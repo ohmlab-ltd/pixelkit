@@ -25,8 +25,6 @@ type Stats = {
 
 type RefImage = { referenceId?: string; filename?: string | null; preview: string; blurhash?: string | null };
 
-type AIInsight = { headline: string; detail: string; tone: "good" | "warn" | "info" } | null;
-
 function toMs(v: number | string | null | undefined): number {
   if (v == null) return 0;
   if (typeof v === "number") return v < 1e12 ? v * 1000 : v;
@@ -166,7 +164,7 @@ export function OverviewPanel({
   projectId,
   refreshSignal = 0,
   refs = [],
-  isSpecific = false,
+  showReferences = true,
   seedStats,
   onOpenHealth,
   onOpenReferences,
@@ -180,7 +178,10 @@ export function OverviewPanel({
   projectId: string | null | undefined;
   refreshSignal?: number;
   refs?: RefImage[];
-  isSpecific?: boolean;
+  /** Hidden for derived datasets — they don't manage their own
+      references. Everywhere else the section shows (references are
+      optional on any dataset). */
+  showReferences?: boolean;
   seedStats: Stats;
   onOpenHealth: () => void;
   onOpenReferences?: () => void;
@@ -211,29 +212,6 @@ export function OverviewPanel({
       .catch(() => {});
     return () => { alive = false; };
   }, [projectId, statsKey, refreshSignal]);
-
-  // AI coaching insight (Claude, server-cached by a coarse signature so it only
-  // costs a model call when the dataset materially changes). Null when there's
-  // no API key / too little data — the rule-based insights still show.
-  // Fetched ONCE per dataset open (keyed on projectId only, NOT refreshSignal),
-  // so labelling/uploading in-session doesn't re-poll; the server cache then
-  // keeps the actual model call down to roughly one per real milestone.
-  const [aiInsight, setAiInsight] = useState<AIInsight>(null);
-  // Reserve the insight's space with a skeleton while it loads so the card
-  // doesn't pop in ~2s after render and shove the rest of the page down.
-  const [aiLoading, setAiLoading] = useState(true);
-  useEffect(() => {
-    if (!projectId) return;
-    let alive = true;
-    setAiLoading(true);
-    apiFetch(`/api/v2/projects/${projectId}/ai-insight`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (alive) setAiInsight((d?.insight as AIInsight) ?? null); })
-      .catch(() => {})
-      .finally(() => { if (alive) setAiLoading(false); });
-    return () => { alive = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
 
   const images = importsTotal ?? imports.length;
   const score = full?.health?.score ?? seedStats?.health?.score;
@@ -289,38 +267,9 @@ export function OverviewPanel({
 
   return (
     <section className="space-y-9 px-6 pt-6 pb-12 lg:px-10">
-      {/* Insights — a Claude-written lead recommendation up top, then the
-          fast rule-based signals as supporting cards. */}
+      {/* Insights — fast rule-based signals. */}
       <div>
         <SectionHeader sub="What to improve next">Insights</SectionHeader>
-        {aiLoading ? (
-          // Skeleton placeholder, same footprint as the real insight so the
-          // layout is stable from first paint until the text lands.
-          <div className="mb-3 flex items-start gap-3.5 rounded-2xl border border-[rgb(var(--accent-orange-rgb)/0.18)] bg-[rgb(var(--accent-orange-rgb)/0.04)] p-4 sm:p-5 animate-pulse">
-            <span className="grid h-9 w-9 shrink-0 rounded-xl bg-[rgb(var(--accent-orange-rgb)/0.12)]" aria-hidden />
-            <div className="min-w-0 flex-1 grid gap-2 pt-1">
-              <div className="h-3.5 w-2/3 rounded bg-foreground/[0.08]" />
-              <div className="h-3 w-full rounded bg-foreground/[0.05]" />
-            </div>
-          </div>
-        ) : aiInsight && (aiInsight.headline || aiInsight.detail) ? (
-          <div className="mb-3 flex items-start gap-3.5 rounded-2xl border border-[rgb(var(--accent-orange-rgb)/0.28)] bg-[rgb(var(--accent-orange-rgb)/0.05)] p-4 sm:p-5">
-            <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-[rgb(var(--accent-orange-rgb)/0.14)] text-[var(--accent-orange)]">
-              <svg viewBox="0 0 24 24" className="h-[18px] w-[18px]" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                <path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z" />
-                <path d="M19 14.5l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z" />
-              </svg>
-            </span>
-            <div className="min-w-0">
-              {aiInsight.headline && (
-                <div className="text-[15px] font-semibold tracking-tight text-foreground">{aiInsight.headline}</div>
-              )}
-              {aiInsight.detail && (
-                <p className="mt-1 text-[13px] leading-snug text-foreground/65">{aiInsight.detail}</p>
-              )}
-            </div>
-          </div>
-        ) : null}
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
           {statsLoading || nearDups == null ? (
             <InsightCard tone="info" title="Duplicates" desc="Checking your images for near-duplicates." />
@@ -389,13 +338,14 @@ export function OverviewPanel({
         </button>
       </div>
 
-      {/* References (specific projects only) */}
-      {isSpecific && (
+      {/* References — optional on every dataset (hidden only for derived
+          datasets, which don't manage their own). */}
+      {showReferences && (
         <div>
-          <SectionHeader count={refs.length} action={onOpenReferences ? <HeaderLink onClick={onOpenReferences}>View all →</HeaderLink> : undefined}>References</SectionHeader>
+          <SectionHeader count={refs.length} sub="Optional — add examples to improve label matching" action={onOpenReferences ? <HeaderLink onClick={onOpenReferences}>View all →</HeaderLink> : undefined}>References</SectionHeader>
           <div className="pk-card rounded-2xl p-5">
             {refs.length === 0 ? (
-              <p className="text-[13px] text-foreground/55">No reference images yet.</p>
+              <p className="text-[13px] text-foreground/55">No reference images yet — optional, but a few clear examples per label improve label matching.</p>
             ) : (
               <div className="grid grid-cols-4 gap-2.5 sm:grid-cols-6 lg:grid-cols-10">
                 {refs.slice(0, 10).map((r, i) => (

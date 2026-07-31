@@ -78,9 +78,13 @@ export function SetupWizard({ onClose }: { onClose: () => void }) {
   const allReady = !!s && s.models.sam3.downloaded && s.models.dinov2.downloaded;
 
   return (
-    <div className="fixed inset-0 z-[500] grid place-items-center bg-black/40 backdrop-blur-sm p-4">
-      <div className="w-full max-w-xl rounded-3xl border border-foreground/10 bg-[var(--background)] p-8 shadow-2xl">
-        <h2 className="text-2xl font-medium tracking-tight">Set up PixelKit</h2>
+    // Outer layer scrolls; the inner grid centres the card when it fits and
+    // top-aligns it when the window is short (e.g. the 700px Electron
+    // minimum) so no section is clipped off-screen.
+    <div className="fixed inset-0 z-[500] overflow-y-auto bg-black/40 backdrop-blur-sm">
+      <div className="grid min-h-full place-items-center p-4">
+      <div className="w-full max-w-xl rounded-3xl border border-foreground/10 bg-[var(--background)] p-6 shadow-2xl">
+        <h2 className="text-xl font-medium tracking-tight">Set up PixelKit</h2>
         <p className="mt-2 text-sm text-foreground/60">
           PixelKit labels images locally with SAM&nbsp;3. The weights download once into your
           workspace{s ? ` (${s.freeDiskGb} GB free)` : ""}. You can skip this and annotate
@@ -193,6 +197,7 @@ export function SetupWizard({ onClose }: { onClose: () => void }) {
             <span className="text-sm text-emerald-500">All set — labelling is live.</span>
           )}
         </div>
+      </div>
       </div>
     </div>
   );

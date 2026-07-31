@@ -22,11 +22,11 @@ export type GuideSectionKey =
 
 const GUIDE_SECTIONS: { key: GuideSectionKey; title: string; blurb: string }[] = [
   { key: "overview", title: "Overview", blurb: "What PixelKit does and how the moving parts fit together." },
-  { key: "projects", title: "Create a dataset", blurb: "Creating a dataset, picking general vs specific, managing references." },
+  { key: "projects", title: "Create a dataset", blurb: "Creating a dataset, naming, labels, optional reference images." },
   { key: "dataset", title: "Dataset", blurb: "Adding images, searching Openverse, video trims, filters, bulk delete." },
   { key: "labelling", title: "Labelling", blurb: "Auto-labelling, the Annotations card, manual edits, fast Review mode." },
   { key: "augmentations", title: "Augmentations", blurb: "Every dial, the Randomise button, the per-tile viewer." },
-  { key: "stats", title: "Dataset stats", blurb: "The health score, AI insights, the variation plot, near-duplicate review." },
+  { key: "stats", title: "Dataset stats", blurb: "The health score, insights, the variation plot, near-duplicate review." },
   { key: "settings", title: "Settings & themes", blurb: "Renaming, recolouring labels, visibility, light / dark, export." },
   { key: "teams", title: "Projects & teams", blurb: "Group datasets into a Project, invite members, owner / editor / viewer roles, activity." },
   { key: "derived", title: "Derived datasets", blurb: "Crop each detection into a child dataset: ROI squares, inherited or fresh labels, live sync." },
@@ -280,16 +280,13 @@ The five-step flow:
 PROJECTS
 ==============================================================
 When you create a project, pick the labels you want PixelKit to find.
+Confirming the labels creates the dataset and opens it straight away.
 
-If your labels are common things (cat, dog, person, car), PixelKit
-already knows what they look like. You go straight to the dataset.
-
-If your labels are visually similar or specific to your domain
-(hare vs rabbit, your part A vs your part B), PixelKit will ask for
-a few example photos of each. This helps it tell them apart.
-
-You can add or remove reference examples later from the project
-page.
+Reference images are optional on every dataset. If your labels are
+visually similar or specific to your domain (hare vs rabbit, your
+part A vs your part B), add a few example photos of each from the
+References tab on the dataset page — they help PixelKit tell the
+classes apart. You can add or remove references at any time.
 
 Project names are display-only; the URL uses a stable identifier.
 A profanity guard runs on names and labels.
@@ -656,45 +653,6 @@ function FlowDiagram() {
   );
 }
 
-function GeneralVsSpecificDiagram() {
-  const general = ["#5b8def", "#f06292", "#ffb74d", "#81c784"];
-  const specific = ["#7c8aa6", "#8c97b0", "#7a89a3", "#92a0b8"];
-  return (
-    <div className="grid sm:grid-cols-2 gap-4">
-      <div className="rounded-xl bg-foreground/[0.03] p-4">
-        <div className="text-[11px] uppercase tracking-wider font-mono text-[var(--muted)] mb-3">
-          General
-        </div>
-        <div className="grid grid-cols-4 gap-2">
-          {general.map((c, i) => (
-            <div key={i} className="aspect-square rounded-lg grid place-items-center" style={{ backgroundColor: `${c}22` }}>
-              <span className="block h-5 w-5 rounded-full" style={{ backgroundColor: c }} />
-            </div>
-          ))}
-        </div>
-        <p className="mt-3 text-[12px] text-[var(--muted)] leading-relaxed">
-          Distinct categories. No references needed. PixelKit already recognises them.
-        </p>
-      </div>
-      <div className="rounded-xl bg-foreground/[0.03] p-4">
-        <div className="text-[11px] uppercase tracking-wider font-mono text-[var(--muted)] mb-3">
-          Specific
-        </div>
-        <div className="grid grid-cols-4 gap-2">
-          {specific.map((c, i) => (
-            <div key={i} className="aspect-square rounded-lg grid place-items-center" style={{ backgroundColor: `${c}22` }}>
-              <span className="block h-5 w-5 rounded-full" style={{ backgroundColor: c }} />
-            </div>
-          ))}
-        </div>
-        <p className="mt-3 text-[12px] text-[var(--muted)] leading-relaxed">
-          Visually similar classes. Upload references so the model can tell them apart.
-        </p>
-      </div>
-    </div>
-  );
-}
-
 function PipelineDiagram() {
   const Box = ({ title, sub }: { title: string; sub: string }) => (
     <div className="flex-1 min-w-0 rounded-xl bg-foreground/[0.04] px-3 py-3 text-center">
@@ -1032,8 +990,8 @@ function ProjectsSection({ go }: { go: (k: GuideSectionKey) => void }) {
           <>
             A dataset is a single collection of labelled images plus everything
             attached to it: labels, reference images, augmentations, settings.
-            This section walks through creating one, choosing the right dataset
-            type, and managing references when needed. (A <Strong>Project</Strong>
+            This section walks through creating one and adding optional
+            reference images. (A <Strong>Project</Strong>
             {" "}is a separate thing, a team container that groups several
             datasets, covered in the Projects &amp; teams section.)
           </>
@@ -1052,79 +1010,40 @@ function ProjectsSection({ go }: { go: (k: GuideSectionKey) => void }) {
             ["Type a name", "Anything you like. You can rename it later from Settings."],
             ["Click Continue", "PixelKit takes you to the labels stage."],
             ["Type the labels you want to detect", "Press Enter, comma, or full stop between each one. Each chip gets a random colour you&rsquo;ll see across the whole dataset."],
-            ["Click Done", "PixelKit classifies the dataset as general or specific (see below) and routes you accordingly."],
+            ["Click Done", "PixelKit creates the dataset and opens it."],
           ]}
         />
       </GuideSection>
 
-      <GuideSection n={2} title="General vs specific datasets">
+      <GuideSection n={2} title="Reference images (optional)">
         <p>
-          When you click Done, PixelKit classifies the label set into one of two
-          flavours.
-        </p>
-        <Figure caption="General labels skip the references step. Specific labels add a reference upload so similar classes can be told apart.">
-          <GeneralVsSpecificDiagram />
-        </Figure>
-        <ul className="grid gap-4">
-          <li className="rounded-xl border border-foreground/10 bg-foreground/[0.02] px-5 py-4">
-            <Strong>General datasets</Strong>{" "}
-            <span className="text-[var(--muted)]">
-              e.g. <em>cat, dog, person, bicycle</em>
-            </span>
-            <p className="mt-2 text-sm">
-              Labels describe distinct, common categories. PixelKit skips
-              references and routes you straight to the dataset page. Auto-labelling
-              already knows what a cat looks like.
-            </p>
-          </li>
-          <li className="rounded-xl border border-foreground/10 bg-foreground/[0.02] px-5 py-4">
-            <Strong>Specific datasets</Strong>{" "}
-            <span className="text-[var(--muted)]">
-              e.g. <em>hare, rabbit, alpaca, llama</em>, or rare and
-              fine-grained variants
-            </span>
-            <p className="mt-2 text-sm">
-              Labels are visually similar or very specific. PixelKit asks for a
-              handful of reference images for each label. These help it tell
-              visually-similar classes apart.
-            </p>
-          </li>
-        </ul>
-      </GuideSection>
-
-      <GuideSection n={3} title="Reference images">
-        <p>
-          References are only needed for specific datasets. Each one is a clear
-          photo of the labelled object: close-up, well-lit, little background
-          clutter. The reference grid stays editable on the project page so
-          you can keep updating them.
+          Reference images are optional — add examples to improve label
+          matching. Each one is a clear photo of the labelled object:
+          close-up, well-lit, little background clutter. They matter most
+          when your labels are visually similar (hare vs rabbit) or specific
+          to your domain; for distinct, common categories auto-labelling
+          usually works without them.
         </p>
         <Figure caption="Reference photos help PixelKit pick the right label when classes look similar.">
           <PipelineDiagram />
         </Figure>
         <Steps
           items={[
-            ["Drop or click to upload", "Up to 20 reference images across all labels."],
-            ["Pick the label for each one", "PixelKit guesses from context, but you can change it."],
-            ["Continue", "Once each label has at least one solid reference, click Continue to move to the dataset page."],
+            ["Open the References tab", "On the dataset page, in the left section nav."],
+            ["Drop or click to upload", "Each label has its own section, the section is the label, so PixelKit knows exactly what each reference shows."],
+            ["Keep them editable", "Add, remove, or re-label references at any time. Changes are picked up the next time you run auto-labelling."],
           ]}
         />
-        <Callout tone="info">
-          <Strong>Editing references later:</Strong> open the Reference images
-          section on the project page (it&rsquo;s collapsible) to add, remove,
-          or re-label references. The change is picked up the next time you
-          run auto-labelling.
-        </Callout>
       </GuideSection>
 
-      <GuideSection n={4} title="Cancelling out of onboarding">
+      <GuideSection n={3} title="Cancelling out of onboarding">
         <p>
           If you bail before finishing the onboarding flow (Cancel or Esc), the
           half-created project is removed from the workspace automatically.
         </p>
       </GuideSection>
 
-      <GuideSection n={5} title="The naming card">
+      <GuideSection n={4} title="The naming card">
         <Bullets
           items={[
             "Project names can be any text. They&rsquo;re display-only. The URL uses a stable UUID under the hood.",
@@ -1310,7 +1229,7 @@ function LabellingSection({ go }: { go: (k: GuideSectionKey) => void }) {
           labelled detections for matching objects.
         </p>
         <p>
-          For specific datasets, your reference photos help PixelKit choose
+          If you&rsquo;ve added reference images, they help PixelKit choose
           the right label when classes look similar. The result is a
           per-detection label assignment with a confidence score. Borderline
           cases are flagged as <em>Unsure</em>.
@@ -1484,7 +1403,7 @@ function LabellingSection({ go }: { go: (k: GuideSectionKey) => void }) {
           Removing a label chip in the Annotations card triggers a confirm
           modal because the action is destructive. Confirming it purges every
           detection on that label across the whole dataset, removes the
-          label&rsquo;s reference data (for specific datasets), and tears down
+          label&rsquo;s reference data (if it has any), and tears down
           any augmentations that referenced it.
         </p>
         <Bullets
@@ -1697,24 +1616,7 @@ function StatsSection({ go }: { go: (k: GuideSectionKey) => void }) {
         </p>
       </GuideSection>
 
-      <GuideSection n={3} title="AI insights">
-        <p>
-          Above the rule-based suggestion cards, the dataset overview shows a
-          short <Strong>AI insight</Strong>: a single lead recommendation,
-          written by a language model, on the most useful thing to do next. The
-          cards beneath it cover the deterministic checks (duplicates, detection
-          coverage, label balance).
-        </p>
-        <Bullets
-          items={[
-            "It is token-frugal by design. The insight only regenerates on a <strong>material change</strong> (crossing an image or labelled-count tier, or changing the set of labels), not on every upload. The rest of the time it is served from cache.",
-            "It respects your label set. A single-class dataset is treated as a deliberate choice, so it will not nag you to add more labels.",
-            "If the model is unavailable, the rule-based cards still show, so the Insights area is never empty.",
-          ]}
-        />
-      </GuideSection>
-
-      <GuideSection n={4} title="Label distribution">
+      <GuideSection n={3} title="Label distribution">
         <p>
           The middle column of the expanded card shows a bar per label
           sorted by count, with the label&rsquo;s project colour as the
@@ -1724,7 +1626,7 @@ function StatsSection({ go }: { go: (k: GuideSectionKey) => void }) {
         </p>
       </GuideSection>
 
-      <GuideSection n={5} title="Image variation plot">
+      <GuideSection n={4} title="Image variation plot">
         <p>
           The right column shows a 2-D plot of the dataset. Each dot is one
           image. The position reflects how visually similar it is to every
@@ -1746,7 +1648,7 @@ function StatsSection({ go }: { go: (k: GuideSectionKey) => void }) {
         />
       </GuideSection>
 
-      <GuideSection n={6} title="Near-duplicate detection &amp; review">
+      <GuideSection n={5} title="Near-duplicate detection &amp; review">
         <p>
           PixelKit identifies pairs of images that look very similar to a
           model. Both members of each flagged pair get an amber halo on the
@@ -1769,7 +1671,7 @@ function StatsSection({ go }: { go: (k: GuideSectionKey) => void }) {
         />
       </GuideSection>
 
-      <GuideSection n={7} title="Live updates">
+      <GuideSection n={6} title="Live updates">
         <p>
           The card refreshes itself on every meaningful change to your
           dataset: new uploads, deletions, manual annotation edits, and

@@ -69,9 +69,9 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="fixed inset-0 z-[400] overflow-y-auto bg-[var(--background)]">
-      <main className="mx-auto max-w-3xl px-6 py-14">
-        <div className="flex items-center justify-between">
-          <h1 className="text-4xl font-medium tracking-tight">Settings</h1>
+      <main className="mx-auto max-w-3xl px-6 py-8">
+        <div className="flex items-center justify-between gap-4">
+          <h1 className="text-2xl font-medium tracking-tight">Settings</h1>
           <button
             onClick={onClose}
             className="text-sm text-foreground/60 hover:text-foreground transition-colors"

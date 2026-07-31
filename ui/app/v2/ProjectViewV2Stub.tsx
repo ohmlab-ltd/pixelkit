@@ -11,10 +11,6 @@ import { BoxEditor, detectionsToBoxes, stripTransientBoxFlags, type EditableBox,
 import { ReferenceImageEditor } from "./ReferenceImageEditor";
 import { LabelJobCard, type LabelJobState } from "./LabelJobCard";
 import { AugmentationsCard } from "./AugmentationsCard";
-import { TrainingPanel } from "./TrainingPanel";
-import { QuantisingPanel } from "./QuantisingPanel";
-import { AnalysePanel } from "./AnalysePanel";
-import { getTrainingModels, getQuantiseOptions, listTrainingJobs } from "../../lib/mlJobs";
 import { DerivedDatasetsBar } from "./DerivedDatasets";
 import { OverviewPanel } from "./OverviewPanel";
 import { DatasetHealthModal } from "./DatasetHealthModal";
@@ -61,7 +57,18 @@ import { resizeForUpload, isImageFile } from "../../lib/resize";
 import { lookupUsers } from "../../lib/userCache";
 import { ScrollToTop } from "../components/ScrollToTop";
 import { useIdle } from "../../lib/useIdle";
-import { DatasetTypePill, type DatasetTypeValue } from "./DatasetTypePill";
+
+// Auto-derived dataset behaviour, mirrored from the engine: a dataset
+// with reference images behaves as "specific" (reference/embedding
+// scoring), without them as "general" (plain text-prompt detection).
+// There is no user-facing dataset-type control any more — this value
+// is read-only UI state that internal code paths still branch on
+// (e.g. suppressing the "No reference embeddings" warning).
+type DatasetTypeValue = {
+  type: "general" | "specific";
+  reason?: string | null;
+  source?: string | null;
+};
 
 const API =
   process.env.NEXT_PUBLIC_API_URL ??
@@ -172,7 +179,7 @@ const INPUT_SHAPES = [
   "96x96", "128x128", "160x160", "192x192", "224x224", "256x256",
   "320x320", "480x480", "512x512", "640x640",
 ];
-type ProjectTab = "overview" | "references" | "dataset" | "augmentations" | "train" | "quantise" | "analyse" | "deploy";
+type ProjectTab = "overview" | "references" | "dataset" | "augmentations";
 
 // Parse a createdAt value (ms epoch number, ms epoch string, or ISO
 // timestamp) into ms-since-epoch. Returns NaN for unparseable values
@@ -284,17 +291,13 @@ export function ProjectViewV2Stub({
       back button reads "Back to project" and onClose returns to that Project. */
   backToProjectId?: string | null;
   /** First-load handoff hint from onboarding:
-   *  "general"  → suppress the full-screen mount loader entirely.
-   *               HomeView is still showing its "Loading project…"
-   *               PixelKit overlay and we don't want a second
-   *               full-screen takeover stacked on top.
-   *  "specific" → show a smaller in-page "Loading project…" card
-   *               instead of the full-screen mount loader; the user
-   *               just left a busy references screen and a full
-   *               takeover would feel abrupt.
-   *  null       → normal load, full-screen mount loader behaves as
-   *               it always has. */
-  firstLoad?: "general" | "specific" | null;
+   *  "onboarding" → suppress the full-screen mount loader entirely.
+   *                 HomeView is still showing its "Opening project…"
+   *                 PixelKit overlay and we don't want a second
+   *                 full-screen takeover stacked on top.
+   *  null         → normal load, full-screen mount loader behaves as
+   *                 it always has. */
+  firstLoad?: "onboarding" | null;
   onClose: () => void;
   onReferencesChange?: (next: ReferenceImage[]) => void;
 }) {
@@ -451,10 +454,9 @@ export function ProjectViewV2Stub({
           label_aliases?: Record<string, string>;
           labelColours?: Record<string, string>;
           private?: boolean;
-          // Cached general/specific verdict, included so the hero badge paints
-          // with the first frame instead of after a separate /dataset-type
-          // round-trip. Null when the server could only answer with a fresh
-          // Claude call — the dedicated effect below then fetches it.
+          // Cached auto-derived dataset behaviour (references → specific),
+          // included so internal branches settle with the first frame
+          // instead of after a separate /dataset-type round-trip.
           dataset_type?: {
             type?: string;
             reason?: string | null;
@@ -507,10 +509,9 @@ export function ProjectViewV2Stub({
         if (typeof j.private === "boolean") {
           setIsPrivate(j.private);
         }
-        // Seed the general/specific badge from the first-paint payload so it
-        // shows in the same frame as the hero (it used to pop in 100-1000 ms
-        // later after a standalone /dataset-type fetch). Null means the server
-        // would have had to classify, so we leave the dedicated effect to fetch.
+        // Seed the auto-derived dataset behaviour from the first-paint
+        // payload (it used to arrive 100-1000 ms later via a standalone
+        // /dataset-type fetch). Null → the dedicated effect fetches it.
         if (
           j.dataset_type
           && (j.dataset_type.type === "general" || j.dataset_type.type === "specific")
@@ -4132,10 +4133,10 @@ export function ProjectViewV2Stub({
             }
             const priv = !!m?.private;
             setIsPrivate(priv);
-            // Keep the general/specific badge in step with /overview (covers
-            // refreshes after a Settings edit). Same cached-only verdict the
-            // hero seeds from /initial; null is ignored so an in-flight manual
-            // change isn't clobbered by a stale read.
+            // Keep the auto-derived dataset behaviour in step with
+            // /overview (covers refreshes after a Settings edit). Same
+            // cached-only value the mount seeds from /initial; null is
+            // ignored so a fresher read isn't clobbered by a stale one.
             const dt = (m as { dataset_type?: { type?: string; reason?: string | null; source?: string | null } | null } | null)?.dataset_type;
             if (dt && (dt.type === "general" || dt.type === "specific")) {
               const next: DatasetTypeValue = {
@@ -4806,27 +4807,22 @@ export function ProjectViewV2Stub({
   // when they want to tweak labels / SAM3 settings.
   const [clearAllOpen, setClearAllOpen] = useState(false);
 
-  // Dataset type (general vs specific) is computed and cached
-  // server-side in projects/<id>/dataset_type.json. The pipeline
-  // already consumes it (centroid vs kNN scoring); this fetch
-  // surfaces it in the UI as small debug text above the dataset-
-  // health pip so the user can see which mode is in play.
+  // Auto-derived dataset behaviour, computed and cached server-side in
+  // projects/<id>/dataset_type.json (references present → "specific",
+  // none → "general"). The label pipeline consumes it (centroid vs kNN
+  // scoring); the UI only reads it to steer internal branches — there
+  // is no user-facing control or badge for it any more.
   const [datasetType, setDatasetType] = useState<DatasetTypeValue | null>(() => {
-    // Seed from cache so the general/specific badge appears on first
-    // paint instead of popping in after a network round-trip to
-    // /dataset-type. The fetch below still runs and updates the cache,
-    // so a label change picks up the new classification on the next
-    // render.
+    // Seed from cache so the value is present on first paint instead
+    // of after a network round-trip to /dataset-type. The fetch below
+    // still runs and updates the cache when the cache is empty.
     if (!projectId) return null;
     return readProjectMeta(projectId)?.datasetType ?? null;
   });
   // Fetch dataset-type ONCE per projectId mount (or when the cache
-  // is empty). Adding / renaming / removing labels intentionally
-  // does NOT retrigger, the LLM classifier behind the endpoint is
-  // expensive and the user found rapid label edits firing it for
-  // every keystroke. The cached classification from onboarding is
-  // good enough until the user explicitly asks for a refresh
-  // (TODO: surface a reclassify button if labels diverge a lot).
+  // is empty). The engine keeps it up to date automatically as
+  // references are added/removed; the refs-length effect below
+  // mirrors that flip locally without a refetch.
   useEffect(() => {
     if (!projectId) return;
     if (datasetType) return; // cache-seeded → trust it
@@ -4854,45 +4850,12 @@ export function ProjectViewV2Stub({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
-  // Owner picks a dataset type (or "auto" to revert to the classifier).
-  // POSTs the sticky override - which also steers the label pipeline's
-  // centroid-vs-kNN scoring - then mirrors the resolved verdict into
-  // state + the meta cache so the badge updates without a refetch.
-  const changeDatasetType = useCallback(
-    async (choice: "general" | "specific" | "auto") => {
-      if (!projectId || readOnly) return;
-      const prev = datasetType;
-      try {
-        const r = await apiFetch(`/api/v2/projects/${projectId}/dataset-type`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type: choice }),
-        });
-        if (!r.ok) throw new Error(`http ${r.status}`);
-        const data = await r.json();
-        const next: DatasetTypeValue = {
-          type: data?.type === "specific" ? "specific" : "general",
-          reason: String(data?.reason ?? ""),
-          source: typeof data?.source === "string" ? data.source : "manual",
-        };
-        setDatasetType(next);
-        patchProjectMeta(projectId, { datasetType: next });
-      } catch {
-        // Leave the previous verdict in place on failure.
-        setDatasetType(prev);
-      }
-    },
-    [projectId, readOnly, datasetType],
-  );
-
-  // Adding reference images flips a project to "specific" (references
-  // only matter for look-alike classes). Mirror the backend's
-  // _apply_reference_dataset_flip optimistically so the badge updates the
-  // moment a ref lands. Fire ONLY when references are actually ADDED
-  // (refs.length grows), not on every datasetType change: the old version
-  // re-ran on the state update from "Let PixelKit decide" and instantly
-  // re-overrode the user's choice back to specific. Never stomps a
-  // deliberate manual choice (matches the backend's source==="manual").
+  // Adding reference images flips a dataset to "specific" behaviour
+  // (the engine derives this automatically from the presence of
+  // references). Mirror that flip optimistically so internal branches
+  // update the moment a ref lands, without a refetch. Fire ONLY when
+  // references are actually ADDED (refs.length grows), not on every
+  // datasetType change.
   const prevRefsLenRef = useRef(0);
   useEffect(() => {
     const grew = refs.length > prevRefsLenRef.current;
@@ -4901,10 +4864,9 @@ export function ProjectViewV2Stub({
     if (!grew || refs.length === 0) return;
     if (!datasetType) return;
     if (datasetType.type === "specific") return;
-    if (datasetType.source === "manual") return;
     const next: DatasetTypeValue = {
       type: "specific",
-      reason: "You added reference images, so this is treated as a specific dataset.",
+      reason: "Reference images present.",
       source: "references",
     };
     setDatasetType(next);
@@ -4953,30 +4915,6 @@ export function ProjectViewV2Stub({
     transition: `opacity 320ms ease-out ${delay}ms, transform 360ms cubic-bezier(0.2, 0.7, 0.2, 1) ${delay}ms`,
   });
 
-  // Warm the train/quantise model registries into cache once the project + its
-  // first images are in, during browser idle time - so opening the Train (or
-  // Quantise) tab paints the models instantly instead of fetching on click.
-  // The registries are static per deploy, so once per session is enough.
-  const warmedRegistries = useRef(false);
-  useEffect(() => {
-    if (!projectId || !importsReady) return;
-    const warm = () => {
-      // Static per-deploy registries - warm once per session.
-      if (!warmedRegistries.current) {
-        warmedRegistries.current = true;
-        void getTrainingModels().catch(() => {});
-        void getQuantiseOptions().catch(() => {});
-      }
-      // Per-project: the already-trained models shown in the Train tab.
-      void listTrainingJobs(projectId).catch(() => {});
-    };
-    const w = window as typeof window & {
-      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
-    };
-    if (typeof w.requestIdleCallback === "function") w.requestIdleCallback(warm, { timeout: 5000 });
-    else window.setTimeout(warm, 1500);
-  }, [projectId, importsReady]);
-
   // Page-ready gate. The user reported that on a hard refresh the
   // loader faded as soon as /initial returned, then the page sat
   // empty for "a few seconds" while the dataset-stats card and the
@@ -5014,34 +4952,23 @@ export function ProjectViewV2Stub({
   }, [loaderVisible]);
 
   // First-load loader variant.
-  //   "general" or "specific" → the user is arriving here straight
-  //     out of onboarding. Project chrome (name + labels) renders
-  //     normally above; in the body area, where the dataset would
-  //     paint, we show the same PixelKit animation HomeView was
-  //     running as "Reading between the labels…" with the message
-  //     swapped to "Opening project…". No backdrop blur, no full-
-  //     screen takeover, so the top bar with the project name and
-  //     label chips is visible (matches the reading-between layout).
+  //   "onboarding" → the user is arriving here straight out of the
+  //     create flow. HomeView's "Opening project…" overlay carried
+  //     the transition, so no second full-screen takeover here.
   //   null → every other entry (workspace cards, projects feed,
   //     deep-link, refresh). Full-screen blurred mount loader, the
   //     existing behaviour.
-  const isFirstLoad = firstLoad === "general" || firstLoad === "specific";
+  const isFirstLoad = firstLoad === "onboarding";
   const showFullscreenLoader = loaderVisible && !isFirstLoad;
-  // First-load "Opening project…" overlay disabled per user request.
-  // The handoff from HomeView's "Reading between the labels…"
-  // (general) or the reference-image upload step (specific) drops
-  // straight into the project page now, with no follow-up animation.
-  // The fullscreen loader still gates every other entry (workspace
-  // card, deep link, refresh).
-  const showFirstLoadLoader = false;
 
-  // Reference images only apply to "specific" (object/class) projects; general
-  // datasets have none, so the References nav is greyed out for them. A project
-  // that already has refs counts as specific even before /dataset-type resolves.
+  // Auto-derived behaviour: a dataset with references acts as
+  // "specific" (reference scoring). Reads may lag the fetch, so a
+  // project that already has refs counts as specific immediately.
   const isSpecific = datasetType?.type === "specific" || refs.length > 0;
-  // Left-sidebar nav. Spec order: Overview, References, Dataset, then the
-  // pipeline sections. (Annotations is split out in a later pass.) Read-only
-  // public views keep References only when the project actually has any.
+  // Left-sidebar nav: Overview, References (optional), Dataset,
+  // Augmentations. Read-only public views keep References only when
+  // the project actually has any. Derived datasets don't manage their
+  // own references, so the entry is disabled for them.
   const sidebarItems: SidebarItem[] = readOnly
     ? [
         { key: "dataset", label: "Dataset", count: imports.length },
@@ -5049,18 +4976,15 @@ export function ProjectViewV2Stub({
       ]
     : [
         { key: "overview", label: "Overview" },
-        { key: "references", label: "References", count: refs.length, disabled: !isSpecific || !!derivedInfo, disabledHint: derivedInfo ? "Derived datasets don't manage their own reference images" : "Reference images are only used by specific-object projects" },
+        { key: "references", label: "References", count: refs.length, disabled: !!derivedInfo, disabledHint: "Derived datasets don't manage their own reference images" },
         { key: "dataset", label: "Dataset", count: imports.length },
         { key: "augmentations", label: "Augmentations" },
-        { key: "train", label: "Train" },
-        { key: "quantise", label: "Quantise" },
-        { key: "analyse", label: "Analyse" },
-        { key: "deploy", label: "Deploy" },
       ];
 
   // Sidebar contents, shared by the full-height md+ sidebar and the mobile
-  // drawer: back-to-workspace at the top, the section nav in the middle, and
-  // "Need help?" pinned to the bottom.
+  // drawer: back row at the top, the section nav in the middle, and
+  // "Need help?" pinned to the bottom. Shell density: flat 13px rows,
+  // no pill chrome, matching the Explorer pane.
   const backTo = backToProjectId
     ? "project"
     : (readOnly || originTab === "projects") ? "projects" : "workspace";
@@ -5070,18 +4994,18 @@ export function ProjectViewV2Stub({
         type="button"
         onClick={onClose}
         title={`Back to ${backTo}`}
-        className="inline-flex items-center gap-1.5 text-[13px] text-foreground/60 outline-none transition-colors hover:text-foreground focus-visible:underline"
+        className="flex h-[26px] w-full shrink-0 items-center gap-1.5 px-2.5 text-left text-[13px] text-foreground/60 outline-none transition-colors hover:bg-foreground/[0.05] hover:text-foreground focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
       >
         <span aria-hidden>←</span> Back to {backTo}
       </button>
-      <div className="mt-5 min-h-0 flex-1 overflow-y-auto">
+      <div className="mt-2 min-h-0 flex-1 overflow-y-auto">
         <SidebarNav items={sidebarItems} active={tab} onSelect={(k) => { setTab(k as ProjectTab); setSidebarOpen(false); }} />
       </div>
       <a
         href="/app?tab=guide"
-        className="mt-4 inline-flex items-center gap-2 rounded-lg px-3 py-2 text-[13px] font-medium text-foreground/55 outline-none transition-colors hover:bg-foreground/[0.05] hover:text-foreground/90 focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
+        className="flex h-[26px] shrink-0 items-center gap-2 px-2.5 text-[13px] text-foreground/55 outline-none transition-colors hover:bg-foreground/[0.05] hover:text-foreground/90 focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
       >
-        <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M9.5 9.2a2.5 2.5 0 1 1 3.4 2.3c-.7.3-1 .8-1 1.6M12 17h.01" /></svg>
+        <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M9.5 9.2a2.5 2.5 0 1 1 3.4 2.3c-.7.3-1 .8-1 1.6M12 17h.01" /></svg>
         Need help?
       </a>
     </>
@@ -5125,24 +5049,6 @@ export function ProjectViewV2Stub({
           <PixelKitLoader size={120} message="Loading project…" />
         </div>
       )}
-      {/* First-load body loader. Sits centred over the viewport with
-          NO backdrop, no fullscreen blur takeover -- so the project
-          chrome painted below (title + label chips at the top of the
-          page) stays fully visible above the loader. Same
-          PixelKitLoader/size combo as HomeView's
-          "Reading between the labels…" overlay so the animation
-          reads as one continuous element across the handoff. */}
-      {showFirstLoadLoader && (
-        <div
-          className="fixed inset-0 z-[900] grid place-items-center pointer-events-none px-6"
-          style={{
-            opacity: pageReady ? 0 : 1,
-            transition: "opacity 240ms ease",
-          }}
-        >
-          <PixelKitLoader size={128} message="Opening project…" />
-        </div>
-      )}
       {/* Below md the sidebar is a left overlay drawer opened from the menu
           button (a fixed overlay over the content). */}
       {sidebarOpen && (
@@ -5160,24 +5066,23 @@ export function ProjectViewV2Stub({
       </button>
       <aside
         className={[
-          "fixed inset-y-0 left-0 z-50 flex w-[15rem] flex-col px-4 py-5 transition-transform duration-200 md:hidden",
+          "fixed inset-y-0 left-0 z-50 flex w-[14rem] flex-col px-2 py-2 transition-transform duration-200 md:hidden",
           "border-r border-[var(--modal-border)] bg-[var(--modal-surface)] shadow-2xl backdrop-blur-xl",
           sidebarOpen ? "translate-x-0" : "-translate-x-full",
         ].join(" ")}
       >
         {sidebarBody}
       </aside>
-      {/* Sidebar: a FIXED full-height column (never moves on scroll), pinned to
-          the left edge of the centred content block so it sits beside the
-          content instead of hugging the screen edge on wide monitors. */}
-      <aside
-        className="fixed bottom-0 top-16 z-20 hidden w-[14rem] flex-col border-r border-[var(--modal-border)] bg-[var(--background)] px-4 py-5 md:flex"
-        style={{ left: "max(0px, calc((100vw - 2000px) / 2))" }}
-      >
+      {/* Sidebar: a FIXED column (never moves on scroll) spanning the
+          shell's content region — below the title bar (top-9), above the
+          status bar (bottom-6), flush against the activity bar's right
+          edge (left-12: the shell side bar auto-hides while a dataset
+          view is open, so this is the only sidebar on screen). */}
+      <aside className="fixed top-9 bottom-6 left-12 z-20 hidden w-[13rem] flex-col border-r border-[var(--border)] bg-foreground/[0.02] px-2 py-2 md:flex">
         {sidebarBody}
       </aside>
-      {/* Centred, capped content block with room for the fixed sidebar. */}
-      <div className="mx-auto w-full max-w-[2000px] md:pl-[14rem]">
+      {/* Content block with room for the fixed sidebar. */}
+      <div className="w-full min-w-0 max-w-[2000px] md:pl-[13rem]">
       {/* Title section as a cover hero: content overlaid on the dataset cover
           with a content-aware left gradient-blur (white scrim + dark text on a
           light cover, dark scrim + white text on a dark one). */}
@@ -5267,8 +5172,8 @@ export function ProjectViewV2Stub({
             }`}
             aria-hidden
           />
-          {/* Content over the cover. */}
-          <div className="relative flex min-h-[15rem] flex-wrap items-end justify-between gap-6 p-6 sm:p-8">
+          {/* Content over the cover. Desktop-tool scale: compact hero. */}
+          <div className="relative flex min-h-[11rem] flex-wrap items-end justify-between gap-6 p-5 sm:p-6">
             <div className="min-w-0 flex-1">
           {titleEditing && !readOnly ? (
             <input
@@ -5281,7 +5186,7 @@ export function ProjectViewV2Stub({
               }}
               onBlur={() => setTitleEditing(false)}
               aria-label="Rename project"
-              className="text-5xl md:text-6xl font-medium tracking-tight leading-[1.3] bg-transparent outline-none border-b border-foreground/30 focus:border-foreground/60 text-[var(--foreground)] pb-3 w-full"
+              className="text-3xl md:text-4xl font-medium tracking-tight leading-[1.3] bg-transparent outline-none border-b border-foreground/30 focus:border-foreground/60 text-[var(--foreground)] pb-3 w-full"
             />
           ) : (
             <div className="flex items-center gap-4 pb-3" style={fade()}>
@@ -5294,7 +5199,7 @@ export function ProjectViewV2Stub({
                 // project; on public read-only view the title is a
                 // static label with no cursor / hover surface.
                 className={[
-                  "text-5xl md:text-6xl font-medium tracking-tight leading-[1.3] pb-2 max-w-full overflow-hidden text-ellipsis whitespace-nowrap w-fit drop-shadow-sm",
+                  "text-3xl md:text-4xl font-medium tracking-tight leading-[1.3] pb-2 max-w-full overflow-hidden text-ellipsis whitespace-nowrap w-fit drop-shadow-sm",
                   bannerLight ? "text-zinc-900" : "text-white",
                   readOnly
                     ? "cursor-default"
@@ -5453,20 +5358,19 @@ export function ProjectViewV2Stub({
 
         </div>
 
-        {/* Right column stretches the hero's height so the dataset-type pill
+        {/* Right column stretches the hero's height so the derived badge
             sits in the top-right corner and the action buttons hold the
             bottom-right. */}
         <div className="flex flex-col items-end justify-between gap-3 self-stretch shrink-0" style={fade()}>
           <div className="flex items-center">
-            {(datasetType || derivedInfo) && (
-              <DatasetTypePill
-                value={datasetType}
-                readOnly={readOnly}
-                onChange={changeDatasetType}
-                derived={!!derivedInfo}
-                onCover
-                light={bannerLight}
-              />
+            {derivedInfo && (
+              <span
+                className={`inline-flex h-6 items-center gap-1.5 rounded-full px-2.5 text-[11px] font-medium uppercase tracking-wider backdrop-blur-md ring-1 ${bannerLight ? "bg-black/10 text-zinc-900 ring-black/10" : "bg-white/15 text-white ring-white/10"}`}
+                title="A cropped child dataset derived from a parent project"
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-current opacity-70" aria-hidden />
+                Derived
+              </span>
             )}
           </div>
           <div className="flex items-center gap-2">
@@ -5638,7 +5542,7 @@ export function ProjectViewV2Stub({
             projectId={projectId}
             refreshSignal={statsRefreshSignal}
             refs={refs}
-            isSpecific={isSpecific}
+            showReferences={!derivedInfo}
             seedStats={seedStats as Parameters<typeof OverviewPanel>[0]["seedStats"]}
             onOpenHealth={() => setHealthOpen(true)}
             onOpenReferences={() => setTab("references")}
@@ -5708,26 +5612,10 @@ export function ProjectViewV2Stub({
 
           <div>
             <div>
-              {/* PixelKit's dataset-type classification, surfaces
-                  WHY references matter (or don't) for this project so
-                  the user understands what's being asked of them. */}
-              {datasetType?.type === "specific" && (
-                <p className="mt-1 text-sm text-foreground/65 leading-relaxed">
-                  PixelKit identified your labels as a{" "}
-                  <span className="text-foreground/95 font-medium">specific</span>{" "}
-                  dataset, fine-grained variants of a similar concept. Reference
-                  images for each class help the model tell them apart.
-                </p>
-              )}
-              {datasetType?.type === "general" && (
-                <p className="mt-1 text-sm text-foreground/65 leading-relaxed">
-                  PixelKit identified your labels as a{" "}
-                  <span className="text-foreground/95 font-medium">general</span>{" "}
-                  dataset, distinct categories with clear visual differences.
-                  References are optional here, and adding any switches this
-                  project to specific.
-                </p>
-              )}
+              <p className="mt-1 text-sm text-foreground/65 leading-relaxed">
+                Reference images (optional) — add examples to improve label
+                matching, especially when classes look similar.
+              </p>
               <p className="mt-1 text-sm text-foreground/55">
                 Drop each photo into its label section below. The section is the label, so PixelKit knows exactly what each reference shows.
               </p>
@@ -5783,7 +5671,6 @@ export function ProjectViewV2Stub({
                 onLeaveImage={flushReferenceEmbeddings}
                 refQuality={refQuality}
                 readOnly={readOnly}
-                isGeneral={datasetType?.type === "general"}
                 onViewerOpenChange={setRefViewerOpen}
                 onRefDeleted={(refId) => {
                   if (projectId) {
@@ -6423,9 +6310,8 @@ export function ProjectViewV2Stub({
           isPulling={!!derivedInfo && !readOnly && imports.length === 0 && !derivedPollDone}
           labels={editLabels}
           hasReferenceEmbeddings={refs.length > 0 || refEmbeddings.length > 0}
-          // Treat anything that isn't explicitly specific (general OR not-yet-
-          // classified) as "general" here, so the "No reference embeddings"
-          // warning only ever shows for specific datasets - never general.
+          // No references → "general" behaviour, so the "No reference
+          // embeddings" warning is suppressed (references are optional).
           isGeneralDataset={!isSpecific}
           onRemove={removeImport}
           onRemoveBatch={removeImportsBatch}
@@ -6564,34 +6450,6 @@ export function ProjectViewV2Stub({
         <div className="pb-24" />
       </div>
 
-      {/* ─── Train / Deploy tabs: Coming Soon placeholders ───
-          Both ship as "coming June 2026" panels so the tab strip
-          stays in place but clicking through gives the user an
-          honest signal that the feature isn't live yet. */}
-      {tab === "train" && projectId && (
-        <TrainingPanel
-          projectId={projectId}
-          projectName={projectTitle}
-          nImages={imports.length}
-          nAugmentations={imports.reduce((s, m) => s + (m.nAugmentations || 0), 0)}
-          onEditAugmentations={() => setTab("augmentations")}
-          inputSize={inputSize}
-          onInputSizeChange={setInputSize}
-        />
-      )}
-      {tab === "quantise" && projectId && (
-        <QuantisingPanel projectId={projectId} projectName={projectTitle} />
-      )}
-      {tab === "analyse" && projectId && (
-        <AnalysePanel projectId={projectId} />
-      )}
-      <div hidden={tab !== "deploy"} className="pk-up">
-        <ComingSoonPanel
-          title="Deploy"
-          subtitle="Deploy your model on edge AI hardware fast."
-        />
-      </div>
-
       <Footer />
       </div>
 
@@ -6690,7 +6548,6 @@ function RefImageGrid({
   onLeaveImage,
   refQuality = {},
   readOnly = false,
-  isGeneral = false,
   onViewerOpenChange,
   onRefDeleted,
 }: {
@@ -6720,10 +6577,6 @@ function RefImageGrid({
       click-to-edit on each tile, visitors just see the curator's
       references as static thumbs. */
   readOnly?: boolean;
-  /** General datasets show the same per-label reference sections but
-      with a note that references are optional and that adding any
-      switches the project to specific. */
-  isGeneral?: boolean;
   /** Fires true/false as the full-screen reference editor opens/closes
       so the parent can hide the dataset gallery's back-to-top button
       while the editor overlay is up. */
@@ -7184,11 +7037,6 @@ function RefImageGrid({
           {remaining > 0
             ? `${remaining} of ${REF_MAX_POOL} reference slots remaining · jpg · png · webp`
             : `Maximum ${REF_MAX_POOL} references reached`}
-          {isGeneral && (
-            <span className="text-foreground/45">
-              {" "}· optional for general datasets, adding references switches this project to specific
-            </span>
-          )}
         </p>
       )}
     </div>
@@ -7277,33 +7125,6 @@ function EditableChip({
   );
 }
 
-
-// ─── Tab button ───────────────────────────────────────────────────────────────
-
-// ─── Coming Soon placeholder ─────────────────────────────────────
-// Shared chrome for the Train / Deploy tabs. Big headline → smaller
-// supporting line → release-window tag. Themable surface, no shadow.
-function ComingSoonPanel({ title, subtitle }: { title: string; subtitle: string }) {
-  return (
-    <section className="px-6 lg:px-10 pt-12 pb-24" style={{ minHeight: "60vh" }}>
-      <div className="grid place-items-center text-center py-20">
-        <div className="text-[11px] uppercase tracking-[0.24em] font-mono text-foreground/45 mb-3">
-          {title}
-        </div>
-        <h2 className="text-5xl md:text-6xl font-medium tracking-tight text-[var(--foreground)]">
-          Coming Soon
-        </h2>
-        <p className="mt-4 max-w-md text-sm text-[var(--muted)]">
-          {subtitle}
-        </p>
-        <p className="mt-6 inline-flex items-center gap-2 rounded-full border border-foreground/15 bg-foreground/[0.04] px-4 py-1.5 text-xs font-mono uppercase tracking-[0.18em] text-foreground/65">
-          <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-orange-500/80" />
-          Launching June 2026
-        </p>
-      </div>
-    </section>
-  );
-}
 
 // Relabel-hotkey rows. 1-9 covers the first nine labels; QWERTYUIOP
 // catches labels 10-19; ASDFGHJKL catches 20-28. The home row stops
@@ -8307,11 +8128,10 @@ function DatasetGallery({
   totalImports?: number | null;
   labels: string[];
   hasReferenceEmbeddings: boolean;
-  /** True when the project's dataset type was classified as
-      "general" (distinct categories, references not used). When set,
-      the "No reference embeddings, embedding QC unavailable"
-      warning is suppressed: general projects don't need references
-      so the warning would just confuse the user. */
+  /** True when the dataset has no reference images (auto-derived
+      "general" behaviour). When set, the "No reference embeddings"
+      warning is suppressed: references are optional, so the warning
+      would just confuse the user. */
   isGeneralDataset?: boolean;
   /** True while a freshly-created derived (child) project is still having its
       crops generated server-side: shows a "pulling images" loader instead of

@@ -7,11 +7,8 @@ import { BlurhashCanvas } from "react-blurhash";
 import { usePlan } from "./PlanPill";
 import { LABEL_COLOURS, readableTextForBg } from "./v2/OnboardLabelsV2";
 import type { ReferenceImage } from "./v2/OnboardReferencesV2";
-import { detectionsToBoxes, type MaskShape, type EditableBox } from "./BoxEditor";
-import { ReferenceImageEditor } from "./v2/ReferenceImageEditor";
 import { WordCloud } from "./v2/WordCloud";
 import { PixelKitLoader } from "./v2/PixelKitLoader";
-import { Tooltip } from "./Tooltip";
 import { capture } from "./lib/analytics";
 import { ProjectsSection } from "./ProjectsSection";
 import { ProjectPage } from "./ProjectPage";
@@ -20,8 +17,7 @@ import { apiFetch } from "@/lib/apiFetch";
 import { onNewDatasetRequest } from "@/lib/appNav";
 import { addDataset } from "@/lib/containers";
 import { isProPlan } from "@/lib/plans";
-import { patchProjectMeta, readProjectMetaCache, writeProjectMetaCache, type ProjectMetaCache } from "@/lib/projectMetaCache";
-import { isImageFile, resizeForUpload } from "@/lib/resize";
+import { readProjectMetaCache, writeProjectMetaCache, type ProjectMetaCache } from "@/lib/projectMetaCache";
 import {
   collectInput,
   parseDataset,
@@ -30,11 +26,6 @@ import {
   ZIP_SOFT_LIMIT_BYTES,
   type ParsedDataset,
 } from "@/lib/datasetImport";
-
-// Total reference images uploaded as a shared pool (not per-label).
-const V2_MAX_REFS = 20;
-// Annotations required per label (shown as a target, not enforced in the UI).
-const V2_ANNOTS_PER_LABEL = 5;
 
 const API =
   process.env.NEXT_PUBLIC_API_URL ??
@@ -251,9 +242,9 @@ export function timeAgo(iso: string | null | undefined): string {
   return `${Math.round(days / 365)}y ago`;
 }
 
-// Small custom dropdown for the workspace sort control. Mirrors the
-// chrome of DatasetTypePill (button + click-away backdrop + menu) so
-// it reads consistently with the rest of the app and themes cleanly.
+// Small custom dropdown for the workspace sort control (button +
+// click-away backdrop + menu), consistent with the rest of the app's
+// pill menus and themes cleanly.
 function SortMenu({
   value,
   onChange,
@@ -342,25 +333,22 @@ export function HomeView({
 }: {
   onOpen: (name: string, owner?: string, displayName?: string, v2?: boolean, fromProjectId?: string) => void;
   /** Optional V2 entry point. Fired once the user has finished the
-      whole inline V2 flow (name + labels + references). The parent
-      mounts the post-onboarding view from this callback. When the
-      prop is undefined the V2 button stays hidden and only the V1
-      path is reachable. */
+      inline V2 flow (name + labels). The parent mounts the
+      post-onboarding view from this callback. When the prop is
+      undefined the V2 button stays hidden and only the V1 path is
+      reachable. References are always empty at creation time — they
+      can be added later from the dataset view. */
   onV2Begin?: (
     name: string,
     labels: string[],
     references: ReferenceImage[],
     projectId: string | null,
-    /** "general" → the project view should suppress its own
-     *  full-screen mount loader (the HomeView "Reading between the
-     *  labels…" overlay is still on screen and carries through as
-     *  "Loading project…").
-     *  "specific" → render the smaller in-page "Loading project…"
-     *  card while /initial is in flight, the user just left a busy
-     *  references screen and a full-screen takeover would feel
-     *  abrupt.
+    /** "onboarding" → the user is arriving straight out of the
+     *  create flow; HomeView's "Opening project…" overlay is still
+     *  on screen, so the project view should suppress its own
+     *  full-screen mount loader.
      *  null → normal load, project view uses its default loader. */
-    firstLoad?: "general" | "specific" | null,
+    firstLoad?: "onboarding" | null,
   ) => void;
   username: string;
   /** Avatar URL for the signed-in user. Shown beside the username
@@ -471,16 +459,11 @@ export function HomeView({
   // and either path is a one-click revert. After Enter on the name
   // field the workspace title swaps to the project name in-place, the
   // subtitle becomes the V2 prompt, search + add buttons fade out, the
-  // page locks scroll, and the labels / references stages render in
-  // the same vertical band underneath.
-  type V2Stage = "idle" | "name" | "labels" | "classifying" | "references" | "import";
+  // page locks scroll, and the labels stage renders in the same
+  // vertical band underneath. "creating" is the brief loader shown
+  // while the backend creates the dataset before it opens.
+  type V2Stage = "idle" | "name" | "labels" | "creating" | "import";
   const [v2Stage, setV2Stage] = useState<V2Stage>("idle");
-  // Message shown on the in-place PixelKit loader during classifying.
-  // Starts as "Reading between the labels…" the moment the user
-  // clicks Done; flips to "Loading project…" the instant the
-  // classifier returns "general" so the overlay carries straight
-  // through the v2HandOff → ProjectViewV2 mount without a copy gap.
-  const [v2ClassifyMsg, setV2ClassifyMsg] = useState("Reading between the labels…");
   const [v2Name, setV2Name] = useState("");
   const [v2Labels, setV2Labels] = useState<string[]>([]);
   // Random colour chosen for each label the moment it's added in the
@@ -522,10 +505,6 @@ export function HomeView({
   // Project page uses (CreateDatasetModal) instead of an inline bar, then jumps
   // straight to the labels stage.
   const [showWorkspaceCreate, setShowWorkspaceCreate] = useState(false);
-  // Reason string from the onboarding dataset-type classification,
-  // stashed so v2HandOff can seed it into the project-meta cache
-  // alongside the type (the type travels via firstLoad).
-  const v2DatasetReasonRef = useRef<string>("");
   useEffect(() => { v2ProjectIdRef.current = v2ProjectId; }, [v2ProjectId]);
 
   // Desktop shell: the Explorer side bar's "+" button fires a
@@ -546,71 +525,18 @@ export function HomeView({
     });
   }, [creating, v2Stage, onV2Begin]);
 
-  // Persist reference box/label edits made in the onboarding editor to
-  // the backend so they survive into the project. The reference was
-  // already POSTed during upload (it carries a referenceId); this PUTs
-  // the edited detections to /references/{referenceId}, which re-embeds
-  // changed boxes server-side. Without this the edits lived only in
-  // local state and the project re-hydrated the ORIGINAL auto-detected
-  // boxes from the manifest, so the user's corrections were lost.
-  const v2RefEditTimers = useRef<Map<string, number>>(new Map());
-  const v2RefEditFlights = useRef<Set<Promise<void>>>(new Set());
-  const v2FlushRefEdit = useCallback((referenceId: string, boxes: EditableBox[]) => {
-    const projectId = v2ProjectIdRef.current;
-    if (!projectId || !referenceId) return;
-    const detections = (boxes ?? []).map((b) => ({
-      label: b.label,
-      score: b.score,
-      box: [b.x0, b.y0, b.x1, b.y1],
-      mask: b.mask ?? null,
-    }));
-    const p = apiFetch(
-      `/api/v2/projects/${projectId}/references/${referenceId}`,
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ detections }),
-      },
-    ).then(() => undefined).catch((e) => {
-      console.warn("[v2 ref edit flush] PUT failed:", e);
-    });
-    v2RefEditFlights.current.add(p);
-    void p.finally(() => v2RefEditFlights.current.delete(p));
-  }, []);
-  const v2ScheduleRefEdit = useCallback(
-    (referenceId: string | undefined, boxes: EditableBox[]) => {
-      if (!referenceId) return;
-      const timers = v2RefEditTimers.current;
-      const prev = timers.get(referenceId);
-      if (prev) window.clearTimeout(prev);
-      timers.set(referenceId, window.setTimeout(() => {
-        timers.delete(referenceId);
-        v2FlushRefEdit(referenceId, boxes);
-      }, 500));
-    },
-    [v2FlushRefEdit],
-  );
   // Whether the new project should be created as private. Toggle is
   // only rendered when the user's plan allows private projects (the
   // same gate ProjectSettingsV2 uses). Persisted into the manifest at
   // create time via the is_private form field on POST /api/v2/projects.
   const [v2IsPrivate, setV2IsPrivate] = useState(false);
-  // Flat pool of reference images, up to V2_MAX_REFS total, shared
-  // across all labels. Annotations per label happen in the project view.
-  const [v2RefImages, setV2RefImages] = useState<ReferenceImage[]>([]);
-  // URLs of reference images currently being processed by the pipeline.
-  const [v2RefProcessing, setV2RefProcessing] = useState<Set<string>>(new Set());
-  // Reference image currently open in the full-screen viewer (by
-  // index so prev/next nav can move through the pool).
-  const [v2ViewingIdx, setV2ViewingIdx] = useState<number | null>(null);
   const v2InputRef = useRef<HTMLInputElement | null>(null);
-  const v2FileRef = useRef<HTMLInputElement | null>(null);
 
   // Stages that take over the workspace surface. While active the
   // search/add buttons fade out and the projects grid is hidden; the
   // page stays scrollable and the footer remains in flow so the
   // surface doesn't feel isolated.
-  const v2Active = v2Stage === "labels" || v2Stage === "classifying" || v2Stage === "references" || v2Stage === "import";
+  const v2Active = v2Stage === "labels" || v2Stage === "creating" || v2Stage === "import";
 
   // Ambient word-cloud overlay is only shown during the labels stage.
   // We keep it mounted briefly after the user leaves the stage so the
@@ -645,39 +571,28 @@ export function HomeView({
 
   // Esc closes whichever V2 stage is active and returns the page to
   // its normal layout. Mirrors how the V1 Cancel button feels.
-  // Suppressed while the per-reference editor is open: ESC there
-  // should just close the editor (handled by ReferenceImageEditor's
-  // own onClose), not nuke the whole onboarding session.
   useEffect(() => {
     if (v2Stage === "idle") return;
-    if (v2ViewingIdx !== null) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") v2Reset();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [v2Stage, v2ViewingIdx]);
+  }, [v2Stage]);
 
-  // Ctrl/Cmd+Enter advances the active V2 stage, triggers Done on
-  // the labels stage and Open project on the references stage.
-  // Deps include v2RefImages.length so the onKey closure picks up
-  // the latest v2DoneRefs after the user uploads images, otherwise
-  // Ctrl+Enter would fire with the empty snapshot from when the
-  // stage first opened.
+  // Ctrl/Cmd+Enter triggers Done on the labels stage.
   useEffect(() => {
-    if (v2Stage !== "labels" && v2Stage !== "references") return;
-    if (v2ViewingIdx !== null) return;
+    if (v2Stage !== "labels") return;
     const onKey = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey) || e.key !== "Enter") return;
       e.preventDefault();
-      if (v2Stage === "labels" && v2Labels.length > 0) v2DoneLabels();
-      else if (v2Stage === "references") v2DoneRefs();
+      if (v2Labels.length > 0) v2DoneLabels();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [v2Stage, v2Labels.length, v2RefImages.length, v2ViewingIdx]);
+  }, [v2Stage, v2Labels.length]);
 
   // Auto-focus the chip input when the labels stage opens.
   useEffect(() => {
@@ -685,17 +600,6 @@ export function HomeView({
     const t = window.setTimeout(() => v2InputRef.current?.focus(), 320);
     return () => window.clearTimeout(t);
   }, [v2Stage]);
-
-  // Revoke object URLs for any references the user picked but didn't
-  // ship through to the project view. Runs only on full unmount.
-  useEffect(() => {
-    return () => {
-      for (const r of v2RefImages) {
-        try { URL.revokeObjectURL(r.preview); } catch { /* already revoked */ }
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const v2Reset = () => {
     // An in-flight import is mid-upload to a real project; ignore cancel/ESC
@@ -706,9 +610,6 @@ export function HomeView({
     // get attached to it.
     pendingContainerRef.current = null;
     setV2ReturnProjectId(null);
-    for (const r of v2RefImages) {
-      try { URL.revokeObjectURL(r.preview); } catch { /* already revoked */ }
-    }
     // Capture the eagerly-created project ID before we wipe local
     // state so we can DELETE it on the backend. Cancelling out of
     // the onboarding flow should NOT leave an orphaned project
@@ -720,7 +621,6 @@ export function HomeView({
     setV2Labels([]);
     setV2LabelColours({});
     setV2Input("");
-    setV2RefImages([]);
     setV2ProjectId(null);
     v2ProjectIdRef.current = null;
     setV2ImportParsed(null);
@@ -794,12 +694,9 @@ export function HomeView({
     }
   };
 
-  // Eagerly create the V2 project on the backend and stash its ID so
-  // each reference upload during onboarding can POST directly to
-  // /api/v2/projects/{id}/references, single round-trip per image
-  // instead of the old /process → /references two-hit flow.
+  // Create the V2 project on the backend and stash its ID.
   // Idempotent: returns the existing ID if we've already created
-  // one in this onboarding session.
+  // one in this onboarding session (e.g. the import path).
   const v2EnsureProject = async (
     name: string,
     labels: string[],
@@ -903,8 +800,7 @@ export function HomeView({
           result.errors[0] ? `Import failed: ${result.errors[0]}` : "No images were imported.",
         );
       }
-      // Open the new project. Labels = the dataset's classes; no references
-      // and no dataset-type seed (imports skip onboarding classification).
+      // Open the new project. Labels = the dataset's classes.
       if (onV2Begin) onV2Begin(v2Name.trim(), parsed.classes, [], projectId, null);
       // Reset onboarding state (mirrors v2HandOff's tail).
       v2ImportBusyRef.current = false;
@@ -939,23 +835,15 @@ export function HomeView({
     }
   };
 
-  // Hand the gathered name + labels + reference images off to the
-  // parent. The V2 project was created eagerly when the user
-  // entered the references stage, so this just transitions UI ,
-  // every accepted reference is already saved on the server with
-  // its detections + embeddings persisted to the manifest.
-  // For projects where the user skipped the references stage we
-  // still need a backend project record, so v2EnsureProject runs
-  // here as a fallback when v2ProjectId is null.
+  // Hand the gathered name + labels off to the parent. The backend
+  // project record is created here if it doesn't exist yet (the
+  // import path creates it earlier).
   const v2HandOff = async (
     name: string,
     labels: string[],
-    images: ReferenceImage[],
-    firstLoad: "general" | "specific" | null = null,
+    firstLoad: "onboarding" | null = null,
   ) => {
     if (!onV2Begin) return;
-    // eslint-disable-next-line no-console
-    console.log("[v2 handoff] start ,", { name, labels, imageCount: images.length, firstLoad });
     let projectId = v2ProjectIdRef.current;
     if (!projectId) projectId = await v2EnsureProject(name, labels);
     // If this onboarding was launched from a Project page, add the new dataset
@@ -968,308 +856,28 @@ export function HomeView({
       }
       pendingContainerRef.current = null;
     }
-    // Flush any pending reference-edit PUTs NOW (clear debounce timers
-    // and fire immediately) and wait for them to land, so the project
-    // view hydrates from a manifest that already reflects the user's
-    // box/label corrections instead of the original auto-detections.
-    for (const [refId, t] of Array.from(v2RefEditTimers.current.entries())) {
-      window.clearTimeout(t);
-      v2RefEditTimers.current.delete(refId);
-      const ref = images.find((r) => r.referenceId === refId);
-      if (ref) v2FlushRefEdit(refId, ref.boxes ?? []);
-    }
-    if (v2RefEditFlights.current.size > 0) {
-      await Promise.allSettled(Array.from(v2RefEditFlights.current));
-    }
-    // Seed the dataset-type classification we already computed during
-    // onboarding into the project-meta cache, keyed by the new project
-    // id. ProjectViewV2Stub's state initialiser reads this on mount, so
-    // the general/specific pill and the references-section mode paint on
-    // the first frame instead of waiting on a fresh (and redundant)
-    // classification round-trip to /dataset-type. firstLoad carries the
-    // type; null means the user skipped labels, so there's nothing to seed.
-    if (projectId && firstLoad) {
-      patchProjectMeta(projectId, {
-        datasetType: {
-          type: firstLoad,
-          reason: v2DatasetReasonRef.current || null,
-          source: "auto",
-        },
-      });
-    }
-    // eslint-disable-next-line no-console
-    console.log("[v2 handoff] calling onV2Begin with", images.length, "images, projectId =", projectId);
-    onV2Begin(name.trim(), labels, images, projectId, firstLoad);
+    onV2Begin(name.trim(), labels, [], projectId, firstLoad);
     setV2Stage("idle");
     setV2Name("");
     setV2Labels([]);
     setV2LabelColours({});
     setV2Input("");
-    setV2RefImages([]);
     setV2IsPrivate(false);
     setV2ProjectId(null);
     v2ProjectIdRef.current = null;
-    v2DatasetReasonRef.current = "";
   };
 
+  // Labels confirmed → create the dataset and open it. The "creating"
+  // stage shows the in-place PixelKit loader while the create POST is
+  // in flight; reference images can be added later from the dataset
+  // view's References tab.
   const v2DoneLabels = () => {
-    if (v2Labels.length === 0) { v2HandOff(v2Name, [], []); return; }
-    // Reset the loader copy back to the entry message every time
-    // we re-enter classifying (e.g. user backed out of references
-    // and pressed Done again).
-    setV2ClassifyMsg("Reading between the labels…");
-    // Step into the classifying stage; the useEffect below pings
-    // /api/v2/dataset-type/preview and routes to either references
-    // (specific) or straight to the project (general).
-    setV2Stage("classifying");
-    // Fire-and-forget: backend project creation runs in parallel
-    // with classification so the project record is ready by the
-    // time we land on either references or the project view.
-    v2EnsureProject(v2Name, v2Labels);
+    if (v2Labels.length === 0) { v2HandOff(v2Name, []); return; }
+    setV2Stage("creating");
+    void v2HandOff(v2Name, v2Labels, "onboarding");
   };
 
-  // Dataset-type classifier, runs once when the stage flips into
-  // "classifying". General label sets skip the references stage and
-  // go straight to the project view. Specific ones go through
-  // references as before. Network errors fall back to "specific" so
-  // the user still gets a chance to upload references rather than
-  // landing on a project page they didn't expect.
-  useEffect(() => {
-    if (v2Stage !== "classifying") return;
-    let cancelled = false;
-    (async () => {
-      let datasetType: "general" | "specific" = "specific";
-      v2DatasetReasonRef.current = "";
-      try {
-        const r = await fetch(`${API}/api/v2/dataset-type/preview`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ labels: v2Labels }),
-        });
-        if (r.ok) {
-          const d = await r.json();
-          if (d?.type === "general") datasetType = "general";
-          if (typeof d?.reason === "string") v2DatasetReasonRef.current = d.reason;
-        }
-      } catch {
-        // Keep default ("specific") so user lands on references.
-      }
-      if (cancelled) return;
-      if (datasetType === "general") {
-        // Skip references entirely, hand off with no images. Switch
-        // the loader copy first so the same PixelKit animation
-        // continues straight through to the project mount with
-        // "Opening project…", the ProjectViewV2Stub then renders
-        // its in-page first-load loader (same animation, project
-        // chrome visible behind) until /initial lands.
-        setV2ClassifyMsg("Opening project…");
-        v2HandOff(v2Name, v2Labels, [], "general");
-      } else {
-        setV2Stage("references");
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // v2HandOff and v2Name/v2Labels are read at fire time; we only
-    // want this effect to run when the stage flips to classifying.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [v2Stage]);
-
-  const v2SkipFromLabels = () => v2HandOff(v2Name, [], []);
-  const v2SkipFromRefs   = () => v2HandOff(v2Name, v2Labels, [], "specific");
-  // Refs Done = "specific" path. Pass "specific" so the project
-  // view renders the smaller in-page "Loading project…" loader card
-  // instead of the full-screen mount loader (per design intent: the
-  // user is moving from a busy refs page to their new project, and
-  // the smaller loader keeps the page chrome in view).
-  const v2DoneRefs       = () => v2HandOff(v2Name, v2Labels, v2RefImages, "specific");
-
-  const v2Remaining = Math.max(0, V2_MAX_REFS - v2RefImages.length);
-  const [v2RefDragOver, setV2RefDragOver] = useState(false);
-  // Active filter for the references grid during onboarding ,
-  // mirrors the same chip row pattern on the V2 project page.
-  // null = show all.
-  const [v2FilterLabel, setV2FilterLabel] = useState<string | null>(null);
-
-  // Single-shot reference upload: POST directly to
-  // /api/v2/projects/{id}/references with the bytes + labels and let
-  // the backend run GD+SAM, save the file to disk, embed each box
-  // with the embedding model, and stamp everything into the manifest in one
-  // round-trip. The endpoint echoes back detections so we can render
-  // boxes immediately without a follow-up manifest GET.
-  //
-  // Falls back to the legacy stateless /process endpoint if the
-  // backend project hasn't been created yet (shouldn't happen, we
-  // call v2EnsureProject on stage entry, but the network race
-  // between "user dragged 20 files" and "POST /api/v2/projects
-  // returned" is real, and stateless /process is a fine cushion).
-  const v2TriggerPipeline = async (ref: ReferenceImage) => {
-    setV2RefProcessing((prev) => new Set([...prev, ref.preview]));
-    try {
-      const projectId = v2ProjectIdRef.current ?? (await v2EnsureProject(v2Name, v2Labels));
-      if (projectId) {
-        const fd = new FormData();
-        fd.append("image", ref.file);
-        fd.append("labels", JSON.stringify(v2Labels));
-        const r = await apiFetch(`/api/v2/projects/${projectId}/references`, {
-          method: "POST",
-          body: fd,
-        });
-        if (!r.ok) {
-          const body = await r.text().catch(() => "");
-          throw new Error(`http ${r.status}, ${body || "no body"}`);
-        }
-        const data = (await r.json()) as {
-          reference_id: string;
-          filename: string;
-          width: number;
-          height: number;
-          detections: { label: string; score: number; box: number[]; mask: MaskShape | null }[];
-        };
-        const boxes = detectionsToBoxes(
-          (data.detections ?? []).map((d) => ({
-            label: d.label,
-            score: d.score,
-            box_xyxy: d.box,
-            mask: d.mask,
-          })),
-          v2Labels,
-        );
-        setV2RefImages((cur) => {
-          const stillExists = cur.some((it) => it.preview === ref.preview);
-          if (!stillExists) {
-            // User removed this ref while the pipeline was in-flight —
-            // the POST already landed on the server, so delete it to
-            // avoid an orphaned manifest entry.
-            void apiFetch(
-              `/api/v2/projects/${projectId}/references/${data.reference_id}`,
-              { method: "DELETE" },
-            ).catch(() => {});
-            return cur;
-          }
-          return cur.map((it) => {
-            if (it.preview !== ref.preview) return it;
-            // Tag the ref with its server-side ID + filename so the
-            // post-onboarding background uploader skips it (no
-            // duplicate POST) and the editor's edit-flush PUT can
-            // target /api/v2/projects/{id}/references/{referenceId}.
-            const tagged = {
-              ...it,
-              width: data.width,
-              height: data.height,
-              referenceId: data.reference_id,
-              filename: data.filename,
-            };
-            // Don't clobber boxes if the user already drew one before
-            // the pipeline returned (same guard as before).
-            return it.boxes !== undefined ? tagged : { ...tagged, boxes };
-          });
-        });
-        return;
-      }
-
-      // Fallback path, project creation hasn't completed. Hit the
-      // stateless /process so the user at least sees boxes; the
-      // background uploader will persist the ref later.
-      const fd = new FormData();
-      fd.append("image", ref.file);
-      fd.append("labels", JSON.stringify(v2Labels));
-      const r = await fetch(`${API}/api/v2/references/process`, { method: "POST", body: fd });
-      if (!r.ok) {
-        const body = await r.text().catch(() => "");
-        throw new Error(`http ${r.status}, ${body || "no body"}`);
-      }
-      const data = (await r.json()) as {
-        width: number;
-        height: number;
-        detections: { label: string; score: number; box: number[]; mask: MaskShape | null }[];
-      };
-      const boxes = detectionsToBoxes(
-        data.detections.map((d) => ({
-          label: d.label,
-          score: d.score,
-          box_xyxy: d.box,
-          mask: d.mask,
-        })),
-        v2Labels,
-      );
-      setV2RefImages((cur) =>
-        cur.map((it) => {
-          if (it.preview !== ref.preview) return it;
-          if (it.boxes !== undefined) {
-            return { ...it, width: data.width, height: data.height };
-          }
-          return { ...it, width: data.width, height: data.height, boxes };
-        }),
-      );
-    } catch (e) {
-      console.error("[v2 ref pipeline]", e);
-    } finally {
-      setV2RefProcessing((prev) => {
-        const next = new Set(prev);
-        next.delete(ref.preview);
-        return next;
-      });
-    }
-  };
-
-  const v2OnUploadFiles = async (files: FileList | null) => {
-    // eslint-disable-next-line no-console
-    console.log("[v2 upload] called with", files?.length ?? 0, "file(s), remaining slots:", v2Remaining);
-    if (!files || files.length === 0) return;
-    // Match V1's upload pipeline: every accepted image is downsized
-    // to 1500px on its longest edge and recompressed under 500 KB
-    // JPEG before it leaves the browser. Saves home-network upload
-    // time, R2 storage, and tunnel bandwidth, and keeps reference
-    // sizes consistent with the import dataset (so the embedder sees the
-    // same scale of crop bytes either way).
-    // Accept files by extension when `file.type` is empty, Safari
-    // hands drag-source files without a MIME in several flows.
-    const candidates = Array.from(files).filter(isImageFile).slice(0, v2Remaining);
-    if (candidates.length === 0) {
-      if (v2FileRef.current) v2FileRef.current.value = "";
-      return;
-    }
-    // Phase 1: spawn placeholder tiles IMMEDIATELY from the original
-    // files (createObjectURL is instant, no decode/resize) so the grid
-    // fills the moment the user drops — previously we awaited every
-    // resize before showing anything, so 20 images took 5-10s to appear.
-    const placeholders: ReferenceImage[] = candidates.map((f) => ({
-      file: f,
-      preview: URL.createObjectURL(f),
-    }));
-    setV2RefImages((cur) => [...cur, ...placeholders]);
-    if (v2FileRef.current) v2FileRef.current.value = "";
-    // Phase 2: resize each in the background and swap in the downsized
-    // File (preview/key stay stable so tiles don't remount/flicker),
-    // then kick the per-ref pipeline on the resized bytes.
-    placeholders.forEach((ph) => {
-      void (async () => {
-        const resized = await resizeForUpload(ph.file).catch(() => ph.file);
-        const ref: ReferenceImage = resized === ph.file ? ph : { ...ph, file: resized };
-        if (ref !== ph) {
-          setV2RefImages((cur) => cur.map((it) => (it.preview === ph.preview ? ref : it)));
-        }
-        v2TriggerPipeline(ref);
-      })();
-    });
-  };
-
-  const v2RemoveRef = (idx: number) => {
-    const list = v2RefImages.slice();
-    const [gone] = list.splice(idx, 1);
-    if (gone) URL.revokeObjectURL(gone.preview);
-    setV2RefImages(list);
-    // If the ref was already uploaded to the server (has a referenceId),
-    // delete it so it doesn't resurface on the next /initial hydration.
-    if (gone?.referenceId && v2ProjectIdRef.current) {
-      void apiFetch(
-        `/api/v2/projects/${v2ProjectIdRef.current}/references/${gone.referenceId}`,
-        { method: "DELETE" },
-      ).catch(() => {});
-    }
-  };
+  const v2SkipFromLabels = () => v2HandOff(v2Name, []);
 
   const planData = usePlan();
   // Free-tier projects are always public, surface the consequence
@@ -1849,7 +1457,6 @@ export function HomeView({
           setV2ReturnProjectId(projectViewId);
           setV2Labels([]);
           setV2Input("");
-          setV2RefImages([]);
           setProjectViewId(null);
           v2BeginLabels(name);
         }}
@@ -1971,32 +1578,26 @@ export function HomeView({
           setV2ReturnProjectId(null);
           setV2Labels([]);
           setV2Input("");
-          setV2RefImages([]);
           v2BeginLabels(name);
         }}
       />
 
       {/* V2 stage body. Labels stage uses the centred-prompt layout
           (negative top margin + flex items-center) so the question
-          sits a touch above the viewport's mid-line. References
-          stage drops the centring entirely, its content grows
-          arbitrarily as the user adds reference images, and a
-          flex-centered container would yank the heading above the
-          viewport as the centroid shifts up with growing content
-          (the page itself doesn't gain enough height to scroll
-          because the wrapper's min-h is fixed at one viewport).
-          Normal flow + a small top padding keeps the heading
-          anchored and lets the page grow naturally. */}
+          sits a touch above the viewport's mid-line. The import
+          stage drops the centring, its content grows as the user
+          picks a dataset, so normal flow + a small top padding
+          keeps the heading anchored and lets the page grow. */}
       {v2Active && (
         <div
           className={[
             "relative px-6",
-            // The classifying stage shares the same vertically-centred
+            // The creating stage shares the same vertically-centred
             // layout as the labels stage so the swap is in-place, no
             // wrapper-level layout shift, no flicker between forms.
             // Pull-up tuned against the denser title band (was -13rem
             // when the workspace heading was text-6xl marketing scale).
-            v2Stage === "labels" || v2Stage === "classifying"
+            v2Stage === "labels" || v2Stage === "creating"
               ? "-mt-[6rem] min-h-[calc(100vh-10rem)] flex items-center justify-center pointer-events-none"
               : "pt-4 pb-16 pointer-events-none",
           ].join(" ")}
@@ -2005,11 +1606,11 @@ export function HomeView({
               parent gate keeps it mounted briefly after the user
               leaves so the fade-out animation plays in full. */}
           {v2Stage === "labels" && v2WordCloudMounted && <WordCloud show={v2WordCloudShouldShow} />}
-          {(v2Stage === "labels" || v2Stage === "classifying") && (
+          {(v2Stage === "labels" || v2Stage === "creating") && (
             <div
               key="v2-labels"
               className={[
-                // Both the form and the classifying loader live in
+                // Both the form and the creating loader live in
                 // this relative wrapper so the loader can absolute-
                 // overlay the form and the two crossfade in place
                 // when the user clicks Done.
@@ -2018,8 +1619,8 @@ export function HomeView({
               ].join(" ")}
             >
             {/* Labels form crossfades out as the loader fades in.
-                Done is disabled while the dataset-type call is in
-                flight so the user can't double-fire. */}
+                Done is disabled while the create call is in flight
+                so the user can't double-fire. */}
             <div
               key="v2-labels-form"
               className="transition-all duration-300 ease-out"
@@ -2111,6 +1712,10 @@ export function HomeView({
                 />
               </div>
 
+              {/* Inline validation (e.g. the profanity guard) — the V1
+                  error strip below is hidden while this stage is up. */}
+              {error && <p className="mt-3 text-sm text-red-600 dark:text-red-400">{error}</p>}
+
               <div className="mt-6 flex items-center gap-3">
                 {/* Visibility toggle, Pro/Mega only. Its left edge
                     sits flush with the label input above (both live
@@ -2172,7 +1777,7 @@ export function HomeView({
                   <button
                     type="button"
                     onClick={v2DoneLabels}
-                    disabled={v2Labels.length === 0 || v2Stage === "classifying"}
+                    disabled={v2Labels.length === 0 || v2Stage === "creating"}
                     className="inline-flex items-center justify-center rounded-full px-7 py-2.5 text-sm font-semibold leading-none text-black transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                     style={{ backgroundColor: "#fb923c" }}
                   >
@@ -2188,19 +1793,16 @@ export function HomeView({
               </div>
             </div>
 
-            {/* Classifying loader, absolute over the form's space.
+            {/* Creating loader, absolute over the form's space.
                 Crossfades with the form (form opacity 0 / loader
                 fades in) so the swap reads as a single in-place
-                transition rather than a layout shift. The message
-                flips to "Loading project…" the moment the classifier
-                lands on "general" so the same animation carries
-                straight through to the project mount. */}
-            {v2Stage === "classifying" && (
+                transition while the dataset is created and opened. */}
+            {v2Stage === "creating" && (
               <div
-                key="v2-classifying"
+                key="v2-creating"
                 className="absolute inset-0 grid place-items-center pointer-events-auto animate-[fadeIn_320ms_ease-out]"
               >
-                <PixelKitLoader size={128} message={v2ClassifyMsg} />
+                <PixelKitLoader size={128} message="Opening project…" />
               </div>
             )}
             </div>
@@ -2414,283 +2016,7 @@ export function HomeView({
             </div>
           )}
 
-          {v2Stage === "references" && (
-            <div
-              key="v2-refs"
-              // mx-auto centres horizontally now that the parent
-              // wrapper is using normal-flow layout instead of
-              // flex justify-center.
-              className="w-full max-w-2xl mx-auto animate-[fadeIn_280ms_ease-out] pointer-events-auto"
-            >
-              <button
-                type="button"
-                onClick={() => setV2Stage("labels")}
-                className="inline-flex items-center gap-1.5 text-xs uppercase tracking-[0.18em] font-mono text-foreground/45 hover:text-foreground transition-colors mb-4"
-              >
-                <span aria-hidden>←</span>
-                Back to labels
-              </button>
-              <h2 className="text-2xl font-light tracking-tight text-[var(--foreground)] leading-tight">
-                Reference images
-              </h2>
-              <p className="mt-3 text-sm text-foreground/50 leading-relaxed">
-                Upload up to {V2_MAX_REFS} images containing your target objects.
-              </p>
-              <p className="mt-1.5 text-sm text-foreground/50 leading-relaxed">
-                You&rsquo;ll annotate at least {V2_ANNOTS_PER_LABEL} examples per label directly in the project.{" "}
-                <span className="text-foreground/70 italic">This step isn&rsquo;t required but is recommended.</span>
-              </p>
-
-              {/* Label chips, both the per-label progress display AND
-                  the filter for the references grid below. Clicking a
-                  chip filters the grid to images containing at least
-                  one box of that label; clicking the active chip (or
-                  "Show all") clears the filter. The chip's coloured
-                  fill stays the visual anchor, with an extra ring
-                  appearing when the chip is the active filter. */}
-              {v2Labels.length > 0 && (
-                <div className="mt-6 flex flex-wrap items-center gap-2">
-                  {v2Labels.map((lab, i) => {
-                    const annotCount = v2RefImages.reduce(
-                      (sum, ri) => sum + (ri.boxes ?? []).filter((b) => b.label === lab).length,
-                      0,
-                    );
-                    const annotDone = annotCount >= V2_ANNOTS_PER_LABEL;
-                    const active = v2FilterLabel?.toLowerCase() === lab.toLowerCase();
-                    const filterDisabled = v2RefImages.length === 0;
-                    const bg = v2LabelColours[lab.toLowerCase()] ?? LABEL_COLOURS[i % LABEL_COLOURS.length];
-                    return (
-                      <button
-                        key={lab}
-                        type="button"
-                        disabled={filterDisabled}
-                        onClick={() => {
-                          if (filterDisabled) return;
-                          setV2FilterLabel((cur) =>
-                            cur?.toLowerCase() === lab.toLowerCase() ? null : lab,
-                          );
-                        }}
-                        aria-pressed={active}
-                        className={[
-                          "inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-sm font-medium transition-all",
-                          filterDisabled ? "cursor-default" : "cursor-pointer",
-                          active ? "ring-2 ring-foreground/85 ring-offset-2 ring-offset-[var(--background)]" : "",
-                        ].join(" ")}
-                        style={{ backgroundColor: bg, color: readableTextForBg(bg) }}
-                        title={
-                          filterDisabled
-                            ? `${annotCount}/${V2_ANNOTS_PER_LABEL} ${lab} annotations, upload references to enable filtering`
-                            : active
-                              ? `Showing only references containing "${lab}", click again to show all`
-                              : `Show only references containing "${lab}"`
-                        }
-                      >
-                        {lab}
-                        {annotDone ? (
-                          <svg viewBox="0 0 24 24" className="h-3 w-3 opacity-50 shrink-0" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-label="Complete">
-                            <polyline points="5 12 10 17 19 7" />
-                          </svg>
-                        ) : (
-                          <span className="text-[10px] opacity-60 tabular-nums">{annotCount}/{V2_ANNOTS_PER_LABEL}</span>
-                        )}
-                      </button>
-                    );
-                  })}
-                  {/* Show all sits after the label chips, only useful
-                      once a filter is active or refs exist. Dim
-                      border-only style so it never competes visually
-                      with the coloured progress chips. */}
-                  {v2RefImages.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => setV2FilterLabel(null)}
-                      aria-pressed={v2FilterLabel === null}
-                      className={[
-                        "rounded-full bg-[var(--background)] px-3 py-1 text-[11px] font-medium tracking-wide transition-all border",
-                        v2FilterLabel === null
-                          ? "border-foreground/15 text-foreground/40"
-                          : "border-foreground/[0.06] text-foreground/25 hover:border-foreground/15 hover:text-foreground/45",
-                      ].join(" ")}
-                      title="Show every reference image"
-                    >
-                      Show all
-                      <span className="ml-1.5 text-[10px] tabular-nums opacity-60">{v2RefImages.length}</span>
-                    </button>
-                  )}
-                </div>
-              )}
-
-              {/* Shared image pool, single drop zone for all labels. */}
-              <div className="mt-8">{/* (filter row removed, merged into the label-chip row above) */}
-                {v2RefImages.length > 0 && (
-                  <div className="mb-4 grid grid-cols-4 sm:grid-cols-5 gap-2">
-                    {v2RefImages
-                      .map((r, i) => ({ r, i }))
-                      .filter(({ r }) => {
-                        if (v2FilterLabel === null) return true;
-                        const k = v2FilterLabel.toLowerCase();
-                        return (r.boxes ?? []).some((b) => (b.label ?? "").toLowerCase() === k);
-                      })
-                      .map(({ r, i }) => {
-                      const processing = v2RefProcessing.has(r.preview);
-                      return (
-                        <div
-                          key={i}
-                          className="group relative aspect-square rounded-lg overflow-hidden bg-foreground/5 border border-foreground/10 animate-[fadeIn_180ms_ease-out]"
-                        >
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img
-                            src={r.preview}
-                            alt=""
-                            className={[
-                              "w-full h-full object-cover transition-all duration-300",
-                              processing ? "opacity-35 scale-105 blur-[1px]" : "cursor-pointer",
-                            ].join(" ")}
-                            onClick={() => !processing && setV2ViewingIdx(i)}
-                          />
-                          {processing ? (
-                            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                              <svg className="h-7 w-7 animate-spin text-[var(--foreground)]" viewBox="0 0 24 24" fill="none">
-                                <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.2" strokeWidth="2.5" />
-                                <path d="M12 3a9 9 0 0 1 9 9" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
-                              </svg>
-                            </div>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={(e) => { e.stopPropagation(); v2RemoveRef(i); }}
-                              className="absolute top-1 right-1 h-6 w-6 rounded-full bg-black/70 text-white hover:bg-black/90 grid place-items-center text-sm opacity-0 group-hover:opacity-100 transition-opacity"
-                              aria-label="Remove reference"
-                            >
-                              ×
-                            </button>
-                          )}
-                        </div>
-                      );
-                    })}
-                    {v2FilterLabel !== null && v2RefImages.every((r) =>
-                      !(r.boxes ?? []).some((b) => (b.label ?? "").toLowerCase() === v2FilterLabel.toLowerCase()),
-                    ) && (
-                      <div className="col-span-full rounded-lg border border-dashed border-foreground/10 px-4 py-6 text-center text-[12px] text-foreground/45">
-                        No references contain &ldquo;{v2FilterLabel}&rdquo; yet.
-                      </div>
-                    )}
-                  </div>
-                )}
-                <div
-                  onClick={() => v2Remaining > 0 && v2FileRef.current?.click()}
-                  // Safari refuses drops unless dragover both
-                  // preventDefaults AND sets dataTransfer.dropEffect.
-                  // stopPropagation defends against parent drag
-                  // handlers swallowing the event.
-                  onDragEnter={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    if (v2Remaining > 0) setV2RefDragOver(true);
-                  }}
-                  onDragLeave={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setV2RefDragOver(false);
-                  }}
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    if (v2Remaining > 0 && e.dataTransfer) e.dataTransfer.dropEffect = "copy";
-                  }}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setV2RefDragOver(false);
-                    if (v2Remaining > 0) v2OnUploadFiles(e.dataTransfer.files);
-                  }}
-                  className={[
-                    "w-full rounded-2xl border-2 border-dashed transition-all p-6 text-center",
-                    v2Remaining <= 0
-                      ? "border-foreground/5 opacity-50 cursor-not-allowed"
-                      : v2RefDragOver
-                      ? "border-foreground/50 bg-foreground/[0.04] cursor-copy"
-                      : "border-foreground/15 hover:border-foreground/30 hover:bg-foreground/[0.02] cursor-pointer",
-                  ].join(" ")}
-                >
-                  <div className="text-sm text-foreground/85">
-                    {v2Remaining > 0 ? "Click or drop images here" : `Maximum ${V2_MAX_REFS} images reached`}
-                  </div>
-                  {v2Remaining > 0 && (
-                    <div className="mt-1 text-xs text-foreground/45">
-                      {v2RefImages.length} of {V2_MAX_REFS} used &nbsp;·&nbsp; jpg · png · webp
-                    </div>
-                  )}
-                </div>
-                <input
-                  ref={v2FileRef}
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  className="hidden"
-                  onChange={(e) => v2OnUploadFiles(e.target.files)}
-                />
-              </div>
-
-              <div className="mt-8 flex items-center justify-end gap-3">
-                <Tooltip side="top" align="center" label="Skip, open project without uploading references">
-                  <button
-                    type="button"
-                    onClick={v2SkipFromRefs}
-                    className="px-4 py-2 text-sm text-foreground/55 hover:text-foreground/90 transition-colors"
-                  >
-                    Skip
-                  </button>
-                </Tooltip>
-                <div className="flex flex-col items-end gap-1">
-                  <button
-                    type="button"
-                    onClick={v2DoneRefs}
-                    className="rounded-full px-7 py-2.5 text-sm font-semibold text-black transition-all"
-                    style={{ backgroundColor: "#fb923c" }}
-                  >
-                    Open project
-                  </button>
-                  <span className="text-[10px] text-foreground/30 font-mono select-none">Ctrl ↵</span>
-                </div>
-              </div>
-            </div>
-          )}
         </div>
-      )}
-
-      {/* Reference image editor, opened on thumbnail click. Esc /
-          Close button + Left/Right arrows + on-screen prev/next
-          buttons all flow through setV2ViewingIdx. */}
-      {v2ViewingIdx !== null && v2RefImages[v2ViewingIdx] && (
-        <ReferenceImageEditor
-          refImage={v2RefImages[v2ViewingIdx]}
-          labels={v2Labels}
-          projectId={v2ProjectId}
-          onChange={(nextBoxes) => {
-            const editing = v2RefImages[v2ViewingIdx];
-            const previewKey = editing?.preview;
-            if (!previewKey) return;
-            setV2RefImages((cur) =>
-              cur.map((it) =>
-                it.preview === previewKey ? { ...it, boxes: nextBoxes } : it,
-              ),
-            );
-            // Persist the edit so it carries through to the project.
-            v2ScheduleRefEdit(editing?.referenceId, nextBoxes);
-          }}
-          onClose={() => setV2ViewingIdx(null)}
-          onPrev={() => setV2ViewingIdx((i) => (i === null ? null : Math.max(0, i - 1)))}
-          onNext={() =>
-            setV2ViewingIdx((i) =>
-              i === null ? null : Math.min(v2RefImages.length - 1, i + 1),
-            )
-          }
-          hasPrev={v2ViewingIdx > 0}
-          hasNext={v2ViewingIdx < v2RefImages.length - 1}
-          index={v2ViewingIdx}
-          total={v2RefImages.length}
-        />
       )}
 
       {/* V1 inline create form + projects grid. Hidden when V2 is

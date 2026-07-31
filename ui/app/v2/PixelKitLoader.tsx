@@ -2,8 +2,8 @@
 
 // Pixelkit loading indicator. The "P" body is static; the 10 small
 // particle squares scattered around it pulse + drift outward and back
-// like dust disintegrating off the letterform. Used wherever we're
-// waiting on Claude (dataset-type preview, label expansion, etc).
+// like dust disintegrating off the letterform. Used wherever the app
+// is waiting on the engine (dataset creation, project load, etc).
 //
 // All animation is pure CSS, no JS animation loop, no requestAnimationFrame
 //, so the loader is cheap to mount/unmount.

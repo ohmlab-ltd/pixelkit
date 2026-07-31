@@ -38,17 +38,13 @@ type V2Result = {
   // dataset view's "Back to project" button + return navigation.
   fromProjectId?: string | null;
   // First-load handoff hint from onboarding:
-  //   "general"  → HomeView's "Reading between the labels…" overlay
-  //                already carried through as "Loading project…";
-  //                ProjectViewV2Stub should NOT show its own full-
-  //                screen mount loader (would be a second full-screen
-  //                takeover on top of HomeView's).
-  //   "specific" → user just finished references; render a smaller
-  //                "Loading project…" loader card inside the page
-  //                rather than the full-screen mount loader.
-  //   null       → normal load, ProjectViewV2Stub uses its default
-  //                full-screen mount loader.
-  firstLoad?: "general" | "specific" | null;
+  //   "onboarding" → HomeView's "Opening project…" overlay already
+  //                  carried the transition; ProjectViewV2Stub should
+  //                  NOT show its own full-screen mount loader (would
+  //                  be a second full-screen takeover on top of it).
+  //   null         → normal load, ProjectViewV2Stub uses its default
+  //                  full-screen mount loader.
+  firstLoad?: "onboarding" | null;
 };
 
 // Legacy tab identity kept for the appNav bus + ProjectViewV2Stub's
@@ -370,14 +366,20 @@ export default function Page() {
     ? (openProjectName || openProject)
     : "";
 
-  const sidebarVisible = sidebarOpen && activity !== "guide";
+  // While a dataset view is open the shell side bar auto-hides — the
+  // dataset has its own internal left nav, and stacking both was two
+  // sidebars deep. The ActivityBar, TitleBar and StatusBar stay, and
+  // the side bar comes back (with its previous open/collapsed state)
+  // as soon as the dataset closes.
+  const datasetOpen = !!openV2Project || !!openProject;
+  const sidebarVisible = sidebarOpen && activity !== "guide" && !datasetOpen;
   // Dataset views (and the not-found message) render as fixed overlays
   // above the content pane: below the title bar, above the status bar,
-  // and to the right of the activity bar + side bar — so the window
-  // chrome and the Explorer tree stay reachable while a dataset is
-  // open. Their internal modals (BoxEditor, viewers) are fixed
-  // inset-0 with higher z-indices and still cover everything, which
-  // matches their previous behaviour.
+  // and to the right of the activity bar (plus the side bar for the
+  // not-found case, where the Explorer tree stays reachable). Their
+  // internal modals (BoxEditor, viewers) are fixed inset-0 with higher
+  // z-indices and still cover everything, which matches their previous
+  // behaviour.
   const overlayCls = [
     "fixed top-9 bottom-6 right-0 z-[200] bg-[var(--background)]",
     sidebarVisible ? "left-[308px]" : "left-12",
@@ -513,10 +515,9 @@ export default function Page() {
             // When the dataset was opened from inside a Project, the back button
             // reads "Back to project" and returns to that Project page.
             backToProjectId={openV2Project.fromProjectId ?? null}
-            // First-load hint from onboarding. "general" suppresses
+            // First-load hint from onboarding. "onboarding" suppresses
             // the project's full-screen mount loader because HomeView
-            // is still showing its overlay; "specific" swaps in the
-            // smaller in-page "Loading project…" card.
+            // is still showing its "Opening project…" overlay.
             firstLoad={openV2Project.firstLoad ?? null}
             onClose={() => {
               const proj = openV2Project.fromProjectId;
