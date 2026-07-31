@@ -5,7 +5,7 @@ def test_models_status_shape(client):
     r = client.get("/api/models/status")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert set(body["models"].keys()) == {"sam3", "dinov2", "vlm"}
+    assert set(body["models"].keys()) == {"sam3", "dinov2"}
     sam3 = body["models"]["sam3"]
     assert sam3["gated"] is True and sam3["required"] is True
     # empty test cache -> nothing downloaded, nothing loaded

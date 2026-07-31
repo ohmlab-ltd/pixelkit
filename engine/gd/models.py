@@ -2,7 +2,7 @@
 
 Owns everything about getting weights onto disk:
   - the registry of models the portable build uses (SAM3 required+gated,
-    DINOv2 required, the small VLM optional),
+    DINOv2 required),
   - the user's Hugging Face token (needed for the gated facebook/sam3):
     validated against the hub, stored in the app-config dir (never in the
     workspace, which may be shared/synced), exported as HF_TOKEN so
@@ -27,7 +27,6 @@ import workspace
 # the (torch-heavy) loader modules.
 SAM3_REPO = os.environ.get("SAM3_MODEL_ID", "facebook/sam3")
 DINO_REPO = os.environ.get("V2_DINO_MODEL", "facebook/dinov2-large")
-VLM_REPO = os.environ.get("VLM_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
 
 # Skip alternative-format mirrors some repos carry (GGUF/ONNX etc.) —
 # transformers only needs configs + safetensors + tokenizer/processor files.
@@ -50,13 +49,6 @@ REGISTRY: dict[str, dict[str, Any]] = {
         "gated": False,
         "required": True,
         "approx_gb": 1.3,
-    },
-    "vlm": {
-        "repo": VLM_REPO,
-        "label": "Qwen3-VL 2B (label tiebreak, optional)",
-        "gated": False,
-        "required": False,
-        "approx_gb": 4.5,
     },
 }
 
@@ -168,7 +160,7 @@ def _loaded(name: str) -> bool:
     aren't already in the process."""
     import sys
 
-    mod_name = {"sam3": "pipeline_charlie", "dinov2": "v2_dinov2", "vlm": "vlm_validate"}[name]
+    mod_name = {"sam3": "pipeline_charlie", "dinov2": "v2_dinov2"}[name]
     mod = sys.modules.get(mod_name)
     if mod is None:
         return False

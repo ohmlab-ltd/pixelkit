@@ -230,33 +230,22 @@ export function ReviewModeV2({
     const unsures = Object.values(verdicts).filter((v) => v === "unsure").length;
     return (
       <div
-        // Contained in the shell's content area (below the title bar,
-        // above the status bar, right of the Explorer side bar) so the
-        // app chrome stays visible — same containment as the editor.
-        className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] z-[1200] grid place-items-center p-6"
-        // Themable wash: white frosted-glass in light mode, near-black
-        // in dark. Reads cleanly on either palette without overriding
-        // the page's accent.
-        style={{
-          background: "rgb(var(--background-rgb) / 0.7)",
-          backdropFilter: "blur(18px) saturate(140%)",
-          WebkitBackdropFilter: "blur(18px) saturate(140%)",
-        }}
+        // In-content PAGE: fills the shell's content area (below the
+        // title bar, above the status bar, right of the Explorer side
+        // bar) on an opaque ground — the app chrome stays visible.
+        className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] z-[1200] grid place-items-center bg-[var(--background)] p-6"
       >
-        <div className="rounded-2xl border border-foreground/15 bg-[var(--surface)] px-10 py-9 text-center max-w-md shadow-[var(--shadow-strong)]">
-          <h2 className="text-2xl font-semibold tracking-tight text-[var(--foreground)]">
+        <div className="max-w-md rounded-md border border-[var(--line)] bg-[var(--panel)] px-8 py-7 text-center">
+          <h2 className="text-[16px] font-medium tracking-tight text-[var(--foreground)]">
             Review complete
           </h2>
-          <p className="mt-3 text-foreground/55 text-sm">
-            <span className="text-emerald-600 dark:text-emerald-400 font-mono">{goods}</span> good ·{" "}
-            <span className="text-rose-600 dark:text-rose-400 font-mono">{bads}</span> bad ·{" "}
-            <span className="text-amber-600 dark:text-amber-400 font-mono">{unsures}</span> unsure
+          <p className="mt-3 text-foreground/55 text-sm tabular-nums">
+            <span className="font-mono text-[var(--ok)]">{goods}</span> good ·{" "}
+            <span className="font-mono text-[var(--bad)]">{bads}</span> bad ·{" "}
+            <span className="font-mono text-[var(--warn)]">{unsures}</span> unsure
           </p>
-          <button
-            onClick={onClose}
-            className="mt-7 rounded-full bg-foreground text-background px-5 py-2.5 text-sm font-medium hover:opacity-90 transition-opacity"
-          >
-            Close
+          <button onClick={onClose} className="pk-btn mt-6">
+            Back to dataset
           </button>
         </div>
       </div>
@@ -277,19 +266,11 @@ export function ReviewModeV2({
     // Contained in the shell's content area — the Explorer tree, title
     // bar and status bar stay visible while reviewing.
     <div
-      className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] z-[1200] flex flex-col"
-      role="dialog"
-      aria-modal="true"
+      // In-content PAGE, not an overlay: opaque ground filling the
+      // shell's content area, its own header/footer chrome. Keyboard
+      // (arrows / Esc) and pointer-swipe interactions are unchanged.
+      className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] z-[1200] flex flex-col bg-[var(--background)]"
       aria-label="Fast review"
-      style={{
-        // Themable wash. --background-rgb is white (light) / near-black
-        // (dark), so this reads as a frosted-glass surface in either
-        // theme. Blur + saturate match the workspace navigation
-        // chrome so the overlay feels like part of the app.
-        background: "rgb(var(--background-rgb) / 0.72)",
-        backdropFilter: "blur(20px) saturate(140%)",
-        WebkitBackdropFilter: "blur(20px) saturate(140%)",
-      }}
     >
       {/* Direction wash, only visible during a pointer drag */}
       <div
@@ -300,11 +281,15 @@ export function ReviewModeV2({
         }}
       />
 
-      <header className="relative flex items-center justify-between gap-4 px-6 py-3.5 border-b border-foreground/10">
-        <div className="flex items-baseline gap-3 min-w-0">
-          <span className="text-[10px] uppercase tracking-[0.18em] text-foreground/45">
-            {SCOPE_LABEL[scope]}
-          </span>
+      <header className="relative flex items-center gap-4 px-6 py-3 border-b border-[var(--line)]">
+        <button type="button" onClick={onClose} className="pk-btn shrink-0" aria-label="Close review">
+          <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <path d="M19 12H5" /><path d="m12 19-7-7 7-7" />
+          </svg>
+          Back
+        </button>
+        <div className="flex min-w-0 items-baseline gap-3">
+          <span className="pk-micro">{SCOPE_LABEL[scope]}</span>
           <span className="text-sm font-mono text-[var(--foreground)] tabular-nums">
             {idx + 1}
             <span className="text-foreground/35"> / {list.length}</span>
@@ -316,13 +301,6 @@ export function ReviewModeV2({
             <VerdictPill v={verdicts[current.id]} />
           )}
         </div>
-        <button
-          onClick={onClose}
-          className="text-foreground/45 hover:text-foreground text-2xl leading-none px-2"
-          aria-label="Close review"
-        >
-          ×
-        </button>
       </header>
 
       <div className="relative flex-1 flex items-stretch overflow-hidden">
@@ -359,7 +337,7 @@ export function ReviewModeV2({
               return (
                 <div
                   key={r.id}
-                  className="absolute inset-0 rounded-2xl overflow-hidden border border-foreground/15 bg-[var(--surface)] shadow-2xl"
+                  className="absolute inset-0 rounded-md overflow-hidden border border-[var(--line)] bg-[var(--surface)] shadow-[var(--shadow-strong)]"
                   style={{
                     transform,
                     transformOrigin: "center center",
@@ -386,10 +364,10 @@ export function ReviewModeV2({
                   {isTop && Math.abs(drag) > 20 && (
                     <span
                       className={[
-                        "pointer-events-none absolute top-6 px-4 py-2 rounded-full text-sm font-bold uppercase tracking-wider border-2 backdrop-blur-md",
+                        "pointer-events-none absolute top-6 rounded-md border-2 bg-black/55 px-4 py-2 font-mono text-sm font-medium uppercase tracking-wider backdrop-blur-md",
                         drag < 0
-                          ? "left-6 -rotate-12 border-rose-500 text-rose-700 dark:text-rose-200 bg-rose-500/15"
-                          : "right-6 rotate-12 border-emerald-500 text-emerald-700 dark:text-emerald-200 bg-emerald-500/15",
+                          ? "left-6 -rotate-12 border-[var(--bad)] text-[var(--bad)]"
+                          : "right-6 rotate-12 border-[var(--ok)] text-[var(--ok)]",
                       ].join(" ")}
                       style={{ opacity: tintIntensity }}
                     >
@@ -425,11 +403,9 @@ export function ReviewModeV2({
         {/* Annotation panel on the right. Lists every detection on the
             current image with its label chip + confidence. Reads as
             a quiet sidebar, same surface tone as the card behind. */}
-        <aside className="hidden lg:flex flex-col w-72 border-l border-foreground/10 bg-[var(--surface)]/60 backdrop-blur-md">
+        <aside className="hidden lg:flex flex-col w-72 border-l border-[var(--line)] bg-[var(--panel)]">
           <div className="px-4 py-3 border-b border-foreground/[0.07] flex items-baseline justify-between gap-2">
-            <h3 className="text-[12px] font-semibold tracking-[-0.01em] text-[var(--foreground)]">
-              Annotations
-            </h3>
+            <h3 className="pk-micro text-[var(--fg-soft)]">Annotations</h3>
             <span className="text-[10px] font-mono text-foreground/40 tabular-nums">
               {current.detections?.length ?? 0}
             </span>
@@ -443,7 +419,6 @@ export function ReviewModeV2({
               <ul className="grid gap-1.5">
                 {(current.detections ?? []).map((d, i) => {
                   const bg = colourFor(d.pred_label ?? null);
-                  const fg = readableTextForBg(bg);
                   const isHovered = hoveredAnnot === i;
                   return (
                     <li
@@ -454,17 +429,17 @@ export function ReviewModeV2({
                       onBlur={() => setHoveredAnnot((cur) => (cur === i ? null : cur))}
                       tabIndex={0}
                       className={[
-                        "flex items-center justify-between gap-2 rounded-lg border px-2.5 py-1.5 cursor-default transition-colors",
+                        "flex items-center justify-between gap-2 rounded-md border px-2.5 py-1.5 cursor-default transition-colors",
                         isHovered
-                          ? "border-foreground/30 bg-foreground/[0.08]"
-                          : "border-foreground/[0.07] bg-foreground/[0.02] hover:border-foreground/20 hover:bg-foreground/[0.05]",
+                          ? "border-[var(--line-strong)] bg-[var(--surface-hover)]"
+                          : "border-[var(--line)] bg-transparent hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)]",
                       ].join(" ")}
                     >
                       <span
-                        className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium truncate max-w-[8.5rem]"
-                        style={{ backgroundColor: bg, color: fg }}
+                        className="inline-flex max-w-[8.5rem] items-center gap-1.5 truncate font-mono text-[11px] text-[var(--fg-soft)]"
                         title={d.pred_label ?? ""}
                       >
+                        <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: bg }} aria-hidden />
                         {displayLabel(d.pred_label ?? null)}
                       </span>
                       {typeof d.score === "number" && (
@@ -481,7 +456,7 @@ export function ReviewModeV2({
         </aside>
       </div>
 
-      <footer className="relative px-6 py-4 border-t border-foreground/10">
+      <footer className="relative px-6 py-4 border-t border-[var(--line)]">
         <div className="flex items-center justify-center gap-6">
           <ControlButton tone="bad" hint="← key" onClick={() => classify("bad")}>
             ← Bad
@@ -502,13 +477,9 @@ export function ReviewModeV2({
 }
 
 function VerdictPill({ v }: { v: Verdict }) {
-  const styles = v === "good"
-    ? "bg-emerald-500/15 border-emerald-400/60 text-emerald-700 dark:text-emerald-200"
-    : v === "bad"
-      ? "bg-rose-500/15 border-rose-400/60 text-rose-700 dark:text-rose-200"
-      : "bg-amber-500/15 border-amber-400/60 text-amber-700 dark:text-amber-200";
+  const tone = v === "good" ? "text-[var(--ok)]" : v === "bad" ? "text-[var(--bad)]" : "text-[var(--warn)]";
   return (
-    <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider border ${styles}`}>
+    <span className={`rounded-md border border-[var(--line)] bg-transparent px-2 py-0.5 font-mono text-[10px] font-medium uppercase tracking-wider ${tone}`}>
       {v}
     </span>
   );
@@ -528,17 +499,17 @@ function ControlButton({
   small?: boolean;
 }) {
   const tones: Record<typeof tone, string> = {
-    bad: "bg-rose-500/15 border-rose-400/70 text-rose-700 dark:text-rose-200 hover:bg-rose-500/25",
-    good: "bg-emerald-500/15 border-emerald-400/70 text-emerald-700 dark:text-emerald-200 hover:bg-emerald-500/25",
-    unsure: "bg-amber-500/15 border-amber-400/70 text-amber-700 dark:text-amber-200 hover:bg-amber-500/25",
+    bad: "text-[var(--bad)]",
+    good: "text-[var(--ok)]",
+    unsure: "text-[var(--warn)]",
   };
   return (
     <div className="grid place-items-center gap-1">
       <button
         onClick={onClick}
         className={[
-          "inline-flex items-center gap-2 rounded-full border transition-colors font-medium",
-          small ? "px-4 py-2 text-xs" : "px-5 py-2.5 text-sm",
+          "inline-flex items-center gap-2 rounded-md border border-[var(--line)] bg-transparent font-medium transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)]",
+          small ? "px-4 py-1.5 text-xs" : "px-5 py-2 text-sm",
           tones[tone],
         ].join(" ")}
       >

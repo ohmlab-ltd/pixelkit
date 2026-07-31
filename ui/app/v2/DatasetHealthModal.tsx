@@ -374,7 +374,7 @@ export function DatasetHealthModal({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6"
+      className="fixed inset-0 z-[1300] flex items-center justify-center p-4 sm:p-6"
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
       role="presentation"
       style={{ background: "rgb(var(--surface-rgb) / 0.55)", backdropFilter: "blur(14px) saturate(115%)", WebkitBackdropFilter: "blur(14px) saturate(115%)" }}

@@ -2362,17 +2362,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
             )}
             {b.validation && b.validation.match === false && (() => {
               const reasonTitle = `Rejected${b.validation.reason ? `: ${b.validation.reason}` : ""}.`;
-              // Stacked chip: bold verdict on top, tiny AI footer
-              // below. Footer is small enough that the chip stays
-              // compact next to the label name without crowding.
-              const Chip = (
-                <span className="flex flex-col items-end leading-[1] gap-[1px]">
-                  <span>Rejected</span>
-                  <span className="text-[6.5px] font-medium opacity-60 uppercase tracking-[0.18em]">
-                    AI
-                  </span>
-                </span>
-              );
+              const Chip = <span>Rejected</span>;
               return readOnly ? (
                 <span
                   className="inline-flex items-center rounded bg-[color-mix(in_srgb,var(--bad)_12%,transparent)] border border-[var(--bad)] text-[var(--bad)] px-2 py-1 text-[10px] uppercase tracking-wider"
@@ -2404,8 +2394,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
                 // Label Cascade provenance, accent chip, distinct
                 // from the green Verified/Manual chip so it's obvious
                 // at a glance which boxes were promoted via the
-                // Cascade modal vs reviewed by AI Review or
-                // hand-verified.
+                // Cascade modal vs hand-verified.
                 <span
                   className="inline-flex items-center rounded border border-[var(--accent)] bg-[var(--accent-dim)] text-[var(--accent)] px-2 py-1 text-[10px] uppercase tracking-wider"
                   title={`Label applied via Label Cascade${b.validation.reason ? `, ${b.validation.reason}` : ""}.`}
@@ -2420,21 +2409,9 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
               ) : (
                 <span
                   className="inline-flex items-center rounded bg-[color-mix(in_srgb,var(--ok)_12%,transparent)] border border-[var(--ok)] text-[var(--ok)] px-2 py-1 text-[10px] uppercase tracking-wider"
-                  title={`AI ${(b.validation.confidence * 100).toFixed(0)}%${b.validation.reason ? `, ${b.validation.reason}` : ""}`}
+                  title={`Verified ${(b.validation.confidence * 100).toFixed(0)}%${b.validation.reason ? `, ${b.validation.reason}` : ""}`}
                 >
-                  {/* Same stacked-chip shape as the rejection so
-                      verified and rejected boxes line up vertically
-                      in the list. The "AI" footer disappears for
-                      manual verifications, those didn't go through
-                      the model. */}
-                  <span className="flex flex-col items-end leading-[1] gap-[1px]">
-                    <span>{b.validation.source === "manual" ? "Manual" : "Verified"}</span>
-                    {b.validation.source !== "manual" && (
-                      <span className="text-[6.5px] font-medium opacity-60 uppercase tracking-[0.18em]">
-                        AI
-                      </span>
-                    )}
-                  </span>
+                  <span>{b.validation.source === "manual" ? "Manual" : "Verified"}</span>
                 </span>
               )
             )}

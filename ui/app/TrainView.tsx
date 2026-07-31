@@ -95,7 +95,6 @@ export function TrainView({ projectName, n_labeled }: { projectName: string; n_l
   const [epochs, setEpochs] = useState(50);
   const [batchSize, setBatchSize] = useState(16);
   const [learningRate, setLearningRate] = useState(0.001);
-  const [includeVlmRejected, setIncludeVlmRejected] = useState(false);
   const [sizeFilter, setSizeFilter] = useState<SizeFilter>("exclude_fail");
 
   const [jobId, setJobId] = useState<string | null>(null);
@@ -147,7 +146,6 @@ export function TrainView({ projectName, n_labeled }: { projectName: string; n_l
             batch: batchSize,
             imgsz: inputSize,
             learning_rate: learningRate,
-            include_vlm_rejected: includeVlmRejected,
             min_box_px: minBoxPx,
           },
         }),
@@ -286,16 +284,6 @@ export function TrainView({ projectName, n_labeled }: { projectName: string; n_l
             </div>
           </Field>
         </div>
-
-        <Field label="Rejected boxes">
-          <ToggleRow
-            value={includeVlmRejected}
-            onChange={setIncludeVlmRejected}
-            disabled={busy}
-            offLabel="Excluded (default)"
-            onLabel="Included as positive samples"
-          />
-        </Field>
 
         <Field label="Box-size filter">
           <div className="flex flex-col gap-1">
@@ -580,37 +568,3 @@ function NumberField({
   );
 }
 
-function ToggleRow({
-  value, onChange, disabled, offLabel, onLabel,
-}: {
-  value: boolean; onChange: (v: boolean) => void; disabled?: boolean;
-  offLabel: string; onLabel: string;
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={value}
-      disabled={disabled}
-      onClick={() => onChange(!value)}
-      className={[
-        "inline-flex items-center gap-3 self-start rounded-full border px-3 py-1.5 text-sm transition-colors",
-        value
-          ? "border-amber-300/40 bg-amber-300/[0.08] text-amber-100 hover:bg-amber-300/[0.12]"
-          : "border-foreground/15 bg-foreground/5 text-foreground/80 hover:bg-foreground/10 hover:text-foreground",
-        disabled ? "opacity-60 cursor-not-allowed" : "",
-      ].join(" ")}
-    >
-      <span
-        aria-hidden
-        className={[
-          "h-4 w-7 rounded-full p-0.5 transition-colors flex",
-          value ? "bg-amber-300/70 justify-end" : "bg-foreground/15",
-        ].join(" ")}
-      >
-        <span className="h-3 w-3 rounded-full bg-[#141416]" />
-      </span>
-      {value ? onLabel : offLabel}
-    </button>
-  );
-}

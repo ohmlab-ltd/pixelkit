@@ -1,7 +1,7 @@
 // Client for the engine's model manager + settings (portable build).
 import { apiFetch } from "@/lib/apiFetch";
 
-export type ModelName = "sam3" | "dinov2" | "vlm";
+export type ModelName = "sam3" | "dinov2";
 
 export type DownloadRec = {
   status: "downloading" | "done" | "error";
@@ -39,7 +39,6 @@ export type TokenStatus = {
 export type EngineSettings = {
   workspace: string;
   device: "cuda" | "mps" | "cpu";
-  vlmEnabled: boolean;
   hfTokenConfigured: boolean;
   sam3Repo: string;
 };

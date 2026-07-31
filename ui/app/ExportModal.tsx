@@ -232,7 +232,7 @@ export function ExportModal({
 
   return (
     <div
-      className="pk-backdrop fixed inset-0 z-[60] flex items-center justify-center overflow-auto p-6"
+      className="pk-backdrop fixed inset-0 z-[1300] flex items-center justify-center overflow-auto p-6"
       role="dialog"
       aria-modal="true"
       onClick={() => { if (!busy) onClose(); }}

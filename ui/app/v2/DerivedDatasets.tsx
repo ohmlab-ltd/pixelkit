@@ -4,6 +4,20 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { apiFetch } from "../../lib/apiFetch";
+import { requestExplorerRefresh } from "../../lib/appNav";
+
+// SPA navigation to another dataset: push the deep-link URL and fire a
+// synthetic popstate — app/app/page.tsx's popstate handler swaps the
+// open dataset view in place (same mechanism as the Explorer tree).
+// No full page load.
+function openDatasetSpa(projectId: string) {
+  if (typeof window === "undefined") return;
+  const target = `/app/${projectId}`;
+  if (window.location.pathname !== target) {
+    window.history.pushState(null, "", target);
+  }
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
 
 type Child = { project_id: string; name: string; labels: string[]; n_images: number };
 type DerivedInfo = { parentProjectId?: string; parentName?: string };
@@ -101,6 +115,7 @@ export function DerivedDatasetsBar({ projectId, labels }: { projectId: string; l
           <div className="ml-auto flex items-center gap-2">
             {derived.parentProjectId && (
               <a href={`/app/${derived.parentProjectId}`}
+                onClick={(e) => { e.preventDefault(); if (derived.parentProjectId) openDatasetSpa(derived.parentProjectId); }}
                 className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--line)] bg-transparent px-3 text-xs font-medium text-[var(--fg-soft)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)]">
                 Open parent →
               </a>
@@ -158,6 +173,7 @@ export function DerivedDatasetsBar({ projectId, labels }: { projectId: string; l
           <div className="space-y-2">
             {children!.map((c) => (
               <a key={c.project_id} href={`/app/${c.project_id}`}
+                onClick={(e) => { e.preventDefault(); openDatasetSpa(c.project_id); }}
                 className="group flex items-center gap-3 rounded-md border border-[var(--line)] bg-[var(--panel)] px-4 py-3 transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)]">
                 <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-foreground/[0.06] text-foreground/70">
                   <DerivedIcon className="h-4 w-4" />
@@ -223,8 +239,12 @@ function DeriveModal({ projectId, labels, parentName, onClose }: { projectId: st
         const d = await r.json().catch(() => ({}));
         throw new Error(d.detail || `http ${r.status}`);
       }
-      const d = await r.json();
-      window.location.href = `/app/${d.project_id}`;   // open the new child
+      const d = await r.json() as { project_id: string };
+      // New child (and possibly a new wrapping Project) exists — refresh
+      // the Explorer tree, close the dialog, and open the child in-app.
+      requestExplorerRefresh();
+      onClose();
+      openDatasetSpa(d.project_id);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
       setBusy(false);
@@ -235,7 +255,7 @@ function DeriveModal({ projectId, labels, parentName, onClose }: { projectId: st
   // Portal to <body> so a transformed ancestor (e.g. the tab's pk-up entrance
   // animation) can't break `position: fixed` and push the modal off-screen.
   return createPortal(
-    <div className="pk-backdrop fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 pt-[8vh]" onClick={onClose}>
+    <div className="pk-backdrop fixed inset-0 z-[1300] flex items-start justify-center overflow-y-auto p-4 pt-[8vh]" onClick={onClose}>
       <div className="pk-glass pk-pop w-full max-w-md rounded-md p-5" onClick={(e) => e.stopPropagation()}>
         <h3 className="text-[15px] font-medium tracking-tight">Create cropped dataset</h3>
         <p className="mt-1 text-[13px] leading-relaxed text-foreground/55">

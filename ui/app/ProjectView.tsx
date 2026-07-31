@@ -77,7 +77,7 @@ type Result = {
 
 type Phase = "idle" | "uploading" | "running" | "done" | "error";
 type Verdict = "good" | "bad";
-type Filter = "all" | "good" | "bad" | "unrated" | "unlabeled" | "vlm";
+type Filter = "all" | "good" | "bad" | "unrated" | "unlabeled";
 type Tab = "label" | "train" | "deploy" | "optimise";
 
 type Manifest = {
@@ -88,7 +88,6 @@ type Manifest = {
   // Resolution choice for the labelling run: tile large images at native
   // resolution (small objects survive) vs the classic full-frame downscale.
   tiling?: { native?: boolean; tileSize?: number };
-  vlm_action?: "manual" | "auto_reject";
   synonyms_enabled?: boolean;
   results: Result[];
   verdicts: Record<string, Verdict>;
@@ -162,11 +161,7 @@ export function ProjectView({
   const [customThresholds, setCustomThresholds] = useState<
     { box: number; text: number; nms: number } | null
   >(null);
-  const [vlmAction, setVlmAction] = useState<"off" | "manual" | "auto_reject">("manual");
   const [synonymsEnabled, setSynonymsEnabled] = useState<boolean>(true);
-
-  // Local build: no plan tiers — AI Review is always available.
-  const effectiveVlmAction: "off" | "manual" | "auto_reject" = vlmAction;
 
   const [phase, setPhase] = useState<Phase>("idle");
   // Hover state for the Target Input Shape pill / picker swap. Uses
@@ -637,7 +632,6 @@ export function ProjectView({
         setDisplayName(m.name ?? name);
         setCreatedAt(m.createdAt ?? null);
         setManifestUpdatedAt((m as { updatedAt?: string | null }).updatedAt ?? null);
-        setVlmAction(m.vlm_action === "auto_reject" ? "auto_reject" : "manual");
         // Re-hydrate the Downscale/Tile choice persisted by the last run.
         // Fallback resets like the sibling fields so a manifest without the
         // key can't leak a previous project's pick if this effect ever
@@ -720,11 +714,6 @@ export function ProjectView({
         body: JSON.stringify({
           tags,
           thresholds: { box: boxThr, text: textThr, nms: nmsIou },
-          // Persist the user's stored preference (`vlmAction`), not
-          // the effective one, otherwise a downgrade would overwrite
-          // their saved choice with "off". Job execution still uses
-          // `effectiveVlmAction` so Free users can't actually run AI Review.
-          vlm_action: vlmAction,
           synonyms_enabled: synonymsEnabled,
           verdicts,
           editedBoxes,
@@ -733,7 +722,7 @@ export function ProjectView({
       }).catch((e) => console.error("save failed", e));
     }, 500);
     return () => window.clearTimeout(t);
-  }, [loaded, readOnly, name, tags, boxThr, textThr, nmsIou, vlmAction, synonymsEnabled, verdicts, editedBoxes, cover, activeJobId, liteJob]);
+  }, [loaded, readOnly, name, tags, boxThr, textThr, nmsIou, synonymsEnabled, verdicts, editedBoxes, cover, activeJobId, liteJob]);
 
   const compiledPrompt = useMemo(() => tags.map((t) => `a ${t}.`).join(" "), [tags]);
 
@@ -1093,7 +1082,6 @@ export function ProjectView({
             box_threshold: boxThr,
             text_threshold: textThr,
             nms_iou: nmsIou,
-            vlm_action: effectiveVlmAction,
             tile_native: tileNative,
             tile_size: tileSize,
           },
@@ -1138,7 +1126,6 @@ export function ProjectView({
             box_threshold: boxThr,
             text_threshold: textThr,
             nms_iou: nmsIou,
-            vlm_action: effectiveVlmAction,
             tile_native: tileNative,
             tile_size: tileSize,
           },
@@ -1441,13 +1428,6 @@ export function ProjectView({
     }
   };
 
-  // Defined inline so filterCounts can use it without depending on the
-  // useCallback below being declared first.
-  const isVlmRejectedFor = useCallback(
-    (image: string) => (editedBoxes[image] ?? []).some((b) => b.validation?.match === false),
-    [editedBoxes],
-  );
-
   const filterCounts = useMemo(
     () => ({
       all: results.length,
@@ -1455,9 +1435,8 @@ export function ProjectView({
       good: results.filter((r) => verdicts[r.image] === "good").length,
       bad: results.filter((r) => verdicts[r.image] === "bad").length,
       unrated: results.filter((r) => !r.pending && !verdicts[r.image]).length,
-      vlm: results.filter((r) => !r.pending && isVlmRejectedFor(r.image)).length,
     }),
-    [results, verdicts, isVlmRejectedFor],
+    [results, verdicts],
   );
 
   const filteredResults = useMemo(
@@ -1468,10 +1447,9 @@ export function ProjectView({
         if (filter === "all") return true;
         if (filter === "unlabeled") return !!r.pending;
         if (filter === "unrated") return !r.pending && !verdicts[r.image];
-        if (filter === "vlm") return !r.pending && isVlmRejectedFor(r.image);
         return verdicts[r.image] === filter;
       }),
-    [results, filter, verdicts, isVlmRejectedFor],
+    [results, filter, verdicts],
   );
 
   // Reset progressive rendering when the visible set changes shape
@@ -1516,19 +1494,17 @@ export function ProjectView({
   const reviewCounts = useMemo(
     () => ({
       unrated: results.filter((r) => !r.pending && !verdicts[r.image]).length,
-      vlm: results.filter((r) => !r.pending && isVlmRejectedFor(r.image)).length,
       good: results.filter((r) => verdicts[r.image] === "good").length,
       bad: results.filter((r) => verdicts[r.image] === "bad").length,
       all: results.filter((r) => !r.pending).length,
     }),
-    [results, verdicts, isVlmRejectedFor],
+    [results, verdicts],
   );
 
   const startReview = (scope: ReviewScope = "unrated") => {
     const list = results.filter((r) => {
       if (r.pending) return false;
       if (scope === "unrated") return !verdicts[r.image];
-      if (scope === "vlm") return isVlmRejectedFor(r.image);
       if (scope === "good") return verdicts[r.image] === "good";
       if (scope === "bad") return verdicts[r.image] === "bad";
       return true;
@@ -2368,8 +2344,8 @@ export function ProjectView({
             </div>
           </div>
 
-          {/* Auto-label panel: title, primary action, labels, settings, AI Review
-              review. One self-contained card so the relationship between
+          {/* Auto-label panel: title, primary action, labels, settings.
+              One self-contained card so the relationship between
               all the auto-labelling controls is unambiguous. The negative
               top margin trims the outer section's gap-10 down to a tighter
               ~12px so the auto-label panel reads as paired with the
@@ -2625,21 +2601,6 @@ export function ProjectView({
             <div className="md:pl-8 grid gap-4">
               <div>
                 <div className="flex items-center gap-2 mb-3">
-                  <div className="text-xs uppercase text-[var(--foreground)]/90">AI Review</div>
-                  <VlmReviewHelpPopover />
-                </div>
-                <SegmentedControl
-                  value={vlmAction}
-                  onChange={setVlmAction}
-                  options={[
-                    { value: "off", label: "Off", title: "Skip the AI review entirely. Faster runs." },
-                    { value: "manual", label: "Manual", title: "Keep flagged boxes; you decide whether to delete or verify." },
-                    { value: "auto_reject", label: "Auto-reject", title: "Drop any detection flagged as a mismatch before saving." },
-                  ]}
-                />
-              </div>
-              <div>
-                <div className="flex items-center gap-2 mb-3">
                   <div className="text-xs uppercase text-[var(--foreground)]/90">Synonyms</div>
                   <SynonymsHelpPopover />
                 </div>
@@ -2678,7 +2639,6 @@ export function ProjectView({
               image={progressImage}
               onCancel={cancelActiveJob}
               cancelling={cancellingJob}
-              vlmEnabled={effectiveVlmAction !== "off"}
             />
           )}
           {liteJob && phase !== "running" && (
@@ -2690,7 +2650,6 @@ export function ProjectView({
               image={liteProgress.image}
               onCancel={cancelLiteJob}
               cancelling={cancellingLite}
-              vlmEnabled={effectiveVlmAction !== "off"}
             />
           )}
           </>)}
@@ -2701,7 +2660,7 @@ export function ProjectView({
                   default; the others appear once they're useful. Hide the
                   whole bar if everything is in the same bucket. */}
               {(() => {
-                const visible = (["all", "unlabeled", "unrated", "good", "bad", "vlm"] as const)
+                const visible = (["all", "unlabeled", "unrated", "good", "bad"] as const)
                   .filter((f) => f === "all" || filterCounts[f] > 0);
                 if (visible.length <= 1) return null;
                 return (
@@ -2710,7 +2669,7 @@ export function ProjectView({
                     <div className="flex flex-wrap items-center gap-2">
                       {visible.map((f) => {
                         const active = filter === f;
-                        const label = f === "vlm" ? "AI-rejected" : f;
+                        const label = f;
                         return (
                           <button
                             key={f}
@@ -3847,9 +3806,7 @@ function DeleteImageModal({
   );
 }
 
-// Friendly rotating status messages while a job is running. Two pools so the
-// AI-Review-enabled path can swap to confidence/review phrases when the model's
-// auditing rather than drawing.
+// Friendly rotating status messages while a job is running.
 const LABEL_PHRASES = [
   "Scanning for suspiciously object-shaped pixels…",
   "Asking the model “what vibes do you detect?”",
@@ -3992,32 +3949,7 @@ const LABEL_PHRASES = [
   "Balancing detection precision and recall…",
   "Optimizing inference results…",
 ];
-const VLM_PHRASES = [
-  "Not entirely convinced about this one…",
-  "This feels like a “maybe”…",
-  "Confidence is… negotiable…",
-  "Sending this one to the thinking department…",
-  "This could go either way…",
-  "Flagging for human wisdom…",
-  "Mild uncertainty detected…",
-  "Escalating to higher intelligence…",
-  "The model is hesitating…",
-  "This one requires vibes + judgment…",
-  "Detecting borderline classifications…",
-  "Separating confident vs uncertain outputs…",
-  "Highlighting items needing review…",
-  "Pausing on unclear results…",
-  "Deferring uncertain decisions…",
-  "Tracking low-confidence outputs…",
-  "Marking outputs requiring verification…",
-  "Reviewing detection quality…",
-  "Validating detection results…",
-  "Screening for uncertain predictions…",
-  "Reviewing low-confidence predictions…",
-  "Flagging ambiguous detections for review…",
-];
-
-function LiveMessage({ vlmEnabled }: { vlmEnabled: boolean }) {
+function LiveMessage() {
   const [msg, setMsg] = useState(() => LABEL_PHRASES[Math.floor(Math.random() * LABEL_PHRASES.length)]);
   const [visible, setVisible] = useState(true);
 
@@ -4030,10 +3962,7 @@ function LiveMessage({ vlmEnabled }: { vlmEnabled: boolean }) {
       // the change feeling intentional rather than flickery.
       window.setTimeout(() => {
         if (!mounted) return;
-        // 30% chance to draw from the review pool when it's enabled, the rest
-        // of the time stay on the labelling pool, since labelling is the
-        // bulk of the work.
-        const pool = vlmEnabled && Math.random() < 0.3 ? VLM_PHRASES : LABEL_PHRASES;
+        const pool = LABEL_PHRASES;
         let next = pool[Math.floor(Math.random() * pool.length)];
         // Avoid same message twice in a row.
         setMsg((cur) => {
@@ -4051,7 +3980,7 @@ function LiveMessage({ vlmEnabled }: { vlmEnabled: boolean }) {
       mounted = false;
       window.clearInterval(id);
     };
-  }, [vlmEnabled]);
+  }, []);
 
   return (
     <span className={["transition-opacity duration-200", visible ? "opacity-100" : "opacity-0"].join(" ")}>
@@ -4068,7 +3997,6 @@ function AutoLabelProgress({
   image,
   onCancel,
   cancelling,
-  vlmEnabled,
 }: {
   jobId: string | null;
   startedAt: number | null;
@@ -4077,7 +4005,6 @@ function AutoLabelProgress({
   image: string;
   onCancel: () => void;
   cancelling: boolean;
-  vlmEnabled: boolean;
 }) {
   // Refresh every second so elapsed/ETA stay live without other state churn.
   const [now, setNow] = useState(() => Date.now());
@@ -4116,7 +4043,7 @@ function AutoLabelProgress({
               Working
             </div>
             <div className="text-2xl md:text-3xl font-light tracking-tight text-[var(--foreground)] truncate leading-snug pb-0.5">
-              <LiveMessage vlmEnabled={vlmEnabled} />
+              <LiveMessage />
             </div>
           </div>
 
@@ -4203,12 +4130,11 @@ function ReviewScopePicker({
   counts,
   onPick,
 }: {
-  counts: { unrated: number; vlm: number; good: number; bad: number; all: number };
+  counts: { unrated: number; good: number; bad: number; all: number };
   onPick: (scope: ReviewScope) => void;
 }) {
   const items: { scope: ReviewScope; label: string; primary?: boolean }[] = [
     { scope: "unrated", label: "Unrated", primary: true },
-    { scope: "vlm", label: "AI-rejected" },
     { scope: "good", label: "Good" },
     { scope: "bad", label: "Bad" },
     { scope: "all", label: "All" },
@@ -4412,32 +4338,6 @@ function HideSmallHelpPopover() {
   );
 }
 
-
-function VlmReviewHelpPopover() {
-  return (
-    <InfoPopover ariaLabel="AI Review help">
-      <h3 className="text-sm font-semibold text-[var(--foreground)] tracking-tight mb-2">
-        AI Review
-      </h3>
-      <p className="text-xs text-foreground/70 leading-relaxed mb-3">
-        After detection, PixelKit takes a second look at each box and decides
-        whether the assigned label actually matches the image. Mismatches get
-        flagged.
-      </p>
-      <ul className="text-xs text-foreground/70 leading-relaxed space-y-2">
-        <li>
-          <span className="text-foreground/90 font-medium">Off</span>: skip the check entirely. Fastest auto-label runs.
-        </li>
-        <li>
-          <span className="text-foreground/90 font-medium">Manual</span>: flagged boxes stay in the manifest with a red badge in the editor. You decide whether to verify or delete.
-        </li>
-        <li>
-          <span className="text-foreground/90 font-medium">Auto-reject</span>: flagged boxes are dropped before saving. Most aggressive, useful when you trust the reviewer&rsquo;s judgement and want a clean dataset out of the gate.
-        </li>
-      </ul>
-    </InfoPopover>
-  );
-}
 
 function ThresholdReadout({ label, value }: { label: string; value: number }) {
   // Read-only display for one of the three threshold parameters

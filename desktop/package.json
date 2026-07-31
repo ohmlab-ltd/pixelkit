@@ -34,13 +34,25 @@
       ],
       "category": "public.app-category.graphics-design",
       "icon": "build/icon.png",
-      "identity": null
+      "identity": null,
+      "extraResources": [
+        {
+          "from": "runtime",
+          "to": "runtime"
+        }
+      ]
     },
     "win": {
       "target": [
-        "nsis"
+        "zip"
       ],
-      "icon": "build/icon.png"
+      "icon": "build/icon.png",
+      "extraResources": [
+        {
+          "from": "runtime-win",
+          "to": "runtime"
+        }
+      ]
     },
     "linux": {
       "target": [
@@ -50,10 +62,6 @@
       "icon": "build/icon.png"
     },
     "extraResources": [
-      {
-        "from": "runtime",
-        "to": "runtime"
-      },
       {
         "from": "../engine/gd",
         "to": "engine/gd",

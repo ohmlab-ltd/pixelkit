@@ -85,7 +85,7 @@ export function GlassDialog({
 
   return createPortal(
     <div
-      className="pk-backdrop fixed inset-0 z-[100] flex items-start justify-center overflow-y-auto p-4 pt-[8vh] sm:pt-[10vh]"
+      className="pk-backdrop fixed inset-0 z-[1300] flex items-start justify-center overflow-y-auto p-4 pt-[8vh] sm:pt-[10vh]"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose(); // outside click
       }}

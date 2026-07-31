@@ -589,14 +589,6 @@ async def _bg_load_charlie() -> None:
         state["charlie"] = None
 
 
-async def _bg_load_vlm() -> None:
-    try:
-        async with state["model_load_lock"]:
-            await asyncio.get_event_loop().run_in_executor(None, _load_vlm_into_state)
-    except Exception as e:
-        print(f"[server] VLM load failed: {e}")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     device = _resolve_device()
@@ -650,8 +642,6 @@ async def lifespan(app: FastAPI):
     elif device == "cpu":
         print("[server] PK_DEVICE=cpu — models will load on CPU. Labelling will be very slow.")
 
-    if not models_disabled and os.environ.get("VLM_ENABLED", "").lower() in ("1", "true", "yes", "on"):
-        await asyncio.get_event_loop().run_in_executor(None, _load_vlm_into_state)
 
     # Model loading policy (portable): the model manager (gd/models.py)
     # owns downloads; boot only auto-loads models whose weights are already
@@ -661,11 +651,6 @@ async def lifespan(app: FastAPI):
     models_mgr.apply_token_env()
 
     if not models_disabled:
-        cfg = workspace.load_config()
-        vlm_on = (
-            os.environ.get("VLM_ENABLED", "").lower() in ("1", "true", "yes", "on")
-            or bool(cfg.get("vlm_enabled"))
-        )
         if models_mgr.is_downloaded("dinov2"):
             asyncio.create_task(_bg_load_dino())
         else:
@@ -714,8 +699,6 @@ async def lifespan(app: FastAPI):
                 "[server] SAM3 needs a Hugging Face token (license-gated) — "
                 "add it in the setup screen and it downloads + loads automatically"
             )
-        if vlm_on and models_mgr.is_downloaded("vlm"):
-            asyncio.create_task(_bg_load_vlm())
     else:
         state["charlie"] = None
 
@@ -986,9 +969,9 @@ def _build_workspace_card_payload(project_id: str, manifest: dict) -> dict:
         if any(r.get("filename") == cover for r in v2_refs):
             cover_subdir = "references"
         elif any(i.get("filename") == cover for i in v2_imps):
-            cover_subdir = "imports"
+            cover_subdir = "images"
         elif any(r.get("image") == cover for r in results):
-            cover_subdir = "imports"
+            cover_subdir = "images"
         else:
             cover = None
     if not cover:
@@ -1002,10 +985,10 @@ def _build_workspace_card_payload(project_id: str, manifest: dict) -> dict:
             cover_subdir = "references"
         elif imp_files:
             cover = seed.choice(imp_files)
-            cover_subdir = "imports"
+            cover_subdir = "images"
         elif v1_files:
             cover = seed.choice(v1_files)
-            cover_subdir = "imports"
+            cover_subdir = "images"
         else:
             cover = None
             cover_subdir = None
@@ -1799,7 +1782,7 @@ def image_size(p: Path) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 # GD recall is meaningfully better when the user's tag is fed alongside
 # a few synonyms / near-synonyms ("potholes" + "road damage" + "crack").
-# We ask Claude Haiku for the variants once per (project, tag), cache
+# (SaaS build asked an LLM for variants; the portable build caches only)
 # them on disk, and on each inference run pass GD the merged list.
 # Detected variants are mapped back to the user's canonical tag in
 # post so the manifest never sees the synthetic labels.
@@ -8910,7 +8893,7 @@ async def v2_augment_preview(project_id: str, payload: AugmentPreviewIn):
     src = (payload.source or "").lower()
     if src not in ("reference", "import"):
         raise HTTPException(400, "source must be 'reference' or 'import'")
-    subdir = "references" if src == "reference" else "imports"
+    subdir = "references" if src == "reference" else "images"
     target = (proj / subdir / payload.filename).resolve()
     try:
         target.relative_to((proj / subdir).resolve())
@@ -11848,7 +11831,7 @@ def _write_dataset_type_sidecar(project_id: str, data: dict) -> None:
 
 
 def _classify_dataset_type_cached(project_id: str, tags: list[str]) -> dict:
-    """Portable build: no user choice, no Claude. A dataset is "specific"
+    """Portable build: no user choice, no external APIs. A dataset is "specific"
     exactly when it has reference images (the embedding resolver can then
     use them) and "general" otherwise — labels alone always just work,
     references are an optional upgrade added any time."""
@@ -11875,7 +11858,7 @@ def _set_dataset_type_override(project_id: str, choice: str, *, source: str, rea
     """Persist a sticky dataset-type override into the sidecar. `choice`
     is "general" or "specific"; `source` is "manual" or "references".
     Preserves the auto classification fields so picking "auto" later can
-    fall back to them without a fresh Claude call when they're still
+    fall back to them when they're still
     valid."""
     data = _read_dataset_type_sidecar(project_id) or {}
     data["override"] = choice
@@ -11931,10 +11914,10 @@ async def v2_dataset_type(project_id: str):
     )
 
 
-# ── AI dataset insight (Claude, token-frugal + cached) ────────────────────────
+# ── (removed) AI dataset insight ──────────────────────────────────────────────
 # One smart, dataset-specific coaching line for the Overview's Insights section.
 # Built from a COMPACT numeric summary (no images) and cached by a coarse
-# signature so Claude is only hit when the dataset materially changes.
+# signature caching from the SaaS build; no external calls remain.
 
 @app.get(
     "/api/v2/projects/{project_id}/access",
@@ -12853,7 +12836,7 @@ def _compute_cover_blurhash(project_id: str, cover_filename: str, *, is_v2: bool
     if cached is not None:
         return cached
 
-    subdir = "references" if is_v2 else "imports"
+    subdir = "references" if is_v2 else "images"
     img_path = project_dir(project_id) / subdir / cover_filename
     if not img_path.exists():
         return None
@@ -13058,9 +13041,9 @@ async def list_projects(
             if any(r.get("filename") == cover for r in v2_refs):
                 cover_subdir = "references"
             elif any(i.get("filename") == cover for i in v2_imps):
-                cover_subdir = "imports"
+                cover_subdir = "images"
             elif any(r.get("image") == cover for r in results):
-                cover_subdir = "imports"  # V1 stores under imports/
+                cover_subdir = "images"  # V1 stores under imports/
             else:
                 cover = None  # cover refs a file that no longer exists
         if not cover:
@@ -13084,10 +13067,10 @@ async def list_projects(
                 cover_subdir = "references"
             elif imp_files:
                 cover = seed.choice(imp_files)
-                cover_subdir = "imports"
+                cover_subdir = "images"
             elif v1_files:
                 cover = seed.choice(v1_files)
-                cover_subdir = "imports"
+                cover_subdir = "images"
             else:
                 cover = None
                 cover_subdir = None
@@ -14049,7 +14032,7 @@ def _build_overview_payload(
         # Cached general/specific verdict (LLM-free resolve) so the hero badge
         # paints in the same frame as the rest of /overview instead of popping
         # in 100-1000 ms later after a separate /dataset-type round-trip. Null
-        # when only a fresh Claude classification could answer — the FE then
+        # when a classification could not be derived locally — the FE then
         # falls back to its own /dataset-type fetch.
         "dataset_type": _resolve_dataset_type_cached_only(
             project_id, list(m.get("tags") or [])
@@ -18169,24 +18152,14 @@ async def models_load(name: str):
         raise HTTPException(409, f"{name} weights not downloaded yet")
     if state.get("device") == "cpu" and (os.environ.get("PK_DEVICE") or "").lower() != "cpu":
         raise HTTPException(409, "no GPU on this machine (set PK_DEVICE=cpu to force CPU)")
-    task = {"sam3": _bg_load_charlie, "dinov2": _bg_load_dino, "vlm": _bg_load_vlm}[name]
+    task = {"sam3": _bg_load_charlie, "dinov2": _bg_load_dino}[name]
     asyncio.create_task(task())
-    if name == "vlm":
-        cfg = workspace.load_config()
-        cfg["vlm_enabled"] = True
-        workspace.save_config(cfg)
     return {"ok": True, "loading": name}
 
 
 @app.post("/api/models/{name}/unload")
 async def models_unload(name: str):
-    if name == "vlm":
-        from vlm_validate import clear_vlm
-        clear_vlm()
-        cfg = workspace.load_config()
-        cfg["vlm_enabled"] = False
-        workspace.save_config(cfg)
-    elif name == "sam3":
+    if name == "sam3":
         import pipeline_charlie
         pipeline_charlie.clear_sam3()
         state["charlie"] = None
@@ -18256,7 +18229,6 @@ async def get_settings():
     return {
         "workspace": str(_ws.dir()),
         "device": state.get("device"),
-        "vlmEnabled": bool(cfg.get("vlm_enabled")),
         "hfTokenConfigured": bool(models_mgr.hf_token()),
         "sam3Repo": models_mgr.SAM3_REPO,
     }

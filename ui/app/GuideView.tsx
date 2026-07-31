@@ -541,7 +541,7 @@ function LLMPromptBox() {
             Ask any LLM about PixelKit
           </div>
           <h3 className="text-base font-semibold tracking-tight text-[var(--foreground)]">
-            Copy this prompt into ChatGPT, Claude, Gemini, or your model of choice.
+            Copy this prompt into the LLM of your choice.
           </h3>
           <p className="mt-1 text-[13px] text-[var(--muted)] leading-relaxed">
             It primes the model with what PixelKit is and what it can do, then hands the floor to your question.

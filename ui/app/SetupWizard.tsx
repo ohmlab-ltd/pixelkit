@@ -139,15 +139,13 @@ export function SetupWizard({ onClose }: { onClose: () => void }) {
               loads them itself.
             </p>
             <div className="mt-3 space-y-3">
-              {(Object.keys(s.models) as ModelName[])
-                .filter((n) => n !== "vlm")
-                .map((n) => (
-                  <ModelStatusRow
-                    key={n}
-                    m={s.models[n]}
-                    tokenConfigured={s.hfTokenConfigured}
-                  />
-                ))}
+              {(Object.keys(s.models) as ModelName[]).map((n) => (
+                <ModelStatusRow
+                  key={n}
+                  m={s.models[n]}
+                  tokenConfigured={s.hfTokenConfigured}
+                />
+              ))}
             </div>
           </div>
         )}

@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { BoxEditor, type EditableBox, type MaskShape } from "./BoxEditor";
 
 type Verdict = "good" | "bad";
-export type ReviewScope = "unrated" | "vlm" | "good" | "bad" | "all";
+export type ReviewScope = "unrated" | "good" | "bad" | "all";
 
 type ResultLite = {
   image: string;
@@ -43,7 +43,6 @@ type Props = {
 
 const SCOPE_LABEL: Record<ReviewScope, string> = {
   unrated: "Unrated",
-  vlm: "AI-rejected",
   good: "Marked good",
   bad: "Marked bad",
   all: "All images",
@@ -115,20 +114,21 @@ export function ReviewMode({
     const goods = Object.values(verdicts).filter((v) => v === "good").length;
     const bads = Object.values(verdicts).filter((v) => v === "bad").length;
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center backdrop-blur-md bg-black/70 p-6">
-        <div className="bg-[var(--background)]/95 rounded-2xl border border-[var(--border)] p-10 text-center max-w-md">
-          <h2 className="text-2xl font-semibold">Review complete</h2>
-          <p className="mt-3 text-[var(--muted)]">
-            <span className="text-green-400 font-mono">{goods}</span> good ·{" "}
-            <span className="text-red-400 font-mono">{bads}</span> bad
-          </p>
-          <div className="mt-8 flex justify-center">
-            <button
-              onClick={onClose}
-              className="rounded-full bg-foreground text-background px-5 py-2.5 text-sm hover:bg-zinc-200"
-            >
-              Close
-            </button>
+      // In-content PAGE, not an overlay: fills the shell's content area
+      // with an opaque ground. No backdrop, no click-outside dismissal.
+      <div className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] z-[700] overflow-auto bg-[var(--background)]">
+        <div className="min-h-full flex items-center justify-center p-6">
+          <div className="rounded-md border border-[var(--line)] p-10 text-center max-w-md">
+            <h2 className="text-2xl font-semibold">Review complete</h2>
+            <p className="mt-3 text-[var(--muted)]">
+              <span className="text-[var(--ok)] font-mono">{goods}</span> good ·{" "}
+              <span className="text-[var(--bad)] font-mono">{bads}</span> bad
+            </p>
+            <div className="mt-8 flex justify-center">
+              <button onClick={onClose} className="pk-btn">
+                Close
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -144,13 +144,19 @@ export function ReviewMode({
   );
 
   return (
-    <div
-      className="fixed inset-0 z-50 backdrop-blur-md bg-black/80 flex flex-col"
-      role="dialog"
-      aria-modal="true"
-    >
-      <header className="flex items-center justify-between px-6 py-4">
-        <div className="flex items-baseline gap-3">
+    // In-content PAGE, not an overlay: fills the shell's content area
+    // (title bar / status bar / Explorer side bar stay visible) with an
+    // opaque ground. No backdrop blur, no click-outside dismissal — the
+    // back button (or Esc, when allowed) is the way out.
+    <div className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] z-[700] overflow-auto bg-[var(--background)] flex flex-col">
+      <header className="flex items-center gap-4 px-6 py-4">
+        <button type="button" onClick={onClose} className="pk-btn shrink-0">
+          <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <path d="M19 12H5" /><path d="m12 19-7-7 7-7" />
+          </svg>
+          Back
+        </button>
+        <div className="flex items-baseline gap-3 min-w-0">
           <span className="text-xs uppercase tracking-wider text-[var(--muted)]">
             {SCOPE_LABEL[scope]}
           </span>
@@ -163,23 +169,16 @@ export function ReviewMode({
           {verdicts[current.image] && (
             <span
               className={[
-                "rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider",
+                "rounded-md border border-[var(--line)] bg-transparent px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider",
                 verdicts[current.image] === "good"
-                  ? "bg-green-500/25 border border-green-400/60 text-green-200"
-                  : "bg-red-500/25 border border-red-400/60 text-red-200",
+                  ? "text-[var(--ok)]"
+                  : "text-[var(--bad)]",
               ].join(" ")}
             >
               {verdicts[current.image]}
             </span>
           )}
         </div>
-        <button
-          onClick={onClose}
-          className="text-2xl px-3 leading-none text-[var(--muted)] hover:text-foreground"
-          aria-label="close"
-        >
-          ×
-        </button>
       </header>
 
       <div className="flex-1 flex items-center justify-center px-6 overflow-hidden">
@@ -188,6 +187,9 @@ export function ReviewMode({
           style={{
             width: "min(96vw, 1500px)",
             height: "78vh",
+            // The shell content area is shorter than the viewport
+            // (title bar above, status bar below), so never exceed it.
+            maxHeight: "100%",
           }}
         >
           {visible.map((r, i) => {
@@ -236,7 +238,7 @@ export function ReviewMode({
                   filter: i === 0 ? "none" : "brightness(0.85)",
                 }}
               >
-                <div className="relative w-full h-full rounded-xl overflow-hidden bg-[var(--background)] border border-[var(--border)] shadow-2xl">
+                <div className="relative w-full h-full rounded-md overflow-hidden bg-[var(--background)] border border-[var(--line)]">
                   {isTop ? (
                     <BoxEditor
                       imageUrl={`${apiBase}/api/projects/${jobId}/originals/${encodeURIComponent(r.image)}`}
@@ -288,7 +290,7 @@ export function ReviewMode({
       <footer className="px-6 py-6 flex items-center justify-center gap-6 relative z-50">
         <button
           onClick={() => classify("bad")}
-          className="rounded-full bg-red-500/15 border border-red-500/60 text-red-200 px-6 py-3 text-sm hover:bg-red-500/25 transition-colors"
+          className="rounded-md border border-[var(--line)] bg-transparent px-6 py-3 text-sm font-medium text-[var(--bad)] hover:border-[var(--bad)] hover:bg-[var(--bad)] hover:text-[var(--background)] transition-colors"
         >
           ← Bad
         </button>
@@ -297,7 +299,7 @@ export function ReviewMode({
         </span>
         <button
           onClick={() => classify("good")}
-          className="rounded-full bg-green-500/15 border border-green-500/60 text-green-200 px-6 py-3 text-sm hover:bg-green-500/25 transition-colors"
+          className="rounded-md border border-[var(--line)] bg-transparent px-6 py-3 text-sm font-medium text-[var(--ok)] hover:border-[var(--ok)] hover:bg-[var(--ok)] hover:text-[var(--background)] transition-colors"
         >
           Good →
         </button>

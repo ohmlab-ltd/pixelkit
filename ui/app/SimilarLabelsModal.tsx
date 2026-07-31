@@ -133,7 +133,7 @@ export function SimilarLabelsModal({
 
   return (
     <div
-      className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center backdrop-blur-md bg-black/60 p-4"
+      className="fixed inset-0 z-[1300] flex items-end sm:items-center justify-center backdrop-blur-md bg-black/60 p-4"
       role="dialog"
       aria-modal="true"
     >
