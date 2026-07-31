@@ -5024,8 +5024,8 @@ export function ProjectViewV2Stub({
                 onClose();
               }}
               aria-label={`Back to ${backTo}`}
-              className="absolute top-4 right-4 rounded-full border border-foreground/15 bg-[var(--surface)]/85 hover:bg-foreground/[0.06] px-3 py-1.5 text-[11px] uppercase tracking-wider font-mono text-foreground/75 hover:text-foreground transition-colors"
-              style={{ boxShadow: "var(--shadow-strong)" }}
+              className="absolute top-4 right-4 rounded-md border border-[var(--line)] bg-[var(--surface)]/85 hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] px-3 py-1.5 text-[11px] uppercase tracking-wider font-mono text-foreground/75 hover:text-foreground transition-colors"
+              style={{ boxShadow: "var(--shadow-soft)" }}
             >
               ← Back to {backTo}
             </button>
@@ -5041,7 +5041,7 @@ export function ProjectViewV2Stub({
           with a content-aware left gradient-blur (white scrim + dark text on a
           light cover, dark scrim + white text on a dark one). */}
       <section className="px-6 lg:px-10 pt-6 pb-2">
-        <div className="relative overflow-hidden rounded-3xl border border-foreground/10 pk-cover">
+        <div className="relative overflow-hidden rounded-xl border border-[var(--line)] pk-cover">
           {projectId && !bannerCoverFailed && (
             <>
               {/* Visible cover — NO crossOrigin so a CORS hiccup never blanks it.
@@ -5140,7 +5140,7 @@ export function ProjectViewV2Stub({
               }}
               onBlur={() => setTitleEditing(false)}
               aria-label="Rename project"
-              className="text-3xl md:text-4xl font-medium tracking-tight leading-[1.3] bg-transparent outline-none border-b border-foreground/30 focus:border-foreground/60 text-[var(--foreground)] pb-3 w-full"
+              className="text-2xl md:text-3xl font-medium tracking-tight leading-[1.3] bg-transparent outline-none border-b border-foreground/30 focus:border-foreground/60 text-[var(--foreground)] pb-3 w-full"
             />
           ) : (
             <div className="flex items-center gap-4 pb-3" style={fade()}>
@@ -5153,7 +5153,7 @@ export function ProjectViewV2Stub({
                 // project; on public read-only view the title is a
                 // static label with no cursor / hover surface.
                 className={[
-                  "text-3xl md:text-4xl font-medium tracking-tight leading-[1.3] pb-2 max-w-full overflow-hidden text-ellipsis whitespace-nowrap w-fit drop-shadow-sm",
+                  "text-2xl md:text-3xl font-medium tracking-tight leading-[1.3] pb-2 max-w-full overflow-hidden text-ellipsis whitespace-nowrap w-fit drop-shadow-sm",
                   bannerLight ? "text-zinc-900" : "text-white",
                   readOnly
                     ? "cursor-default"
@@ -5218,11 +5218,11 @@ export function ProjectViewV2Stub({
             <div className="flex flex-wrap items-center gap-2">
               <span
                 className={[
-                  "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium backdrop-blur-md ring-1",
+                  "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium backdrop-blur-md ring-1",
                   isPrivate
                     ? bannerLight
-                      ? "bg-orange-500/20 text-orange-900 ring-orange-500/50 shadow-[0_0_16px_rgba(249,115,22,0.45)]"
-                      : "bg-orange-500/25 text-orange-50 ring-orange-400/60 shadow-[0_0_18px_rgba(249,115,22,0.6)]"
+                      ? "bg-orange-500/20 text-orange-900 ring-orange-500/50"
+                      : "bg-orange-500/25 text-orange-50 ring-orange-400/60"
                     : bannerLight
                       ? "bg-black/10 text-zinc-900 ring-black/10"
                       : "bg-white/15 text-white ring-white/10",
@@ -5235,13 +5235,13 @@ export function ProjectViewV2Stub({
                 )}
                 {isPrivate ? "Private" : "Public"}
               </span>
-              <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium backdrop-blur-md ring-1 ${bannerLight ? "bg-black/10 text-zinc-900 ring-black/10" : "bg-white/15 text-white ring-white/10"}`}>
+              <span className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium backdrop-blur-md ring-1 ${bannerLight ? "bg-black/10 text-zinc-900 ring-black/10" : "bg-white/15 text-white ring-white/10"}`}>
                 Updated {dateLabel}
               </span>
               {/* Image size limit: the max upload resolution (longest edge),
                   inherited from the Project. */}
               <span
-                className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium backdrop-blur-md ring-1 ${bannerLight ? "bg-black/10 text-zinc-900 ring-black/10" : "bg-white/15 text-white ring-white/10"}`}
+                className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium backdrop-blur-md ring-1 ${bannerLight ? "bg-black/10 text-zinc-900 ring-black/10" : "bg-white/15 text-white ring-white/10"}`}
                 title={`Image size limit — uploads are kept up to ${maxInputSize}px on the longest edge (set by the Project).`}
               >
                 <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -5291,7 +5291,7 @@ export function ProjectViewV2Stub({
                 }}
                 onBlur={() => { if (addInput.trim()) addLabel(addInput); setAdding(false); }}
                 placeholder="new label"
-                className="rounded-full bg-foreground/[0.04] border border-foreground/15 focus:border-foreground/35 focus:bg-foreground/[0.06] outline-none px-3 py-1 text-sm text-[var(--foreground)] placeholder:text-foreground/35 transition-colors"
+                className="rounded-md bg-foreground/[0.04] border border-[var(--line)] focus:border-[var(--line-strong)] focus:bg-foreground/[0.06] outline-none px-3 py-1 text-sm text-[var(--foreground)] placeholder:text-foreground/35 transition-colors"
                 style={{ width: "9rem", position: "relative", zIndex: 70 }}
               />
             ) : (
@@ -5319,7 +5319,7 @@ export function ProjectViewV2Stub({
           <div className="flex items-center">
             {derivedInfo && (
               <span
-                className={`inline-flex h-6 items-center gap-1.5 rounded-full px-2.5 text-[11px] font-medium uppercase tracking-wider backdrop-blur-md ring-1 ${bannerLight ? "bg-black/10 text-zinc-900 ring-black/10" : "bg-white/15 text-white ring-white/10"}`}
+                className={`inline-flex h-6 items-center gap-1.5 rounded-md px-2.5 text-[11px] font-medium uppercase tracking-wider backdrop-blur-md ring-1 ${bannerLight ? "bg-black/10 text-zinc-900 ring-black/10" : "bg-white/15 text-white ring-white/10"}`}
                 title="A cropped child dataset derived from a parent project"
               >
                 <span className="h-1.5 w-1.5 rounded-full bg-current opacity-70" aria-hidden />
@@ -5337,7 +5337,7 @@ export function ProjectViewV2Stub({
               disabled={!isOwnDataset}
               onClick={() => { if (projectId && isOwnDataset) setSettingsOpen(true); }}
               className={[
-                "inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-sm font-semibold backdrop-blur-md shadow-sm transition",
+                "inline-flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-[13px] font-medium backdrop-blur-md transition",
                 bannerLight ? "bg-black/80 text-white" : "bg-white/90 text-black",
                 isOwnDataset
                   ? bannerLight ? "hover:bg-black/90" : "hover:bg-white"
@@ -5355,7 +5355,7 @@ export function ProjectViewV2Stub({
           <button
             type="button"
             onClick={() => { if (projectId) setExportOpen(true); }}
-            className={`inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-sm font-semibold backdrop-blur-md shadow-sm transition ${bannerLight ? "bg-black/80 text-white hover:bg-black/90" : "bg-white/90 text-black hover:bg-white"}`}
+            className={`inline-flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-[13px] font-medium backdrop-blur-md transition ${bannerLight ? "bg-black/80 text-white hover:bg-black/90" : "bg-white/90 text-black hover:bg-white"}`}
             title="Export dataset"
           >
             <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -5394,8 +5394,8 @@ export function ProjectViewV2Stub({
           return (
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
               {items.map((s) => (
-                <div key={s.label} className="pk-card rounded-2xl px-5 py-5">
-                  <div className="text-[2rem] font-bold leading-none tracking-tight tabular-nums text-[var(--foreground)]">
+                <div key={s.label} className="pk-card rounded-lg px-4 py-4">
+                  <div className="text-[2rem] font-semibold leading-none tracking-tight tabular-nums text-[var(--foreground)]">
                     {s.value.toLocaleString()}
                   </div>
                   <div className="pk-eyebrow mt-2">{s.label}</div>
@@ -5405,12 +5405,12 @@ export function ProjectViewV2Stub({
                 type="button"
                 onClick={() => setHealthOpen(true)}
                 title="Open dataset health"
-                className="pk-card pk-card-hover rounded-2xl px-5 py-5 text-left"
+                className="pk-card pk-card-hover rounded-lg px-4 py-4 text-left"
               >
-                <div className="text-[2rem] font-bold leading-none tracking-tight tabular-nums text-[var(--foreground)]">
+                <div className="text-[2rem] font-semibold leading-none tracking-tight tabular-nums text-[var(--foreground)]">
                   {typeof score === "number" ? Math.round(score) : "—"}
                 </div>
-                <div className="pk-eyebrow mt-2" style={{ color: "var(--accent-orange)" }}>
+                <div className="pk-eyebrow mt-2" style={{ color: "var(--accent)" }}>
                   {healthTone ? `Health · ${healthTone}` : "Health"}
                 </div>
               </button>
@@ -5452,7 +5452,7 @@ export function ProjectViewV2Stub({
                 className="appearance-none bg-transparent border-0 p-0 text-left cursor-pointer"
                 aria-label="Expand input-shape picker"
               >
-                <span className="inline-flex items-center font-mono text-xs text-foreground/85 px-3 py-1 rounded-full border border-foreground/15 bg-foreground/[0.04] hover:bg-foreground/[0.06] hover:border-foreground/25 whitespace-nowrap transition-colors">
+                <span className="inline-flex items-center font-mono text-xs text-foreground/85 px-3 py-1 rounded-md border border-[var(--line)] bg-[var(--surface)] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] whitespace-nowrap transition-colors">
                   {inputSize}
                 </span>
               </button>
@@ -5531,7 +5531,7 @@ export function ProjectViewV2Stub({
           owner view to keep their page clean. */}
       {readOnly && (
         <section className="px-6 lg:px-10 pt-3 -mb-1">
-          <span className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-[0.18em] font-mono text-foreground/55">
+          <span className="inline-flex items-center gap-1.5 pk-micro">
             <span>Powered by PixelKit</span>
           </span>
         </section>
@@ -5552,10 +5552,10 @@ export function ProjectViewV2Stub({
           the placeholder grid is up immediately and refs slot in
           as their bytes arrive. */}
       <section className="px-6 lg:px-10 pt-3 pb-3">
-          <div className="pk-card rounded-2xl px-5 py-3">
+          <div className="pk-card rounded-lg px-5 py-3">
           {/* Always-expanded heading (no dropdown): the references page shows
               all of its info directly. */}
-          <div className="inline-flex items-center gap-3 text-2xl font-medium tracking-tight text-[var(--foreground)] min-h-[2.5rem]">
+          <div className="inline-flex items-center gap-3 text-xl font-medium tracking-tight text-[var(--foreground)] min-h-[2.5rem]">
             <span className="pk-accent-bar" style={{ height: "1.4rem" }} aria-hidden />
             Reference images
             <span className="ml-1 text-xs font-normal text-foreground/55">
@@ -5652,11 +5652,11 @@ export function ProjectViewV2Stub({
               <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-300" />
             </span>
             <div className="flex-1 min-w-0">
-              <div className="text-[12px] font-medium text-amber-100/90">
+              <div className="text-[12px] font-medium text-[var(--warn)]">
                 Saving references, {refUploadCounts.done}/{refUploadCounts.total} done
                 {refUploadCounts.failed > 0 ? ` · ${refUploadCounts.failed} failed` : ""}
               </div>
-              <div className="text-[11px] text-amber-200/55 mt-0.5">
+              <div className="text-[11px] text-foreground/55 mt-0.5">
                 Image imports and training are paused until centroids are persisted.
               </div>
             </div>
@@ -5759,7 +5759,7 @@ export function ProjectViewV2Stub({
           while the gallery fills in behind it). */}
       {!readOnly && importProgress && importProgress.total > 0 && (
         <section className="px-6 lg:px-10 pb-3">
-          <div className="rounded-2xl border border-foreground/10 bg-[var(--surface)] shadow-[var(--shadow-soft)] px-5 py-4">
+          <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-5 py-4">
             <div className="flex items-center justify-between gap-3 text-sm">
               <span className="font-medium text-[var(--foreground)]">
                 {importProgress.done >= importProgress.total ? "Finishing up…" : "Uploading images"}
@@ -5770,7 +5770,7 @@ export function ProjectViewV2Stub({
             </div>
             <div className="mt-2.5 h-2 w-full overflow-hidden rounded-full bg-foreground/10">
               <div
-                className="h-full rounded-full bg-[var(--accent-orange)] transition-[width] duration-300 ease-out motion-reduce:transition-none"
+                className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-300 ease-out motion-reduce:transition-none"
                 style={{
                   width: `${Math.round(
                     (Math.min(importProgress.done, importProgress.total) /
@@ -5799,12 +5799,12 @@ export function ProjectViewV2Stub({
       {!readOnly && !derivedInfo && (
       <>
       <section className="px-6 lg:px-10 pt-3 pb-3" style={rise()}>
-        <div className="rounded-2xl bg-foreground/[0.025] px-5 py-3">
+        <div className="rounded-lg bg-foreground/[0.025] px-5 py-3">
           <div className="flex items-center justify-between gap-3 flex-wrap">
             {/* Static heading (no dropdown): the annotation controls are
                 built into the page below. */}
             <div className="flex min-h-[2.5rem] items-center gap-3 flex-wrap">
-              <h2 className="flex items-center gap-3 text-2xl font-medium tracking-tight text-[var(--foreground)]">
+              <h2 className="flex items-center gap-3 text-xl font-medium tracking-tight text-[var(--foreground)]">
                 <span className="pk-accent-bar" style={{ height: "1.4rem" }} aria-hidden />
                 Annotations
               </h2>
@@ -6157,7 +6157,7 @@ export function ProjectViewV2Stub({
       {/* Transient video-error chip, shown when a video was
           rejected for being too large or failed mid-decode. */}
       {videoError && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[1250] rounded-full border border-rose-500/40 bg-rose-500/[0.12] px-4 py-2 text-[12px] text-rose-700 dark:text-rose-200 shadow-lg backdrop-blur-md">
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[1250] rounded-md border border-rose-500/40 bg-rose-500/[0.12] px-4 py-2 text-[12px] text-rose-700 dark:text-rose-200 shadow-lg backdrop-blur-md">
           {videoError}
         </div>
       )}
@@ -6776,7 +6776,7 @@ function RefImageGrid({
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); if (i >= 0) removeAt(i); }}
-            className="absolute top-1 right-1 h-6 w-6 rounded-full bg-black/70 text-foreground/80 hover:text-foreground hover:bg-[var(--background)] grid place-items-center text-sm opacity-0 group-hover:opacity-100 transition-opacity"
+            className="absolute top-1 right-1 h-6 w-6 rounded-md bg-black/70 text-white/85 hover:text-white hover:bg-black/85 grid place-items-center text-sm opacity-0 group-hover:opacity-100 transition-opacity"
             aria-label="Remove reference"
           >×</button>
         ) : null}
@@ -6859,10 +6859,10 @@ function RefImageGrid({
                   if (files.length > 0) addFiles(files, lab);
                 }}
                 className={[
-                  "rounded-2xl border p-4 transition-colors",
+                  "rounded-lg border p-4 transition-colors",
                   isDragTarget
                     ? "border-foreground/45 bg-foreground/[0.05]"
-                    : "border-foreground/[0.08] hover:border-foreground/[0.14]",
+                    : "border-[var(--line)] hover:border-[var(--line-strong)]",
                 ].join(" ")}
               >
                 <div className="flex items-center justify-between gap-3 mb-3">
@@ -6878,7 +6878,7 @@ function RefImageGrid({
                       type="button"
                       onClick={() => { setPendingUploadLabel(lab); fileRef.current?.click(); }}
                       disabled={!canAdd}
-                      className="text-xs px-3.5 py-1.5 rounded-full border border-foreground/[0.12] hover:border-foreground/25 hover:bg-foreground/[0.04] disabled:opacity-35 disabled:cursor-not-allowed transition-colors shrink-0"
+                      className="text-[13px] px-3.5 py-1.5 rounded-md border border-[var(--line)] hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] disabled:opacity-35 disabled:cursor-not-allowed transition-colors shrink-0"
                     >
                       + Add photos
                     </button>
@@ -6902,7 +6902,7 @@ function RefImageGrid({
               longer) a project label, e.g. uploaded before that label
               was renamed. Open one to re-label it in the editor. */}
           {unsortedRefs.length > 0 && (
-            <div className="rounded-2xl border border-amber-300/20 bg-amber-300/[0.03] p-4">
+            <div className="rounded-lg border border-amber-300/20 bg-amber-300/[0.03] p-4">
               <div className="flex items-center gap-2 mb-3 flex-wrap">
                 <span className="text-sm font-medium">Unsorted</span>
                 <span className="text-[11px] text-foreground/35 font-mono">{unsortedRefs.length}</span>
@@ -7141,7 +7141,7 @@ function VerdictPills({
     },
   ];
   return (
-    <div className="inline-flex items-center gap-0.5 rounded-full bg-foreground/[0.04] p-0.5" role="group" aria-label="Set image verdict">
+    <div className="inline-flex items-center gap-0.5 rounded-md bg-foreground/[0.04] p-0.5" role="group" aria-label="Set image verdict">
       {pills.map((p) => {
         const active = current === p.key;
         return (
@@ -7152,7 +7152,7 @@ function VerdictPills({
             aria-pressed={active}
             title={active ? `Clear ${p.label.toLowerCase()} verdict` : `Mark image ${p.label.toLowerCase()}`}
             className={[
-              "rounded-full px-2.5 py-1 text-[11px] uppercase tracking-wider font-medium transition-colors",
+              "rounded px-2.5 py-1 text-[11px] uppercase tracking-wider font-medium transition-colors",
               active ? p.active : p.idle,
             ].join(" ")}
           >
@@ -7211,7 +7211,7 @@ function AnimatedStartButton({
       <span
         ref={ghostRef}
         aria-hidden
-        className="rounded-full px-5 py-2 text-[13px] font-semibold inline-flex items-center justify-center whitespace-nowrap pointer-events-none"
+        className="rounded-md px-5 py-2 text-[13px] font-semibold inline-flex items-center justify-center whitespace-nowrap pointer-events-none"
         style={{
           position: "absolute",
           visibility: "hidden",
@@ -7228,19 +7228,16 @@ function AnimatedStartButton({
         onClick={onClick}
         disabled={disabled}
         title={title}
-        className="relative rounded-full px-5 py-2 text-[13px] font-semibold text-black disabled:cursor-not-allowed overflow-hidden whitespace-nowrap inline-flex items-center justify-center"
+        className="relative rounded-md px-5 py-2 text-[13px] font-semibold text-[var(--accent-contrast)] hover:brightness-105 disabled:cursor-not-allowed overflow-hidden whitespace-nowrap inline-flex items-center justify-center"
         style={{
-          backgroundColor: running ? "rgba(251,146,60,0.55)" : "#fb923c",
-          boxShadow: running
-            ? "0 0 14px 1px rgba(249,115,22,0.25)"
-            : "0 0 14px 1px rgba(249,115,22,0.35)",
+          backgroundColor: running ? "var(--accent-dim)" : "var(--accent)",
           opacity: fadeOpacity,
           // Pixel width from the ghost lets the browser interpolate
           // between two concrete values. Falls back to "auto" on the
           // very first render so we never paint a 0-px button.
           width: pixelWidth != null ? `${pixelWidth}px` : "auto",
           transition:
-            "width 320ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease, background-color 220ms ease, box-shadow 220ms ease",
+            "width 320ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease, background-color 220ms ease",
         }}
       >
         {running && (
@@ -7302,7 +7299,7 @@ function Sam3Slider({
   return (
     <div className="grid gap-1.5">
       <div className="flex items-baseline justify-between gap-2">
-        <span className="text-[11px] uppercase tracking-wider text-foreground/55">{label}</span>
+        <span className="pk-micro">{label}</span>
         <span className="text-[12px] font-mono tabular-nums text-[var(--foreground)]">{format(value)}</span>
       </div>
       <input
@@ -7326,12 +7323,12 @@ function SegmentedControl<T extends string>({
   value, onChange, options,
 }: { value: T; onChange: (v: T) => void; options: { value: T; label: string }[] }) {
   return (
-    <div className="inline-flex rounded-full border border-[var(--border)] p-0.5">
+    <div className="inline-flex rounded-md border border-[var(--line)] p-0.5">
       {options.map((opt) => (
         <button
           key={opt.value}
           onClick={() => onChange(opt.value)}
-          className={["rounded-full px-3 py-1 text-xs uppercase tracking-wide transition-colors", value === opt.value ? "bg-foreground text-background" : "text-[var(--muted)] hover:text-foreground"].join(" ")}
+          className={["rounded px-3 py-1 text-xs uppercase tracking-wide transition-colors", value === opt.value ? "bg-[var(--surface-hover)] text-[var(--foreground)]" : "text-foreground/60 hover:text-foreground"].join(" ")}
         >
           {opt.label}
         </button>
@@ -7382,7 +7379,7 @@ function ShapeHelpPopover() {
           />
           <div
             role="tooltip"
-            className="fixed z-[1002] w-80 rounded-2xl border border-foreground/10 p-4 pointer-events-none"
+            className="fixed z-[1002] w-80 rounded-lg border border-[var(--line)] p-4 pointer-events-none"
             // Themable tooltip surface, light grey card in light
             // mode, dark surface in dark. Previously pinned to a
             // hard-coded #0c0c0e fallback so the box was always dark.
@@ -7516,7 +7513,7 @@ function ImportMediaSection({
         onClick={() => { if (!disabled) fileInputRef.current?.click(); }}
         aria-disabled={disabled}
         className={[
-          "relative flex min-w-0 flex-col justify-center overflow-hidden rounded-2xl border-2 border-dashed transition-all px-5 py-5 bg-[var(--surface-2)] sm:flex-1",
+          "relative flex min-w-0 flex-col justify-center overflow-hidden rounded-lg border-2 border-dashed transition-all px-5 py-5 bg-[var(--surface-2)] sm:flex-1",
           disabled
             ? "cursor-not-allowed opacity-60 border-foreground/15"
             : ["cursor-pointer", dragOver ? "border-foreground/50" : "border-foreground/20 hover:border-foreground/40"].join(" "),
@@ -7526,7 +7523,7 @@ function ImportMediaSection({
 
         <div className="flex items-center gap-3 max-w-[80%]">
           <div className="min-w-0 flex-1">
-            <div className="text-2xl font-medium tracking-tight text-[var(--foreground)]">
+            <div className="text-lg font-medium tracking-tight text-[var(--foreground)]">
               {disabled
                 ? (disabledMessage ?? "Waiting for setup to finish…")
                 : (uploading ? "Uploading…" : "Drop media here or click to browse")}
@@ -8409,7 +8406,7 @@ function DatasetGallery({
   return (
     <>
       <div className="flex items-center justify-between gap-3 mb-1 flex-wrap">
-        <h2 className="text-2xl font-medium tracking-tight text-[var(--foreground)] shrink-0">
+        <h2 className="text-xl font-medium tracking-tight text-[var(--foreground)] shrink-0">
           Dataset
           <span className="ml-3 text-sm text-foreground/40 font-mono tabular-nums">
             {/* When the user has filtered, show "shown / total" so the
@@ -8440,7 +8437,7 @@ function DatasetGallery({
                 onChange={(e) => setNameQuery(e.target.value)}
                 placeholder="Search image names"
                 aria-label="Search images by name"
-                className="w-48 rounded-full border border-foreground/10 bg-foreground/[0.025] pl-8 pr-7 py-1.5 text-[12px] text-[var(--foreground)] outline-none transition-colors focus:border-foreground/30 placeholder:text-foreground/40"
+                className="w-48 rounded-md border border-[var(--line)] bg-foreground/[0.025] pl-8 pr-7 py-1.5 text-[12px] text-[var(--foreground)] outline-none transition-colors focus:border-[var(--line-strong)] placeholder:text-foreground/40"
               />
               {nameQuery && (
                 <button
@@ -8463,7 +8460,7 @@ function DatasetGallery({
               action button on the right. Hidden when only "All"
               would render (single-pill row is pointless). */}
           {!readOnly && visiblePills.length > 1 && (
-            <div className="flex items-center gap-2 rounded-full border border-foreground/10 bg-foreground/[0.025] pl-3 pr-1.5 py-1">
+            <div className="flex items-center gap-2 rounded-md border border-[var(--line)] bg-foreground/[0.025] pl-3 pr-1.5 py-1">
               <span className="inline-flex items-center gap-1.5 text-[12px] font-medium text-foreground/55">
                 <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                   <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
@@ -8480,10 +8477,10 @@ function DatasetGallery({
                       type="button"
                       onClick={() => onVerdictFilterChange?.(key)}
                       className={[
-                        "rounded-full px-3 py-1 text-[12px] font-medium border transition-colors",
+                        "rounded px-3 py-1 text-[12px] font-medium border transition-colors",
                         active
-                          ? "bg-foreground text-background border-[var(--foreground)]"
-                          : "border-transparent text-foreground/65 hover:bg-foreground/[0.06] hover:text-foreground",
+                          ? "bg-[var(--surface-hover)] text-[var(--foreground)] border-[var(--line-strong)]"
+                          : "border-transparent text-foreground/60 hover:bg-foreground/[0.06] hover:text-foreground",
                       ].join(" ")}
                     >
                       {label}
@@ -8525,7 +8522,7 @@ function DatasetGallery({
               <button
                 type="button"
                 onClick={exitSelection}
-                className="rounded-full border border-foreground/15 px-3.5 py-1.5 text-[12px] font-medium text-foreground/70 hover:border-foreground/35 hover:text-foreground transition-colors"
+                className="rounded-md border border-[var(--line)] px-3.5 py-1.5 text-[13px] font-medium text-foreground/70 hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] hover:text-foreground transition-colors"
               >
                 Done
               </button>
@@ -8533,7 +8530,7 @@ function DatasetGallery({
               <button
                 type="button"
                 onClick={() => setSelectionMode(true)}
-                className="inline-flex items-center gap-1.5 rounded-full border border-foreground/15 px-3.5 py-1.5 text-[12px] font-medium text-foreground/70 hover:border-foreground/35 hover:text-foreground transition-colors"
+                className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] px-3.5 py-1.5 text-[13px] font-medium text-foreground/70 hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] hover:text-foreground transition-colors"
                 title="Bulk delete"
               >
                 <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -8611,8 +8608,8 @@ function DatasetGallery({
       </div>
 
       {isPulling && visible.length === 0 && (
-        <div className="mt-6 flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-foreground/15 bg-foreground/[0.02] px-6 py-16 text-center">
-          <span className="h-7 w-7 animate-spin rounded-full border-2 border-foreground/15 border-t-[var(--accent-orange)]" aria-hidden />
+        <div className="mt-6 flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-foreground/15 bg-foreground/[0.02] px-6 py-16 text-center">
+          <span className="h-7 w-7 animate-spin rounded-full border-2 border-foreground/15 border-t-[var(--accent)]" aria-hidden />
           <div className="text-[13px] font-medium text-foreground/70">Pulling cropped images from the parent project…</div>
           <div className="text-[12px] text-foreground/50">This can take a moment for large datasets; images appear as they are cropped.</div>
         </div>
@@ -8702,7 +8699,7 @@ function DatasetGallery({
           regardless of theme. */}
       {selectionMode && typeof window !== "undefined" &&
         createPortal(
-          <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[400] flex items-center gap-2 rounded-full border border-white/20 bg-black/85 backdrop-blur-md px-3 py-2 shadow-[var(--shadow-strong)]">
+          <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[400] flex items-center gap-2 rounded-md border border-white/20 bg-black/85 backdrop-blur-md px-3 py-2 shadow-[var(--shadow-strong)]">
             <span className="text-xs text-white/80 px-2 tabular-nums">
               {selectedCount} selected
             </span>
@@ -8710,7 +8707,7 @@ function DatasetGallery({
               type="button"
               onClick={selectAllVisible}
               disabled={bulkBusy}
-              className="rounded-full border border-white/20 bg-white/[0.06] px-3 py-1 text-[11px] text-white/85 hover:border-white/45 hover:text-white transition-colors disabled:opacity-40"
+              className="rounded-md border border-white/20 bg-white/[0.06] px-3 py-1 text-[11px] text-white/85 hover:border-white/45 hover:text-white transition-colors disabled:opacity-40"
             >
               Select all
             </button>
@@ -8718,7 +8715,7 @@ function DatasetGallery({
               type="button"
               onClick={() => void deleteSelected()}
               disabled={bulkBusy || selectedCount === 0}
-              className="rounded-full bg-red-500 text-white px-4 py-1 text-xs font-semibold hover:bg-red-400 disabled:opacity-40 disabled:cursor-not-allowed"
+              className="rounded-md bg-red-500 text-white px-4 py-1 text-xs font-semibold hover:bg-red-400 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {bulkBusy ? "Deleting…" : `Delete ${selectedCount}`}
             </button>
@@ -8726,7 +8723,7 @@ function DatasetGallery({
               type="button"
               onClick={exitSelection}
               disabled={bulkBusy}
-              className="rounded-full border border-white/20 px-3 py-1 text-[11px] text-white/65 hover:border-white/45 hover:text-white transition-colors disabled:opacity-40"
+              className="rounded-md border border-white/20 px-3 py-1 text-[11px] text-white/65 hover:border-white/45 hover:text-white transition-colors disabled:opacity-40"
             >
               Cancel
             </button>
@@ -8890,7 +8887,7 @@ function LazyRefImage({
           style={{
             opacity: loaded ? 0 : 1,
             transition: "opacity 250ms ease-out",
-            background: "linear-gradient(135deg, #1a1a1c 0%, #232328 50%, #1a1a1c 100%)",
+            background: "linear-gradient(135deg, var(--surface) 0%, var(--surface-2) 50%, var(--surface) 100%)",
             backgroundSize: "200% 200%",
             animation: "shimmer 2s ease-in-out infinite",
           }}
@@ -8989,7 +8986,7 @@ function ReviewLauncher({
         type="button"
         onClick={() => defaultCount > 0 && onStartReview(defaultScope)}
         disabled={defaultCount === 0}
-        className="inline-flex items-center gap-1.5 rounded-l-full bg-foreground text-background border border-[var(--foreground)] px-3.5 py-1.5 text-[12px] font-medium capitalize hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+        className="inline-flex items-center gap-1.5 rounded-l-md bg-foreground text-background border border-[var(--foreground)] px-3.5 py-1.5 text-[12px] font-medium capitalize hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
         title={defaultCount === 0
           ? "No images in this bucket"
           : `Swipe left = bad, right = good. Walk the ${defaultScope} set.`}
@@ -9006,7 +9003,7 @@ function ReviewLauncher({
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="listbox"
         aria-expanded={open}
-        className="inline-flex items-center justify-center rounded-r-full bg-foreground text-background border border-l-0 border-[var(--foreground)] px-2.5 py-1.5 hover:opacity-90 transition-opacity"
+        className="inline-flex items-center justify-center rounded-r-md bg-foreground text-background border border-l-0 border-[var(--foreground)] px-2.5 py-1.5 hover:opacity-90 transition-opacity"
         title="Pick review scope"
       >
         <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
@@ -9254,35 +9251,35 @@ function AugmentationsViewer({
               filename below. Stronger border-foreground in light mode
               so the chip stays visible on the near-white surface. */}
           <div className="flex items-center justify-between gap-3">
-            <div className="text-xs uppercase tracking-wider text-foreground/45">Augmentations</div>
+            <div className="pk-micro">Augmentations</div>
             <button
               type="button"
               onClick={onClose}
               aria-label="Close"
-              className="h-7 w-7 grid place-items-center rounded-full border border-foreground/30 dark:border-foreground/15 text-foreground/70 dark:text-foreground/65 hover:border-foreground/55 hover:text-foreground transition-colors shrink-0"
+              className="h-7 w-7 grid place-items-center rounded-md border border-[var(--line)] text-foreground/70 hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] hover:text-foreground transition-colors shrink-0"
             >
               <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M18 6 6 18" /><path d="m6 6 12 12" />
               </svg>
             </button>
           </div>
-          <h2 className="text-2xl font-medium tracking-tight text-[var(--foreground)] truncate">{filename}</h2>
+          <h2 className="text-xl font-medium tracking-tight text-[var(--foreground)] truncate">{filename}</h2>
         </div>
 
         {/* Original at the top, small, centred. The augmentation
             grid below is wider + bigger so the user spends most
             of their attention there. */}
         <div className="flex justify-center mb-8">
-          <div className="rounded-2xl overflow-hidden border border-foreground/10 bg-[var(--surface-2)] max-w-sm w-full">
+          <div className="rounded-lg overflow-hidden border border-[var(--line)] bg-[var(--surface-2)] max-w-sm w-full">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src={sourceUrl} alt={filename} className="block w-full h-auto" draggable={false} />
-            <div className="px-4 py-2 text-[11px] uppercase tracking-wider font-mono text-foreground/45 text-center">
+            <div className="px-4 py-2 pk-micro text-center">
               Original
             </div>
           </div>
         </div>
 
-        <div className="text-xs uppercase tracking-wider text-foreground/45 mb-3">
+        <div className="pk-micro tabular-nums mb-3">
           {items === null ? "Loading…" : `${items.length} ${items.length === 1 ? "augmentation" : "augmentations"}`}
         </div>
 
@@ -9293,7 +9290,7 @@ function AugmentationsViewer({
         )}
 
         {items !== null && items.length === 0 && (
-          <div className="rounded-2xl border border-dashed border-foreground/10 bg-foreground/[0.02] px-5 py-12 text-center">
+          <div className="rounded-lg border border-dashed border-foreground/10 bg-foreground/[0.02] px-5 py-12 text-center">
             <div className="text-sm text-foreground/65 mb-1">No augmentations generated yet</div>
             <div className="text-[11px] text-foreground/35">
               Set a per-image count + enable some augmentations, then click Update on the Augmentations tab.
@@ -9375,7 +9372,7 @@ function AugmentationTile({
       // Same frame chrome as the original-image card up top ,
       // larger rounding, darker fill, so the augmentation grid
       // visually matches the row above it.
-      className="rounded-2xl overflow-hidden border border-foreground/10 bg-[var(--surface-2)] relative group"
+      className="rounded-lg overflow-hidden border border-[var(--line)] bg-[var(--surface-2)] relative group"
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
@@ -9401,7 +9398,7 @@ function AugmentationTile({
           title="Delete this augmentation"
           // Sits over the augmentation thumbnail, keep dark bubble
           // + white icon regardless of theme.
-          className="absolute top-2 right-2 h-7 w-7 grid place-items-center rounded-full bg-black/65 backdrop-blur-md text-white/90 hover:bg-red-500/85 hover:text-white transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
+          className="absolute top-2 right-2 h-7 w-7 grid place-items-center rounded-md bg-black/65 backdrop-blur-md text-white/90 hover:bg-red-500/85 hover:text-white transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
         >
           <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
             <path d="M18 6 6 18" /><path d="m6 6 12 12" />
@@ -9889,7 +9886,7 @@ function DatasetThumb({
               style={{ animation: "augFlashIn 220ms ease-out both" }}
             >
               <div
-                className="rounded-full bg-black/65 text-white px-3 py-1.5 text-[11px] font-mono uppercase tracking-[0.18em] backdrop-blur-md"
+                className="rounded-md bg-black/65 text-white px-3 py-1.5 text-[11px] font-mono uppercase tracking-[0.18em] backdrop-blur-md"
                 style={{ boxShadow: "var(--shadow-strong)" }}
               >
                 Augmentation
@@ -10037,7 +10034,7 @@ function DatasetThumb({
                   // and the glyph as fixed dark-on-white regardless
                   // of theme, themable foreground here would make
                   // the icon black on a dark bubble in light mode.
-                  className="h-7 w-7 rounded-full bg-black/55 backdrop-blur-md grid place-items-center text-white/90 hover:bg-black/80 hover:text-white transition-colors"
+                  className="h-7 w-7 rounded-md bg-black/55 backdrop-blur-md grid place-items-center text-white/90 hover:bg-black/80 hover:text-white transition-colors"
                   title={`${media.nAugmentations} augmentation${media.nAugmentations === 1 ? "" : "s"}`}
                   aria-label="Augmentations"
                 >
@@ -10061,13 +10058,13 @@ function DatasetThumb({
                   /overview and /annotations responses, even for
                   images that already have boxes on disk. */}
               {detectionCount === 0 && media.detections !== undefined && (
-                <span className="rounded-full bg-amber-300/85 px-2 py-0.5 text-[10px] font-semibold text-black uppercase tracking-wider">
+                <span className="rounded-md bg-amber-300/85 px-2 py-0.5 text-[10px] font-semibold text-black uppercase tracking-wider">
                   Unlabelled
                 </span>
               )}
               {detectionCount > 0 && hasUnsureDetection && (
                 <span
-                  className="rounded-full bg-amber-400/90 px-2 py-0.5 text-[10px] font-semibold text-black uppercase tracking-wider"
+                  className="rounded-md bg-amber-400/90 px-2 py-0.5 text-[10px] font-semibold text-black uppercase tracking-wider"
                   title="At least one detection is borderline, open to review"
                 >
                   Unsure
@@ -10134,7 +10131,7 @@ function DatasetThumb({
           aria-label="Remove image"
           // Sits over the image, keep dark bubble + white icon in
           // both themes so it stays legible against any thumbnail.
-          className="absolute top-2 right-2 h-7 w-7 grid place-items-center rounded-full bg-black/55 text-white/80 hover:bg-black/80 hover:text-white transition-colors z-10"
+          className="absolute top-2 right-2 h-7 w-7 grid place-items-center rounded-md bg-black/55 text-white/80 hover:bg-black/80 hover:text-white transition-colors z-10"
         >
           <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
             <path d="M18 6 6 18" /><path d="m6 6 12 12" />
@@ -10156,10 +10153,10 @@ function DatasetThumb({
           aria-pressed={selected}
           aria-label={selected ? "Unselect image" : "Select image"}
           className={[
-            "absolute top-2 right-2 h-7 w-7 grid place-items-center rounded-full transition-colors z-10",
+            "absolute top-2 right-2 h-7 w-7 grid place-items-center rounded-md transition-colors z-10",
             selected
-              ? "bg-red-500 text-[var(--foreground)]"
-              : "bg-black/55 text-foreground/70 hover:bg-black/80 hover:text-foreground",
+              ? "bg-red-500 text-white"
+              : "bg-black/55 text-white/70 hover:bg-black/80 hover:text-white",
             !media.backendId ? "opacity-30 cursor-not-allowed" : "",
           ].join(" ")}
         >
@@ -10168,7 +10165,7 @@ function DatasetThumb({
               <polyline points="5 12 10 17 19 7" />
             </svg>
           ) : (
-            <span className="block h-3.5 w-3.5 rounded-full border-2 border-foreground/55" aria-hidden="true" />
+            <span className="block h-3.5 w-3.5 rounded-full border-2 border-white/55" aria-hidden="true" />
           )}
         </button>
       )}
@@ -11102,7 +11099,7 @@ function DatasetViewer({
               return (
                 <span
                   key={lab}
-                  className="inline-flex items-center gap-1.5 rounded-full border border-foreground/10 bg-foreground/[0.03] px-2 py-0.5 text-[11px] tabular-nums"
+                  className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] bg-foreground/[0.03] px-2 py-0.5 text-[11px] tabular-nums"
                 >
                   {key && (
                     <kbd className="font-mono text-foreground/80 px-1 py-[1px] rounded bg-foreground/[0.06] leading-none text-[10px]">
@@ -11136,7 +11133,7 @@ function DatasetViewer({
               fresh label. */}
           {media.derivedLabel && (
             <span
-              className="inline-flex items-center gap-1.5 rounded-full bg-foreground/[0.06] px-2.5 h-7 text-[11px] font-medium text-foreground/60"
+              className="inline-flex items-center gap-1.5 rounded-md bg-foreground/[0.06] px-2.5 h-7 text-[11px] font-medium text-foreground/60"
               title={`Original label in the parent project: "${media.derivedLabel}". Assign your own label here.`}
             >
               <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 opacity-60" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -11170,7 +11167,7 @@ function DatasetViewer({
                 type="button"
                 onClick={() => onMediaChange(media.id, { editedBoxes: [] })}
                 title="Clear every box on this image"
-                className="h-8 inline-flex items-center gap-1.5 rounded-full border border-foreground/[0.10] text-foreground/65 hover:border-rose-400/60 hover:text-rose-700 dark:hover:text-rose-300 px-3 text-[11px] uppercase tracking-wider font-mono transition-colors"
+                className="h-8 inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] text-foreground/65 hover:border-rose-400/60 hover:text-rose-700 dark:hover:text-rose-300 px-3 text-[11px] uppercase tracking-wider font-mono transition-colors"
               >
                 <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                   <polyline points="3 6 5 6 21 6" />
@@ -11197,10 +11194,10 @@ function DatasetViewer({
                 : "Switch to manual labelling (no SAM3 auto-detect)"
               }
               className={[
-                "h-8 inline-flex items-center gap-1.5 rounded-full border px-3 text-[11px] uppercase tracking-wider font-mono transition-colors",
+                "h-8 inline-flex items-center gap-1.5 rounded-md border px-3 text-[11px] uppercase tracking-wider font-mono transition-colors",
                 manualMode
-                  ? "border-orange-500/60 bg-orange-500/15 text-orange-700 dark:text-orange-200"
-                  : "border-foreground/[0.10] text-foreground/65 hover:border-foreground/30 hover:text-foreground",
+                  ? "border-accent/60 bg-accent/10 text-[var(--accent)]"
+                  : "border-[var(--line)] text-foreground/65 hover:border-[var(--line-strong)] hover:text-foreground",
               ].join(" ")}
             >
               <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -11226,7 +11223,7 @@ function DatasetViewer({
               }}
               title="Delete this image"
               aria-label="Delete this image"
-              className="h-8 inline-flex items-center gap-1.5 rounded-full border border-foreground/[0.10] text-foreground/65 hover:border-rose-400/60 hover:text-rose-700 dark:hover:text-rose-300 px-3 text-[11px] uppercase tracking-wider font-mono transition-colors"
+              className="h-8 inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] text-foreground/65 hover:border-rose-400/60 hover:text-rose-700 dark:hover:text-rose-300 px-3 text-[11px] uppercase tracking-wider font-mono transition-colors"
             >
               <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                 <polyline points="3 6 5 6 21 6" />
@@ -11241,7 +11238,7 @@ function DatasetViewer({
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="h-8 w-8 grid place-items-center rounded-full border border-foreground/[0.08] text-foreground/55 hover:border-foreground/30 hover:text-foreground transition-colors"
+            className="h-8 w-8 grid place-items-center rounded-md border border-[var(--line)] text-foreground/55 hover:border-[var(--line-strong)] hover:text-foreground transition-colors"
           >
             <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M18 6 6 18" /><path d="m6 6 12 12" />
@@ -11261,7 +11258,7 @@ function DatasetViewer({
             (which would otherwise overlap the bottom nav bar). */}
         <div className="relative flex-1 min-h-0">
         <div
-          className="h-full overflow-hidden rounded-2xl border border-foreground/[0.06] bg-[var(--surface-2)]"
+          className="h-full overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--surface-2)]"
         >
           {dims ? (
             <BoxEditor
@@ -11489,9 +11486,9 @@ function DatasetViewer({
             disabled={!hasPrev}
             aria-label="Previous image"
             className={[
-              "h-10 px-5 inline-flex items-center gap-2 rounded-full border text-sm font-medium transition-all",
+              "h-9 px-4 inline-flex items-center gap-2 rounded-md border text-[13px] font-medium transition-all",
               hasPrev
-                ? "border-foreground/[0.08] bg-foreground/[0.03] text-foreground/85 hover:bg-foreground/[0.06] hover:border-foreground/25"
+                ? "border-[var(--line)] bg-foreground/[0.03] text-foreground/85 hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)]"
                 : "border-foreground/[0.04] bg-foreground/[0.01] text-foreground/25 cursor-not-allowed",
             ].join(" ")}
           >
@@ -11511,9 +11508,9 @@ function DatasetViewer({
             disabled={!hasNext}
             aria-label="Next image"
             className={[
-              "h-10 px-5 inline-flex items-center gap-2 rounded-full border text-sm font-medium transition-all",
+              "h-9 px-4 inline-flex items-center gap-2 rounded-md border text-[13px] font-medium transition-all",
               hasNext
-                ? "border-foreground/[0.08] bg-foreground/[0.03] text-foreground/85 hover:bg-foreground/[0.06] hover:border-foreground/25"
+                ? "border-[var(--line)] bg-foreground/[0.03] text-foreground/85 hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)]"
                 : "border-foreground/[0.04] bg-foreground/[0.01] text-foreground/25 cursor-not-allowed",
             ].join(" ")}
           >

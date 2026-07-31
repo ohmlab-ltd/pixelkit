@@ -98,7 +98,7 @@ export function GlassDialog({
         aria-label={title}
         tabIndex={-1}
         onMouseDown={(e) => e.stopPropagation()}
-        className={`pk-glass pk-pop relative w-full ${maxWidth} rounded-2xl outline-none`}
+        className={`pk-glass pk-pop relative w-full ${maxWidth} rounded-xl outline-none`}
       >
         {(title || showClose) && (
           <div className="flex items-center justify-between gap-3 px-5 pb-3 pt-4">
@@ -112,7 +112,7 @@ export function GlassDialog({
                 type="button"
                 onClick={onClose}
                 aria-label="Close"
-                className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-foreground/55 outline-none transition-colors hover:bg-foreground/[0.08] hover:text-foreground focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
+                className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-foreground/55 outline-none transition-colors hover:bg-[var(--surface-hover)] hover:text-foreground focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
               >
                 <svg viewBox="0 0 20 20" className="h-4 w-4" fill="none">
                   <path d="M5 5l10 10M15 5L5 15" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />

@@ -648,13 +648,13 @@ export function AugmentationsCard({
           References / Annotations title rows on the Dataset tab. */}
       <div className="flex items-center justify-between gap-4 mb-2">
         <div className="flex items-center gap-3 flex-wrap">
-          <h2 className="flex items-center gap-3 text-2xl font-medium tracking-tight text-[var(--foreground)]">
-            <span className="pk-accent-bar" style={{ height: "1.4rem" }} aria-hidden />
+          <h2 className="flex items-center gap-3 text-xl font-semibold tracking-tight text-[var(--foreground)]">
+            <span className="pk-accent-bar" aria-hidden />
             Augmentations
           </h2>
           {enabledCount > 0 && (
-            <span className="inline-flex items-center gap-1 rounded-full border bg-orange-500/[0.12] dark:bg-orange-400/15 border-orange-500/40 dark:border-orange-300/25 px-2 py-0.5 text-[10px] font-medium text-orange-800 dark:text-orange-200/90 uppercase tracking-wider">
-              <span className="h-1 w-1 rounded-full bg-orange-600 dark:bg-orange-300/90" aria-hidden />
+            <span className="inline-flex items-center gap-1 rounded-md border border-[var(--line)] px-2 py-0.5 font-mono text-[10px] font-medium uppercase tracking-wider text-[var(--fg-muted)]">
+              <span className="h-1 w-1 rounded-full bg-[var(--accent)]" aria-hidden />
               {enabledCount} on
             </span>
           )}
@@ -665,8 +665,10 @@ export function AugmentationsCard({
             onClick={() => randomiseAll()}
             disabled={updating || !!activeJob}
             className={[
-              "text-xs font-medium uppercase tracking-wider transition-colors inline-flex items-center gap-1.5",
-              updating || activeJob ? "text-foreground/30" : "text-foreground/55 hover:text-foreground",
+              "inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] px-2.5 py-1 text-[13px] font-medium transition-colors",
+              updating || activeJob
+                ? "text-[var(--fg-faint)]"
+                : "text-[var(--fg-soft)] hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] hover:text-foreground",
             ].join(" ")}
             title="Randomise every augmentation setting (skips inputs that need uploaded images, like background and overlay)"
           >
@@ -685,8 +687,8 @@ export function AugmentationsCard({
             onClick={() => void onUpdate()}
             disabled={updating || !!activeJob}
             className={[
-              "text-xs font-medium uppercase tracking-wider transition-colors",
-              updating || activeJob ? "text-foreground/40" : "text-foreground/65 hover:text-foreground",
+              "rounded-md bg-[var(--accent)] px-3 py-1 text-[13px] font-medium text-[var(--accent-contrast)] transition-[filter,opacity]",
+              updating || activeJob ? "opacity-50" : "hover:brightness-105",
             ].join(" ")}
             title={
               state.perImage === "off"
@@ -774,7 +776,7 @@ export function AugmentationsCard({
         </div>
       </div>
       {updateError && (
-        <div className="mb-6 rounded-2xl border border-red-500/35 dark:border-red-400/25 bg-red-500/[0.10] dark:bg-red-500/[0.08] px-4 py-2 text-[11px] text-red-800 dark:text-red-200">
+        <div className="mb-6 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-4 py-2 text-[11px] text-[var(--bad)]">
           {updateError}
         </div>
       )}
@@ -782,7 +784,7 @@ export function AugmentationsCard({
       <div className="space-y-6">
         {/* Augmentations per image, top-level frequency-cap toggle. */}
         <div>
-          <div className="text-xs uppercase tracking-wider text-foreground/45 mb-3">Augmentations per image</div>
+          <div className="pk-micro mb-3">Augmentations per image</div>
           <SegmentedToggle<PerImage>
                   options={[
                     { value: "off", label: "Off" },
@@ -931,7 +933,7 @@ export function AugmentationsCard({
                   frequency={state.domain.environmental.frequency}
                   onFrequency={() => { /* disabled */ }}
                   rightBadge={
-                    <span className="inline-flex items-center gap-1 rounded-full bg-foreground/[0.04] border border-foreground/15 px-2 py-0.5 text-[10px] font-medium text-foreground/60 uppercase tracking-wider">
+                    <span className="inline-flex items-center gap-1 rounded-md border border-[var(--line)] px-2 py-0.5 font-mono text-[10px] font-medium uppercase tracking-wider text-[var(--fg-dim)]">
                       Coming soon
                     </span>
                   }
@@ -1061,7 +1063,7 @@ export function AugmentationsCard({
                   frequency={state.occlusion.objectOverlay.frequency}
                   onFrequency={() => { /* disabled */ }}
                   rightBadge={
-                    <span className="inline-flex items-center gap-1 rounded-full bg-foreground/[0.04] border border-foreground/15 px-2 py-0.5 text-[10px] font-medium text-foreground/60 uppercase tracking-wider">
+                    <span className="inline-flex items-center gap-1 rounded-md border border-[var(--line)] px-2 py-0.5 font-mono text-[10px] font-medium uppercase tracking-wider text-[var(--fg-dim)]">
                       Coming soon
                     </span>
                   }
@@ -1453,7 +1455,7 @@ function CameraSensorBlock({
           centered against the dial stack so a short image + its
           controls sit halfway down the card. */}
       <div className="space-y-3">
-        <div className="rounded-xl border border-foreground/[0.08] bg-black/40 overflow-hidden relative">
+        <div className="rounded-lg border border-[var(--line)] bg-black/40 overflow-hidden relative">
           {previewUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
@@ -1485,7 +1487,7 @@ function CameraSensorBlock({
             type="button"
             onClick={pickRandom}
             disabled={previewSources.length === 0}
-            className="inline-flex items-center gap-1.5 rounded-full border border-foreground/15 bg-foreground/[0.04] px-3 py-1 text-[11px] uppercase tracking-wider text-foreground/70 transition-colors hover:border-foreground/30 hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
+            className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] px-2.5 py-1 text-[13px] text-[var(--fg-soft)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
             title="Pick a new random image"
           >
             <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -1512,7 +1514,7 @@ function CameraSensorBlock({
           </div>
         </div>
         {previewError && (
-          <div className="rounded-xl border border-red-500/35 dark:border-red-400/25 bg-red-500/[0.10] dark:bg-red-500/[0.08] px-3 py-1.5 text-[11px] text-red-800 dark:text-red-200">
+          <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
             {previewError}
           </div>
         )}
@@ -1642,7 +1644,7 @@ function RandomBlockOcclusionBlock({
   return (
     <div className="grid gap-4 md:grid-cols-2 md:items-center w-full">
       <div className="space-y-3">
-        <div className="rounded-xl border border-foreground/[0.08] bg-black/40 overflow-hidden relative">
+        <div className="rounded-lg border border-[var(--line)] bg-black/40 overflow-hidden relative">
           {previewUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
@@ -1674,7 +1676,7 @@ function RandomBlockOcclusionBlock({
             type="button"
             onClick={pickRandom}
             disabled={eligible.length === 0}
-            className="inline-flex items-center gap-1.5 rounded-full border border-foreground/15 bg-foreground/[0.04] px-3 py-1 text-[11px] uppercase tracking-wider text-foreground/70 transition-colors hover:border-foreground/30 hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
+            className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] px-2.5 py-1 text-[13px] text-[var(--fg-soft)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
             title="Pick a new random image"
           >
             <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -1689,7 +1691,7 @@ function RandomBlockOcclusionBlock({
           </span>
         </div>
         {previewError && (
-          <div className="rounded-xl border border-red-500/35 dark:border-red-400/25 bg-red-500/[0.10] dark:bg-red-500/[0.08] px-3 py-1.5 text-[11px] text-red-800 dark:text-red-200">
+          <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
             {previewError}
           </div>
         )}
@@ -1815,7 +1817,7 @@ function SimpleStrengthBlock({
   return (
     <div className="grid gap-4 md:grid-cols-2 md:items-center w-full">
       <div className="space-y-3">
-        <div className="rounded-xl border border-foreground/[0.08] bg-black/40 overflow-hidden relative">
+        <div className="rounded-lg border border-[var(--line)] bg-black/40 overflow-hidden relative">
           {previewUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img src={previewUrl} alt={`${dialLabel} preview`} className="block w-full h-auto" draggable={false} />
@@ -1840,7 +1842,7 @@ function SimpleStrengthBlock({
             type="button"
             onClick={pickRandom}
             disabled={eligible.length === 0}
-            className="inline-flex items-center gap-1.5 rounded-full border border-foreground/15 bg-foreground/[0.04] px-3 py-1 text-[11px] uppercase tracking-wider text-foreground/70 transition-colors hover:border-foreground/30 hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
+            className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] px-2.5 py-1 text-[13px] text-[var(--fg-soft)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
               <polyline points="23 4 23 10 17 10" />
@@ -1854,7 +1856,7 @@ function SimpleStrengthBlock({
           </span>
         </div>
         {previewError && (
-          <div className="rounded-xl border border-red-500/35 dark:border-red-400/25 bg-red-500/[0.10] dark:bg-red-500/[0.08] px-3 py-1.5 text-[11px] text-red-800 dark:text-red-200">
+          <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
             {previewError}
           </div>
         )}
@@ -1954,7 +1956,7 @@ function PerspectiveWarpBlock({
   return (
     <div className="grid gap-4 md:grid-cols-2 md:items-center w-full">
       <div className="space-y-3">
-        <div className="rounded-xl border border-foreground/[0.08] bg-black/40 overflow-hidden relative">
+        <div className="rounded-lg border border-[var(--line)] bg-black/40 overflow-hidden relative">
           {previewUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img src={previewUrl} alt="Perspective warp preview" className="block w-full h-auto" draggable={false} />
@@ -1979,7 +1981,7 @@ function PerspectiveWarpBlock({
             type="button"
             onClick={pickRandom}
             disabled={eligible.length === 0}
-            className="inline-flex items-center gap-1.5 rounded-full border border-foreground/15 bg-foreground/[0.04] px-3 py-1 text-[11px] uppercase tracking-wider text-foreground/70 transition-colors hover:border-foreground/30 hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
+            className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] px-2.5 py-1 text-[13px] text-[var(--fg-soft)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
               <polyline points="23 4 23 10 17 10" />
@@ -1993,7 +1995,7 @@ function PerspectiveWarpBlock({
           </span>
         </div>
         {previewError && (
-          <div className="rounded-xl border border-red-500/35 dark:border-red-400/25 bg-red-500/[0.10] dark:bg-red-500/[0.08] px-3 py-1.5 text-[11px] text-red-800 dark:text-red-200">
+          <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
             {previewError}
           </div>
         )}
@@ -2110,7 +2112,7 @@ function ScaleRotationBlock({
   return (
     <div className="grid gap-4 md:grid-cols-2 md:items-center w-full">
       <div className="space-y-3">
-        <div className="rounded-xl border border-foreground/[0.08] bg-black/40 overflow-hidden relative">
+        <div className="rounded-lg border border-[var(--line)] bg-black/40 overflow-hidden relative">
           {previewUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img src={previewUrl} alt="Scale & rotation preview" className="block w-full h-auto" draggable={false} />
@@ -2135,7 +2137,7 @@ function ScaleRotationBlock({
             type="button"
             onClick={pickRandom}
             disabled={eligible.length === 0}
-            className="inline-flex items-center gap-1.5 rounded-full border border-foreground/15 bg-foreground/[0.04] px-3 py-1 text-[11px] uppercase tracking-wider text-foreground/70 transition-colors hover:border-foreground/30 hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
+            className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] px-2.5 py-1 text-[13px] text-[var(--fg-soft)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
               <polyline points="23 4 23 10 17 10" />
@@ -2149,7 +2151,7 @@ function ScaleRotationBlock({
           </span>
         </div>
         {previewError && (
-          <div className="rounded-xl border border-red-500/35 dark:border-red-400/25 bg-red-500/[0.10] dark:bg-red-500/[0.08] px-3 py-1.5 text-[11px] text-red-800 dark:text-red-200">
+          <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
             {previewError}
           </div>
         )}
@@ -2425,7 +2427,7 @@ function BackgroundRandomisationBlock({
       />
 
       <div className="space-y-3">
-        <div className="rounded-xl border border-foreground/[0.08] bg-black/40 overflow-hidden relative">
+        <div className="rounded-lg border border-[var(--line)] bg-black/40 overflow-hidden relative">
           {backgrounds.length === 0 ? (
             <div className="grid place-items-center py-16 px-4 text-center">
               <span className="text-xs uppercase tracking-wider text-foreground/35">
@@ -2456,7 +2458,7 @@ function BackgroundRandomisationBlock({
             type="button"
             onClick={pickRandom}
             disabled={eligible.length === 0 || backgrounds.length === 0}
-            className="inline-flex items-center gap-1.5 rounded-full border border-foreground/15 bg-foreground/[0.04] px-3 py-1 text-[11px] uppercase tracking-wider text-foreground/70 transition-colors hover:border-foreground/30 hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
+            className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] px-2.5 py-1 text-[13px] text-[var(--fg-soft)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
               <polyline points="23 4 23 10 17 10" />
@@ -2470,7 +2472,7 @@ function BackgroundRandomisationBlock({
           </span>
         </div>
         {previewError && (
-          <div className="rounded-xl border border-red-500/35 dark:border-red-400/25 bg-red-500/[0.10] dark:bg-red-500/[0.08] px-3 py-1.5 text-[11px] text-red-800 dark:text-red-200">
+          <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
             {previewError}
           </div>
         )}
@@ -2495,7 +2497,7 @@ function BackgroundRandomisationBlock({
                   type="button"
                   onClick={() => void removeAt(idx)}
                   aria-label="Remove background"
-                  className="absolute top-1 right-1 h-5 w-5 grid place-items-center rounded-full bg-black/65 text-foreground/75 hover:bg-black/85 hover:text-foreground text-xs"
+                  className="absolute top-1 right-1 h-5 w-5 grid place-items-center rounded-md bg-black/65 text-white/80 hover:bg-black/85 hover:text-white text-xs"
                 >
                   ×
                 </button>
@@ -2514,7 +2516,7 @@ function BackgroundRandomisationBlock({
             onDragLeave={() => setDragOver(false)}
             onDrop={onDrop}
             className={[
-              "rounded-xl border border-dashed bg-foreground/[0.02] px-4 text-center text-sm transition-colors cursor-pointer outline-none",
+              "rounded-lg border border-dashed bg-[var(--panel)] px-4 text-center text-sm transition-colors cursor-pointer outline-none",
               // Empty state: stretch tall so the drop zone matches
               // the height of the "Upload a background to start"
               // preview placeholder on the left. Once at least one
@@ -2524,8 +2526,8 @@ function BackgroundRandomisationBlock({
                 ? "py-16 grid place-items-center"
                 : "py-6",
               dragOver
-                ? "border-foreground/45 bg-foreground/[0.05] text-[var(--foreground)]"
-                : "border-foreground/15 text-foreground/65 hover:border-foreground/30 hover:text-foreground",
+                ? "border-[var(--accent)] bg-[var(--surface-hover)] text-[var(--foreground)]"
+                : "border-[var(--line-strong)] text-[var(--fg-muted)] hover:border-foreground/35 hover:text-foreground",
               uploading ? "opacity-60 cursor-wait" : "",
             ].join(" ")}
           >
@@ -2542,7 +2544,7 @@ function BackgroundRandomisationBlock({
           </div>
         )}
         {uploadError && (
-          <div className="rounded-xl border border-red-500/35 dark:border-red-400/25 bg-red-500/[0.10] dark:bg-red-500/[0.08] px-3 py-1.5 text-[11px] text-red-800 dark:text-red-200">
+          <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
             {uploadError}
           </div>
         )}
@@ -2781,7 +2783,7 @@ function ObjectOverlayBlock({
 
       {/* Preview pane, composite of selected dataset image + overlays. */}
       <div className="space-y-3">
-        <div className="rounded-xl border border-foreground/[0.08] bg-black/40 overflow-hidden relative">
+        <div className="rounded-lg border border-[var(--line)] bg-black/40 overflow-hidden relative">
           {overlays.length === 0 ? (
             <div className="grid place-items-center py-16 px-4 text-center">
               <span className="text-xs uppercase tracking-wider text-foreground/35">
@@ -2819,7 +2821,7 @@ function ObjectOverlayBlock({
             type="button"
             onClick={pickRandom}
             disabled={eligible.length === 0 || overlays.length === 0}
-            className="inline-flex items-center gap-1.5 rounded-full border border-foreground/15 bg-foreground/[0.04] px-3 py-1 text-[11px] uppercase tracking-wider text-foreground/70 transition-colors hover:border-foreground/30 hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
+            className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] px-2.5 py-1 text-[13px] text-[var(--fg-soft)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
               <polyline points="23 4 23 10 17 10" />
@@ -2833,7 +2835,7 @@ function ObjectOverlayBlock({
           </span>
         </div>
         {previewError && (
-          <div className="rounded-xl border border-red-500/35 dark:border-red-400/25 bg-red-500/[0.10] dark:bg-red-500/[0.08] px-3 py-1.5 text-[11px] text-red-800 dark:text-red-200">
+          <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
             {previewError}
           </div>
         )}
@@ -2844,7 +2846,7 @@ function ObjectOverlayBlock({
         {overlays.map((entry, idx) => (
           <div
             key={entry.id}
-            className="rounded-xl border border-foreground/[0.07] bg-foreground/[0.02] px-3 py-2 flex items-center gap-3"
+            className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-2 flex items-center gap-3"
           >
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
@@ -2853,7 +2855,7 @@ function ObjectOverlayBlock({
               className="h-10 w-10 rounded-md object-contain bg-black/40"
             />
             <div className="min-w-0 flex-1">
-              <div className="text-xs uppercase tracking-wider text-foreground/55">
+              <div className="pk-micro">
                 Overlay {idx + 1}
               </div>
               <div className="text-sm text-foreground/90 truncate">{entry.label}</div>
@@ -2868,7 +2870,7 @@ function ObjectOverlayBlock({
             <button
               type="button"
               onClick={() => onOverlays(overlays.filter((_, i) => i !== idx))}
-              className="text-[10px] uppercase tracking-wider text-foreground/40 hover:text-rose-300"
+              className="text-[10px] uppercase tracking-wider text-foreground/40 hover:text-[var(--bad)]"
             >
               Remove
             </button>
@@ -2885,10 +2887,10 @@ function ObjectOverlayBlock({
             onDragLeave={() => setDragOver(false)}
             onDrop={onDrop}
             className={[
-              "rounded-xl border border-dashed bg-foreground/[0.02] px-4 py-6 text-center text-sm transition-colors cursor-pointer outline-none",
+              "rounded-lg border border-dashed bg-[var(--panel)] px-4 py-6 text-center text-sm transition-colors cursor-pointer outline-none",
               dragOver
-                ? "border-foreground/45 bg-foreground/[0.05] text-[var(--foreground)]"
-                : "border-foreground/15 text-foreground/65 hover:border-foreground/30 hover:text-foreground",
+                ? "border-[var(--accent)] bg-[var(--surface-hover)] text-[var(--foreground)]"
+                : "border-[var(--line-strong)] text-[var(--fg-muted)] hover:border-foreground/35 hover:text-foreground",
             ].join(" ")}
           >
             {overlays.length === 0 ? "+ Upload overlay image" : "+ Add another overlay"}
@@ -2914,13 +2916,13 @@ function ObjectOverlayBlock({
         createPortal(
           <div
             className="fixed inset-0 z-[700] grid place-items-center px-4"
-            style={{ background: "rgb(var(--shadow-rgb) / 0.7)", backdropFilter: "blur(8px)" }}
+            style={{ background: "var(--backdrop)", backdropFilter: "blur(8px)" }}
             onClick={() => { if (!segmenting) setPendingFile(null); }}
             role="dialog"
             aria-modal="true"
           >
             <div
-              className="w-full max-w-md rounded-2xl border border-foreground/12 bg-[var(--background)] p-5 grid gap-4"
+              className="w-full max-w-md rounded-lg pk-glass p-5 grid gap-4"
               onClick={(e) => e.stopPropagation()}
               style={{ animation: "objectOverlayPopIn 220ms cubic-bezier(0.2, 0.7, 0.2, 1) both" }}
             >
@@ -2934,12 +2936,12 @@ function ObjectOverlayBlock({
                   aria-label="Close"
                 >×</button>
               </div>
-              <div className="rounded-xl overflow-hidden bg-black/40 max-h-[50vh] grid place-items-center">
+              <div className="rounded-lg overflow-hidden bg-black/40 max-h-[50vh] grid place-items-center">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={pendingPreview} alt="" className="block max-h-[50vh] w-auto h-auto" />
               </div>
               <div className="grid gap-1.5">
-                <label htmlFor="object-overlay-label" className="text-xs uppercase tracking-wider text-foreground/45">
+                <label htmlFor="object-overlay-label" className="pk-micro">
                   What object should PixelKit cut out?
                 </label>
                 <input
@@ -2954,11 +2956,11 @@ function ObjectOverlayBlock({
                     }
                   }}
                   placeholder="e.g. cat, red sports car, traffic cone"
-                  className="rounded-lg border border-foreground/10 bg-transparent px-3 py-2 text-sm text-[var(--foreground)] focus:outline-none focus:border-foreground/30"
+                  className="rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] focus:outline-none focus:border-[var(--line-strong)]"
                 />
               </div>
               {segError && (
-                <div className="rounded-xl border border-red-500/35 dark:border-red-400/25 bg-red-500/[0.10] dark:bg-red-500/[0.08] px-3 py-1.5 text-[11px] text-red-800 dark:text-red-200">
+                <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
                   {segError}
                 </div>
               )}
@@ -2967,13 +2969,13 @@ function ObjectOverlayBlock({
                   type="button"
                   onClick={() => setPendingFile(null)}
                   disabled={segmenting}
-                  className="rounded-full border border-foreground/15 px-3.5 py-1.5 text-xs font-medium text-foreground/65 hover:border-foreground/30 hover:text-foreground disabled:opacity-40"
+                  className="rounded-md border border-[var(--line)] px-3.5 py-1.5 text-[13px] font-medium text-[var(--fg-soft)] hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] hover:text-foreground disabled:opacity-40"
                 >Cancel</button>
                 <button
                   type="button"
                   onClick={() => void submitSegment()}
                   disabled={segmenting || !labelDraft.trim()}
-                  className="rounded-full bg-foreground text-background px-4 py-1.5 text-xs font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="rounded-md bg-[var(--accent)] text-[var(--accent-contrast)] px-4 py-1.5 text-[13px] font-medium hover:brightness-105 disabled:opacity-40 disabled:cursor-not-allowed"
                 >{segmenting ? "Segmenting…" : "Segment"}</button>
               </div>
               <style>{`
@@ -3042,13 +3044,13 @@ function BigDial({
   const decimals = step < 1 ? Math.min(2, Math.ceil(-Math.log10(step))) : 0;
   return (
     <div className={[
-      "rounded-xl px-4 py-3 transition-colors",
+      "rounded-lg px-4 py-3 transition-colors",
       active ? "bg-foreground/[0.04]" : "bg-foreground/[0.02]",
     ].join(" ")}>
       <div className="flex items-center justify-between mb-1">
         <span className={[
-          "text-xs uppercase tracking-wider transition-colors",
-          active ? "text-foreground/85" : "text-foreground/55",
+          "font-mono text-[11px] uppercase tracking-[0.12em] transition-colors",
+          active ? "text-foreground/85" : "text-[var(--fg-dim)]",
         ].join(" ")}>{label}</span>
         <span className="text-sm text-foreground/85 tabular-nums font-mono">{draft.toFixed(decimals)}{suffix}</span>
       </div>
@@ -3069,7 +3071,7 @@ function BigDial({
         onPointerCancel={() => { draggingRef.current = false; setDraft(value); }}
         onKeyUp={(e) => commit((e.target as HTMLInputElement).value)}
         onBlur={(e) => { draggingRef.current = false; commit(e.target.value); }}
-        className="w-full accent-orange-400"
+        className="w-full accent-[var(--accent)]"
         aria-label={label}
       />
     </div>
@@ -3118,7 +3120,7 @@ function CategoryBlock({
   return (
     <div
       className={[
-        "rounded-2xl transition-colors",
+        "rounded-lg border border-[var(--line)] transition-colors",
         enabled ? "bg-foreground/[0.04]" : "bg-foreground/[0.02]",
       ].join(" ")}
     >
@@ -3199,7 +3201,7 @@ function SubAugRow({
     <div className={[
       // Borderless sub-row, uses background tint against the slightly
       // darker parent CategoryBlock for hierarchy without chrome.
-      "rounded-xl bg-[var(--background)]/55 transition-colors",
+      "rounded-lg bg-[var(--background)]/55 transition-colors",
       isComingSoon ? "opacity-70" : "",
     ].join(" ")}>
       <div className="flex items-start gap-3 px-4 py-3">
@@ -3256,7 +3258,7 @@ function NestedToggleRow({
   onFrequency: (f: Frequency) => void;
 }) {
   return (
-    <div className="flex items-center gap-3 px-3 py-2 rounded-lg border border-foreground/[0.04] bg-black/20">
+    <div className="flex items-center gap-3 px-3 py-2 rounded-lg border border-[var(--line)] bg-[var(--panel)]">
       <Checkbox checked={enabled} onChange={() => onToggle(!enabled)} ariaLabel={`${label} enabled`} />
       <span className="text-sm text-foreground/85 flex-1">{label}</span>
       {enabled && <FrequencyToggle value={frequency} onChange={onFrequency} compact />}
@@ -3281,7 +3283,7 @@ function FrequencyToggle({
   ];
   return (
     <div className={[
-      "inline-flex rounded-full border border-foreground/10 bg-foreground/[0.04] backdrop-blur-md",
+      "inline-flex rounded-md border border-[var(--line)] bg-[var(--surface)]",
       compact ? "p-0.5" : "p-1",
     ].join(" ")}>
       {items.map((it) => {
@@ -3292,7 +3294,7 @@ function FrequencyToggle({
             type="button"
             onClick={(e) => { e.stopPropagation(); onChange(it.value); }}
             className={[
-              "rounded-full px-2.5 py-0.5 text-[11px] font-medium uppercase tracking-wider transition-all",
+              "rounded-[4px] px-2.5 py-0.5 text-[11px] font-medium uppercase tracking-wider transition-colors",
               active ? "bg-foreground text-background" : "text-foreground/55 hover:text-foreground",
             ].join(" ")}
           >
@@ -3316,7 +3318,7 @@ function SegmentedToggle<T extends string>({
   onChange: (v: T) => void;
 }) {
   return (
-    <div className="inline-flex rounded-full border border-foreground/10 bg-foreground/[0.04] p-1 backdrop-blur-md">
+    <div className="inline-flex rounded-md border border-[var(--line)] bg-[var(--surface)] p-1">
       {options.map((opt) => {
         const active = value === opt.value;
         return (
@@ -3325,7 +3327,7 @@ function SegmentedToggle<T extends string>({
             type="button"
             onClick={() => onChange(opt.value)}
             className={[
-              "rounded-full px-4 py-1 text-[12px] font-medium uppercase tracking-wider transition-all",
+              "rounded-[4px] px-4 py-1 text-[12px] font-medium uppercase tracking-wider transition-colors",
               active ? "bg-foreground text-background" : "text-foreground/55 hover:text-foreground",
             ].join(" ")}
           >
@@ -3356,7 +3358,7 @@ function Checkbox({
       className={[
         "h-5 w-5 rounded-md border grid place-items-center transition-colors shrink-0",
         checked
-          ? "bg-orange-400 border-orange-400 text-black"
+          ? "bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-contrast)]"
           : "border-foreground/20 bg-foreground/[0.02] text-transparent hover:border-foreground/40",
       ].join(" ")}
     >
@@ -3389,7 +3391,7 @@ function DialInput({
 }) {
   return (
     <div className="flex items-center gap-3 w-full">
-      <span className="text-xs text-foreground/55 uppercase tracking-wider w-20 shrink-0">{label}</span>
+      <span className="font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--fg-dim)] w-20 shrink-0">{label}</span>
       <input
         type="range"
         min={min}
@@ -3397,7 +3399,7 @@ function DialInput({
         step={step}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="flex-1 accent-orange-400"
+        className="flex-1 accent-[var(--accent)]"
       />
       <span className="text-sm text-[var(--foreground)] tabular-nums w-8 text-right">{value}</span>
     </div>
@@ -3428,7 +3430,7 @@ function DualSlider({
   return (
     <div className="w-full">
       <div className="flex items-center justify-between mb-1.5">
-        <span className="text-xs text-foreground/55 uppercase tracking-wider">{label}</span>
+        <span className="font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--fg-dim)]">{label}</span>
         <span className="text-[11px] text-foreground/55 tabular-nums">
           {format(a)} <span className="text-foreground/30">→</span> {format(b)}
         </span>
@@ -3470,9 +3472,9 @@ function DualSlider({
           height: 16px;
           width: 16px;
           border-radius: 9999px;
-          background: #fb923c;
-          border: 2px solid #0e0e10;
-          box-shadow: 0 0 0 1px rgba(251,146,60,0.4);
+          background: var(--accent);
+          border: 2px solid var(--background);
+          box-shadow: 0 0 0 1px var(--accent-dim);
           cursor: pointer;
         }
         .dual-range::-moz-range-thumb {
@@ -3480,9 +3482,9 @@ function DualSlider({
           height: 16px;
           width: 16px;
           border-radius: 9999px;
-          background: #fb923c;
-          border: 2px solid #0e0e10;
-          box-shadow: 0 0 0 1px rgba(251,146,60,0.4);
+          background: var(--accent);
+          border: 2px solid var(--background);
+          box-shadow: 0 0 0 1px var(--accent-dim);
           cursor: pointer;
         }
       `}</style>
@@ -3549,7 +3551,7 @@ function ImageUploadGrid({
               type="button"
               onClick={() => fileRefs.current[i]?.click()}
               className={[
-                "absolute inset-0 rounded-xl border-2 grid place-items-center transition-colors overflow-hidden",
+                "absolute inset-0 rounded-lg border-2 grid place-items-center transition-colors overflow-hidden",
                 img
                   ? "border-foreground/15 bg-black/40"
                   : "border-dashed border-foreground/15 bg-foreground/[0.02] hover:border-foreground/30 hover:bg-foreground/[0.04]",
@@ -3570,7 +3572,7 @@ function ImageUploadGrid({
                 type="button"
                 onClick={() => setAt(i, null)}
                 aria-label="Remove image"
-                className="absolute top-1 right-1 h-5 w-5 grid place-items-center rounded-full bg-black/65 text-foreground/75 hover:bg-black/85 hover:text-foreground text-xs"
+                className="absolute top-1 right-1 h-5 w-5 grid place-items-center rounded-md bg-black/65 text-white/80 hover:bg-black/85 hover:text-white text-xs"
               >
                 ×
               </button>

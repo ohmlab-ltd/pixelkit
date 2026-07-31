@@ -260,7 +260,7 @@ export function ExplorerPane({
     <div className="flex h-full min-h-0 flex-col">
       {/* Pane header: title + New dataset + Refresh. */}
       <div className="flex h-8 shrink-0 items-center justify-between pl-4 pr-2">
-        <span className="text-[11px] font-medium uppercase tracking-wide text-foreground/55 select-none">
+        <span className="pk-micro select-none">
           Explorer
         </span>
         <span className="flex items-center">
@@ -315,7 +315,7 @@ export function ExplorerPane({
                   >
                     <Chevron open={open} />
                     <span className="min-w-0 flex-1 truncate">{node.name}</span>
-                    <span className="pr-1 text-[11px] tabular-nums text-foreground/35">
+                    <span className="pr-1 font-mono text-[11px] tabular-nums text-foreground/35">
                       {node.datasets.length}
                     </span>
                   </button>
@@ -399,7 +399,7 @@ function DatasetNode({
             className={nameCls}
           >
             <span className="min-w-0 flex-1 truncate">{ds.name}</span>
-            <span className="text-[11px] tabular-nums text-foreground/35">
+            <span className="font-mono text-[11px] tabular-nums text-foreground/35">
               {ds.n_images}
             </span>
           </button>
@@ -412,7 +412,7 @@ function DatasetNode({
           className={[nameCls, "w-full", indent ? "pl-8" : "pl-[1.625rem]"].join(" ")}
         >
           <span className="min-w-0 flex-1 truncate">{ds.name}</span>
-          <span className="text-[11px] tabular-nums text-foreground/35">
+          <span className="font-mono text-[11px] tabular-nums text-foreground/35">
             {ds.n_images}
           </span>
         </button>
@@ -440,7 +440,7 @@ function DatasetNode({
             >
               <span className="min-w-0 flex-1 truncate">{s.label}</span>
               {typeof s.count === "number" && !s.disabled && (
-                <span className="shrink-0 text-[11px] tabular-nums text-foreground/35">
+                <span className="shrink-0 font-mono text-[11px] tabular-nums text-foreground/35">
                   {s.count}
                 </span>
               )}

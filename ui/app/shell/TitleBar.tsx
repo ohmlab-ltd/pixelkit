@@ -38,9 +38,10 @@ export function TitleBar({ title }: { title?: string }) {
         PixelKit
       </span>
       {/* Centre slot: the open dataset/project name. Absolutely centred
-          so it doesn't drift when the left padding changes. */}
+          so it doesn't drift when the left padding changes. Mono
+          micro-label voice — the operational chrome idiom. */}
       {title ? (
-        <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 max-w-[40%] truncate text-[13px] text-foreground/60 leading-none">
+        <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 max-w-[40%] truncate font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--fg-dim)] leading-none">
           {title}
         </span>
       ) : null}

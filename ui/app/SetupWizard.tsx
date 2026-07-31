@@ -74,10 +74,10 @@ export function SetupWizard({ onClose }: { onClose: () => void }) {
     // Outer layer scrolls; the inner grid centres the card when it fits and
     // top-aligns it when the window is short (e.g. the 700px Electron
     // minimum) so no section is clipped off-screen.
-    <div className="fixed inset-0 z-[500] overflow-y-auto bg-black/40 backdrop-blur-sm">
+    <div className="pk-backdrop fixed inset-0 z-[500] overflow-y-auto">
       <div className="grid min-h-full place-items-center p-4">
-      <div className="w-full max-w-xl rounded-3xl border border-foreground/10 bg-[var(--background)] p-6 shadow-2xl">
-        <h2 className="text-xl font-medium tracking-tight">Set up PixelKit</h2>
+      <div className="pk-glass w-full max-w-xl rounded-lg p-6">
+        <h2 className="text-lg font-semibold tracking-tight">Set up PixelKit</h2>
         <p className="mt-2 text-sm text-foreground/60">
           PixelKit labels images locally with SAM&nbsp;3. The weights download once into your
           workspace{s ? ` (${s.freeDiskGb} GB free)` : ""}. You can skip this and annotate
@@ -85,8 +85,8 @@ export function SetupWizard({ onClose }: { onClose: () => void }) {
         </p>
 
         {needsToken && (
-          <div className="mt-6 rounded-2xl border border-foreground/10 p-5">
-            <h3 className="text-sm font-medium">1 · Hugging Face access</h3>
+          <div className="mt-6 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-5">
+            <h3 className="pk-micro">1 · Hugging Face access</h3>
             <p className="mt-1.5 text-[13px] leading-relaxed text-foreground/60">
               SAM&nbsp;3 is license-gated by Meta.{" "}
               <a
@@ -114,24 +114,24 @@ export function SetupWizard({ onClose }: { onClose: () => void }) {
                 value={token}
                 onChange={(e) => setToken(e.target.value)}
                 placeholder="hf_..."
-                className="flex-1 rounded-full border border-foreground/15 bg-transparent px-4 py-2 text-sm outline-none focus:border-foreground/40"
+                className="flex-1 rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-sm outline-none focus:border-[var(--line-strong)]"
               />
               <button
                 onClick={submitToken}
                 disabled={tokenBusy || !token.trim()}
-                className="rounded-full bg-foreground px-4 py-2 text-sm text-background disabled:opacity-40"
+                className="rounded-md bg-[var(--accent)] px-4 py-2 text-[13px] text-[var(--accent-contrast)] hover:brightness-105 disabled:opacity-40"
               >
                 {tokenBusy ? "Checking…" : "Validate"}
               </button>
             </div>
           </div>
         )}
-        {tokenError && <p className="mt-3 text-[13px] text-red-500">{tokenError}</p>}
-        {tokenOk && <p className="mt-3 text-[13px] text-emerald-500">{tokenOk}</p>}
+        {tokenError && <p className="mt-3 text-[13px] text-[var(--bad)]">{tokenError}</p>}
+        {tokenOk && <p className="mt-3 text-[13px] text-[var(--ok)]">{tokenOk}</p>}
 
         {s && (!needsToken || s.hfTokenConfigured) && (
-          <div className="mt-6 rounded-2xl border border-foreground/10 p-5">
-            <h3 className="text-sm font-medium">
+          <div className="mt-6 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-5">
+            <h3 className="pk-micro">
               {needsToken ? "2 · " : ""}Model weights
             </h3>
             <p className="mt-1.5 text-[13px] leading-relaxed text-foreground/60">
@@ -155,12 +155,12 @@ export function SetupWizard({ onClose }: { onClose: () => void }) {
         <div className="mt-6 flex items-center justify-between">
           <button
             onClick={onClose}
-            className="text-sm text-foreground/50 hover:text-foreground transition-colors"
+            className="rounded-md border border-[var(--line)] px-3 py-1.5 text-[13px] text-[var(--fg-muted)] hover:text-foreground hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] transition-colors"
           >
             {allReady ? "Close" : "Skip for now"}
           </button>
           {allReady && (
-            <span className="text-sm text-emerald-500">All set — labelling is live.</span>
+            <span className="text-sm text-[var(--ok)]">All set — labelling is live.</span>
           )}
         </div>
       </div>

@@ -64,7 +64,7 @@ export function GuideView() {
     <main className="min-h-full mx-auto max-w-6xl px-6 pt-8 pb-16">
       <nav
         aria-label="Guide sections"
-        className="flex flex-wrap gap-1.5 mb-8 pb-2 border-b border-foreground/[0.06]"
+        className="flex flex-wrap gap-1.5 mb-8 pb-2 border-b border-[var(--line-soft)]"
       >
         {GUIDE_SECTIONS.map((s) => {
           const isActive = s.key === section;
@@ -73,10 +73,10 @@ export function GuideView() {
               key={s.key}
               onClick={() => go(s.key)}
               className={[
-                "px-3.5 h-9 inline-flex items-center rounded-full text-xs uppercase tracking-wider transition-colors duration-[90ms]",
+                "px-3 h-8 inline-flex items-center rounded-md border font-mono text-[11px] uppercase tracking-[0.12em] transition-colors duration-[90ms]",
                 isActive
-                  ? "bg-foreground/[0.08] text-[var(--foreground)] font-medium"
-                  : "text-foreground/55 hover:text-foreground/90 hover:bg-foreground/[0.04]",
+                  ? "border-[var(--accent)] bg-[var(--accent-dim)] text-[var(--foreground)] font-medium"
+                  : "border-[var(--line)] text-[var(--fg-muted)] hover:text-[var(--foreground)] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)]",
               ].join(" ")}
             >
               {s.title}
@@ -115,10 +115,10 @@ function GuideHeader({
 }) {
   return (
     <header>
-      <div className="text-[11px] uppercase tracking-[0.24em] font-mono text-[var(--muted)] mb-2">
+      <div className="pk-micro mb-2">
         {eyebrow}
       </div>
-      <h1 className="text-5xl md:text-6xl font-medium tracking-tight text-[var(--foreground)]">
+      <h1 className="pk-page-title text-2xl md:text-3xl text-[var(--foreground)]">
         {title}
       </h1>
       <p className="mt-4 text-base text-[var(--muted)] leading-relaxed max-w-2xl">
@@ -139,8 +139,8 @@ function GuideSection({
 }) {
   return (
     <section className="scroll-mt-24">
-      <h2 className="flex items-center gap-3 text-2xl font-medium tracking-tight">
-        <span className="pk-accent-bar" style={{ height: "1.3rem" }} aria-hidden />
+      <h2 className="flex items-center gap-3 text-lg font-semibold tracking-tight">
+        <span className="pk-accent-bar" style={{ height: "1.05rem" }} aria-hidden />
         <span className="text-[var(--muted)] font-mono tabular-nums">
           {String(n).padStart(2, "0")}
         </span>
@@ -174,9 +174,9 @@ function Steps({ items }: { items: [string, string][] }) {
       {items.map(([title, body], i) => (
         <li
           key={i}
-          className="flex items-start gap-3 rounded-xl border border-foreground/[0.08] bg-foreground/[0.02] px-4 py-3"
+          className="flex items-start gap-3 rounded-md border border-[var(--line)] bg-[var(--panel)] px-4 py-3"
         >
-          <span className="shrink-0 grid place-items-center h-6 w-6 rounded-full bg-foreground/[0.08] text-[10px] font-mono text-[var(--foreground)] tabular-nums mt-0.5">
+          <span className="shrink-0 grid place-items-center h-6 w-6 rounded-full bg-[var(--surface-hover)] text-[10px] font-mono text-[var(--foreground)] tabular-nums mt-0.5">
             {i + 1}
           </span>
           <div className="min-w-0">
@@ -195,13 +195,13 @@ function Steps({ items }: { items: [string, string][] }) {
 
 function ShortcutTable({ rows }: { rows: [string, string][] }) {
   return (
-    <div className="rounded-xl border border-foreground/[0.08] overflow-hidden">
+    <div className="rounded-md border border-[var(--line)] overflow-hidden">
       <table className="w-full text-sm">
-        <tbody className="divide-y divide-foreground/[0.06]">
+        <tbody className="divide-y divide-[var(--line-soft)]">
           {rows.map(([key, action], i) => (
             <tr key={i}>
               <td className="px-4 py-2.5 w-32">
-                <kbd className="inline-block rounded border border-foreground/15 bg-foreground/[0.04] px-1.5 py-0.5 font-mono text-[11px] text-[var(--foreground)]">
+                <kbd className="inline-block rounded border border-[var(--line)] bg-[var(--panel)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--foreground)]">
                   {key}
                 </kbd>
               </td>
@@ -223,10 +223,10 @@ function Callout({
 }) {
   const classes =
     tone === "warn"
-      ? "border-amber-500/40 bg-amber-500/[0.08]"
-      : "border-foreground/15 bg-foreground/[0.03]";
+      ? "border-[var(--line)] border-l-2 border-l-[var(--warn)] bg-[var(--panel)]"
+      : "border-[var(--line)] bg-[var(--panel)]";
   return (
-    <div className={`rounded-xl border px-4 py-3 text-[14px] leading-relaxed ${classes}`}>
+    <div className={`rounded-md border px-4 py-3 text-[14px] leading-relaxed ${classes}`}>
       {children}
     </div>
   );
@@ -244,10 +244,10 @@ function NextUp({
   return (
     <button
       onClick={() => go(target.key)}
-      className="mt-4 w-full text-left inline-flex items-center justify-between gap-4 rounded-2xl border border-foreground/[0.08] bg-foreground/[0.02] hover:bg-orange-500/[0.04] hover:border-orange-400/35 transition-colors px-5 py-4 group"
+      className="mt-4 w-full text-left inline-flex items-center justify-between gap-4 rounded-lg border border-[var(--line)] bg-[var(--panel)] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] transition-colors px-5 py-4 group"
     >
       <div className="min-w-0">
-        <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-[var(--muted)] mb-1">
+        <div className="pk-micro mb-1">
           Next up
         </div>
         <div className="text-base font-medium text-[var(--foreground)]">{target.title}</div>
@@ -545,13 +545,13 @@ function LLMPromptBox() {
   };
 
   return (
-    <div className="rounded-2xl border border-foreground/[0.08] bg-foreground/[0.02] overflow-hidden">
+    <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] overflow-hidden">
       <div className="flex items-start justify-between gap-3 px-5 pt-4 pb-3">
         <div className="min-w-0">
-          <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-[var(--muted)] mb-1">
+          <div className="pk-micro mb-1">
             Ask any LLM about PixelKit
           </div>
-          <h3 className="text-lg font-medium tracking-tight text-[var(--foreground)]">
+          <h3 className="text-base font-semibold tracking-tight text-[var(--foreground)]">
             Copy this prompt into ChatGPT, Claude, Gemini, or your model of choice.
           </h3>
           <p className="mt-1 text-[13px] text-[var(--muted)] leading-relaxed">
@@ -562,10 +562,10 @@ function LLMPromptBox() {
           type="button"
           onClick={copy}
           className={[
-            "shrink-0 inline-flex items-center gap-2 rounded-full px-4 py-2 text-[13px] font-medium transition-colors",
+            "shrink-0 inline-flex items-center gap-2 rounded-md border px-4 py-2 text-[13px] font-medium transition-colors",
             copied
-              ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-200"
-              : "bg-foreground text-background hover:opacity-90",
+              ? "border-[var(--line)] bg-[var(--panel)] text-[var(--ok)]"
+              : "border-transparent bg-[var(--accent)] text-[var(--accent-contrast)] hover:brightness-105",
           ].join(" ")}
           aria-live="polite"
         >
@@ -593,7 +593,7 @@ function LLMPromptBox() {
         value={LLM_PROMPT}
         onFocus={(e) => e.currentTarget.select()}
         spellCheck={false}
-        className="block w-full max-h-72 resize-none bg-foreground/[0.03] border-t border-foreground/[0.06] px-5 py-4 font-mono text-[12px] leading-relaxed text-[var(--foreground)]/85 focus:outline-none focus:bg-foreground/[0.05]"
+        className="block w-full max-h-72 resize-none bg-[var(--panel)] border-t border-[var(--line-soft)] px-5 py-4 font-mono text-[12px] leading-relaxed text-[var(--foreground)]/85 focus:outline-none focus:bg-[var(--surface-hover)]"
         rows={10}
       />
     </div>
@@ -608,10 +608,10 @@ function Figure({
   children: ReactNode;
 }) {
   return (
-    <figure className="rounded-2xl border border-foreground/[0.08] bg-foreground/[0.02] overflow-hidden">
+    <figure className="rounded-lg border border-[var(--line)] bg-[var(--panel)] overflow-hidden">
       <div className="p-5 sm:p-6">{children}</div>
       {caption && (
-        <figcaption className="border-t border-foreground/[0.06] px-5 py-2.5 text-[12px] text-[var(--muted)] leading-relaxed">
+        <figcaption className="border-t border-[var(--line-soft)] px-5 py-2.5 text-[12px] text-[var(--muted)] leading-relaxed">
           {caption}
         </figcaption>
       )}
@@ -634,7 +634,7 @@ function FlowDiagram() {
       {steps.map((s, i) => (
         <div key={s.label} className="flex items-center gap-2 sm:gap-3 shrink-0">
           <div className="flex flex-col items-center gap-2">
-            <div className="grid place-items-center h-12 w-12 sm:h-14 sm:w-14 rounded-2xl bg-foreground/[0.06] text-[var(--foreground)]">
+            <div className="grid place-items-center h-12 w-12 sm:h-14 sm:w-14 rounded-lg border border-[var(--line)] bg-[var(--panel)] text-[var(--foreground)]">
               {s.icon}
             </div>
             <div className="text-[11px] uppercase tracking-wider font-mono text-[var(--muted)]">
@@ -655,7 +655,7 @@ function FlowDiagram() {
 
 function PipelineDiagram() {
   const Box = ({ title, sub }: { title: string; sub: string }) => (
-    <div className="flex-1 min-w-0 rounded-xl bg-foreground/[0.04] px-3 py-3 text-center">
+    <div className="flex-1 min-w-0 rounded-md border border-[var(--line-soft)] bg-[var(--panel)] px-3 py-3 text-center">
       <div className="text-[13px] font-medium text-[var(--foreground)]">{title}</div>
       <div className="mt-0.5 text-[11px] text-[var(--muted)]">{sub}</div>
     </div>
@@ -756,7 +756,7 @@ function HealthBadgeMock() {
   return (
     <div className="grid sm:grid-cols-[160px_1fr] gap-5 items-center">
       <div className="grid place-items-center">
-        <div className="rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-200 px-5 py-3 inline-flex items-center gap-3">
+        <div className="rounded-full border border-[var(--line)] bg-[var(--panel)] text-[var(--ok)] px-5 py-3 inline-flex items-center gap-3">
           <span className="text-[10px] uppercase tracking-[0.18em] font-mono opacity-80">Health</span>
           <span className="text-2xl font-mono tabular-nums">82</span>
         </div>
@@ -800,27 +800,27 @@ function ViewerOverlayMock() {
 function ReviewModeMock() {
   return (
     <div className="grid sm:grid-cols-3 gap-3">
-      <div className="rounded-xl bg-foreground/[0.03] p-3">
-        <div className="text-[11px] uppercase tracking-wider font-mono text-emerald-700 dark:text-emerald-300 mb-2">
+      <div className="rounded-md border border-[var(--line-soft)] bg-[var(--panel)] p-3">
+        <div className="text-[11px] uppercase tracking-wider font-mono text-[var(--ok)] mb-2">
           ← Good
         </div>
-        <div className="aspect-[4/3] rounded-lg bg-foreground/[0.06] grid place-items-center text-[11px] text-[var(--muted)]">
+        <div className="aspect-[4/3] rounded-md bg-foreground/[0.06] grid place-items-center text-[11px] text-[var(--muted)]">
           confirmed
         </div>
       </div>
-      <div className="rounded-xl bg-foreground/[0.04] p-3 outline outline-2 outline-foreground/15">
+      <div className="rounded-md border border-[var(--line-strong)] bg-[var(--panel)] p-3">
         <div className="text-[11px] uppercase tracking-wider font-mono text-[var(--muted)] mb-2">
           Reviewing
         </div>
-        <div className="aspect-[4/3] rounded-lg bg-foreground/[0.08] grid place-items-center text-[11px] text-[var(--foreground)]/70">
+        <div className="aspect-[4/3] rounded-md bg-foreground/[0.08] grid place-items-center text-[11px] text-[var(--foreground)]/70">
           current image
         </div>
       </div>
-      <div className="rounded-xl bg-foreground/[0.03] p-3">
-        <div className="text-[11px] uppercase tracking-wider font-mono text-red-600 dark:text-red-300 mb-2">
+      <div className="rounded-md border border-[var(--line-soft)] bg-[var(--panel)] p-3">
+        <div className="text-[11px] uppercase tracking-wider font-mono text-[var(--bad)] mb-2">
           Bad →
         </div>
-        <div className="aspect-[4/3] rounded-lg bg-foreground/[0.06] grid place-items-center text-[11px] text-[var(--muted)]">
+        <div className="aspect-[4/3] rounded-md bg-foreground/[0.06] grid place-items-center text-[11px] text-[var(--muted)]">
           rejected
         </div>
       </div>
@@ -843,12 +843,12 @@ function FilterChipsMock() {
         <span
           key={c.label}
           className={[
-            "inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[12px]",
+            "inline-flex items-center gap-1.5 rounded-md border px-3 py-1 text-[12px]",
             c.active
-              ? "bg-foreground text-background font-medium"
+              ? "border-[var(--accent)] bg-[var(--accent-dim)] text-[var(--foreground)] font-medium"
               : c.tone === "amber"
-                ? "bg-amber-500/15 text-amber-800 dark:text-amber-200"
-                : "bg-foreground/[0.06] text-[var(--foreground)]/80",
+                ? "border-[var(--line)] bg-[var(--panel)] text-[var(--warn)]"
+                : "border-[var(--line)] bg-[var(--panel)] text-[var(--foreground)]/80",
           ].join(" ")}
         >
           {c.label}
@@ -963,9 +963,9 @@ function OverviewSection({ go }: { go: (k: GuideSectionKey) => void }) {
             <li key={s.key}>
               <button
                 onClick={() => go(s.key)}
-                className="w-full text-left block rounded-2xl border border-foreground/[0.08] bg-foreground/[0.02] hover:bg-orange-500/[0.04] hover:border-orange-400/35 transition-colors px-5 py-4 group h-full"
+                className="w-full text-left block rounded-lg border border-[var(--line)] bg-[var(--panel)] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] transition-colors px-5 py-4 group h-full"
               >
-                <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-[var(--muted)] mb-1">
+                <div className="pk-micro pk-num mb-1">
                   {String(i + 1).padStart(2, "0")}
                 </div>
                 <div className="text-base font-medium text-[var(--foreground)]">{s.title}</div>
@@ -1904,7 +1904,7 @@ function TeamsSection({ go }: { go: (k: GuideSectionKey) => void }) {
           that person can do inside it.
         </p>
         <ul className="grid gap-4">
-          <li className="rounded-xl border border-foreground/10 bg-foreground/[0.02] px-5 py-4">
+          <li className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-5 py-4">
             <Strong>Owner</Strong>
             <p className="mt-2 text-sm">
               Full control. Everything an editor can do, plus renaming the
@@ -1912,7 +1912,7 @@ function TeamsSection({ go }: { go: (k: GuideSectionKey) => void }) {
               removing members, and deleting the Project.
             </p>
           </li>
-          <li className="rounded-xl border border-foreground/10 bg-foreground/[0.02] px-5 py-4">
+          <li className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-5 py-4">
             <Strong>Editor</Strong>
             <p className="mt-2 text-sm">
               Can do almost everything inside the Project: add and create
@@ -1921,7 +1921,7 @@ function TeamsSection({ go }: { go: (k: GuideSectionKey) => void }) {
               delete the Project, change its cover, or manage members.
             </p>
           </li>
-          <li className="rounded-xl border border-foreground/10 bg-foreground/[0.02] px-5 py-4">
+          <li className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-5 py-4">
             <Strong>Viewer</Strong>
             <p className="mt-2 text-sm">
               Read-only access to the Project and its datasets.

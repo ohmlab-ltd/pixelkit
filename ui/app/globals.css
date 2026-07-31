@@ -2,100 +2,155 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Two var flavours per theme token:
-   - `--x` is the ready-to-use colour value used everywhere across the
-     existing codebase (`color: var(--foreground)`, Tailwind
-     arbitrary-value `text-[var(--foreground)]`, etc.).
-   - `--x-rgb` is the same colour as a bare `R G B` triplet, used by
-     the Tailwind config (`rgb(var(--x-rgb) / <alpha-value>)`) so
-     opacity modifiers like `bg-foreground/[0.04]` resolve correctly.
-   Keeping both flavours means we get themed opacity from Tailwind
-   AND drop-in compatibility with every existing `var(--x)` consumer. */
+/* ------------------------------------------------------------------ */
+/* PixelKit — studio design language.                                  */
+/*                                                                     */
+/* Dark is the primary/brand look: a near-black neutral surface, flat  */
+/* panels (rgba white 0.02), hairline borders from a three-step line   */
+/* ramp, a five-step foreground ramp, ONE orange accent used sparingly */
+/* and semantic ok/warn/bad status colours. Micro-labels are uppercase */
+/* mono; figures are tabular. Motion is a single ease-out vocabulary.  */
+/* Light mode mirrors the same system in adapted neutrals via the      */
+/* existing `.dark` class mechanism (html.dark = dark).                */
+/*                                                                     */
+/* Two var flavours per legacy token:                                  */
+/*   - `--x` is the ready-to-use colour value used across the          */
+/*     existing codebase (`color: var(--foreground)`, Tailwind         */
+/*     arbitrary-value `text-[var(--foreground)]`, etc.).              */
+/*   - `--x-rgb` is the same colour as a bare `R G B` triplet, used    */
+/*     by the Tailwind config (`rgb(var(--x-rgb) / <alpha-value>)`)    */
+/*     so opacity modifiers like `bg-foreground/[0.04]` resolve.       */
+/* New code should prefer the ramp vars (--fg-*, --line*, --panel,     */
+/* --accent-dim, --ok/--warn/--bad).                                   */
+/* ------------------------------------------------------------------ */
+
 :root {
-  --background: rgb(247 247 249);
-  --foreground: rgb(9 9 11);
-  --muted: rgb(82 82 91);
-  --border: rgb(224 224 229);
-  --accent: rgb(9 9 11);
+  /* Light theme: same system, adapted neutral (not tinted). */
+  --background: rgb(246 246 248);
+  --foreground: rgb(23 25 30);
+  --muted: rgb(92 97 108);
+  --border: rgba(23, 25, 30, 0.12);
+  --accent: rgb(192 74 0);
   --surface: rgb(255 255 255);
-  --surface-2: rgb(240 240 243);
-  --background-rgb: 247 247 249;
-  --foreground-rgb: 9 9 11;
-  --muted-rgb: 82 82 91;
-  --border-rgb: 224 224 229;
-  --accent-rgb: 9 9 11;
+  --surface-2: rgb(238 238 241);
+  --background-rgb: 246 246 248;
+  --foreground-rgb: 23 25 30;
+  --muted-rgb: 92 97 108;
+  /* Composited hairline over --background, for Tailwind's border-border. */
+  --border-rgb: 219 219 222;
+  --accent-rgb: 192 74 0;
   --surface-rgb: 255 255 255;
-  --surface-2-rgb: 240 240 243;
-  /* Themable shadow tints. Light mode uses a soft mid-grey at low
-     opacity so cards float without the harsh halo a black shadow
-     leaves on a pale background. */
-  --shadow-strong: 0 8px 28px -10px rgb(15 23 42 / 0.16);
-  /* Flat, clean: cards are defined by a hairline border + a barely-there
-     shadow rather than floating elevation. */
-  --shadow-soft: 0 1px 2px rgb(15 23 42 / 0.04);
-  --shadow-rgb: 15 23 42;
-  /* ── "Vibrant & clean" brand language ─────────────────────────────────
-     A warm gold -> pixelkit-orange -> deep-orange gradient (matching the
-     "kit" in the logo) + a soft orange glow, used for cover headers,
-     accents + hover lift. brand-2 is the app's existing accent-orange so
-     the gradient harmonises with the nav/health/upload accents. Triplets
-     so opacity modifiers work; gradient/cover/glow reference them via
-     var() so they auto-adapt in dark mode. */
-  --brand-1: 251 191 36;   /* amber-400 (gold) */
-  --brand-2: 244 124 32;   /* pixelkit orange (= --accent-orange) */
-  --brand-3: 234 88 12;    /* orange-600 (deep) */
-  --brand-gradient: linear-gradient(135deg, rgb(var(--brand-1)), rgb(var(--brand-2)) 52%, rgb(var(--brand-3)));
-  --brand-cover: linear-gradient(135deg, rgb(var(--brand-1) / 0.28), rgb(var(--brand-2) / 0.22) 55%, rgb(var(--brand-3) / 0.26));
-  --brand-glow: 0 14px 34px -12px rgb(var(--brand-2) / 0.42);
-  /* ── Cohesive project-area design tokens ──────────────────────────────
-     Brand accent (orange) for active nav, accents + the health card; a
-     translucent elevated "glass" surface for modals/popovers; status
-     colours; a focus ring; backdrop tint. Both flavours (`--x` value and
-     `--x-rgb` triplet) where Tailwind opacity modifiers need it. */
-  --accent-orange: rgb(244 124 32);
-  --accent-orange-rgb: 244 124 32;
+  --surface-2-rgb: 238 238 241;
+
+  /* Foreground ramp. */
+  --fg: rgb(23 25 30);
+  --fg-soft: rgb(63 67 76);
+  --fg-muted: rgb(92 97 108);
+  --fg-dim: rgb(109 114 125);
+  --fg-faint: rgb(155 160 171);
+
+  /* Line ramp: hairlines everywhere; -strong only for emphasis. */
+  --line: rgba(23, 25, 30, 0.1);
+  --line-soft: rgba(23, 25, 30, 0.06);
+  --line-strong: rgba(23, 25, 30, 0.18);
+
+  /* Flat panel surfaces: a quiet tonal step, not an elevation. */
+  --panel: rgba(23, 25, 30, 0.025);
+  --panel-solid: rgb(255 255 255);
+  --surface-hover: rgba(23, 25, 30, 0.05);
+
+  /* ONE accent: PixelKit orange (deepened for AA on light ground). */
+  --accent-dim: rgba(192, 74, 0, 0.12);
+  /* Text/icon colour that sits ON an accent-filled control. */
+  --accent-contrast: rgb(255 255 255);
+  --accent-orange: var(--accent);
+  --accent-orange-rgb: 192 74 0;
+  --focus-ring: var(--accent);
+
+  /* Status colours. */
+  --ok: rgb(12 127 82);
+  --warn: rgb(156 101 0);
+  --bad: rgb(217 38 38);
+  /* Legacy aliases still consumed across the app. */
+  --success: var(--ok);
+  --warning: var(--warn);
+  --destructive: var(--bad);
+
+  /* Legacy brand triplets: flattened onto the single accent so any
+     remaining gradient consumer renders as flat orange. */
+  --brand-1: 192 74 0;
+  --brand-2: 192 74 0;
+  --brand-3: 192 74 0;
+  --brand-gradient: linear-gradient(135deg, rgb(var(--brand-2)), rgb(var(--brand-2)));
+  --brand-cover: linear-gradient(135deg, rgb(var(--brand-2) / 0.1), rgb(var(--brand-2) / 0.1));
+  --brand-glow: none;
+
+  /* Flat language: definition comes from hairlines, not elevation.
+     Shadows survive only where something truly floats (modals). */
+  --shadow-strong: 0 16px 48px -16px rgb(15 18 24 / 0.24);
+  --shadow-soft: 0 1px 2px rgb(15 18 24 / 0.04);
+  --shadow-rgb: 15 18 24;
+
   --modal-surface: rgb(255 255 255);
-  --modal-border: rgba(15, 23, 42, 0.10);
-  --backdrop: rgba(255, 255, 255, 0.5);
-  --focus-ring: rgb(244 124 32);
-  --success: rgb(22 163 74);
-  --warning: rgb(217 119 6);
-  --destructive: rgb(220 38 38);
+  --modal-border: rgba(23, 25, 30, 0.12);
+  --backdrop: rgba(246, 246, 248, 0.6);
+
+  /* One motion vocabulary. */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .dark {
-  --background: rgb(9 9 11);
-  --foreground: rgb(240 240 242);
-  --muted: rgb(161 161 170);
-  --border: rgb(39 39 44);
-  --accent: rgb(255 255 255);
-  --surface: rgb(18 18 21);
-  --surface-2: rgb(26 26 30);
-  --background-rgb: 9 9 11;
-  --foreground-rgb: 240 240 242;
-  --muted-rgb: 161 161 170;
-  --border-rgb: 39 39 44;
-  --accent-rgb: 255 255 255;
-  --surface-rgb: 18 18 21;
-  --surface-2-rgb: 26 26 30;
-  --shadow-strong: 0 8px 28px -10px rgb(0 0 0 / 0.6);
-  --shadow-soft: 0 1px 2px rgb(0 0 0 / 0.20);
+  /* Dark theme: the primary/brand look. Near-black neutral ground. */
+  --background: rgb(10 10 12);
+  --foreground: rgb(242 244 248);
+  --muted: rgb(153 161 172);
+  --border: rgba(255, 255, 255, 0.08);
+  --accent: rgb(255 121 0);
+  --surface: rgb(15 15 17);
+  --surface-2: rgb(21 21 24);
+  --background-rgb: 10 10 12;
+  --foreground-rgb: 242 244 248;
+  --muted-rgb: 153 161 172;
+  --border-rgb: 30 30 33;
+  --accent-rgb: 255 121 0;
+  --surface-rgb: 15 15 17;
+  --surface-2-rgb: 21 21 24;
+
+  --fg: rgb(242 244 248);
+  --fg-soft: rgb(201 206 214);
+  --fg-muted: rgb(153 161 172);
+  --fg-dim: rgb(109 117 129);
+  --fg-faint: rgb(69 76 87);
+
+  --line: rgba(255, 255, 255, 0.08);
+  --line-soft: rgba(255, 255, 255, 0.05);
+  --line-strong: rgba(255, 255, 255, 0.16);
+
+  --panel: rgba(255, 255, 255, 0.02);
+  --panel-solid: rgb(15 15 17);
+  --surface-hover: rgba(255, 255, 255, 0.045);
+
+  --accent-dim: rgba(255, 121, 0, 0.14);
+  --accent-contrast: rgb(26 18 5);
+  --accent-orange: var(--accent);
+  --accent-orange-rgb: 255 121 0;
+  --focus-ring: var(--accent);
+
+  --ok: rgb(61 220 151);
+  --warn: rgb(245 184 61);
+  --bad: rgb(255 93 93);
+
+  --brand-1: 255 121 0;
+  --brand-2: 255 121 0;
+  --brand-3: 255 121 0;
+
+  --shadow-strong: 0 24px 64px -16px rgb(0 0 0 / 0.6);
+  --shadow-soft: 0 1px 2px rgb(0 0 0 / 0.3);
   --shadow-rgb: 0 0 0;
-  /* Brighter warm triplets in dark so the orange still glows on near-black.
-     The gradient/cover tokens inherit these via var(); glow gets more lift. */
-  --brand-1: 252 211 77;   /* amber-300 */
-  --brand-2: 251 146 60;   /* orange-400 (dark accent) */
-  --brand-3: 249 115 22;   /* orange-500 */
-  --brand-glow: 0 14px 38px -12px rgb(var(--brand-2) / 0.5);
-  --accent-orange: rgb(251 146 60);
-  --accent-orange-rgb: 251 146 60;
-  --modal-surface: rgb(22 22 26);
-  --modal-border: rgba(255, 255, 255, 0.10);
-  --backdrop: rgba(0, 0, 0, 0.55);
-  --focus-ring: rgb(251 146 60);
-  --success: rgb(52 211 153);
-  --warning: rgb(251 191 36);
-  --destructive: rgb(248 113 113);
+
+  --modal-surface: rgb(19 19 22);
+  --modal-border: rgba(255, 255, 255, 0.08);
+  --backdrop: rgba(0, 0, 0, 0.6);
 }
 
 html,
@@ -112,8 +167,13 @@ body {
 }
 
 ::selection {
-  background: var(--foreground);
-  color: var(--background);
+  background: var(--accent-dim);
+  color: var(--foreground);
+}
+
+:focus-visible {
+  outline: 1px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 /* Theme-swap synchronisation.
@@ -147,6 +207,145 @@ html.theme-changing [data-theme-fade] *::after {
   transition: none !important;
 }
 
+/* ── Typography helpers ────────────────────────────────────────────── */
+
+/* Uppercase mono micro-label: pane headers, status segments, table
+   heads, stat keys. Colour defaults to the dim step; callers may
+   override. */
+.pk-micro {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+/* Tabular figures for counts and readouts. */
+.pk-num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Small uppercase eyebrow above a section or title — now the same
+   mono micro-label voice as the rest of the chrome. */
+.pk-eyebrow {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+/* Section heading: quiet weight, tight tracking. Pair with a Tailwind
+   size class (e.g. `pk-section-title text-lg`). */
+.pk-section-title {
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--foreground);
+}
+
+/* Page/hero title. No `color` so the caller's text-* class controls it. */
+.pk-page-title {
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.08;
+}
+
+/* Leading accent bar for a section heading. */
+.pk-accent-bar {
+  display: inline-block;
+  width: 3px;
+  height: 1.05rem;
+  border-radius: 1px;
+  background: var(--accent);
+  flex: none;
+}
+
+/* ── Flat surfaces ─────────────────────────────────────────────────── */
+
+/* Flat panel card: hairline border + the faint tonal step. No
+   elevation. Hover (via .pk-card-hover) firms the hairline and deepens
+   the step — accent stays reserved for active/selected states. */
+.pk-card {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: none;
+  transition: border-color 0.16s ease, background-color 0.16s ease;
+}
+.pk-card-hover:hover {
+  border-color: var(--line-strong);
+  background-color: var(--surface-hover);
+}
+
+/* Cover/placeholder wash for letter tiles + dataset covers: a quiet
+   hatched blank rather than a brand gradient. */
+.pk-cover {
+  background-color: var(--panel);
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--line-soft) 0 1px,
+    transparent 1px 8px
+  );
+}
+
+/* Compact flat button: 6px radius, hairline border, hover surface. */
+.pk-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.65rem;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--fg-soft);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background-color 0.16s ease, color 0.16s ease;
+}
+.pk-btn:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background: var(--surface-hover);
+  color: var(--foreground);
+}
+.pk-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Primary action: flat accent fill, contrast-safe label colour. */
+.pk-btn-primary {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+.pk-btn-primary:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  filter: brightness(1.08);
+}
+
+/* ── Modal / popover surfaces ──────────────────────────────────────── */
+
+/* Elevated surface + blur + hairline border, theme-aware via tokens. */
+.pk-glass {
+  background: var(--modal-surface);
+  border: 1px solid var(--modal-border);
+  -webkit-backdrop-filter: blur(16px) saturate(1.2);
+  backdrop-filter: blur(16px) saturate(1.2);
+  box-shadow: var(--shadow-strong);
+}
+.pk-backdrop {
+  background: var(--backdrop);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+/* ── Motion vocabulary ─────────────────────────────────────────────── */
+
 /* Generic fade-in keyframe used across the app via Tailwind's
    arbitrary `animate-[fadeIn_Xms_ease-out]` syntax. */
 @keyframes fadeIn {
@@ -155,8 +354,7 @@ html.theme-changing [data-theme-fade] *::after {
 }
 
 /* Pop-in used by modal cards (e.g. ExportModal). Scale + lift +
-   fade lands in the same beat as the backdrop's fadeIn so the
-   dialog feels glued to the chrome rather than separately animated. */
+   fade lands in the same beat as the backdrop's fadeIn. */
 @keyframes popIn {
   from {
     opacity: 0;
@@ -168,137 +366,23 @@ html.theme-changing [data-theme-fade] *::after {
   }
 }
 
-/* Project tab/panel entrance - fade + lift. Used by every project tab
-   (Train, Quantise, Analyse already inline this; Dataset, Augmentations
-   and Deploy now share it via globals) so switching tabs gives the same
-   gentle "load in". Re-runs whenever a hidden tab is shown again, because
-   going display:none → shown restarts the animation. */
+/* Tab/panel entrance — things rise in once. */
 @keyframes pkUp {
   from { opacity: 0; transform: translateY(10px); }
   to   { opacity: 1; transform: none; }
 }
-.pk-up { animation: pkUp 0.55s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.pk-up { animation: pkUp 0.55s var(--ease-out) both; }
 @media (prefers-reduced-motion: reduce) {
   .pk-up { animation: none; }
 }
 
-/* Shared glass surfaces for the cohesive modal/popover style. Translucent
-   elevated surface + blur + soft border, theme-aware via the design tokens
-   above so it reads correctly in both light and dark mode. */
-.pk-glass {
-  background: var(--modal-surface);
-  border: 1px solid var(--modal-border);
-  -webkit-backdrop-filter: blur(16px) saturate(1.4);
-  backdrop-filter: blur(16px) saturate(1.4);
-  box-shadow: var(--shadow-strong);
-}
-.pk-backdrop {
-  background: var(--backdrop);
-  -webkit-backdrop-filter: blur(8px);
-  backdrop-filter: blur(8px);
-}
 @keyframes pkPop {
   from { opacity: 0; transform: translateY(8px) scale(0.98); }
   to   { opacity: 1; transform: none; }
 }
-.pk-pop { animation: pkPop 0.22s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.pk-pop { animation: pkPop 0.22s var(--ease-out) both; }
 @media (prefers-reduced-motion: reduce) {
   .pk-pop { animation: none; }
-}
-
-/* ── "Vibrant & clean" utilities ───────────────────────────────────────
-   Additive helper classes for the bolder refresh. Pages opt in by adding
-   these; nothing existing changes until it does. */
-
-/* Gradient-clipped text for big headings + section titles. */
-.pk-gradient-text {
-  background-image: var(--brand-gradient);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  color: transparent;
-}
-
-/* Brand cover wash for card/hero headers (used behind covers + letter tiles). */
-.pk-cover { background-image: var(--brand-cover); }
-
-/* Soft ambient brand aura for page + hero backgrounds. */
-.pk-aura {
-  background-image:
-    radial-gradient(60% 50% at 12% -10%, rgb(var(--brand-1) / 0.10), transparent 70%),
-    radial-gradient(55% 45% at 100% -10%, rgb(var(--brand-3) / 0.10), transparent 72%);
-}
-
-/* Flat card: airy surface defined by a hairline border + the barely-there
-   --shadow-soft. No elevation. Pair with .pk-card-hover for a clean flat
-   hover (orange border + the faintest orange wash, no lift, no glow). */
-.pk-card {
-  border: 1px solid rgb(var(--foreground-rgb) / 0.10);
-  background: var(--surface);
-  box-shadow: var(--shadow-soft);
-  transition: border-color 0.16s ease, background-color 0.16s ease;
-}
-.pk-card-hover:hover {
-  border-color: rgb(var(--brand-2) / 0.55);
-  background-color: rgb(var(--brand-2) / 0.04);
-}
-
-/* Primary brand button: flat solid orange (no gradient, no glow). */
-.pk-brand-btn {
-  background-color: rgb(var(--brand-2));
-  color: #fff;
-  transition: filter 0.15s ease;
-}
-.pk-brand-btn:hover { filter: brightness(1.06); }
-.pk-brand-btn:active { filter: brightness(0.95); }
-
-/* Thin gradient hairline (e.g. under a hero or section header). */
-.pk-gradient-rule {
-  height: 2px;
-  border: 0;
-  background-image: var(--brand-gradient);
-  opacity: 0.7;
-  border-radius: 9999px;
-}
-
-/* ── Typographic scale (premium, bold, cohesive) ───────────────────────
-   One definition each so headings line up across every page. Pair with a
-   Tailwind size class (e.g. `pk-section-title text-xl`). */
-
-/* Bold, tightly-tracked section heading. */
-.pk-section-title {
-  font-weight: 700;
-  letter-spacing: -0.015em;
-  color: var(--foreground);
-}
-
-/* Big page/hero title: confident weight + tight tracking. No `color` so the
-   caller's text-* class controls it (the Project hero picks black/white from
-   the cover's luminance, which a forced color here would override). */
-.pk-page-title {
-  font-weight: 600;
-  letter-spacing: -0.025em;
-  line-height: 1.05;
-}
-
-/* Small uppercase eyebrow above a section or title. */
-.pk-eyebrow {
-  font-size: 0.6875rem;
-  font-weight: 600;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
-/* Leading orange accent bar for a section heading. Put before the title
-   text inside a flex row: <span class="pk-accent-bar" /> Heading. */
-.pk-accent-bar {
-  display: inline-block;
-  width: 0.25rem;
-  height: 1.15rem;
-  border-radius: 9999px;
-  background: rgb(var(--brand-2));
-  flex: none;
 }
 
 /* Used by hydration placeholder tiles while reference image bytes
@@ -317,37 +401,12 @@ html.theme-changing [data-theme-fade] *::after {
   animation: indeterminate-slide 1.1s ease-in-out infinite;
 }
 
-@keyframes hero-fade-up {
-  from {
-    opacity: 0;
-    transform: translateY(28px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@keyframes hero-glow-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
-}
-
-/* Exit animation for the demo's entry-choice section - fades + lifts
-   away when the user picks a path, so the chosen section can fade up in
-   its place. Pairs with hero-fade-up (the enter animation). */
-@keyframes demo-choice-out {
-  from { opacity: 1; transform: translateY(0); }
-  to   { opacity: 0; transform: translateY(-12px); }
-}
-
-/* Subtle pulsing glow around the demo's "Click to detect" button so a
-   first-time visitor's eye lands on the primary action. Orange to match
-   the sparkle accent on the button. Off when the user prefers reduced
-   motion (a static soft glow stays). */
+/* Gentle pulsing ring around the BoxEditor's "click to detect"
+   affordance, in the accent at low opacity. Static soft ring when the
+   user prefers reduced motion. */
 @keyframes demo-detect-glow-pulse {
-  0%, 100% { box-shadow: 0 0 8px 1px rgba(251, 146, 60, 0.30); }
-  50%      { box-shadow: 0 0 16px 4px rgba(251, 146, 60, 0.55); }
+  0%, 100% { box-shadow: 0 0 8px 1px var(--accent-dim); }
+  50%      { box-shadow: 0 0 16px 4px var(--accent-dim); }
 }
 .demo-detect-glow {
   animation: demo-detect-glow-pulse 2.2s ease-in-out infinite;
@@ -355,14 +414,15 @@ html.theme-changing [data-theme-fade] *::after {
 @media (prefers-reduced-motion: reduce) {
   .demo-detect-glow {
     animation: none;
-    box-shadow: 0 0 12px 2px rgba(251, 146, 60, 0.40);
+    box-shadow: 0 0 12px 2px var(--accent-dim);
   }
 }
 
-/* Sweep used by the auto-label progress bar, a soft white highlight that
-   slides across the bar, signalling activity even when the percentage isn't
-   moving for a moment. Confined to a small element with `will-change` so the
-   GPU can promote it to its own layer without invalidating the parent. */
+/* Sweep used by the auto-label progress bar, a soft highlight that
+   slides across the bar, signalling activity even when the percentage
+   isn't moving for a moment. Confined to a small element with
+   `will-change` so the GPU can promote it to its own layer without
+   invalidating the parent. */
 @keyframes progress-sweep {
   0%   { transform: translateX(-100%); }
   100% { transform: translateX(150%); }
@@ -370,348 +430,4 @@ html.theme-changing [data-theme-fade] *::after {
 .progress-sweep {
   animation: progress-sweep 2.4s linear infinite;
   will-change: transform;
-}
-
-/* Marketing homepage motion. All small, tasteful animations referenced
-   by app/page.tsx so the live-inference hero, feature visuals and
-   technical-section visuals can lean on CSS instead of pulling in a
-   motion library. Each keyframe is scoped to a single visual effect
-   so it's obvious what's running where. */
-
-/* Hero inference: diagonal "scanning" gradient bar sliding across
-   the live-inference panel. Now driven by a transform on a child
-   element (compositor-only) instead of background-position on the
-   parent (forces a per-frame paint of the gradient texture). The
-   child sits at -left-1/2 with w-1/2 so a translateX(400%) sweeps
-   it fully off the right edge before looping back. */
-@keyframes hero-scan-translate {
-  0%   { transform: translateX(0); }
-  100% { transform: translateX(400%); }
-}
-
-/* Hero inference: each detection box / mask / label fades up + in. */
-@keyframes hero-detect-in {
-  0%   { opacity: 0; transform: translateY(4px) scale(0.985); }
-  100% { opacity: 1; transform: translateY(0)   scale(1);     }
-}
-
-/* Feature card mini visuals: SVG stroke drawing in. */
-@keyframes feat-stroke-in {
-  to { stroke-dashoffset: 0; }
-}
-
-/* Generic fade-in for feature cards (chips, tiny tiles). */
-@keyframes feat-fade-in {
-  from { opacity: 0; transform: translateY(2px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-
-/* Slight overshoot pop-in for chips / dots so they feel deliberate. */
-@keyframes feat-pop-in {
-  0%   { opacity: 0; transform: scale(0.6); }
-  60%  { opacity: 1; transform: scale(1.06); }
-  100% { opacity: 1; transform: scale(1); }
-}
-
-/* Technical section: gentle dot pulse for the variation plot. Scales
-   in and out by ~6 % so the cluster reads as "alive" without flicker. */
-@keyframes tech-dot-pulse {
-  0%, 100% { transform: scale(1);    opacity: 0.95; }
-  50%      { transform: scale(1.07); opacity: 1; }
-}
-
-/* Technical section: slow drift for the background flowing dots. A
-   small x/y translation loop, each circle gets its own delay so the
-   field never visibly syncs. */
-@keyframes tech-drift {
-  0%, 100% { transform: translate(0, 0); }
-  25%      { transform: translate(8px, -6px); }
-  50%      { transform: translate(-4px, 10px); }
-  75%      { transform: translate(-10px, -4px); }
-}
-
-/* Technical section: health-bar fill in from 0. Pure-CSS so the
-   browser can interpolate width without JS. */
-@keyframes tech-bar-fill {
-  from { width: 0%; }
-}
-
-/* Technical section: pipeline step gently pulses to suggest the
-   active stage shifts along the chain. Each step gets a unique
-   delay so they ripple. */
-@keyframes tech-step-pulse {
-  0%, 70%, 100% {
-    box-shadow: 0 0 0 0 rgba(99, 102, 241, 0);
-  }
-  35% {
-    box-shadow: 0 0 0 6px rgba(99, 102, 241, 0.10);
-  }
-}
-
-/* Technical section: glowing packet that traverses the pipeline
-   chain. translateX is compositor-only so this is cheap. The
-   keyframe runs against a CSS variable so each chain can size to
-   itself without re-authoring the animation. */
-@keyframes tech-traveller {
-  0%   { transform: translateX(0%);   opacity: 0; }
-  10%  {                              opacity: 1; }
-  90%  {                              opacity: 1; }
-  100% { transform: translateX(100%); opacity: 0; }
-}
-
-/* Technical section: stroke-in for SVG outlines (auto-label demo).
-   stroke-dasharray + stroke-dashoffset = a "draws itself" effect
-   that the browser interpolates for free. */
-@keyframes tech-stroke-in {
-  0%   { stroke-dashoffset: 360; }
-  60%  { stroke-dashoffset: 0;   }
-  90%  { stroke-dashoffset: 0;   }
-  100% { stroke-dashoffset: 0;   }
-}
-
-/* Technical section: segmentation mask fade-in for the auto-label
-   demo. Cycles so the card feels alive without re-mounting. */
-@keyframes tech-mask-fade {
-  0%, 100% { fill-opacity: 0;    }
-  55%      { fill-opacity: 0.40; }
-  85%      { fill-opacity: 0.40; }
-}
-
-/* Technical section: variation-plot scan sweep. A faint diagonal
-   gradient that slides across the plot, evoking a continuous
-   clustering pass. */
-@keyframes tech-scan-sweep {
-  0%   { transform: translateX(-110%); }
-  100% { transform: translateX(110%);  }
-}
-
-/* Technical section: review-mode verdict cycle. Cycles a chip
-   through good / unsure / bad colours so the card feels active.
-   Lower duty cycle on bad so the dominant feel is positive. */
-@keyframes tech-verdict-cycle {
-  0%, 50%, 100% { background-color: rgba(52,199,89,0.85); }
-  60%, 75%      { background-color: rgba(255,159,10,0.85); }
-  85%, 95%      { background-color: rgba(255,55,95,0.85); }
-}
-
-/* Pipeline "Coming soon" sub-card: three slow float curves used by
-   the five drifting tokens. Each token nudges around its base
-   position by a few percent so the field reads as alive without
-   any of them straying far enough to overlap a neighbour. Each
-   curve is staggered by its inline `animation-delay` so the
-   tokens don't sync up over time. translate-only - runs on the
-   compositor and never triggers layout. */
-@keyframes pipeline-float-a {
-  0%, 100% { transform: translate(-50%, -50%); }
-  25%      { transform: translate(calc(-50% + 14px), calc(-50% - 10px)); }
-  50%      { transform: translate(calc(-50% + 4px),  calc(-50% + 12px)); }
-  75%      { transform: translate(calc(-50% - 10px), calc(-50% + 4px));  }
-}
-@keyframes pipeline-float-b {
-  0%, 100% { transform: translate(-50%, -50%); }
-  30%      { transform: translate(calc(-50% - 12px), calc(-50% + 8px));  }
-  55%      { transform: translate(calc(-50% + 10px), calc(-50% + 14px)); }
-  80%      { transform: translate(calc(-50% + 14px), calc(-50% - 6px));  }
-}
-@keyframes pipeline-float-c {
-  0%, 100% { transform: translate(-50%, -50%); }
-  35%      { transform: translate(calc(-50% + 8px),  calc(-50% + 10px)); }
-  60%      { transform: translate(calc(-50% - 14px), calc(-50% + 2px));  }
-  82%      { transform: translate(calc(-50% - 4px),  calc(-50% - 12px)); }
-}
-
-/* Save-hours hero. 8s loop covering:
-     0.0 → 2.7s : 8 chips type in (one every ~340ms) and their
-                  matching polygons fade in on the showcase image
-     2.7 → 3.4s : everything held; user reads the showcase
-     3.4 → 5.0s : motion-blurred vertical scroll through 9 frames
-     5.0 → 7.5s : final showcase held with full segmentation
-     7.5 → 8.0s : everything fades out so the next loop reads
-                  cleanly from the start
-
-   Eight per-chip keyframes share the same hold/fade-out endpoints
-   (90% hold, 96% fade-out start) so all chips reset together. Only
-   their "appear" point varies. The same keyframes drive both the
-   chip in the pill box AND the segmentation polygons matching that
-   label on the showcase frames, so segs land in lockstep with the
-   chip that triggered them. */
-@keyframes save-chip-1 {
-  0%, 2%    { opacity: 0; transform: translateY(4px) scale(0.92); }
-  4%        { opacity: 1; transform: translateY(0)   scale(1); }
-  90%       { opacity: 1; transform: translateY(0)   scale(1); }
-  96%, 100% { opacity: 0; transform: translateY(0)   scale(1); }
-}
-@keyframes save-chip-2 {
-  0%, 6%    { opacity: 0; transform: translateY(4px) scale(0.92); }
-  8%        { opacity: 1; transform: translateY(0)   scale(1); }
-  90%       { opacity: 1; transform: translateY(0)   scale(1); }
-  96%, 100% { opacity: 0; transform: translateY(0)   scale(1); }
-}
-@keyframes save-chip-3 {
-  0%, 10%   { opacity: 0; transform: translateY(4px) scale(0.92); }
-  12%       { opacity: 1; transform: translateY(0)   scale(1); }
-  90%       { opacity: 1; transform: translateY(0)   scale(1); }
-  96%, 100% { opacity: 0; transform: translateY(0)   scale(1); }
-}
-@keyframes save-chip-4 {
-  0%, 14%   { opacity: 0; transform: translateY(4px) scale(0.92); }
-  16%       { opacity: 1; transform: translateY(0)   scale(1); }
-  90%       { opacity: 1; transform: translateY(0)   scale(1); }
-  96%, 100% { opacity: 0; transform: translateY(0)   scale(1); }
-}
-@keyframes save-chip-5 {
-  0%, 18%   { opacity: 0; transform: translateY(4px) scale(0.92); }
-  20%       { opacity: 1; transform: translateY(0)   scale(1); }
-  90%       { opacity: 1; transform: translateY(0)   scale(1); }
-  96%, 100% { opacity: 0; transform: translateY(0)   scale(1); }
-}
-@keyframes save-chip-6 {
-  0%, 22%   { opacity: 0; transform: translateY(4px) scale(0.92); }
-  24%       { opacity: 1; transform: translateY(0)   scale(1); }
-  90%       { opacity: 1; transform: translateY(0)   scale(1); }
-  96%, 100% { opacity: 0; transform: translateY(0)   scale(1); }
-}
-@keyframes save-chip-7 {
-  0%, 26%   { opacity: 0; transform: translateY(4px) scale(0.92); }
-  28%       { opacity: 1; transform: translateY(0)   scale(1); }
-  90%       { opacity: 1; transform: translateY(0)   scale(1); }
-  96%, 100% { opacity: 0; transform: translateY(0)   scale(1); }
-}
-@keyframes save-chip-8 {
-  0%, 30%   { opacity: 0; transform: translateY(4px) scale(0.92); }
-  32%       { opacity: 1; transform: translateY(0)   scale(1); }
-  90%       { opacity: 1; transform: translateY(0)   scale(1); }
-  96%, 100% { opacity: 0; transform: translateY(0)   scale(1); }
-}
-@keyframes save-caret-blink {
-  0%, 100% { opacity: 1; }
-  50%      { opacity: 0.15; }
-}
-/* Carousel scroll. The strip is N frames tall (N = 9: showcase +
-   7 fresh + showcase repeat). Translates from 0 to "all but last"
-   so the scroll ends on the duplicated-showcase frame - visually
-   identical to frame 0, which removes the black panel at the end
-   of the scroll and lets the loop restart land on the same image.
-   The end position is supplied per-instance via --save-scroll-end
-   (computed in TS so the number of frames stays in one place). */
-@keyframes save-carousel-scroll {
-  0%, 42%   { transform: translateY(0); }
-  62%       { transform: translateY(var(--save-scroll-end, -88.89%)); }
-  100%      { transform: translateY(var(--save-scroll-end, -88.89%)); }
-}
-@keyframes save-carousel-blur {
-  0%, 42%   { filter: blur(0); }
-  48%, 58%  { filter: blur(10px); }
-  62%, 100% { filter: blur(0); }
-}
-
-/* Click-to-detect demo (Tech section, strawberry card).
-   --------------------------------------------------------------
-   A virtual mouse cursor visits three berries in sequence; at each
-   stop a click ripple expands and the corresponding segmentation
-   polygon fades in. Coordinates are in the 1024x686 image-pixel
-   space the SVG uses. Total cycle: 9 s.
-   Timeline anchors:
-     ~20%   click berry 1   (~1.8 s)
-     ~44%   click berry 2   (~4.0 s)
-     ~68%   click berry 3   (~6.1 s)
-     ~88%   cursor exits
-*/
-@keyframes berry-cursor {
-  /* Waypoints match the centroids of the three rendered berries:
-       top   (459, 114)
-       front (558, 477)
-       back  (646, 357)
-     Order matches the JSX (top → front → back), and each click
-     position is held for ~10% of the loop so the ripple + mask have
-     time to read before the cursor moves on.
-  */
-  0%, 4%   { transform: translate(900px, 700px); opacity: 0; }
-  8%       { transform: translate(900px, 700px); opacity: 1; }
-  18%      { transform: translate(459px, 114px); opacity: 1; }
-  28%      { transform: translate(459px, 114px); opacity: 1; }
-  42%      { transform: translate(558px, 477px); opacity: 1; }
-  52%      { transform: translate(558px, 477px); opacity: 1; }
-  64%      { transform: translate(646px, 357px); opacity: 1; }
-  78%      { transform: translate(646px, 357px); opacity: 1; }
-  90%      { transform: translate(646px, 357px); opacity: 1; }
-  96%      { transform: translate(900px, 700px); opacity: 0; }
-  100%     { transform: translate(900px, 700px); opacity: 0; }
-}
-
-/* Per-berry chip pop-up. Group opacity ramps up at the click moment
-   and stays through to the loop's wind-down. The chip is an SVG <g>
-   containing the rounded-rect background + label + score sub-pill;
-   one opacity animation covers the lot. */
-@keyframes berry-mask-1 {
-  0%, 20%  { opacity: 0; }
-  23%      { opacity: 1; }
-  92%      { opacity: 1; }
-  100%     { opacity: 0; }
-}
-@keyframes berry-mask-2 {
-  0%, 44%  { opacity: 0; }
-  47%      { opacity: 1; }
-  92%      { opacity: 1; }
-  100%     { opacity: 0; }
-}
-@keyframes berry-mask-3 {
-  0%, 68%  { opacity: 0; }
-  71%      { opacity: 1; }
-  92%      { opacity: 1; }
-  100%     { opacity: 0; }
-}
-
-/* Review-mode demo: the active card swipes left or right depending
-   on the verdict. Three "good"s and one "bad" so the dominant feel
-   stays positive. Each animation cycle is 6s; staggered delays per
-   card produce a continuous deck of swipes.
-
-   States per phase:
-     0%      → card sits centered, "REVIEW" label hovering above
-     35-50% → "GOOD" or "BAD" label fades in
-     55-100%→ card translates off-screen + rotates + fades
-*/
-/* Good → swipe RIGHT. Bad → swipe LEFT. Matches the in-app
-   keyboard mapping where the LEFT arrow marks a tile good - the
-   visual gesture is the inverse of the key (your hand pushes the
-   card right while pressing left). */
-@keyframes review-swipe-good {
-  0%, 30%  { transform: translateX(0) rotate(0deg); opacity: 1; }
-  55%      { transform: translateX(130%) rotate(14deg); opacity: 0; }
-  100%     { transform: translateX(130%) rotate(14deg); opacity: 0; }
-}
-@keyframes review-swipe-bad {
-  0%, 30%  { transform: translateX(0) rotate(0deg); opacity: 1; }
-  55%      { transform: translateX(-130%) rotate(-14deg); opacity: 0; }
-  100%     { transform: translateX(-130%) rotate(-14deg); opacity: 0; }
-}
-@keyframes review-verdict-good {
-  0%, 30%, 100% { opacity: 0; transform: scale(0.85); }
-  40%, 52%      { opacity: 1; transform: scale(1); }
-}
-@keyframes review-verdict-bad {
-  0%, 30%, 100% { opacity: 0; transform: scale(0.85); }
-  40%, 52%      { opacity: 1; transform: scale(1); }
-}
-
-/* Per-berry click ripple. A circle that briefly expands and fades.
-   Held off-screen-ish (scale 0) for most of the loop. */
-@keyframes berry-click-1 {
-  0%, 19%   { transform: scale(0);    opacity: 0;    }
-  20%       { transform: scale(0.2);  opacity: 0.95; }
-  28%       { transform: scale(1.4);  opacity: 0;    }
-  100%      { transform: scale(0);    opacity: 0;    }
-}
-@keyframes berry-click-2 {
-  0%, 43%   { transform: scale(0);    opacity: 0;    }
-  44%       { transform: scale(0.2);  opacity: 0.95; }
-  52%       { transform: scale(1.4);  opacity: 0;    }
-  100%      { transform: scale(0);    opacity: 0;    }
-}
-@keyframes berry-click-3 {
-  0%, 67%   { transform: scale(0);    opacity: 0;    }
-  68%       { transform: scale(0.2);  opacity: 0.95; }
-  76%       { transform: scale(1.4);  opacity: 0;    }
-  100%      { transform: scale(0);    opacity: 0;    }
 }

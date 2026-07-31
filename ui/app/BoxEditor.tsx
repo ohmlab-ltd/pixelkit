@@ -1246,13 +1246,13 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
       <div className="relative shrink-0">
       <div
         className="relative flex items-center justify-between gap-2 sm:gap-3 px-2 sm:px-4 py-2 sm:py-2.5 shrink-0 overflow-x-auto whitespace-nowrap [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-        // Themable toolbar: subtle gradient + foreground-tinted
-        // divider so the strip reads against either page colour.
-        // Previously hard-coded white-tint stripes that disappeared
-        // on a white surface in light mode.
+        // Themable toolbar: flat panel tint + hairline divider so the
+        // strip reads against either page colour. Previously hard-coded
+        // white-tint stripes that disappeared on a white surface in
+        // light mode.
         style={{
-          background: "linear-gradient(180deg, rgb(var(--foreground-rgb) / 0.025) 0%, rgb(var(--foreground-rgb) / 0) 100%)",
-          borderBottom: "1px solid rgb(var(--foreground-rgb) / 0.08)",
+          background: "var(--panel)",
+          borderBottom: "1px solid var(--line)",
         }}
       >
         {busy && (
@@ -1260,7 +1260,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
             className="absolute left-0 right-0 bottom-0 h-0.5 overflow-hidden"
             title={busyParts.join(" · ")}
           >
-            <div className="indeterminate-bar h-full w-1/3 bg-emerald-400" />
+            <div className="indeterminate-bar h-full w-1/3 bg-[var(--accent)]" />
           </div>
         )}
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
@@ -1273,10 +1273,10 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
                 setEditingId(null);
               }}
               className={[
-                "rounded-full px-3 py-1.5 text-xs font-medium transition-all duration-150 ease-out border backdrop-blur-md",
+                "rounded-md px-3 py-1.5 text-xs font-medium transition-colors duration-150 ease-out border",
                 drawMode
-                  ? "bg-foreground/90 text-background border-foreground/80 shadow-[var(--shadow-strong)]"
-                  : "bg-foreground/[0.04] border-foreground/10 text-foreground/80 hover:bg-foreground/[0.08] hover:border-foreground/20 hover:text-foreground",
+                  ? "bg-[var(--accent-dim)] border-[var(--accent)] text-[var(--foreground)]"
+                  : "border-[var(--line)] text-[var(--fg-muted)] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] hover:text-[var(--foreground)]",
               ].join(" ")}
             >
               {drawMode ? "Drawing… (drag on image)" : "+ Add box"}
@@ -1291,10 +1291,10 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
                 setEditingId(null);
               }}
               className={[
-                "rounded-full px-3 py-1.5 text-xs font-medium transition-all duration-150 ease-out border backdrop-blur-md",
+                "rounded-md px-3 py-1.5 text-xs font-medium transition-colors duration-150 ease-out border",
                 pointMode
-                  ? "bg-foreground/90 text-background border-foreground/80 shadow-[var(--shadow-strong)]"
-                  : "bg-foreground/[0.04] border-foreground/10 text-foreground/80 hover:bg-foreground/[0.08] hover:border-foreground/20 hover:text-foreground",
+                  ? "bg-[var(--accent-dim)] border-[var(--accent)] text-[var(--foreground)]"
+                  : "border-[var(--line)] text-[var(--fg-muted)] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] hover:text-[var(--foreground)]",
                 // Subtle pulsing glow to draw the eye to click-to-detect
                 // in the public demo (off everywhere else). Suppressed
                 // once the mode is active so it doesn't compete with the
@@ -1310,7 +1310,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
           <OverlayToggle label="Labels" on={showLabels} setOn={setShowLabels} />
           <OverlayToggle label="Masks" on={showMasks} setOn={setShowMasks} disabled={!hasMasks} />
           {sizeFilter !== undefined && onSizeFilterChange && Object.values(sizeStatuses ?? {}).some((s) => s !== "ok") && (
-            <div className="inline-flex rounded-full border border-foreground/10 bg-foreground/[0.04] p-0.5 backdrop-blur-md">
+            <div className="inline-flex rounded-md border border-[var(--line)] p-0.5">
               {([
                 ["all", "All", "Show every box, regardless of size."],
                 ["hide", "Hide warned", "Hide boxes too small or borderline at the current input shape."],
@@ -1321,10 +1321,10 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
                   onClick={() => onSizeFilterChange(val)}
                   title={ttl}
                   className={[
-                    "rounded-full px-3 py-1 text-[11px] font-medium uppercase tracking-wider transition-all duration-150",
+                    "rounded-[4px] px-3 py-1 text-[11px] font-medium uppercase tracking-wider transition-colors duration-150",
                     sizeFilter === val
-                      ? "bg-foreground text-background shadow-[var(--shadow-soft)]"
-                      : "text-foreground/55 hover:text-foreground",
+                      ? "bg-[var(--surface-2)] text-[var(--foreground)]"
+                      : "text-[var(--fg-dim)] hover:text-[var(--foreground)]",
                   ].join(" ")}
                 >
                   {lbl}
@@ -1335,7 +1335,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
           {!readOnly && selectedId && !paintingId && (
             <button
               onClick={() => setPaintingId(selectedId)}
-              className="rounded-full px-3 py-1.5 text-xs font-medium transition-all duration-150 ease-out border bg-foreground/[0.04] border-foreground/10 text-foreground/80 hover:bg-foreground/[0.08] hover:border-foreground/20 hover:text-foreground backdrop-blur-md"
+              className="rounded-md px-3 py-1.5 text-xs font-medium transition-colors duration-150 ease-out border border-[var(--line)] text-[var(--fg-muted)] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] hover:text-[var(--foreground)]"
               title="Paint or erase pixels on this box's mask"
             >
               ✎ Edit mask
@@ -1373,10 +1373,10 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
                   : "Highlight boxes that are too small to detect once the image is downscaled"
               }
               className={[
-                "rounded-full px-3 py-1.5 text-xs font-medium transition-all duration-150 ease-out border backdrop-blur-md inline-flex items-center gap-1.5",
+                "rounded-md px-3 py-1.5 text-xs font-medium transition-colors duration-150 ease-out border inline-flex items-center gap-1.5",
                 sizeColoringOn
-                  ? "bg-foreground/90 text-background border-foreground/80 shadow-[var(--shadow-strong)]"
-                  : "bg-foreground/[0.04] border-foreground/10 text-foreground/80 hover:bg-foreground/[0.08] hover:border-foreground/20 hover:text-foreground",
+                  ? "bg-[var(--surface-2)] border-[var(--line-strong)] text-[var(--foreground)]"
+                  : "border-[var(--line)] text-[var(--fg-muted)] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] hover:text-[var(--foreground)]",
               ].join(" ")}
             >
               {/* Three-stripe traffic-light glyph */}
@@ -1390,7 +1390,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
             </button>
           )}
           {busy && (
-            <span className="font-mono text-[10px] uppercase tracking-wider text-emerald-300">
+            <span className="font-mono text-[10px] uppercase tracking-wider text-[var(--accent)]">
               {busyParts.join(" · ")}
             </span>
           )}
@@ -1405,7 +1405,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
               <HotkeyChip k="M" label="Edit mask" />
             </div>
           )}
-          <span>
+          <span className="tabular-nums">
             {boxes.length} box{boxes.length === 1 ? "" : "es"}
           </span>
         </div>
@@ -1437,11 +1437,11 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
           {(zoom !== 1 || pan.x !== 0 || pan.y !== 0) && (
             <button
               onClick={resetView}
-              // Themable reset-zoom pill: surface fill instead of
-              // a translucent black tint so the chip is visible on
-              // a light canvas. Border + text use foreground tokens
-              // so contrast is maintained across themes.
-              className="absolute top-3 right-3 z-10 px-2.5 py-1 text-[10px] font-mono uppercase tracking-wider rounded-full bg-[rgb(var(--surface-rgb)/0.85)] border border-foreground/15 text-foreground/75 hover:bg-[rgb(var(--surface-rgb)/0.95)] hover:border-foreground/30 hover:text-foreground transition-all duration-150 backdrop-blur-md"
+              // Themable reset-zoom chip: solid modal surface instead
+              // of a translucent black tint so the chip is visible on
+              // a light canvas. Border + text use tokens so contrast
+              // is maintained across themes.
+              className="absolute top-3 right-3 z-10 px-2.5 py-1 text-[10px] font-mono uppercase tracking-wider tabular-nums rounded-md bg-[var(--modal-surface)] border border-[var(--line)] text-[var(--fg-muted)] shadow-[var(--shadow-soft)] hover:border-[var(--line-strong)] hover:text-[var(--foreground)] transition-colors duration-150"
               title="Reset zoom / pan"
             >
               {Math.round(zoom * 100)}% · reset
@@ -2131,28 +2131,28 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
             // Mobile gets the bottom paint bar instead (keyboard hints are
             // meaningless on touch), so this is hidden below md.
             <div
-              className="absolute top-3 left-1/2 -translate-x-1/2 z-20 hidden md:flex items-center gap-2 rounded-full px-2 py-1 text-xs backdrop-blur-xl"
+              className="absolute top-3 left-1/2 -translate-x-1/2 z-20 hidden md:flex items-center gap-2 rounded-lg px-2 py-1 text-xs"
               style={{
-                // Themable: tints with --surface so the paint toolbar
-                // floats as a frosted pill in light mode instead of
-                // a dark grey block.
-                background: "linear-gradient(180deg, rgb(var(--surface-rgb) / 0.85) 0%, rgb(var(--surface-2-rgb) / 0.85) 100%)",
-                border: "1px solid rgb(var(--foreground-rgb) / 0.1)",
+                // Themable: flat modal surface + hairline border so the
+                // paint toolbar floats as a quiet flat panel in either
+                // theme instead of a frosted gradient pill.
+                background: "var(--modal-surface)",
+                border: "1px solid var(--line)",
                 boxShadow: "var(--shadow-strong)",
               }}
             >
-              <span className="text-foreground/55 uppercase tracking-wider px-2 text-[10px]">
+              <span className="font-mono text-[10px] uppercase tracking-wider text-[var(--fg-dim)] px-2">
                 Painting · enter to save · esc to cancel
               </span>
               <button
                 onClick={() => painterHandle.current?.commit()}
-                className="rounded-full bg-foreground/95 text-background px-3 py-1 transition-all duration-150 hover:bg-surface-2 shadow-[var(--shadow-soft)]"
+                className="rounded-md bg-[var(--accent)] text-[var(--accent-contrast)] px-3 py-1 font-medium transition-opacity duration-150 hover:opacity-90"
               >
                 Done
               </button>
               <button
                 onClick={() => setPaintingId(null)}
-                className="rounded-full border border-foreground/10 bg-foreground/[0.04] px-3 py-1 text-foreground/75 transition-all duration-150 hover:bg-foreground/[0.08] hover:border-foreground/20 hover:text-foreground"
+                className="rounded-md border border-[var(--line)] px-3 py-1 text-[var(--fg-muted)] transition-colors duration-150 hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] hover:text-[var(--foreground)]"
               >
                 Cancel
               </button>
@@ -2165,15 +2165,15 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
               one-handed and reference keyboard shortcuts that don't exist
               on touch. */}
           {!readOnly && paintingBox && (
-            <div className="md:hidden absolute inset-x-2 bottom-2 z-40 rounded-2xl border border-foreground/15 bg-[rgb(var(--surface-rgb)/0.95)] backdrop-blur-md shadow-2xl px-3 py-2.5 flex flex-col gap-2.5">
+            <div className="md:hidden absolute inset-x-2 bottom-2 z-40 rounded-lg border border-[var(--line)] bg-[var(--modal-surface)] shadow-[var(--shadow-strong)] px-3 py-2.5 flex flex-col gap-2.5">
               <div className="flex items-center gap-2">
-                <div className="flex flex-1 rounded-full border border-foreground/10 bg-foreground/[0.05] p-0.5">
+                <div className="flex flex-1 rounded-md border border-[var(--line)] p-0.5">
                   <button
                     type="button"
                     onClick={() => setPaintMode("brush")}
                     className={[
-                      "flex-1 rounded-full py-2 text-sm font-medium transition-colors touch-manipulation",
-                      paintMode === "brush" ? "bg-foreground text-background" : "text-foreground/60",
+                      "flex-1 rounded-[4px] py-2 text-sm font-medium transition-colors touch-manipulation",
+                      paintMode === "brush" ? "bg-[var(--accent-dim)] text-[var(--foreground)]" : "text-[var(--fg-muted)]",
                     ].join(" ")}
                   >
                     Brush
@@ -2182,8 +2182,8 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
                     type="button"
                     onClick={() => setPaintMode("eraser")}
                     className={[
-                      "flex-1 rounded-full py-2 text-sm font-medium transition-colors touch-manipulation",
-                      paintMode === "eraser" ? "bg-foreground text-background" : "text-foreground/60",
+                      "flex-1 rounded-[4px] py-2 text-sm font-medium transition-colors touch-manipulation",
+                      paintMode === "eraser" ? "bg-[var(--accent-dim)] text-[var(--foreground)]" : "text-[var(--fg-muted)]",
                     ].join(" ")}
                   >
                     Eraser
@@ -2192,20 +2192,20 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
                 <button
                   type="button"
                   onClick={() => setPaintingId(null)}
-                  className="rounded-full border border-foreground/10 bg-foreground/[0.04] px-4 py-2 text-sm text-foreground/75 active:scale-95 transition-transform touch-manipulation shrink-0"
+                  className="rounded-md border border-[var(--line)] px-4 py-2 text-sm text-[var(--fg-muted)] active:scale-95 transition-transform touch-manipulation shrink-0"
                 >
                   Cancel
                 </button>
                 <button
                   type="button"
                   onClick={() => painterHandle.current?.commit()}
-                  className="rounded-full bg-foreground text-background px-4 py-2 text-sm font-semibold active:scale-95 transition-transform touch-manipulation shrink-0"
+                  className="rounded-md bg-[var(--accent)] text-[var(--accent-contrast)] px-4 py-2 text-sm font-semibold active:scale-95 transition-transform touch-manipulation shrink-0"
                 >
                   Done
                 </button>
               </div>
               <div className="flex items-center gap-3">
-                <span className="text-[10px] uppercase tracking-wider text-foreground/45 shrink-0">Size</span>
+                <span className="pk-micro shrink-0">Size</span>
                 <input
                   type="range"
                   min={4}
@@ -2213,10 +2213,10 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
                   step={1}
                   value={brushSize}
                   onChange={(e) => setBrushSize(Number(e.target.value))}
-                  className="flex-1 h-6 accent-cyan-400 touch-manipulation"
+                  className="flex-1 h-6 accent-[var(--accent)] touch-manipulation"
                   aria-label="Brush size"
                 />
-                <span className="font-mono text-xs text-foreground/55 tabular-nums w-8 text-right shrink-0">{brushSize}</span>
+                <span className="font-mono text-xs text-[var(--fg-muted)] tabular-nums w-8 text-right shrink-0">{brushSize}</span>
               </div>
             </div>
           )}
@@ -2228,15 +2228,15 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
             // Mobile: dismissible bottom-sheet overlay. Sits at the bottom
             // with side margins so it covers the image as little as
             // possible, blurred + translucent so the image reads through.
-            "flex flex-col min-h-0 absolute inset-x-2 bottom-2 z-30 max-h-[42%] rounded-2xl border border-foreground/15 bg-[rgb(var(--surface-rgb)/0.94)] backdrop-blur-md shadow-2xl overflow-hidden",
+            "flex flex-col min-h-0 absolute inset-x-2 bottom-2 z-30 max-h-[42%] rounded-lg border border-[var(--line)] bg-[rgb(var(--surface-rgb)/0.94)] backdrop-blur-md shadow-[var(--shadow-strong)] overflow-hidden",
             mobileLabelsOpen ? "flex" : "hidden",
             // Desktop (md+): the original static right-hand column.
-            "md:flex md:static md:inset-auto md:bottom-auto md:z-auto md:max-h-none md:w-72 md:shrink-0 md:rounded-none md:border-y-0 md:border-r-0 md:border-l md:border-foreground/10 md:bg-foreground/[0.02] md:backdrop-blur-none md:shadow-none md:overflow-visible",
+            "md:flex md:static md:inset-auto md:bottom-auto md:z-auto md:max-h-none md:w-72 md:shrink-0 md:rounded-none md:border-y-0 md:border-r-0 md:border-l md:border-[var(--line)] md:bg-[var(--panel)] md:backdrop-blur-none md:shadow-none md:overflow-visible",
           ].join(" ")}
         >
           <div
-            className="px-4 py-2.5 text-[10px] uppercase tracking-wider text-foreground/45 shrink-0 flex items-center justify-between gap-2"
-            style={{ borderBottom: "1px solid rgb(var(--foreground-rgb) / 0.05)" }}
+            className="px-4 py-2.5 pk-micro shrink-0 flex items-center justify-between gap-2"
+            style={{ borderBottom: "1px solid var(--line-soft)" }}
           >
             <span>Labels · {boxes.length}</span>
             <div className="flex items-center gap-2">
@@ -2375,7 +2375,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
               );
               return readOnly ? (
                 <span
-                  className="inline-flex items-center rounded-full bg-red-500/25 border border-red-400/70 text-red-100 px-2 py-1 text-[10px] uppercase tracking-wider"
+                  className="inline-flex items-center rounded bg-[color-mix(in_srgb,var(--bad)_12%,transparent)] border border-[var(--bad)] text-[var(--bad)] px-2 py-1 text-[10px] uppercase tracking-wider"
                   title={reasonTitle}
                 >
                   {Chip}
@@ -2383,7 +2383,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
               ) : (
                 <button
                   onClick={() => verifyBox(b.id)}
-                  className="group inline-flex items-center gap-1 rounded-full bg-red-500/25 border border-red-400/70 text-red-100 hover:bg-emerald-500/25 hover:border-emerald-400/70 hover:text-emerald-100 px-2 py-1 text-[10px] uppercase tracking-wider transition-colors"
+                  className="group inline-flex items-center gap-1 rounded bg-[color-mix(in_srgb,var(--bad)_12%,transparent)] border border-[var(--bad)] text-[var(--bad)] hover:bg-[color-mix(in_srgb,var(--ok)_12%,transparent)] hover:border-[var(--ok)] hover:text-[var(--ok)] px-2 py-1 text-[10px] uppercase tracking-wider transition-colors"
                   title={`${reasonTitle} Click to mark as verified.`}
                 >
                   <span className="group-hover:hidden">{Chip}</span>
@@ -2393,7 +2393,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
             })()}
             {b.validation && b.validation.match && b.validation.kind === "unsure" && (
               <span
-                className="inline-flex items-center rounded-full bg-amber-400/20 border border-amber-500/40 text-amber-700 dark:bg-amber-300/15 dark:border-amber-300/45 dark:text-amber-200 px-2 py-1 text-[10px] uppercase tracking-wider"
+                className="inline-flex items-center rounded bg-[color-mix(in_srgb,var(--warn)_12%,transparent)] border border-[var(--warn)] text-[var(--warn)] px-2 py-1 text-[10px] uppercase tracking-wider"
                 title={b.validation.reason || "Resolver flagged this detection as ambiguous, worth eyeballing."}
               >
                 Unsure
@@ -2401,14 +2401,13 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
             )}
             {b.validation && b.validation.match && b.validation.kind !== "unsure" && b.validation.confidence > 0 && (
               b.validation.source === "cascade" ? (
-                // Label Cascade provenance, orange-glow chip,
-                // distinct from the green Verified/Manual pill so
-                // it's obvious at a glance which boxes were
-                // promoted via the Cascade modal vs reviewed by
-                // AI Review or hand-verified.
+                // Label Cascade provenance, accent chip, distinct
+                // from the green Verified/Manual chip so it's obvious
+                // at a glance which boxes were promoted via the
+                // Cascade modal vs reviewed by AI Review or
+                // hand-verified.
                 <span
-                  className="inline-flex items-center rounded-full border border-orange-300/55 bg-orange-400/15 text-orange-100 px-2 py-1 text-[10px] uppercase tracking-wider"
-                  style={{ boxShadow: "0 0 12px rgba(251, 146, 60, 0.45), 0 0 4px rgba(251, 146, 60, 0.35)" }}
+                  className="inline-flex items-center rounded border border-[var(--accent)] bg-[var(--accent-dim)] text-[var(--accent)] px-2 py-1 text-[10px] uppercase tracking-wider"
                   title={`Label applied via Label Cascade${b.validation.reason ? `, ${b.validation.reason}` : ""}.`}
                 >
                   <span className="flex flex-col items-end leading-[1] gap-[1px]">
@@ -2420,7 +2419,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
                 </span>
               ) : (
                 <span
-                  className="inline-flex items-center rounded-full bg-emerald-500/15 border border-emerald-400/40 text-emerald-200 px-2 py-1 text-[10px] uppercase tracking-wider"
+                  className="inline-flex items-center rounded bg-[color-mix(in_srgb,var(--ok)_12%,transparent)] border border-[var(--ok)] text-[var(--ok)] px-2 py-1 text-[10px] uppercase tracking-wider"
                   title={`AI ${(b.validation.confidence * 100).toFixed(0)}%${b.validation.reason ? `, ${b.validation.reason}` : ""}`}
                 >
                   {/* Same stacked-chip shape as the rejection so
@@ -2466,7 +2465,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
           <button
             type="button"
             onClick={() => setMobileLabelsOpen(true)}
-            className="md:hidden absolute bottom-3 left-1/2 -translate-x-1/2 z-20 inline-flex items-center gap-1.5 rounded-full border border-foreground/15 bg-[rgb(var(--surface-rgb)/0.92)] backdrop-blur-md px-3.5 py-1.5 text-xs font-medium text-foreground/80 shadow-lg active:scale-95 transition-transform touch-manipulation"
+            className="md:hidden absolute bottom-3 left-1/2 -translate-x-1/2 z-20 inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] bg-[var(--modal-surface)] px-3.5 py-1.5 text-xs font-medium text-[var(--fg-soft)] shadow-[var(--shadow-strong)] active:scale-95 transition-transform touch-manipulation"
           >
             <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
               <line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" />
@@ -2483,13 +2482,13 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
 function HotkeyChip({ k, label }: { k: string; label: string }) {
   return (
     <span
-      className="inline-flex items-center gap-1 rounded-full border border-foreground/15 bg-foreground/[0.04] px-1.5 py-0.5 text-[10px] tabular-nums leading-none"
+      className="inline-flex items-center gap-1 rounded border border-[var(--line)] px-1.5 py-0.5 text-[10px] tabular-nums leading-none"
       title={`${label} (press ${k})`}
     >
-      <kbd className="font-mono text-foreground/85 px-1 py-[1px] rounded bg-foreground/10 leading-none">
+      <kbd className="font-mono text-[var(--fg-soft)] px-1 py-[1px] rounded-[3px] bg-[var(--surface-2)] leading-none">
         {k}
       </kbd>
-      <span className="text-foreground/65">{label}</span>
+      <span className="text-[var(--fg-dim)]">{label}</span>
     </span>
   );
 }
@@ -2513,17 +2512,15 @@ function OverlayToggle({
       disabled={disabled}
       onClick={() => setOn(!on)}
       className={[
-        "rounded-full px-3 py-1.5 text-xs font-medium transition-all duration-150 ease-out border backdrop-blur-md",
+        "rounded-md px-3 py-1.5 text-xs font-medium transition-colors duration-150 ease-out border",
         disabled
-          ? "border-foreground/10 text-foreground/35 opacity-50 cursor-not-allowed"
+          ? "border-[var(--line)] text-[var(--fg-faint)] opacity-50 cursor-not-allowed"
           : on
-          // Active state: themable inverted pill, bg = current
-          // foreground, text = current background. In light mode
-          // that's a black pill with white text; in dark mode it's
-          // white with black text. Previously hard-coded text-black
-          // which left both bg + text dark in light mode.
-          ? "bg-foreground/90 text-background border-foreground/80 shadow-[var(--shadow-strong)]"
-          : "bg-foreground/[0.04] border-foreground/10 text-foreground/75 hover:bg-foreground/[0.08] hover:border-foreground/20 hover:text-foreground",
+          // Active state: quiet filled chip, surface fill + stronger
+          // hairline, foreground text. Reads as "on" in both themes
+          // without spending accent on a view toggle.
+          ? "bg-[var(--surface-2)] border-[var(--line-strong)] text-[var(--foreground)]"
+          : "border-[var(--line)] text-[var(--fg-muted)] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] hover:text-[var(--foreground)]",
       ].join(" ")}
       title={`${label}: ${on ? "on" : "off"}`}
     >
@@ -2544,12 +2541,12 @@ function PaintControls({
   setSize: (n: number) => void;
 }) {
   return (
-    <div className="flex items-center gap-1 rounded-full border border-foreground/10 bg-foreground/[0.04] px-1.5 py-1 backdrop-blur-md">
+    <div className="flex items-center gap-1 rounded-md border border-[var(--line)] px-1.5 py-1">
       <button
         onClick={() => setMode("brush")}
         className={[
-          "rounded-full px-2.5 py-1 text-xs font-medium transition-all duration-150 ease-out",
-          mode === "brush" ? "bg-foreground text-background shadow-[var(--shadow-soft)]" : "text-foreground/55 hover:text-foreground",
+          "rounded-[4px] px-2.5 py-1 text-xs font-medium transition-colors duration-150 ease-out",
+          mode === "brush" ? "bg-[var(--accent-dim)] text-[var(--foreground)]" : "text-[var(--fg-dim)] hover:text-[var(--foreground)]",
         ].join(" ")}
         title="Brush, paint into the mask"
       >
@@ -2558,14 +2555,14 @@ function PaintControls({
       <button
         onClick={() => setMode("eraser")}
         className={[
-          "rounded-full px-2.5 py-1 text-xs font-medium transition-all duration-150 ease-out",
-          mode === "eraser" ? "bg-foreground text-background shadow-[var(--shadow-soft)]" : "text-foreground/55 hover:text-foreground",
+          "rounded-[4px] px-2.5 py-1 text-xs font-medium transition-colors duration-150 ease-out",
+          mode === "eraser" ? "bg-[var(--accent-dim)] text-[var(--foreground)]" : "text-[var(--fg-dim)] hover:text-[var(--foreground)]",
         ].join(" ")}
         title="Eraser, remove pixels from the mask"
       >
         Eraser
       </button>
-      <span className="text-[10px] text-[var(--muted)] uppercase tracking-wider pl-1">Size</span>
+      <span className="pk-micro pl-1">Size</span>
       <input
         type="range"
         min={4}
@@ -2573,9 +2570,9 @@ function PaintControls({
         step={1}
         value={size}
         onChange={(e) => setSize(Number(e.target.value))}
-        className="w-24 accent-white"
+        className="w-24 accent-[var(--accent)]"
       />
-      <span className="font-mono text-[10px] text-[var(--muted)] tabular-nums w-8 text-right">{size}</span>
+      <span className="font-mono text-[10px] text-[var(--fg-dim)] tabular-nums w-8 text-right">{size}</span>
     </div>
   );
 }
@@ -2711,22 +2708,22 @@ function LabelPicker({
           // Solid theme-aware surface + explicit text colour: previously
           // bg-transparent with no colour, so over a dark image the typed
           // label was unreadable.
-          "w-full rounded border px-2 py-1 outline-none font-mono text-xs bg-[var(--background)] text-[var(--foreground)] placeholder:text-foreground/40",
+          "w-full rounded border px-2 py-1 outline-none font-mono text-xs bg-[var(--background)] text-[var(--foreground)] placeholder:text-[var(--fg-faint)]",
           blocked
-            ? "border-rose-400/70 focus:border-rose-300"
-            : "border-zinc-500 focus:border-zinc-300",
+            ? "border-[var(--bad)] focus:border-[var(--bad)]"
+            : "border-[var(--line-strong)] focus:border-[var(--accent)]",
         ].join(" ")}
         aria-invalid={blocked ? true : undefined}
       />
       {blocked && (
-        <p className="absolute left-0 right-0 top-full mt-1 text-[10px] text-rose-300/90 z-30">
+        <p className="absolute left-0 right-0 top-full mt-1 text-[10px] text-[var(--bad)] z-30">
           That label can&rsquo;t be used.
         </p>
       )}
       {!blocked && items.length > 0 && (
         <ul
           role="listbox"
-          className="absolute left-0 right-0 top-full mt-1 max-h-56 overflow-y-auto rounded-md border border-[var(--border)] bg-[var(--background)] shadow-xl z-20 py-1"
+          className="absolute left-0 right-0 top-full mt-1 max-h-56 overflow-y-auto rounded-md border border-[var(--line)] bg-[var(--panel-solid)] shadow-[var(--shadow-strong)] z-20 py-1"
         >
           {items.map((it, i) => {
             const isCreate = it.startsWith("__create:");
@@ -2747,12 +2744,12 @@ function LabelPicker({
                 }}
                 className={[
                   "px-2 py-1 text-xs font-mono cursor-pointer flex items-center gap-2",
-                  i === highlight ? "bg-foreground/10 text-[var(--foreground)]" : "text-[var(--muted)] hover:bg-foreground/5",
+                  i === highlight ? "bg-[var(--surface-hover)] text-[var(--foreground)]" : "text-[var(--fg-muted)]",
                 ].join(" ")}
               >
                 {isCreate ? (
                   <>
-                    <span className="text-[10px] uppercase tracking-wider text-emerald-400">New</span>
+                    <span className="text-[10px] uppercase tracking-wider text-[var(--ok)]">New</span>
                     <span>{text}</span>
                   </>
                 ) : (

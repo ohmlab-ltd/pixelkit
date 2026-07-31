@@ -137,7 +137,7 @@ export function PrivateLockIcon() {
       strokeWidth="1.8"
       strokeLinecap="round"
       strokeLinejoin="round"
-      className="text-amber-600 dark:text-amber-300/80 shrink-0"
+      className="text-[var(--warn)] shrink-0"
       aria-label="Private project"
       role="img"
     >
@@ -206,13 +206,13 @@ export function projectStatusBadges(
   const allUnlabelled = nImages > 0 && !nLabelled;
   const badges: { label: string; classes: string }[] = [];
   if (project.running) {
-    badges.push({ label: "In progress", classes: "border-orange-500/45 text-orange-700 dark:border-orange-400/45 dark:text-orange-300" });
+    badges.push({ label: "In progress", classes: "border-accent/45 text-accent" });
   } else if (allLabelled) {
-    badges.push({ label: "Labelled", classes: "border-emerald-500/45 text-emerald-700 dark:border-emerald-400/45 dark:text-emerald-300" });
+    badges.push({ label: "Labelled", classes: "border-[var(--ok)] text-[var(--ok)]" });
   } else if (someLabelled) {
-    badges.push({ label: "Partial", classes: "border-amber-500/50 text-amber-700 dark:border-amber-400/45 dark:text-amber-300" });
+    badges.push({ label: "Partial", classes: "border-[var(--warn)] text-[var(--warn)]" });
   } else if (allUnlabelled) {
-    badges.push({ label: "Unlabelled", classes: "border-red-500/45 text-red-600 dark:border-red-400/45 dark:text-red-300" });
+    badges.push({ label: "Unlabelled", classes: "border-[var(--bad)] text-[var(--bad)]" });
   }
   if (project.hasModel) {
     badges.push({ label: "Model", classes: "border-sky-500/45 text-sky-700 dark:border-sky-400/45 dark:text-sky-300" });
@@ -261,7 +261,7 @@ function SortMenu({
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="inline-flex h-9 items-center gap-1.5 rounded-full border border-foreground/10 bg-foreground/[0.03] hover:border-foreground/20 hover:bg-foreground/[0.06] px-3.5 text-sm text-foreground/75 transition-colors"
+        className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[var(--line)] hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] px-3 text-[13px] text-foreground/75 transition-colors"
       >
         {active.label}
         <svg
@@ -282,7 +282,7 @@ function SortMenu({
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} aria-hidden />
           <div
             role="menu"
-            className="absolute right-0 top-[calc(100%+8px)] z-50 w-48 rounded-xl border border-foreground/10 bg-[var(--background)] p-1.5 shadow-xl"
+            className="pk-glass absolute right-0 top-[calc(100%+8px)] z-50 w-48 rounded-lg p-1.5 shadow-[var(--shadow-strong)]"
           >
             {SORT_OPTIONS.map((opt) => (
               <button
@@ -304,7 +304,7 @@ function SortMenu({
                 {opt.key === value && (
                   <svg
                     viewBox="0 0 24 24"
-                    className="h-3.5 w-3.5 text-[var(--accent-orange)]"
+                    className="h-3.5 w-3.5 text-[var(--accent)]"
                     fill="none"
                     stroke="currentColor"
                     strokeWidth="2.6"
@@ -1641,7 +1641,7 @@ export function HomeView({
                     v2Reset();
                     if (back) setProjectViewId(back);
                   }}
-                  className="mb-5 -ml-1 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-sm font-medium text-foreground/55 transition-colors hover:bg-foreground/[0.06] hover:text-foreground/90"
+                  className="mb-5 -ml-1 inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[13px] font-medium text-foreground/55 transition-colors hover:bg-[var(--surface-hover)] hover:text-foreground/90"
                 >
                   <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                     <path d="M15 18l-6-6 6-6" />
@@ -1649,7 +1649,7 @@ export function HomeView({
                   Back to project
                 </button>
               )}
-              <h2 className="text-2xl font-light tracking-tight text-[var(--foreground)] leading-tight">
+              <h2 className="text-xl font-medium tracking-tight text-[var(--foreground)] leading-tight">
                 What do you want to detect?
               </h2>
               <p className="mt-3 text-sm text-foreground/50 leading-relaxed">
@@ -1661,10 +1661,10 @@ export function HomeView({
                 className="mt-2.5 inline-flex items-center gap-1.5 text-sm text-foreground/55 hover:text-foreground transition-colors"
               >
                 Already have a labelled dataset?
-                <span className="font-medium text-[#fb923c]">Import it →</span>
+                <span className="font-medium text-[var(--accent)]">Import it →</span>
               </button>
 
-              <div className="mt-10 rounded-2xl border border-foreground/10 bg-foreground/[0.03] focus-within:border-foreground/30 focus-within:bg-foreground/[0.05] transition-colors px-4 py-3.5 flex flex-wrap items-center gap-2">
+              <div className="mt-8 rounded-lg border border-[var(--line)] bg-[var(--panel)] focus-within:border-[var(--line-strong)] transition-colors px-4 py-3.5 flex flex-wrap items-center gap-2">
                 {v2Labels.map((lab, i) => {
                   const bg = v2LabelColours[lab.toLowerCase()] ?? LABEL_COLOURS[i % LABEL_COLOURS.length];
                   return (
@@ -1714,7 +1714,7 @@ export function HomeView({
 
               {/* Inline validation (e.g. the profanity guard) — the V1
                   error strip below is hidden while this stage is up. */}
-              {error && <p className="mt-3 text-sm text-red-600 dark:text-red-400">{error}</p>}
+              {error && <p className="mt-3 text-sm text-[var(--bad)]">{error}</p>}
 
               <div className="mt-6 flex items-center gap-3">
                 {/* Visibility toggle, Pro/Mega only. Its left edge
@@ -1729,10 +1729,10 @@ export function HomeView({
                     aria-checked={v2IsPrivate}
                     onClick={() => setV2IsPrivate((p) => !p)}
                     className={[
-                      "inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs transition-colors",
+                      "inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs transition-colors",
                       v2IsPrivate
-                        ? "border-amber-500/50 bg-amber-300/[0.12] text-amber-800 dark:text-amber-100 hover:bg-amber-300/[0.18]"
-                        : "border-foreground/20 bg-foreground/5 text-[var(--foreground)] hover:bg-foreground/10",
+                        ? "border-[var(--warn)] text-[var(--warn)] hover:bg-[var(--surface-hover)]"
+                        : "border-[var(--line)] text-[var(--foreground)] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)]",
                     ].join(" ")}
                     title={v2IsPrivate ? "Private, only you will see this project" : "Public, visible in the community feed"}
                   >
@@ -1740,7 +1740,7 @@ export function HomeView({
                       aria-hidden
                       className={[
                         "h-4 w-7 rounded-full p-0.5 transition-colors flex",
-                        v2IsPrivate ? "bg-amber-500/80 justify-end" : "bg-foreground/25",
+                        v2IsPrivate ? "bg-[var(--warn)] justify-end" : "bg-foreground/25",
                       ].join(" ")}
                     >
                       <span className="h-3 w-3 rounded-full bg-background" />
@@ -1778,8 +1778,8 @@ export function HomeView({
                     type="button"
                     onClick={v2DoneLabels}
                     disabled={v2Labels.length === 0 || v2Stage === "creating"}
-                    className="inline-flex items-center justify-center rounded-full px-7 py-2.5 text-sm font-semibold leading-none text-black transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-                    style={{ backgroundColor: "#fb923c" }}
+                    className="inline-flex items-center justify-center rounded-md px-5 py-2.5 text-[13px] font-semibold leading-none text-[var(--accent-contrast)] transition-all hover:brightness-105 disabled:opacity-40 disabled:cursor-not-allowed"
+                    style={{ backgroundColor: "var(--accent)" }}
                   >
                     Done
                   </button>
@@ -1817,12 +1817,12 @@ export function HomeView({
                 type="button"
                 onClick={() => { if (!v2ImportBusy) setV2Stage("labels"); }}
                 disabled={v2ImportBusy}
-                className="inline-flex items-center gap-1.5 text-xs uppercase tracking-[0.18em] font-mono text-foreground/45 hover:text-foreground transition-colors mb-4 disabled:opacity-30 disabled:cursor-not-allowed"
+                className="inline-flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--fg-dim)] hover:text-foreground transition-colors mb-4 disabled:opacity-30 disabled:cursor-not-allowed"
               >
                 <span aria-hidden>←</span>
                 Back to labels
               </button>
-              <h2 className="text-2xl font-light tracking-tight text-[var(--foreground)] leading-tight">
+              <h2 className="text-xl font-medium tracking-tight text-[var(--foreground)] leading-tight">
                 Import a labelled dataset
               </h2>
               <p className="mt-3 text-sm text-foreground/50 leading-relaxed">
@@ -1831,12 +1831,12 @@ export function HomeView({
                 image and box comes in fully editable.
               </p>
 
-              {error && <p className="mt-4 text-sm text-red-600 dark:text-red-400">{error}</p>}
+              {error && <p className="mt-4 text-sm text-[var(--bad)]">{error}</p>}
 
               {/* Picker — folder or zip. Hidden once a dataset is parsed. */}
               {!v2ImportParsed && (
                 <div className="mt-8 flex flex-wrap items-center gap-3">
-                  <label className="cursor-pointer inline-flex items-center gap-2 rounded-full border border-foreground/15 bg-foreground/5 hover:bg-foreground/10 hover:border-foreground/25 px-4 py-2.5 text-sm transition-colors">
+                  <label className="cursor-pointer inline-flex items-center gap-2 rounded-md border border-[var(--line)] bg-[var(--panel)] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] px-4 py-2.5 text-[13px] transition-colors">
                     Choose folder
                     <input
                       type="file"
@@ -1851,7 +1851,7 @@ export function HomeView({
                       onChange={(e) => v2PickDataset(e.target.files)}
                     />
                   </label>
-                  <label className="cursor-pointer inline-flex items-center gap-2 rounded-full border border-foreground/15 bg-foreground/5 hover:bg-foreground/10 hover:border-foreground/25 px-4 py-2.5 text-sm transition-colors">
+                  <label className="cursor-pointer inline-flex items-center gap-2 rounded-md border border-[var(--line)] bg-[var(--panel)] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] px-4 py-2.5 text-[13px] transition-colors">
                     Choose .zip
                     <input
                       type="file"
@@ -1875,7 +1875,7 @@ export function HomeView({
               {/* Preview + options once parsed. */}
               {v2ImportParsed && (
                 <div className="mt-8 animate-[fadeIn_220ms_ease-out]">
-                  <div className="rounded-2xl border border-foreground/10 bg-foreground/[0.03] p-5">
+                  <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] p-5">
                     <div className="text-sm text-[var(--foreground)]">
                       <span className="font-medium uppercase">{v2ImportParsed.format}</span>
                       <span className="text-foreground/45"> · </span>
@@ -1908,7 +1908,7 @@ export function HomeView({
                     {v2ImportParsed.warnings.length > 0 && (
                       <ul className="mt-3 space-y-1">
                         {v2ImportParsed.warnings.map((w, i) => (
-                          <li key={i} className="text-[12px] text-amber-700 dark:text-amber-300/85">
+                          <li key={i} className="text-[12px] text-[var(--warn)]">
                             {w}
                           </li>
                         ))}
@@ -1929,7 +1929,7 @@ export function HomeView({
                         setV2ImportMaxSide(e.target.value === "" ? null : Number(e.target.value))
                       }
                       disabled={v2ImportBusy}
-                      className="rounded-lg border border-foreground/15 bg-foreground/5 px-3 py-1.5 text-sm text-[var(--foreground)] outline-none focus:border-foreground/30 disabled:opacity-50"
+                      className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-sm text-[var(--foreground)] outline-none focus:border-[var(--line-strong)] disabled:opacity-50"
                     >
                       {IMPORT_MAX_SIZE_OPTIONS.map((o) => (
                         <option key={o.label} value={o.value ?? ""}>
@@ -1951,10 +1951,10 @@ export function HomeView({
                         onClick={() => setV2IsPrivate((p) => !p)}
                         disabled={v2ImportBusy}
                         className={[
-                          "inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs transition-colors disabled:opacity-50",
+                          "inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs transition-colors disabled:opacity-50",
                           v2IsPrivate
-                            ? "border-amber-500/50 bg-amber-300/[0.12] text-amber-800 dark:text-amber-100 hover:bg-amber-300/[0.18]"
-                            : "border-foreground/20 bg-foreground/5 text-[var(--foreground)] hover:bg-foreground/10",
+                            ? "border-[var(--warn)] text-[var(--warn)] hover:bg-[var(--surface-hover)]"
+                            : "border-[var(--line)] text-[var(--foreground)] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)]",
                         ].join(" ")}
                         title={
                           v2IsPrivate
@@ -1966,7 +1966,7 @@ export function HomeView({
                           aria-hidden
                           className={[
                             "h-4 w-7 rounded-full p-0.5 transition-colors flex",
-                            v2IsPrivate ? "bg-amber-500/80 justify-end" : "bg-foreground/25",
+                            v2IsPrivate ? "bg-[var(--warn)] justify-end" : "bg-foreground/25",
                           ].join(" ")}
                         >
                           <span className="h-3 w-3 rounded-full bg-background" />
@@ -2000,11 +2000,11 @@ export function HomeView({
                       type="button"
                       onClick={v2RunImport}
                       disabled={v2ImportBusy || v2ImportParsed.items.length === 0}
-                      className="inline-flex items-center justify-center gap-2 rounded-full px-7 py-2.5 text-sm font-semibold leading-none text-black transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-                      style={{ backgroundColor: "#fb923c" }}
+                      className="inline-flex items-center justify-center gap-2 rounded-md px-5 py-2.5 text-[13px] font-semibold leading-none text-[var(--accent-contrast)] transition-all hover:brightness-105 disabled:opacity-40 disabled:cursor-not-allowed"
+                      style={{ backgroundColor: "var(--accent)" }}
                     >
                       {v2ImportBusy && (
-                        <span className="inline-block h-3 w-3 rounded-full border-2 border-black/40 border-t-transparent animate-spin" />
+                        <span className="inline-block h-3 w-3 rounded-full border-2 border-current border-t-transparent opacity-60 animate-spin" />
                       )}
                       {v2ImportBusy
                         ? `Importing… ${v2ImportProgress ? `${v2ImportProgress.done}/${v2ImportProgress.total}` : ""}`
@@ -2026,7 +2026,7 @@ export function HomeView({
       {!v2Active && (
         <section className="mx-auto max-w-[1400px] px-6 pb-24 grid gap-8">
           {creating && (
-            <div className="rounded-xl border border-[var(--border)] p-5 grid gap-4 animate-[fadeIn_180ms_ease-out]">
+            <div className="rounded-lg border border-[var(--border)] p-5 grid gap-4 animate-[fadeIn_180ms_ease-out]">
               <div className="flex flex-wrap items-center gap-3">
                 <input
                   autoFocus
@@ -2037,21 +2037,21 @@ export function HomeView({
                     if (e.key === "Escape") setCreating(false);
                   }}
                   placeholder="Project name (e.g. potholes)"
-                  className="flex-1 min-w-[12rem] bg-transparent border-b border-[var(--border)] focus:border-zinc-400 outline-none py-2 text-base"
+                  className="flex-1 min-w-[12rem] bg-transparent border-b border-[var(--border)] focus:border-[var(--line-strong)] outline-none py-2 text-base"
                 />
                 <button
                   onClick={create}
                   disabled={!newName.trim()}
-                  className="rounded-full bg-foreground text-background px-5 py-2.5 text-sm font-medium hover:bg-zinc-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="rounded-md bg-[var(--accent)] text-[var(--accent-contrast)] px-4 py-2 text-[13px] font-medium hover:brightness-105 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   Create
                 </button>
               </div>
               {isFreePlan && (
-                <div className="rounded-lg border border-amber-300/25 bg-amber-300/[0.04] px-3.5 py-2.5 flex items-start gap-3">
-                  <span aria-hidden className="mt-1.5 h-1.5 w-1.5 rounded-full bg-amber-300/80 shrink-0" />
+                <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-3.5 py-2.5 flex items-start gap-3">
+                  <span aria-hidden className="mt-1.5 h-1.5 w-1.5 rounded-full bg-[var(--warn)] shrink-0" />
                   <div className="text-[12px] text-foreground/75 leading-relaxed">
-                    <span className="text-amber-200/90 font-mono uppercase tracking-wider text-[10px]">Public project</span>
+                    <span className="text-[var(--warn)] font-mono uppercase tracking-[0.12em] text-[11px]">Public project</span>
                     <span className="text-foreground/45"> · </span>
                     Free projects are public, anyone can see the images, labels and exports.
                     Don&rsquo;t upload anything personal, sensitive, controlled, restricted or
@@ -2062,7 +2062,7 @@ export function HomeView({
             </div>
           )}
 
-          {error && <div className="text-sm text-red-400">{error}</div>}
+          {error && <div className="text-sm text-[var(--bad)]">{error}</div>}
 
           {/* Projects (team containers of datasets). Sits above the Datasets
               grid. Only for signed-in users (lists the user's own Projects). */}
@@ -2090,17 +2090,17 @@ export function HomeView({
                         type="button"
                         onClick={() => setTab(t.key)}
                         className={[
-                          "inline-flex items-center gap-2 rounded-full px-3.5 h-9 text-sm transition-colors",
+                          "inline-flex items-center gap-2 rounded-md px-3 h-9 text-[13px] transition-colors",
                           isActive
-                            ? "bg-orange-500/[0.12] text-orange-700 dark:text-orange-300 font-semibold"
-                            : "text-foreground/55 hover:text-foreground/90 hover:bg-foreground/[0.04]",
+                            ? "bg-accent/10 text-accent font-medium"
+                            : "text-foreground/55 hover:text-foreground/90 hover:bg-[var(--surface-hover)]",
                         ].join(" ")}
                       >
                         {t.label}
                         <span
                           className={[
-                            "tabular-nums rounded-full px-1.5 text-[11px] leading-5",
-                            isActive ? "bg-orange-500/20 text-orange-700 dark:text-orange-200" : "bg-foreground/[0.06] text-foreground/45",
+                            "tabular-nums rounded px-1.5 text-[11px] leading-5",
+                            isActive ? "bg-accent/15 text-accent" : "bg-foreground/[0.06] text-foreground/45",
                           ].join(" ")}
                         >
                           {t.count}
@@ -2130,7 +2130,7 @@ export function HomeView({
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
                       placeholder="Search datasets"
-                      className="h-9 rounded-full bg-foreground/[0.04] border border-foreground/10 hover:border-foreground/20 focus:border-foreground/40 focus:bg-foreground/[0.06] outline-none pl-9 pr-3 text-sm text-[var(--foreground)] placeholder:text-foreground/40 transition-colors w-44 sm:w-56"
+                      className="h-9 rounded-md bg-[var(--panel)] border border-[var(--line)] hover:border-[var(--line-strong)] focus:border-[var(--accent)] outline-none pl-9 pr-3 text-sm text-[var(--foreground)] placeholder:text-foreground/40 transition-colors w-44 sm:w-56"
                     />
                   </label>
                 )}
@@ -2152,7 +2152,7 @@ export function HomeView({
                       v2Reset();
                     }
                   }}
-                  className="h-9 rounded-full bg-foreground text-background px-4 text-sm font-medium hover:opacity-90 transition-opacity"
+                  className="h-9 rounded-md bg-[var(--accent)] text-[var(--accent-contrast)] px-4 text-[13px] font-medium hover:brightness-105 transition"
                 >
                   {v2Stage !== "idle" || creating ? "Cancel" : "+ Add Dataset"}
                 </button>
@@ -2163,7 +2163,7 @@ export function HomeView({
           {sortedProjects === null ? (
             <div className="text-[var(--muted)] text-sm">Loading…</div>
           ) : sortedProjects.length === 0 ? (
-            <div className="rounded-3xl border border-foreground/10 bg-foreground/[0.02] py-16 text-center text-foreground/50">
+            <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] py-10 text-center text-foreground/50">
               {isSearching ? (
                 <>No projects match <span className="text-foreground/90">&ldquo;{searchQuery.trim()}&rdquo;</span>.</>
               ) : tab === "starred" ? (
@@ -2208,7 +2208,7 @@ export function HomeView({
                   && Array.from({ length: Math.min(WORKSPACE_PAGE_SIZE, total - projects.length) }).map((_, i) => (
                     <div
                       key={`ws-skel-${projects.length + i}`}
-                      className="rounded-2xl border border-foreground/10 bg-foreground/[0.02] overflow-hidden"
+                      className="rounded-lg border border-[var(--line)] bg-[var(--panel)] overflow-hidden"
                     >
                       <div className="aspect-video bg-foreground/[0.04]" />
                       <div className="p-4 space-y-2">
@@ -2407,11 +2407,11 @@ function ProjectCard({
   // Shared chrome for the two floating cover buttons: a frosted white
   // pill that stays legible on any thumbnail in both themes.
   const coverBtn =
-    "h-8 w-8 rounded-full grid place-items-center backdrop-blur-md bg-white/85 hover:bg-white text-zinc-700 transition-colors";
-  const coverBtnShadow = { boxShadow: "0 1px 6px rgb(var(--shadow-rgb) / 0.45), 0 0 0 1px rgb(var(--shadow-rgb) / 0.08)" };
+    "h-8 w-8 rounded-md grid place-items-center backdrop-blur-md bg-white/85 hover:bg-white text-zinc-700 transition-colors";
+  const coverBtnShadow = { boxShadow: "var(--shadow-soft)" };
   return (
     <div
-      className="pk-card pk-card-hover group overflow-hidden rounded-2xl"
+      className="pk-card pk-card-hover group overflow-hidden rounded-lg"
       style={{
         // Lift the card above the dim overlay (z-1000) while either
         // popup (tag overflow / overflow menu) is open so the card
@@ -2438,7 +2438,7 @@ function ProjectCard({
           </div>
         </button>
         {project.certified && (
-          <div className="absolute top-3 left-3 inline-flex items-center gap-1.5 rounded-full bg-amber-500/20 backdrop-blur-md border border-amber-300/40 text-amber-50 px-2.5 py-1 text-[10px] font-medium shadow-lg pointer-events-none">
+          <div className="absolute top-3 left-3 inline-flex items-center gap-1.5 rounded-md bg-amber-500/20 backdrop-blur-md border border-amber-300/40 text-amber-50 px-2.5 py-1 text-[10px] font-medium pointer-events-none">
             <svg viewBox="0 0 24 24" className="h-3 w-3" fill="currentColor">
               <path d="M12 1.6l2.6 5.6 6.1.6-4.6 4.2 1.4 6.1L12 14.9 6.5 18.1l1.4-6.1L3.3 7.8l6.1-.6z" />
             </svg>
@@ -2453,7 +2453,7 @@ function ProjectCard({
           }}
           aria-pressed={favourited}
           aria-label={favourited ? "unfavourite" : "favourite"}
-          className={[coverBtn, "absolute top-3 right-3", favourited ? "text-amber-500" : ""].join(" ")}
+          className={[coverBtn, "absolute top-3 right-3", favourited ? "text-[var(--accent)]" : ""].join(" ")}
           style={coverBtnShadow}
         >
           <svg
@@ -2500,7 +2500,7 @@ function ProjectCard({
               />
               <div
                 role="menu"
-                className="absolute bottom-[calc(100%+8px)] right-0 z-50 w-44 rounded-xl border border-foreground/10 bg-[var(--background)] p-1.5 shadow-xl"
+                className="pk-glass absolute bottom-[calc(100%+8px)] right-0 z-50 w-44 rounded-lg p-1.5 shadow-[var(--shadow-strong)]"
               >
                 {onDuplicate && (
                   <button
@@ -2530,7 +2530,7 @@ function ProjectCard({
                     setMenuOpen(false);
                     onDelete();
                   }}
-                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-sm text-red-600 hover:bg-red-500/10 dark:text-red-300 transition-colors"
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-sm text-[var(--bad)] hover:bg-[var(--surface-hover)] transition-colors"
                 >
                   <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                     <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
@@ -2562,7 +2562,7 @@ function ProjectCard({
                   <span
                     key={b.label}
                     className={[
-                      "rounded-full px-2 py-0.5 text-[10px] leading-normal uppercase tracking-wider border",
+                      "rounded px-1.5 py-0.5 font-mono text-[10px] leading-normal uppercase tracking-[0.12em] border",
                       b.classes,
                     ].join(" ")}
                   >
@@ -2578,11 +2578,11 @@ function ProjectCard({
               numbers dominating the body. */}
           <div className="flex flex-wrap items-baseline gap-x-6 gap-y-1">
             <div className="flex items-baseline gap-1.5">
-              <span className="text-[10px] uppercase tracking-wider text-[var(--muted)]">Images</span>
+              <span className="pk-micro">Images</span>
               <span className="tabular-nums text-sm font-semibold text-[var(--foreground)]">{project.n_images}</span>
             </div>
             <div className="flex items-baseline gap-1.5">
-              <span className="text-[10px] uppercase tracking-wider text-[var(--muted)]">Labelled</span>
+              <span className="pk-micro">Labelled</span>
               <span className="tabular-nums text-sm font-semibold text-[var(--foreground)]">
                 {project.n_labelled}
                 <span className="text-foreground/35 font-normal"> / {project.n_images}</span>
@@ -2608,9 +2608,9 @@ function ProjectCard({
           }}
           aria-pressed={project.likedByMe}
           className={[
-            "inline-flex items-center gap-1.5 rounded-full px-2 py-1 -ml-2 transition-colors",
+            "inline-flex items-center gap-1.5 rounded-md px-2 py-1 -ml-2 transition-colors",
             project.likedByMe
-              ? "text-pink-500 hover:text-pink-400"
+              ? "text-accent hover:text-accent/80"
               : "text-foreground/45 hover:text-foreground",
           ].join(" ")}
           title={project.likedByMe ? "Unlike" : "Like"}
@@ -2626,7 +2626,7 @@ function ProjectCard({
               e.stopPropagation();
               onOpenProject(project.container!.id);
             }}
-            className="inline-flex items-center gap-1 rounded-full bg-orange-500/10 px-2.5 py-1 text-[11px] font-medium text-orange-600 transition-colors hover:bg-orange-500/20 dark:text-orange-300"
+            className="inline-flex items-center gap-1 rounded-md border border-[var(--line)] px-2.5 py-1 text-[11px] font-medium text-foreground/70 transition-colors hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)]"
             title={`Open project: ${project.container.name}`}
           >
             <svg
@@ -2689,10 +2689,10 @@ function DeleteProjectDialog({
         if (e.target === e.currentTarget && !busy) onCancel();
       }}
     >
-      <div className="pk-glass pk-pop max-w-md w-full rounded-2xl overflow-hidden">
+      <div className="pk-glass pk-pop max-w-md w-full rounded-lg overflow-hidden">
         <header className="px-6 pt-6 pb-3">
-          <div className="text-[10px] uppercase tracking-[0.2em] text-red-700 dark:text-red-400">Permanent action</div>
-          <h2 className="mt-2 text-2xl font-semibold tracking-tight">Delete project?</h2>
+          <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--bad)]">Permanent action</div>
+          <h2 className="mt-2 text-xl font-semibold tracking-tight">Delete project?</h2>
         </header>
 
         <div className="px-6 pb-5 grid gap-4">
@@ -2701,10 +2701,10 @@ function DeleteProjectDialog({
             <span className="font-mono text-[var(--foreground)]">{project.name}</span> along with{" "}
             <span className="font-mono text-[var(--foreground)]">{project.n_images}</span> image
             {project.n_images === 1 ? "" : "s"}, every label, every verdict, and any model state.{" "}
-            <span className="text-red-700 dark:text-red-300">This cannot be recovered.</span>
+            <span className="text-[var(--bad)]">This cannot be recovered.</span>
           </p>
 
-          <div className="rounded-lg border border-red-500/40 dark:border-red-500/30 bg-red-500/[0.08] dark:bg-red-500/[0.05] px-3 py-2.5 text-xs text-red-800 dark:text-red-200">
+          <div className="rounded-md border border-[var(--bad)] bg-[var(--panel)] px-3 py-2.5 text-xs text-[var(--bad)]">
             Type the project name{" "}
             <span className="font-mono text-[var(--foreground)]">{project.name}</span> below to confirm.
           </div>
@@ -2717,7 +2717,7 @@ function DeleteProjectDialog({
               if (e.key === "Enter") submit();
             }}
             placeholder={project.name}
-            className="w-full rounded-lg border border-[var(--border)] bg-transparent px-3 py-2.5 font-mono text-sm focus:outline-none focus:border-[var(--foreground)]/40"
+            className="w-full rounded-md border border-[var(--border)] bg-transparent px-3 py-2.5 font-mono text-sm focus:outline-none focus:border-[var(--line-strong)]"
             spellCheck={false}
             autoComplete="off"
           />
@@ -2726,7 +2726,7 @@ function DeleteProjectDialog({
         <footer className="px-6 py-4 border-t border-[var(--border)] flex items-center justify-end gap-2">
           <button
             onClick={onCancel}
-            className="rounded-full border border-[var(--border)] px-5 py-2 text-sm hover:border-zinc-500 transition-colors"
+            className="rounded-md border border-[var(--line)] px-4 py-2 text-[13px] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] transition-colors"
           >
             Cancel
           </button>
@@ -2734,7 +2734,7 @@ function DeleteProjectDialog({
             onClick={submit}
             disabled={!matches || busy}
             className={[
-              "rounded-full px-5 py-2 text-sm font-medium transition-colors",
+              "rounded-md px-4 py-2 text-[13px] font-medium transition-colors",
               matches && !busy
                 ? "bg-red-600 dark:bg-red-500 text-white hover:bg-red-700 dark:hover:bg-red-400"
                 : "bg-red-500/20 text-red-700/60 dark:text-red-300/60 cursor-not-allowed",

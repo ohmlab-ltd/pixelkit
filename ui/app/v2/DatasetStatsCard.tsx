@@ -242,7 +242,7 @@ export function DatasetStatsCard({
           card reads as quiet metadata above the page; the only
           visual chrome is the chevron + health badge in the
           summary row. */}
-      <div className="rounded-2xl overflow-hidden">
+      <div className="rounded-lg overflow-hidden">
         {/* Header / summary row, always visible. Click toggles the
             full breakdown below. The headline metric (health score)
             and the top-three counters live in this row so the user
@@ -307,7 +307,7 @@ export function DatasetStatsCard({
                     </span>
                   )}
                   {stats.counts.near_duplicates > 0 && (
-                    <span className="font-mono tabular-nums text-amber-700 dark:text-amber-300">
+                    <span className="font-mono tabular-nums text-[var(--warn)]">
                       {stats.counts.near_duplicates} near-dup
                     </span>
                   )}
@@ -350,7 +350,7 @@ export function DatasetStatsCard({
                 <div className="text-sm text-[var(--muted)] py-4">Loading stats…</div>
               )}
               {error && !stats && (
-                <div className="text-sm text-red-700 dark:text-red-300 py-4">
+                <div className="text-sm text-[var(--bad)] py-4">
                   Couldn&rsquo;t load stats, {error}
                 </div>
               )}
@@ -382,7 +382,7 @@ export function DatasetStatsCard({
                       the cap (LabelsList measures itself + toggles
                       the mask), so short label sets stay flat-edged. */}
                   <div className="lg:col-span-1">
-                    <div className="text-xs uppercase tracking-wider text-[var(--muted)] font-mono mb-3">
+                    <div className="pk-micro mb-3">
                       Label distribution
                     </div>
                     {stats.labels.length === 0 ? (
@@ -430,7 +430,7 @@ export function DatasetStatsCard({
 
                   {/* Variation plot column */}
                   <div className="lg:col-span-1">
-                    <div className="text-xs uppercase tracking-wider text-[var(--muted)] font-mono mb-3 flex items-center justify-between gap-2">
+                    <div className="pk-micro mb-3 flex items-center justify-between gap-2">
                       <span>Image variation</span>
                       {stats.counts.embeddings_ready > 0 && (
                         <span className="text-[10px] font-normal text-foreground/40 normal-case tracking-normal">
@@ -690,7 +690,7 @@ function RemoveDuplicatesAction({ projectId }: { projectId: string }) {
         <button
           type="button"
           onClick={openModal}
-          className="text-[11px] uppercase tracking-wider font-mono text-amber-700 dark:text-amber-300 hover:text-amber-600 dark:hover:text-amber-200 transition-colors"
+          className="text-[11px] uppercase tracking-wider font-mono text-[var(--warn)] transition-opacity hover:opacity-80"
         >
           Review duplicates →
         </button>
@@ -698,13 +698,9 @@ function RemoveDuplicatesAction({ projectId }: { projectId: string }) {
       {open && typeof window !== "undefined" && createPortal(
         <>
           <div
-            className="fixed inset-0 z-[1000] bg-white/65 dark:bg-black/65"
+            className="fixed inset-0 z-[1000] pk-backdrop"
             onClick={closeAndRefresh}
             aria-hidden
-            style={{
-              backdropFilter: "blur(14px) saturate(120%)",
-              WebkitBackdropFilter: "blur(14px) saturate(120%)",
-            }}
           />
           <div
             role="dialog"
@@ -713,8 +709,7 @@ function RemoveDuplicatesAction({ projectId }: { projectId: string }) {
             className="fixed inset-0 z-[1001] grid place-items-center p-6 pointer-events-none"
           >
             <div
-              className="pointer-events-auto w-full max-w-3xl max-h-[88vh] flex flex-col rounded-2xl border border-foreground/10 overflow-hidden"
-              style={{ background: "rgb(var(--surface-rgb))", boxShadow: "var(--shadow-strong)" }}
+              className="pointer-events-auto w-full max-w-3xl max-h-[88vh] flex flex-col rounded-lg pk-glass overflow-hidden"
               onClick={(e) => e.stopPropagation()}
             >
               <header className="px-5 py-4 border-b border-foreground/[0.08] flex items-start justify-between gap-3">
@@ -731,7 +726,7 @@ function RemoveDuplicatesAction({ projectId }: { projectId: string }) {
                   <div
                     role="tablist"
                     aria-label="Duplicate type"
-                    className="mt-3 inline-flex rounded-full border border-foreground/15 p-0.5 bg-foreground/[0.025]"
+                    className="mt-3 inline-flex rounded-md border border-[var(--line)] p-0.5 bg-[var(--panel)]"
                   >
                     {([
                       { key: "near", label: "Near duplicates" },
@@ -747,7 +742,7 @@ function RemoveDuplicatesAction({ projectId }: { projectId: string }) {
                           onClick={() => void switchMode(key)}
                           disabled={loading && !active}
                           className={[
-                            "rounded-full px-3 py-1 text-[11px] uppercase tracking-wider font-mono transition-colors",
+                            "rounded-[4px] px-3 py-1 text-[11px] uppercase tracking-wider font-mono transition-colors",
                             active
                               ? "bg-foreground text-background"
                               : "text-foreground/65 hover:text-foreground",
@@ -781,7 +776,7 @@ function RemoveDuplicatesAction({ projectId }: { projectId: string }) {
                     type="button"
                     onClick={() => void bulkDelete()}
                     disabled={selectedIds.size === 0 || bulkBusy}
-                    className="text-[11px] uppercase tracking-wider font-mono px-3 py-1 rounded-full border border-red-500/40 text-red-700 dark:text-red-300 hover:bg-red-500/[0.08] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    className="text-[11px] uppercase tracking-wider font-mono px-3 py-1 rounded-md border border-[var(--line)] text-[var(--bad)] hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                   >
                     {bulkBusy
                       ? "Deleting…"
@@ -801,11 +796,11 @@ function RemoveDuplicatesAction({ projectId }: { projectId: string }) {
                   <div className="text-sm text-foreground/55 py-6">No duplicate groups remain.</div>
                 )}
                 {error && (
-                  <div className="text-sm text-red-700 dark:text-red-300 py-4">{error}</div>
+                  <div className="text-sm text-[var(--bad)] py-4">{error}</div>
                 )}
                 <ul className="grid gap-5">
                   {groups.map((g, gi) => (
-                    <li key={g.keep} className="border border-foreground/[0.08] rounded-xl p-3">
+                    <li key={g.keep} className="border border-[var(--line)] rounded-lg p-3">
                       <div className="flex items-center justify-between gap-3 mb-3">
                         <div className="text-[11px] uppercase tracking-wider font-mono text-foreground/60">
                           Group {gi + 1} · {g.drop.length + 1} images
@@ -815,7 +810,7 @@ function RemoveDuplicatesAction({ projectId }: { projectId: string }) {
                             type="button"
                             disabled={busyKey === g.keep}
                             onClick={() => deleteGroup(g)}
-                            className="text-[11px] uppercase tracking-wider font-mono px-2.5 py-1 rounded-full border border-red-500/40 text-red-700 dark:text-red-300 hover:bg-red-500/[0.08] disabled:opacity-50 transition-colors"
+                            className="text-[11px] uppercase tracking-wider font-mono px-2.5 py-1 rounded-md border border-[var(--line)] text-[var(--bad)] hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] disabled:opacity-50 transition-colors"
                           >
                             {busyKey === g.keep ? "…" : `Delete ${g.drop.length}`}
                           </button>
@@ -823,7 +818,7 @@ function RemoveDuplicatesAction({ projectId }: { projectId: string }) {
                             type="button"
                             disabled={busyKey === g.keep}
                             onClick={() => ignoreGroup(g)}
-                            className="text-[11px] uppercase tracking-wider font-mono px-2.5 py-1 rounded-full border border-foreground/15 text-foreground/70 hover:text-foreground hover:bg-foreground/[0.04] disabled:opacity-50 transition-colors"
+                            className="text-[11px] uppercase tracking-wider font-mono px-2.5 py-1 rounded-md border border-[var(--line)] text-foreground/70 hover:text-foreground hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] disabled:opacity-50 transition-colors"
                           >
                             Not duplicates
                           </button>
@@ -843,10 +838,10 @@ function RemoveDuplicatesAction({ projectId }: { projectId: string }) {
                               onClick={() => !m.isKeeper && toggleSelect(m.id)}
                               className={`relative aspect-square rounded-lg overflow-hidden border text-left transition-shadow ${
                                 m.isKeeper
-                                  ? "border-emerald-500/40 ring-1 ring-emerald-500/30 cursor-default"
+                                  ? "border-[var(--ok)] cursor-default"
                                   : isSelected
-                                    ? "border-red-500/70 ring-2 ring-red-500/55 cursor-pointer"
-                                    : "border-foreground/10 hover:border-foreground/30 cursor-pointer"
+                                    ? "border-[var(--bad)] ring-1 ring-[var(--bad)] cursor-pointer"
+                                    : "border-[var(--line)] hover:border-[var(--line-strong)] cursor-pointer"
                               }`}
                             >
                               {m.filename && (
@@ -862,7 +857,7 @@ function RemoveDuplicatesAction({ projectId }: { projectId: string }) {
                                 />
                               )}
                               {m.isKeeper && (
-                                <span className="absolute bottom-1 left-1 text-[10px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-emerald-500/85 text-white">
+                                <span className="absolute bottom-1 left-1 text-[10px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-md bg-black/60 text-[var(--ok)]">
                                   Keep
                                 </span>
                               )}
@@ -870,7 +865,7 @@ function RemoveDuplicatesAction({ projectId }: { projectId: string }) {
                                 <span
                                   className={`absolute top-1.5 right-1.5 h-5 w-5 rounded-md grid place-items-center text-[10px] font-bold border transition-colors ${
                                     isSelected
-                                      ? "bg-red-500 border-red-500 text-white"
+                                      ? "bg-[var(--bad)] border-[var(--bad)] text-white"
                                       : "bg-black/50 border-white/60 text-white/0"
                                   }`}
                                   aria-hidden
@@ -890,7 +885,7 @@ function RemoveDuplicatesAction({ projectId }: { projectId: string }) {
                 <button
                   type="button"
                   onClick={closeAndRefresh}
-                  className="text-[11px] uppercase tracking-wider font-mono px-3 py-1.5 rounded-full bg-foreground/[0.06] text-[var(--foreground)] hover:bg-foreground/[0.1] transition-colors"
+                  className="text-[11px] uppercase tracking-wider font-mono px-3 py-1.5 rounded-md border border-[var(--line)] text-[var(--foreground)] hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] transition-colors"
                 >
                   Done
                 </button>
@@ -914,7 +909,7 @@ function CounterRow({
   tone?: "warn";
 }) {
   const valueClass = tone === "warn" && value > 0
-    ? "text-amber-700 dark:text-amber-300"
+    ? "text-[var(--warn)]"
     : "text-[var(--foreground)]";
   return (
     <div className="flex items-baseline justify-between gap-3 py-1.5 border-b border-foreground/[0.06] last:border-b-0">
@@ -953,10 +948,10 @@ function HealthBadge({
       : "red";
   const toneClasses =
     tone === "emerald"
-      ? "border-emerald-500/45 bg-emerald-500/[0.10] text-emerald-800 dark:text-emerald-200"
+      ? "border-[var(--line)] bg-[var(--surface)] text-[var(--ok)]"
       : tone === "amber"
-      ? "border-amber-500/50 bg-amber-500/[0.12] text-amber-800 dark:text-amber-200"
-      : "border-red-500/50 bg-red-500/[0.10] text-red-800 dark:text-red-200";
+      ? "border-[var(--line)] bg-[var(--surface)] text-[var(--warn)]"
+      : "border-[var(--line)] bg-[var(--surface)] text-[var(--bad)]";
 
   const triggerRef = useRef<HTMLSpanElement | null>(null);
   const [open, setOpen] = useState(false);
@@ -983,7 +978,7 @@ function HealthBadge({
       onMouseEnter={onEnter}
       onMouseLeave={onLeave}
       onClick={(e) => e.stopPropagation()}
-      className={`relative inline-flex items-center gap-3 rounded-full border px-3 py-1.5 ${toneClasses}`}
+      className={`relative inline-flex items-center gap-3 rounded-md border px-2.5 py-1 ${toneClasses}`}
     >
       <span className="text-[10px] uppercase tracking-[0.18em] font-mono opacity-80">Health</span>
       <span className="text-base font-mono tabular-nums">{score}</span>
@@ -996,7 +991,7 @@ function HealthBadge({
           />
           <div
             role="tooltip"
-            className="fixed z-[1002] w-80 rounded-2xl border border-foreground/10 p-4 pointer-events-none"
+            className="fixed z-[1002] w-80 rounded-lg border border-[var(--modal-border)] p-4 pointer-events-none"
             style={{
               left: anchor.x,
               top: anchor.y,
@@ -1055,9 +1050,9 @@ function FactorRow({
   const tone =
     pct >= 80 ? "emerald" : pct >= 55 ? "amber" : "red";
   const bar =
-    tone === "emerald" ? "bg-emerald-500/70"
-    : tone === "amber" ? "bg-amber-500/80"
-    : "bg-red-500/75";
+    tone === "emerald" ? "bg-[var(--ok)]"
+    : tone === "amber" ? "bg-[var(--warn)]"
+    : "bg-[var(--bad)]";
   return (
     <li className="grid gap-1">
       <div className="flex items-baseline justify-between gap-2 text-[11px]">
@@ -1168,7 +1163,7 @@ export function VariationPlot({
       return (
         <div
           ref={wrapRef}
-          className="relative aspect-square rounded-xl border border-foreground/10 bg-foreground/[0.02] grid place-items-center"
+          className="relative aspect-square rounded-lg border border-[var(--line)] bg-[var(--panel)] grid place-items-center"
         >
           <style>{`
             @keyframes pk-stats-spin { to { transform: rotate(360deg); } }
@@ -1213,11 +1208,11 @@ export function VariationPlot({
     return (
       <div
         ref={wrapRef}
-        className="relative aspect-square grid place-items-center rounded-xl border border-foreground/10 bg-foreground/[0.02]"
+        className="relative aspect-square grid place-items-center rounded-lg border border-[var(--line)] bg-[var(--panel)]"
       >
         {/* Loading wheel rather than a "no embeddings" message, so the plot
             reads as still loading while the embeddings/projection arrive. */}
-        <span className="h-7 w-7 animate-spin rounded-full border-2 border-foreground/15 border-t-[var(--accent-orange)]" aria-label="Loading image variation" role="status" />
+        <span className="h-7 w-7 animate-spin rounded-full border-2 border-foreground/15 border-t-[var(--accent)]" aria-label="Loading image variation" role="status" />
       </div>
     );
   }
@@ -1228,7 +1223,7 @@ export function VariationPlot({
   return (
     <div
       ref={wrapRef}
-      className="relative aspect-square rounded-xl border border-foreground/10 bg-foreground/[0.02] overflow-hidden"
+      className="relative aspect-square rounded-lg border border-[var(--line)] bg-[var(--panel)] overflow-hidden"
     >
       <svg viewBox="0 0 100 100" className="absolute inset-0 w-full h-full" preserveAspectRatio="none">
         {[25, 50, 75].map((g) => (
@@ -1293,7 +1288,7 @@ export function VariationPlot({
               style={{ cursor: onJumpToImport ? "pointer" : "default" }}
             >
               {isDup && (
-                <circle cx={cx} cy={cy} r={r + 1.6} fill="none" stroke="rgb(245 158 11 / 0.7)" strokeWidth="0.5" />
+                <circle cx={cx} cy={cy} r={r + 1.6} fill="none" stroke="var(--warn)" strokeOpacity="0.75" strokeWidth="0.5" />
               )}
               <circle
                 cx={cx}
@@ -1328,7 +1323,7 @@ export function VariationPlot({
           <span className="truncate">{hover.filename ?? hover.id}</span>
           {hover.label && <span className="opacity-70 ml-2">· {hover.label}</span>}
           {hover.n_detections > 0 && <span className="opacity-70 ml-2">· {hover.n_detections} det.</span>}
-          {nearDuplicateIds.has(hover.id) && <span className="opacity-80 ml-2 text-amber-700 dark:text-amber-300">· near-dup</span>}
+          {nearDuplicateIds.has(hover.id) && <span className="opacity-80 ml-2 text-[var(--warn)]">· near-dup</span>}
         </div>
       )}
     </div>

@@ -113,30 +113,30 @@ const SOFTWARE_LD = {
 
 // Inline pre-hydration script: applies the persisted theme class on
 // <html> before React mounts so the first paint matches the user's
-// stored preference. Without this, users on light mode see a brief
-// dark flash on every full page load.
+// stored preference. Without this, users see a brief wrong-theme
+// flash on every full page load.
 //
-// First-visit default is LIGHT, t === null when no preference is
-// stored yet, so the only way the page renders dark on first paint
-// is if the user explicitly toggled into dark on a previous visit
-// (in which case t === 'dark').
+// First-visit default is DARK (the brand look), t === null when no
+// preference is stored yet, so the only way the page renders light on
+// first paint is if the user explicitly toggled into light on a
+// previous visit (in which case t === 'light').
 const themeInitScript = `
 (function() {
   try {
     var t = window.localStorage.getItem('pixelkit-theme');
-    var dark = t === 'dark';
+    var dark = t !== 'light';
     var root = document.documentElement;
     if (dark) root.classList.add('dark'); else root.classList.remove('dark');
     root.style.colorScheme = dark ? 'dark' : 'light';
   } catch (e) {
-    /* localStorage blocked, fall back to light to match the default */
+    /* localStorage blocked; the SSR class below already renders dark */
   }
 })();
 `;
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" style={{ colorScheme: "light" }} suppressHydrationWarning>
+    <html lang="en" className="dark" style={{ colorScheme: "dark" }} suppressHydrationWarning>
       <head>
         {/* eslint-disable-next-line @next/next/no-sync-scripts */}
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />

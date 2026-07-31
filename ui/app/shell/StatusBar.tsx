@@ -54,7 +54,7 @@ function Segment({
   title?: string;
 }) {
   const cls =
-    "flex h-full items-center gap-1.5 px-2 hover:bg-foreground/[0.08] transition-colors";
+    "flex h-full items-center gap-1.5 px-2 hover:bg-[var(--surface-hover)] hover:text-[var(--foreground)] transition-colors";
   if (onClick) {
     return (
       <button type="button" onClick={onClick} title={title} className={cls}>
@@ -137,7 +137,7 @@ export function StatusBar({ onOpenSettings }: { onOpenSettings: () => void }) {
   const isDark = theme === "dark";
 
   return (
-    <footer className="flex h-6 shrink-0 items-stretch justify-between border-t border-[var(--border)] bg-[var(--background)] text-[12px] text-foreground/60 select-none">
+    <footer className="flex h-6 shrink-0 items-stretch justify-between border-t border-[var(--border)] bg-[var(--background)] font-mono text-[11px] uppercase tracking-[0.08em] text-[var(--fg-dim)] tabular-nums select-none">
       <span className="flex items-stretch">
         <Segment title={engineUp ? "Engine running" : engineUp === null ? "Checking engine…" : "Engine unreachable"}>
           <span
@@ -147,8 +147,8 @@ export function StatusBar({ onOpenSettings }: { onOpenSettings: () => void }) {
               engineUp === null
                 ? "bg-foreground/25"
                 : engineUp
-                ? "bg-[var(--success)]"
-                : "bg-[var(--destructive)]",
+                ? "bg-[var(--ok)]"
+                : "bg-[var(--bad)]",
             ].join(" ")}
           />
           <span>{engineUp === false ? "Engine down" : device ?? "Engine"}</span>
@@ -201,7 +201,8 @@ export function StatusBar({ onOpenSettings }: { onOpenSettings: () => void }) {
           )}
         </Segment>
         <Segment title="PixelKit version">
-          <span className="font-mono text-[11px]">{VERSION}</span>
+          {/* Version keeps its literal casing (lowercase v + suffix). */}
+          <span className="normal-case">{VERSION}</span>
         </Segment>
       </span>
     </footer>

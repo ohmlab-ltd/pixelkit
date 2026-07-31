@@ -71,7 +71,7 @@ function Donut({ slices }: { slices: { label: string; count: number; colour: str
 
 function Card({ title, action, children }: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
   return (
-    <div className="pk-card flex min-h-[120px] flex-col rounded-2xl p-5">
+    <div className="pk-card flex min-h-[120px] flex-col rounded-lg p-5">
       <div className="mb-3 flex items-center justify-between gap-2">
         <h3 className="pk-eyebrow">{title}</h3>
         {action}
@@ -92,7 +92,7 @@ function SectionHeader({ children, sub, count, action }: { children: React.React
           <span className="pk-accent-bar" aria-hidden />
           {children}
           {typeof count === "number" && (
-            <span className="rounded-full bg-foreground/[0.06] px-2 py-0.5 text-xs font-semibold text-[var(--muted)]">
+            <span className="rounded-md border border-[var(--line)] px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-[var(--fg-dim)]">
               {count}
             </span>
           )}
@@ -109,7 +109,7 @@ function HeaderLink({ onClick, children }: { onClick?: () => void; children: Rea
     <button
       type="button"
       onClick={onClick}
-      className="text-[13px] font-semibold text-[var(--accent-orange)] outline-none transition-opacity hover:opacity-80 focus-visible:underline"
+      className="text-[13px] font-medium text-[var(--accent)] outline-none transition-opacity hover:opacity-80 focus-visible:underline"
     >
       {children}
     </button>
@@ -122,10 +122,10 @@ function InsightCard({ tone, title, desc, onClick }: { tone: "warn" | "good" | "
   // neutral = still computing.
   const palette =
     tone === "warn"
-      ? { text: "text-amber-600 dark:text-amber-400", chip: "bg-amber-500/[0.12]" }
+      ? { text: "text-[var(--warn)]", chip: "bg-foreground/[0.05]" }
       : tone === "good"
-        ? { text: "text-emerald-600 dark:text-emerald-400", chip: "bg-emerald-500/[0.12]" }
-        : { text: "text-foreground/55", chip: "bg-foreground/[0.06]" };
+        ? { text: "text-[var(--ok)]", chip: "bg-foreground/[0.05]" }
+        : { text: "text-foreground/55", chip: "bg-foreground/[0.05]" };
   const icon =
     tone === "warn" ? (
       <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 9v4M12 17h.01M10.3 4.3 2.5 18a2 2 0 0 0 1.7 3h15.6a2 2 0 0 0 1.7-3L13.7 4.3a2 2 0 0 0-3.4 0z" /></svg>
@@ -134,10 +134,10 @@ function InsightCard({ tone, title, desc, onClick }: { tone: "warn" | "good" | "
     ) : (
       <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 8h.01M11 12h1v4h1" /></svg>
     );
-  const base = "flex w-full items-start gap-3 rounded-xl border border-foreground/[0.07] bg-foreground/[0.02] p-3.5 text-left";
+  const base = "flex w-full items-start gap-3 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-3.5 text-left";
   const inner = (
     <>
-      <span className={`mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg ${palette.chip} ${palette.text}`}>{icon}</span>
+      <span className={`mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-md ${palette.chip} ${palette.text}`}>{icon}</span>
       <span className="min-w-0">
         <span className="block text-[13px] font-semibold leading-tight text-foreground">{title}</span>
         <span className="mt-1 block text-[12px] leading-snug text-foreground/55">{desc}</span>
@@ -146,7 +146,7 @@ function InsightCard({ tone, title, desc, onClick }: { tone: "warn" | "good" | "
   );
   if (onClick) {
     return (
-      <button type="button" onClick={onClick} className={`${base} outline-none transition-colors hover:border-foreground/15 hover:bg-foreground/[0.04] focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]`}>
+      <button type="button" onClick={onClick} className={`${base} outline-none transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]`}>
         {inner}
       </button>
     );
@@ -301,11 +301,11 @@ export function OverviewPanel({
         <button
           type="button"
           onClick={onOpenHealth}
-          className="pk-card pk-card-hover w-full rounded-3xl p-6 text-left outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] sm:p-7"
+          className="pk-card pk-card-hover w-full rounded-lg p-5 text-left outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] sm:p-6"
         >
           {typeof score !== "number" ? (
             <div className="flex items-center justify-center gap-2.5 py-12 text-sm text-foreground/50">
-              <span className="h-4 w-4 animate-spin rounded-full border-2 border-foreground/20 border-t-[var(--accent-orange)]" />
+              <span className="h-4 w-4 animate-spin rounded-full border-2 border-foreground/20 border-t-[var(--accent)]" />
               Computing dataset health…
             </div>
           ) : (
@@ -313,9 +313,9 @@ export function OverviewPanel({
               <div className="flex items-center gap-5">
                 <FactorRadar values={factorVals} size={172} />
                 <div>
-                  <div className="text-[3.25rem] font-bold leading-none tabular-nums" style={{ color: factorColour((score ?? 0) / 100) }}>
+                  <div className="text-4xl font-medium tracking-tight leading-none tabular-nums" style={{ color: factorColour((score ?? 0) / 100) }}>
                     {Math.round(score)}
-                    <span className="ml-1 align-top text-lg font-medium text-foreground/40">/100</span>
+                    <span className="ml-1 align-top text-sm font-medium text-foreground/40">/100</span>
                   </div>
                   <div className="pk-eyebrow mt-2" style={{ color: factorColour((score ?? 0) / 100) }}>{healthLabel}</div>
                 </div>
@@ -325,7 +325,7 @@ export function OverviewPanel({
                   <div key={f.key}>
                     <div className="flex items-baseline justify-between gap-2 text-[13px]">
                       <span className="text-foreground/75">{FACTOR_INFO[f.key]?.label ?? f.key}</span>
-                      <span className="tabular-nums font-semibold" style={{ color: factorColour(f.value) }}>{Math.round(f.value * 100)}%</span>
+                      <span className="tabular-nums font-medium" style={{ color: factorColour(f.value) }}>{Math.round(f.value * 100)}%</span>
                     </div>
                     <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-foreground/[0.08]">
                       <div className="h-full rounded-full" style={{ width: `${f.value * 100}%`, background: factorColour(f.value) }} />
@@ -343,7 +343,7 @@ export function OverviewPanel({
       {showReferences && (
         <div>
           <SectionHeader count={refs.length} sub="Optional — add examples to improve label matching" action={onOpenReferences ? <HeaderLink onClick={onOpenReferences}>View all →</HeaderLink> : undefined}>References</SectionHeader>
-          <div className="pk-card rounded-2xl p-5">
+          <div className="pk-card rounded-lg p-5">
             {refs.length === 0 ? (
               <p className="text-[13px] text-foreground/55">No reference images yet — optional, but a few clear examples per label improve label matching.</p>
             ) : (
@@ -382,7 +382,7 @@ export function OverviewPanel({
                     <li key={s.label} className="flex items-center gap-2.5 text-[13px]">
                       <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: s.colour }} />
                       <span className="min-w-0 flex-1 truncate text-foreground/85">{s.label}</span>
-                      <span className="shrink-0 tabular-nums font-semibold text-foreground/60">{s.count}</span>
+                      <span className="shrink-0 tabular-nums font-medium text-foreground/60">{s.count}</span>
                     </li>
                   ))}
                 </ul>
@@ -441,7 +441,7 @@ export function OverviewPanel({
                   {activity.map((a) => (
                     <li key={a.id} className="relative text-[12.5px] leading-snug text-foreground/70">
                       <span
-                        className="absolute -left-5 top-1 h-2 w-2 rounded-full bg-[var(--accent-orange)] ring-2 ring-[var(--surface)]"
+                        className="absolute -left-5 top-1 h-2 w-2 rounded-full bg-[var(--accent)] ring-2 ring-[var(--surface)]"
                         aria-hidden
                       />
                       <button
@@ -450,7 +450,7 @@ export function OverviewPanel({
                         className="flex w-full items-baseline justify-between gap-2 text-left outline-none focus-visible:underline"
                       >
                         <span className="min-w-0 flex-1 truncate">
-                          <span className="font-semibold text-foreground/90">{a.kind === "labelled" ? "Labelled " : "Added "}</span>
+                          <span className="font-medium text-foreground/90">{a.kind === "labelled" ? "Labelled " : "Added "}</span>
                           <span className="text-foreground/60">{a.name}</span>
                         </span>
                         <span className="shrink-0 whitespace-nowrap text-xs text-foreground/40">{relTime(a.at)}</span>

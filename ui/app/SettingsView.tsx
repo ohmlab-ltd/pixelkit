@@ -42,8 +42,8 @@ export function ModelStatusRow({
         <span className="min-w-0 truncate text-sm">{m.label}</span>
         <span
           className={[
-            "shrink-0 text-[12px]",
-            m.downloaded ? "text-emerald-500" : "text-foreground/50",
+            "shrink-0 text-[12px] tabular-nums",
+            m.downloaded ? "text-[var(--ok)]" : "text-[var(--fg-muted)]",
           ].join(" ")}
         >
           {state}
@@ -58,7 +58,7 @@ export function ModelStatusRow({
         </div>
       )}
       {m.download?.status === "error" && (
-        <p className="mt-1 text-[12px] text-red-500">{m.download.error}</p>
+        <p className="mt-1 text-[12px] text-[var(--bad)]">{m.download.error}</p>
       )}
     </div>
   );
@@ -116,7 +116,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
     <div className="fixed inset-0 z-[400] overflow-y-auto bg-[var(--background)]">
       <main className="mx-auto max-w-3xl px-6 py-8">
         <div className="flex items-center justify-between gap-4">
-          <h1 className="text-2xl font-medium tracking-tight">Settings</h1>
+          <h1 className="text-xl font-semibold tracking-tight">Settings</h1>
           <button
             onClick={onClose}
             className="text-sm text-foreground/60 hover:text-foreground transition-colors"
@@ -126,14 +126,14 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
         </div>
 
         {(note || err) && (
-          <p className={`mt-4 text-[13px] ${err ? "text-red-500" : "text-emerald-500"}`}>
+          <p className={`mt-4 text-[13px] ${err ? "text-[var(--bad)]" : "text-[var(--ok)]"}`}>
             {err ?? note}
           </p>
         )}
 
         {/* Workspace */}
-        <section className="mt-8 rounded-2xl border border-foreground/10 p-6">
-          <h2 className="text-sm font-medium">Workspace</h2>
+        <section className="mt-8 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-5">
+          <h2 className="pk-micro">Workspace</h2>
           <p className="mt-1 text-[13px] text-foreground/55">
             Every project, image, annotation and model weight lives in this folder.
           </p>
@@ -141,7 +141,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
             <input
               value={wsPath}
               onChange={(e) => setWsPath(e.target.value)}
-              className="flex-1 rounded-full border border-foreground/15 bg-transparent px-4 py-2 text-sm font-mono outline-none focus:border-foreground/40"
+              className="flex-1 rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-sm font-mono outline-none focus:border-[var(--line-strong)]"
             />
             <button
               onClick={() =>
@@ -155,7 +155,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
                 })
               }
               disabled={!wsPath.trim() || wsPath.trim() === settings?.workspace}
-              className="rounded-full border border-foreground/20 px-4 py-2 text-sm hover:bg-foreground/[0.05] disabled:opacity-40"
+              className="rounded-md border border-[var(--line)] px-4 py-2 text-[13px] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] disabled:opacity-40"
             >
               Change
             </button>
@@ -164,8 +164,8 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
         </section>
 
         {/* Compute */}
-        <section className="mt-4 rounded-2xl border border-foreground/10 p-6">
-          <h2 className="text-sm font-medium">Compute</h2>
+        <section className="mt-4 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-5">
+          <h2 className="pk-micro">Compute</h2>
           <p className="mt-1 text-[13px] text-foreground/55">{deviceLabel}</p>
           {models && (
             <p className="mt-1 text-[12px] text-foreground/40">
@@ -175,8 +175,8 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
         </section>
 
         {/* Hugging Face */}
-        <section className="mt-4 rounded-2xl border border-foreground/10 p-6">
-          <h2 className="text-sm font-medium">Hugging Face access</h2>
+        <section className="mt-4 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-5">
+          <h2 className="pk-micro">Hugging Face access</h2>
           <p className="mt-1 text-[13px] text-foreground/55">
             {settings?.hfTokenConfigured
               ? "A token is configured."
@@ -188,7 +188,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
               value={token}
               onChange={(e) => setToken(e.target.value)}
               placeholder={settings?.hfTokenConfigured ? "Replace token (hf_...)" : "hf_..."}
-              className="flex-1 rounded-full border border-foreground/15 bg-transparent px-4 py-2 text-sm outline-none focus:border-foreground/40"
+              className="flex-1 rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-sm outline-none focus:border-[var(--line-strong)]"
             />
             <button
               onClick={() =>
@@ -202,14 +202,14 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
                 }, "Token validated and saved.")
               }
               disabled={!token.trim()}
-              className="rounded-full bg-foreground px-4 py-2 text-sm text-background disabled:opacity-40"
+              className="rounded-md bg-[var(--accent)] px-4 py-2 text-[13px] text-[var(--accent-contrast)] hover:brightness-105 disabled:opacity-40"
             >
               Save
             </button>
             {settings?.hfTokenConfigured && (
               <button
                 onClick={() => act(() => clearHfToken(), "Token removed.")}
-                className="rounded-full border border-foreground/20 px-4 py-2 text-sm hover:bg-foreground/[0.05]"
+                className="rounded-md border border-[var(--line)] px-4 py-2 text-[13px] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)]"
               >
                 Remove
               </button>
@@ -220,8 +220,8 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
         {/* Models — passive status only. The engine downloads and
             loads everything itself once the HF token exists; there is
             nothing for the user to click here. */}
-        <section className="mt-4 rounded-2xl border border-foreground/10 p-6">
-          <h2 className="text-sm font-medium">Models</h2>
+        <section className="mt-4 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-5">
+          <h2 className="pk-micro">Models</h2>
           <p className="mt-1 text-[13px] text-foreground/55">
             Models are built in and managed automatically.
           </p>

@@ -2,9 +2,9 @@
 
 // Site-wide light/dark theme management.
 //
-//   • Default is light, new visitors land on light mode with no
-//     flash. Once they toggle into dark it persists until they
-//     toggle back.
+//   • Default is dark (the brand look), new visitors land on dark
+//     mode with no flash. Once they toggle into light it persists
+//     until they toggle back.
 //   • The current theme is stored in `localStorage("pixelkit-theme")`
 //     so a user's preference survives navigation and reloads.
 //   • The `.dark` class on <html> is the single source of truth for
@@ -34,12 +34,12 @@ const ThemeContext = createContext<Ctx | null>(null);
 // inline script in layout.tsx applies the class for first paint ,
 // this hook then mirrors that into React state on hydration.
 function readStored(): Theme {
-  if (typeof window === "undefined") return "light";
+  if (typeof window === "undefined") return "dark";
   try {
     const v = window.localStorage.getItem(STORAGE_KEY);
     if (v === "light" || v === "dark") return v;
   } catch { /* localStorage blocked, fall through */ }
-  return "light";
+  return "dark";
 }
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
@@ -121,7 +121,7 @@ export function useTheme(): Ctx {
     // the provider (storybook, isolated tests) don't crash. The toggle
     // still works on the live app where the provider is mounted.
     return {
-      theme: "light",
+      theme: "dark",
       setTheme: () => {},
       toggle: () => {},
     };

@@ -239,12 +239,12 @@ export function ExportModal({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="pk-glass pk-pop w-full max-w-2xl mt-8 mb-8 rounded-2xl overflow-hidden"
+        className="pk-glass pk-pop w-full max-w-2xl mt-8 mb-8 rounded-lg overflow-hidden"
       >
-        <header className="flex items-center justify-between px-6 py-4 border-b border-foreground/10">
+        <header className="flex items-center justify-between px-6 py-4 border-b border-[var(--line-soft)]">
           <div>
-            <div className="text-xs uppercase tracking-wider text-foreground/40">Export</div>
-            <h2 className="mt-0.5 text-2xl font-light tracking-tight">{projectName}</h2>
+            <div className="pk-micro">Export</div>
+            <h2 className="mt-0.5 text-lg font-semibold tracking-tight">{projectName}</h2>
           </div>
           <button
             onClick={() => { if (!busy) onClose(); }}
@@ -266,10 +266,10 @@ export function ExportModal({
                   key={f.id}
                   onClick={() => setPicked(f.id)}
                   className={[
-                    "text-left rounded-xl border px-4 py-3 transition-colors",
+                    "text-left rounded-md border px-4 py-3 transition-colors",
                     active
-                      ? "border-foreground/40 bg-foreground/[0.06]"
-                      : "border-foreground/10 bg-foreground/[0.02] hover:border-foreground/20 hover:bg-foreground/[0.04]",
+                      ? "border-[var(--accent)] bg-[var(--accent-dim)] text-[var(--foreground)]"
+                      : "border-[var(--line)] bg-[var(--panel)] hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)]",
                   ].join(" ")}
                 >
                   <div className="flex items-center justify-between gap-3">
@@ -289,7 +289,7 @@ export function ExportModal({
               type="checkbox"
               checked={includeBoxes}
               onChange={(e) => setIncludeBoxes(e.target.checked)}
-              className="h-4 w-4 accent-zinc-900 dark:accent-white"
+              className="h-4 w-4 accent-[var(--accent)]"
             />
             <span className="text-sm text-foreground/85">Bounding boxes</span>
           </label>
@@ -304,19 +304,19 @@ export function ExportModal({
               checked={effectiveSeg}
               disabled={!fmtSupportsSeg}
               onChange={(e) => setIncludeSegmentations(e.target.checked)}
-              className="h-4 w-4 accent-zinc-900 dark:accent-white"
+              className="h-4 w-4 accent-[var(--accent)]"
             />
             <span className="text-sm text-foreground/85">
               Segmentations
               {!fmtSupportsSeg && (
-                <span className="ml-2 text-[10px] uppercase tracking-wider text-foreground/40">
+                <span className="ml-2 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-dim)]">
                   not supported in {fmt.name}
                 </span>
               )}
             </span>
           </label>
           {!canExport && (
-            <p className="text-[11px] text-amber-700 dark:text-amber-300/85 mt-1">
+            <p className="text-[11px] text-[var(--warn)] mt-1">
               At least one of boxes or segmentations must be enabled to export.
             </p>
           )}
@@ -333,7 +333,7 @@ export function ExportModal({
               type="checkbox"
               checked={excludeRed}
               onChange={(e) => setExcludeRed(e.target.checked)}
-              className="h-4 w-4 accent-zinc-900 dark:accent-white"
+              className="h-4 w-4 accent-[var(--accent)]"
             />
             <span className="text-sm text-foreground/85">
               <span className="inline-block h-2 w-2 rounded-full bg-[hsl(0,78%,56%)] mr-2 align-middle" />
@@ -345,7 +345,7 @@ export function ExportModal({
               type="checkbox"
               checked={excludeOrange}
               onChange={(e) => setExcludeOrange(e.target.checked)}
-              className="h-4 w-4 accent-zinc-900 dark:accent-white"
+              className="h-4 w-4 accent-[var(--accent)]"
             />
             <span className="text-sm text-foreground/85">
               <span className="inline-block h-2 w-2 rounded-full bg-[hsl(38,92%,58%)] mr-2 align-middle" />
@@ -364,7 +364,7 @@ export function ExportModal({
               step={5}
               value={trainPct}
               onChange={(e) => setTrainPct(Number(e.target.value))}
-              className="flex-1 accent-zinc-900 dark:accent-white"
+              className="flex-1 accent-[var(--accent)]"
             />
             <span className="text-sm font-mono tabular-nums text-foreground/85 w-28 text-right">
               {trainPct}% / {100 - trainPct}%
@@ -383,7 +383,7 @@ export function ExportModal({
               type="checkbox"
               checked={includeImages}
               onChange={(e) => setIncludeImages(e.target.checked)}
-              className="h-4 w-4 accent-zinc-900 dark:accent-white"
+              className="h-4 w-4 accent-[var(--accent)]"
             />
             <span className="text-sm text-foreground/85">Include image files (originals + augmentations)</span>
           </label>
@@ -394,7 +394,7 @@ export function ExportModal({
         </section>
 
         {error && (
-          <div className="mx-6 mb-3 rounded-xl border border-red-500/30 bg-red-500/[0.06] px-3 py-2 text-xs text-red-700 dark:text-red-300">
+          <div className="mx-6 mb-3 rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs text-[var(--bad)]">
             {error}
           </div>
         )}
@@ -407,7 +407,7 @@ export function ExportModal({
             to close the window, the build is happening on the server
             and the request is what carries the zip back. */}
         {busy && (
-          <div className="mx-6 mb-4 rounded-xl bg-foreground/[0.04] px-4 py-3.5">
+          <div className="mx-6 mb-4 rounded-md border border-[var(--line-soft)] bg-[var(--panel)] px-4 py-3.5">
             <div className="flex items-center justify-between gap-3 mb-2">
               <div className="flex items-center gap-2.5 min-w-0">
                 <span className="inline-block h-3 w-3 rounded-full border-2 border-foreground/60 border-t-transparent animate-spin shrink-0" />
@@ -444,7 +444,7 @@ export function ExportModal({
           </div>
         )}
 
-        <footer className="flex items-center justify-between gap-3 px-6 py-4 border-t border-foreground/10 bg-foreground/[0.02]">
+        <footer className="flex items-center justify-between gap-3 px-6 py-4 border-t border-[var(--line-soft)] bg-[var(--panel)]">
           <span className="text-[11px] text-foreground/45">
             Exporting as <span className="font-medium text-foreground/85">{fmt.name}</span>
             {includeImages && <span className="text-foreground/45"> · with images</span>}
@@ -453,7 +453,7 @@ export function ExportModal({
             <button
               onClick={onClose}
               disabled={busy}
-              className="rounded-full border border-foreground/15 bg-foreground/5 hover:bg-foreground/10 hover:border-foreground/25 px-4 py-2 text-xs text-foreground/80 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              className="rounded-md border border-[var(--line)] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] px-4 py-2 text-[13px] text-[var(--fg-soft)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               title={busy ? "Cancel disabled while the export is building" : undefined}
             >
               Cancel
@@ -461,10 +461,10 @@ export function ExportModal({
             <button
               onClick={triggerExport}
               disabled={busy || !canExport}
-              className="rounded-full bg-foreground text-background px-5 py-2 text-xs font-medium hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-2"
+              className="rounded-md bg-[var(--accent)] text-[var(--accent-contrast)] px-5 py-2 text-[13px] font-medium hover:brightness-105 disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-2"
             >
               {busy && (
-                <span className="inline-block h-3 w-3 rounded-full border-2 border-black/40 border-t-transparent animate-spin" />
+                <span className="inline-block h-3 w-3 rounded-full border-2 border-current border-t-transparent opacity-70 animate-spin" />
               )}
               {busy
                 ? phase === "downloading"
@@ -481,7 +481,7 @@ export function ExportModal({
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="text-xs uppercase text-[var(--foreground)]/90 mb-3">
+    <div className="pk-micro mb-1">
       {children}
     </div>
   );

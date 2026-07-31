@@ -76,21 +76,68 @@ components live in `ui/app/shell/`.
 
 ## Tokens
 
+The UI runs on the studio design language shared with the sibling products:
+dark is the primary/brand look (near-black neutral ground, flat panels,
+hairline borders, one orange accent); light mode mirrors the same system in
+adapted neutrals via the `html.dark` class mechanism (dark is the first-visit
+default).
+
+### Colour system (`app/globals.css`)
+
+| Token | Dark (default) | Light |
+|---|---|---|
+| `--background` | `rgb(10 10 12)` near-black neutral | `rgb(246 246 248)` |
+| `--foreground` / `--fg` | `rgb(242 244 248)` | `rgb(23 25 30)` |
+| `--fg-soft` | `rgb(201 206 214)` | `rgb(63 67 76)` |
+| `--fg-muted` / `--muted` | `rgb(153 161 172)` | `rgb(92 97 108)` |
+| `--fg-dim` | `rgb(109 117 129)` | `rgb(109 114 125)` |
+| `--fg-faint` | `rgb(69 76 87)` | `rgb(155 160 171)` |
+| `--panel` | `rgba(255,255,255,0.02)` flat panel | `rgba(23,25,30,0.025)` |
+| `--surface` / `--panel-solid` | `rgb(15 15 17)` | `rgb(255 255 255)` |
+| `--surface-2` | `rgb(21 21 24)` | `rgb(238 238 241)` |
+| `--surface-hover` | `rgba(255,255,255,0.045)` | `rgba(23,25,30,0.05)` |
+| `--line-soft` | `rgba(255,255,255,0.05)` | `rgba(23,25,30,0.06)` |
+| `--line` / `--border` | `rgba(255,255,255,0.08)` hairline | `rgba(23,25,30,0.10)` (`--border` 0.12) |
+| `--line-strong` | `rgba(255,255,255,0.16)` | `rgba(23,25,30,0.18)` |
+| `--accent` / `--accent-orange` | `#ff7900` PixelKit orange | `#c04a00` (deepened for AA) |
+| `--accent-dim` | `rgba(255,121,0,0.14)` | `rgba(192,74,0,0.12)` |
+| `--accent-contrast` (text ON accent) | `rgb(26 18 5)` | `#ffffff` |
+| `--ok` (alias `--success`) | `#3ddc97` | `#0c7f52` |
+| `--warn` (alias `--warning`) | `#f5b83d` | `#9c6500` |
+| `--bad` (alias `--destructive`) | `#ff5d5d` | `#d92626` |
+| `--ease-out` | `cubic-bezier(0.16, 1, 0.3, 1)` | same |
+
+Legacy var names (`--background-rgb`, `--foreground-rgb`, `--accent-rgb`,
+`--surface-rgb`, `--border`, `--success`, `--destructive`, `--brand-1/2/3`, …)
+are mapped onto this system so every existing consumer shifts automatically;
+the `--brand-*` gradient triplets are flattened to the single accent. New code
+should prefer the ramp vars (or the matching Tailwind colours `ok` / `warn` /
+`bad` / `panel` / `line*` / `fg-*` / `accent-dim`).
+
+### Language rules
+
+| Rule | Value |
+|---|---|
+| Micro-labels (pane headers, status segments, stat keys, eyebrows) | uppercase mono, 11px, `tracking-[0.12em]`, `--fg-dim` (`.pk-micro`) |
+| Counts / figures | `tabular-nums` (`.pk-num`), quiet weight (400–500) |
+| Panels / cards | flat `--panel` + 1px `--line` hairline, no elevation (`.pk-card`) |
+| Buttons | compact flat, 6px radius (`rounded-md`), hairline border, hover `--surface-hover` (`.pk-btn`); primary = flat `--accent` fill + `--accent-contrast` label (`.pk-btn-primary`) |
+| Accent usage | sparing: active states, primary actions, focus ring; status dots stay semantic `--ok`/`--warn`/`--bad` |
+| Motion | one vocabulary: rise/fade in once on `--ease-out` (`.pk-up`, `.pk-pop`), state changes ease |
+
+### Shell metrics
+
 | Token | Value |
 |---|---|
 | Title bar height | 36px (`h-9`) |
 | Activity bar width | 48px (`w-12`), icons 20px |
 | Side bar width | 260px |
-| Status bar height | 24px (`h-6`), 12px font |
+| Status bar height | 24px (`h-6`), mono 11px uppercase segments |
 | Shell base font | 13px |
 | Tree row height | 24px (`h-6`) |
-| Pane headers | 11px uppercase, tracking-wide |
-| Borders | flat 1px `var(--border)` / foreground-mix |
+| Pane headers | `.pk-micro` (11px uppercase mono, tracked) |
+| Borders | flat 1px hairline `var(--border)` / `var(--line)` |
 | Border radius | ≤ 6px (no pill shapes in shell chrome) |
-
-Both themes work off the existing CSS variables in `app/globals.css`
-(`--background`, `--foreground`, `--border`, `--accent`, `--success`,
-`--destructive`); the shell introduces no new colour tokens.
 
 ## Where the legacy views live now
 
