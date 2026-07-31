@@ -1,17 +1,22 @@
 "use client";
 
-// Explorer side-bar pane: a per-workspace tree. Projects (containers)
-// render as expandable nodes with their datasets as children; datasets
-// that don't belong to any Project list at the root level.
+// Explorer side-bar pane: THE single navigation tree for the app.
+// Three levels:
+//   Projects (containers)      → expandable, children are datasets
+//     Datasets                 → V2 datasets expand one level further
+//       Sections               → Overview / References / Dataset /
+//                                Augmentations (the old in-view
+//                                SidebarNav, folded into the tree)
+// Datasets that don't belong to any Project list at the root level.
 //
 // Data comes from the two endpoints the workspace already consumes:
 //   GET /api/containers                → { containers: [{id, name, ...}] }
 //   GET /api/projects?owner=<user>&…   → {total, items: ProjectSummary[]}
-//     (each item: id, name, n_images, v2, createdBy,
-//      container: {id, name} | null — the reverse map that assigns a
-//      dataset to its Project)
+//     (each item: id, name, n_images, n_references, derived, v2,
+//      createdBy, container: {id, name} | null — the reverse map that
+//      assigns a dataset to its Project)
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { apiFetch } from "@/lib/apiFetch";
 import { listContainers, type ContainerCard } from "@/lib/containers";
@@ -20,20 +25,56 @@ export type ExplorerDataset = {
   id: string;
   name: string;
   n_images: number;
+  n_references: number;
+  derived: boolean;
   v2: boolean;
   owner: string;
   containerId: string | null;
 };
+
+// Dataset view sections, third tree level. Mirrors the V2 dataset
+// view's ProjectTab union (the view consumes these via its `section`
+// prop; app/page.tsx owns the state).
+export type DatasetSection = "overview" | "references" | "dataset" | "augmentations";
 
 // The slice of HomeView's ProjectSummary this pane reads.
 type DatasetListItem = {
   id: string;
   name: string;
   n_images?: number;
+  n_references?: number;
+  derived?: { parentProjectId?: string; parentName?: string } | null;
   v2?: boolean;
   createdBy?: string;
   container?: { id: string; name: string } | null;
 };
+
+// Section rows under an expanded V2 dataset. Availability mirrors the
+// old in-view SidebarNav rules for an editable dataset: References is
+// disabled on derived datasets (they don't manage their own reference
+// images) and carries the reference count; Dataset carries the image
+// count. (The portable build is single-user, so the read-only variant
+// of those rules never applies here.)
+function sectionsFor(ds: ExplorerDataset): {
+  key: DatasetSection;
+  label: string;
+  count: number | null;
+  disabled: boolean;
+  disabledHint?: string;
+}[] {
+  return [
+    { key: "overview", label: "Overview", count: null, disabled: false },
+    {
+      key: "references",
+      label: "References",
+      count: ds.n_references,
+      disabled: ds.derived,
+      disabledHint: "Derived datasets don't manage their own reference images",
+    },
+    { key: "dataset", label: "Dataset", count: ds.n_images, disabled: false },
+    { key: "augmentations", label: "Augmentations", count: null, disabled: false },
+  ];
+}
 
 const STROKE = {
   fill: "none",
@@ -61,17 +102,25 @@ function Chevron({ open }: { open: boolean }) {
 export function ExplorerPane({
   username,
   selectedDatasetId,
+  activeSection,
   onOpenDataset,
+  onOpenSection,
   onNewDataset,
 }: {
   username: string;
   selectedDatasetId: string | null;
+  activeSection: DatasetSection | null;
   onOpenDataset: (ds: ExplorerDataset) => void;
+  onOpenSection: (ds: ExplorerDataset, section: DatasetSection) => void;
   onNewDataset: () => void;
 }) {
   const [containers, setContainers] = useState<ContainerCard[] | null>(null);
   const [datasets, setDatasets] = useState<ExplorerDataset[] | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // Expanded DATASET nodes (third tree level). Kept separately from the
+  // project set so a project and a dataset sharing an id prefix can
+  // never collide, and so "collapse the open dataset" stays possible.
+  const [dsExpanded, setDsExpanded] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -95,6 +144,8 @@ export function ExplorerPane({
           id: p.id,
           name: p.name,
           n_images: p.n_images ?? 0,
+          n_references: p.n_references ?? 0,
+          derived: !!p.derived,
           v2: !!p.v2,
           owner: p.createdBy ?? "",
           containerId: p.container?.id ?? null,
@@ -116,6 +167,32 @@ export function ExplorerPane({
     const id = window.setInterval(refresh, 10000);
     return () => window.clearInterval(id);
   }, [refresh]);
+
+  // Opening a dataset (from anywhere — tree, workspace cards, deep
+  // link) reveals its section rows: expand the dataset node and the
+  // Project that contains it, so the selection is always visible.
+  // Guarded by a "handled" ref so the 10s poll's fresh `datasets`
+  // array can't keep re-expanding a node the user chose to collapse;
+  // only an ACTUAL selection change re-expands. The container lookup
+  // needs the listing, so handling is deferred until it has loaded
+  // (deep-link case: selection lands before the first fetch).
+  const expandHandledRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!selectedDatasetId) {
+      expandHandledRef.current = null;
+      return;
+    }
+    if (expandHandledRef.current === selectedDatasetId) return;
+    setDsExpanded((prev) =>
+      prev.has(selectedDatasetId) ? prev : new Set(prev).add(selectedDatasetId),
+    );
+    if (datasets === null) return; // container unknown — retry once loaded
+    expandHandledRef.current = selectedDatasetId;
+    const container = datasets.find((d) => d.id === selectedDatasetId)?.containerId;
+    if (container) {
+      setExpanded((prev) => (prev.has(container) ? prev : new Set(prev).add(container)));
+    }
+  }, [selectedDatasetId, datasets]);
 
   // Group datasets under their Project; anything unassigned lists at root.
   const { projectNodes, rootDatasets } = useMemo(() => {
@@ -155,7 +232,29 @@ export function ExplorerPane({
       return next;
     });
 
+  const toggleDs = (id: string) =>
+    setDsExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
   const loading = datasets === null;
+
+  const renderDataset = (ds: ExplorerDataset, indent: boolean) => (
+    <DatasetNode
+      key={ds.id}
+      ds={ds}
+      indent={indent}
+      selected={selectedDatasetId === ds.id}
+      activeSection={selectedDatasetId === ds.id ? activeSection : null}
+      expanded={dsExpanded.has(ds.id)}
+      onToggle={() => toggleDs(ds.id)}
+      onOpen={onOpenDataset}
+      onOpenSection={onOpenSection}
+    />
+  );
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -226,27 +325,12 @@ export function ExplorerPane({
                         Empty
                       </p>
                     ) : (
-                      node.datasets.map((ds) => (
-                        <DatasetRow
-                          key={ds.id}
-                          ds={ds}
-                          indent
-                          selected={selectedDatasetId === ds.id}
-                          onOpen={onOpenDataset}
-                        />
-                      ))
+                      node.datasets.map((ds) => renderDataset(ds, true))
                     ))}
                 </div>
               );
             })}
-            {rootDatasets.map((ds) => (
-              <DatasetRow
-                key={ds.id}
-                ds={ds}
-                selected={selectedDatasetId === ds.id}
-                onOpen={onOpenDataset}
-              />
-            ))}
+            {rootDatasets.map((ds) => renderDataset(ds, false))}
           </>
         )}
       </div>
@@ -254,34 +338,115 @@ export function ExplorerPane({
   );
 }
 
-function DatasetRow({
+// One dataset in the tree plus (for V2 datasets) its expandable
+// section rows. V1 datasets have no sections — the legacy view keeps
+// its own internal nav — so they render as a plain row.
+function DatasetNode({
   ds,
   selected,
-  indent = false,
+  activeSection,
+  expanded,
+  indent,
+  onToggle,
   onOpen,
+  onOpenSection,
 }: {
   ds: ExplorerDataset;
   selected: boolean;
-  indent?: boolean;
+  activeSection: DatasetSection | null;
+  expanded: boolean;
+  indent: boolean;
+  onToggle: () => void;
   onOpen: (ds: ExplorerDataset) => void;
+  onOpenSection: (ds: ExplorerDataset, section: DatasetSection) => void;
 }) {
+  const hasSections = ds.v2;
+  const showSections = hasSections && expanded;
+  // While the section rows are visible, the ACTIVE SECTION row carries
+  // the selected highlight; the dataset row itself only keeps the
+  // full-strength text so the highlight isn't doubled.
+  const rowHighlight = selected && !showSections;
+  const nameCls = [
+    "flex h-6 min-w-0 flex-1 items-center gap-2 pr-3 text-left text-[13px] transition-colors",
+    rowHighlight
+      ? "bg-foreground/[0.08] text-[var(--foreground)]"
+      : selected
+        ? "text-[var(--foreground)] hover:bg-foreground/[0.05]"
+        : "text-foreground/75 hover:bg-foreground/[0.05] hover:text-foreground/95",
+  ].join(" ");
+
   return (
-    <button
-      type="button"
-      onClick={() => onOpen(ds)}
-      aria-current={selected || undefined}
-      className={[
-        "flex h-6 w-full items-center gap-2 pr-3 text-left text-[13px] transition-colors",
-        indent ? "pl-8" : "pl-[1.375rem]",
-        selected
-          ? "bg-foreground/[0.08] text-[var(--foreground)]"
-          : "text-foreground/75 hover:bg-foreground/[0.05] hover:text-foreground/95",
-      ].join(" ")}
-    >
-      <span className="min-w-0 flex-1 truncate">{ds.name}</span>
-      <span className="text-[11px] tabular-nums text-foreground/35">
-        {ds.n_images}
-      </span>
-    </button>
+    <>
+      {hasSections ? (
+        // Two sibling buttons (chevron + name) — nesting a button in a
+        // button is invalid HTML. Chevron toggles the section rows,
+        // the name row opens the dataset (which also expands it via
+        // the selection effect in the pane).
+        <div className={["flex w-full items-stretch", indent ? "pl-3.5" : "pl-2"].join(" ")}>
+          <button
+            type="button"
+            onClick={onToggle}
+            aria-expanded={expanded}
+            aria-label={`${expanded ? "Collapse" : "Expand"} ${ds.name}`}
+            className="grid w-[18px] shrink-0 place-items-center text-foreground/55 hover:text-foreground/90 transition-colors"
+          >
+            <Chevron open={expanded} />
+          </button>
+          <button
+            type="button"
+            onClick={() => onOpen(ds)}
+            aria-current={selected || undefined}
+            className={nameCls}
+          >
+            <span className="min-w-0 flex-1 truncate">{ds.name}</span>
+            <span className="text-[11px] tabular-nums text-foreground/35">
+              {ds.n_images}
+            </span>
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => onOpen(ds)}
+          aria-current={selected || undefined}
+          className={[nameCls, "w-full", indent ? "pl-8" : "pl-[1.625rem]"].join(" ")}
+        >
+          <span className="min-w-0 flex-1 truncate">{ds.name}</span>
+          <span className="text-[11px] tabular-nums text-foreground/35">
+            {ds.n_images}
+          </span>
+        </button>
+      )}
+      {showSections &&
+        sectionsFor(ds).map((s) => {
+          const active = selected && activeSection === s.key;
+          return (
+            <button
+              key={s.key}
+              type="button"
+              disabled={s.disabled}
+              title={s.disabled ? s.disabledHint : undefined}
+              onClick={() => { if (!s.disabled) onOpenSection(ds, s.key); }}
+              aria-current={active ? "true" : undefined}
+              className={[
+                "flex h-6 w-full items-center gap-2 pr-3 text-left text-[13px] transition-colors",
+                indent ? "pl-[3.125rem]" : "pl-11",
+                s.disabled
+                  ? "cursor-not-allowed text-foreground/25"
+                  : active
+                    ? "bg-foreground/[0.08] text-[var(--foreground)]"
+                    : "text-foreground/70 hover:bg-foreground/[0.05] hover:text-foreground/95",
+              ].join(" ")}
+            >
+              <span className="min-w-0 flex-1 truncate">{s.label}</span>
+              {typeof s.count === "number" && !s.disabled && (
+                <span className="shrink-0 text-[11px] tabular-nums text-foreground/35">
+                  {s.count}
+                </span>
+              )}
+            </button>
+          );
+        })}
+    </>
   );
 }

@@ -669,7 +669,21 @@ async def lifespan(app: FastAPI):
         if models_mgr.is_downloaded("dinov2"):
             asyncio.create_task(_bg_load_dino())
         else:
-            print("[server] DINOv2 weights not downloaded yet — POST /api/models/dinov2/download")
+            # Ungated — no token needed. Models are built in: fetch silently.
+            async def _auto_dino() -> None:
+                print("[server] DINOv2 weights missing — auto-downloading...")
+                await asyncio.to_thread(models_mgr.start_download, "dinov2")
+                while True:
+                    await asyncio.sleep(5)
+                    if models_mgr.is_downloaded("dinov2"):
+                        await _bg_load_dino()
+                        return
+                    with models_mgr._DL_LOCK:
+                        rec = dict(models_mgr._DOWNLOADS.get("dinov2") or {})
+                    if rec.get("status") == "error":
+                        print(f"[server] DINOv2 auto-download failed: {rec.get('error')}")
+                        return
+            asyncio.create_task(_auto_dino())
         if os.environ.get("CHARLIE_DISABLED", "").lower() in ("1", "true", "yes", "on"):
             print("[server] CHARLIE_DISABLED set — pipeline_charlie endpoints will return 503.")
             state["charlie"] = None
@@ -17284,6 +17298,7 @@ async def _detect_point_unified(
     allow_sam3=True,
     allow_reject=False,
     is_labelled=False,
+    cache_key=None,
 ):
     """One click-to-detect implementation shared by the charlie, demo, and
     (optionally) v2 endpoints, so every surface behaves identically.
@@ -17318,7 +17333,7 @@ async def _detect_point_unified(
         charlie = state["charlie"]
 
         def _run_sam3():
-            return charlie.segment_point(image_pil, [px, py], labels)
+            return charlie.segment_point(image_pil, [px, py], labels, cache_key=cache_key)
 
         try:
             async with state["gpu_lock"].interactive():
@@ -17704,7 +17719,10 @@ async def charlie_imports_detect_point(
         raise HTTPException(503, "SAM3 not loaded")
 
     def _run_sam3():
-        return charlie.segment_point(image_pil, [px, py], candidate_labels)
+        return charlie.segment_point(
+            image_pil, [px, py], candidate_labels,
+            cache_key=(f"{project_id}:{import_id}" if import_id else None),
+        )
 
     try:
         async with state["gpu_lock"].interactive():
@@ -17804,6 +17822,7 @@ async def charlie_imports_segment_box(
         t0 = time.perf_counter()
         detection, _timings = charlie.segment_box(
             image_pil, [float(c) for c in coords], candidate_labels or None,
+            cache_key=(f"{project_id}:{import_id}" if import_id else None),
         )
         ms = (time.perf_counter() - t0) * 1000.0
         return detection, ms
@@ -17894,7 +17913,10 @@ async def charlie_imports_classify_box(
         detection = None
         if charlie is not None:
             try:
-                detection, _t = charlie.segment_box(image_pil, coords_f, candidate_list or None)
+                detection, _t = charlie.segment_box(
+                    image_pil, coords_f, candidate_list or None,
+                    cache_key=(f"{project_id}:{import_id}" if import_id else None),
+                )
             except Exception as e:
                 print(f"[charlie/classify_box] sam3 mask failed: {e}")
         ms = (time.perf_counter() - t0) * 1000.0

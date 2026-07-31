@@ -6,18 +6,63 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   EngineSettings,
+  ModelInfo,
   ModelName,
   ModelsStatus,
   clearHfToken,
-  downloadModel,
   downloadPct,
   fetchEngineSettings,
   fetchModelsStatus,
-  loadModel,
   setHfToken,
   setWorkspacePath,
-  unloadModel,
 } from "@/lib/models";
+
+// Passive one-line model status: name + state (ready / downloading
+// NN% with a thin progress bar / waiting for token). No buttons — the
+// engine auto-downloads and auto-loads everything once the HF token
+// exists. Shared with the first-run SetupWizard.
+export function ModelStatusRow({
+  m,
+  tokenConfigured,
+}: {
+  m: ModelInfo;
+  tokenConfigured: boolean;
+}) {
+  const pct = downloadPct(m.download);
+  const state = m.downloaded
+    ? "ready"
+    : pct !== null
+      ? `downloading ${pct}%`
+      : m.gated && !tokenConfigured
+        ? "waiting for token"
+        : "waiting…";
+  return (
+    <div>
+      <div className="flex items-baseline justify-between gap-3">
+        <span className="min-w-0 truncate text-sm">{m.label}</span>
+        <span
+          className={[
+            "shrink-0 text-[12px]",
+            m.downloaded ? "text-emerald-500" : "text-foreground/50",
+          ].join(" ")}
+        >
+          {state}
+        </span>
+      </div>
+      {pct !== null && (
+        <div className="mt-1.5 h-1 rounded-full bg-foreground/10 overflow-hidden">
+          <div
+            className="h-full rounded-full bg-foreground/70 transition-[width]"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+      )}
+      {m.download?.status === "error" && (
+        <p className="mt-1 text-[12px] text-red-500">{m.download.error}</p>
+      )}
+    </div>
+  );
+}
 
 export function SettingsView({ onClose }: { onClose: () => void }) {
   const [settings, setSettings] = useState<EngineSettings | null>(null);
@@ -172,68 +217,19 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
           </div>
         </section>
 
-        {/* Models */}
+        {/* Models — passive status only. The engine downloads and
+            loads everything itself once the HF token exists; there is
+            nothing for the user to click here. */}
         <section className="mt-4 rounded-2xl border border-foreground/10 p-6">
           <h2 className="text-sm font-medium">Models</h2>
-          <div className="mt-3 space-y-4">
+          <p className="mt-1 text-[13px] text-foreground/55">
+            Models are built in and managed automatically.
+          </p>
+          <div className="mt-3 space-y-3">
             {models &&
-              (Object.keys(models.models) as ModelName[]).map((n) => {
-                const m = models.models[n];
-                const pct = downloadPct(m.download);
-                return (
-                  <div key={n} className="flex items-center gap-3">
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm truncate">
-                        {m.label}
-                        {m.loaded && <span className="ml-2 text-[11px] text-emerald-500">loaded</span>}
-                      </p>
-                      <p className="text-[12px] text-foreground/45">
-                        {m.repo} · ~{m.approxGb} GB
-                        {m.download?.status === "error" && (
-                          <span className="text-red-500"> — {m.download.error}</span>
-                        )}
-                      </p>
-                      {pct !== null && (
-                        <div className="mt-1.5 h-1.5 rounded-full bg-foreground/10 overflow-hidden">
-                          <div
-                            className="h-full rounded-full bg-foreground/70 transition-[width]"
-                            style={{ width: `${pct}%` }}
-                          />
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      {!m.downloaded && pct === null && (
-                        <button
-                          onClick={() => act(() => downloadModel(n))}
-                          className="rounded-full border border-foreground/20 px-3 py-1.5 text-[12px] hover:bg-foreground/[0.05]"
-                        >
-                          Download
-                        </button>
-                      )}
-                      {pct !== null && (
-                        <span className="text-[12px] text-foreground/50">{pct}%</span>
-                      )}
-                      {m.downloaded && !m.loaded && (
-                        <button
-                          onClick={() => act(() => loadModel(n), `${m.label} loading…`)}
-                          className="rounded-full border border-foreground/20 px-3 py-1.5 text-[12px] hover:bg-foreground/[0.05]"
-                        >
-                          Load
-                        </button>
-                      )}
-                      {m.loaded && (n === "vlm" || n === "sam3") && (
-                        <button
-                          onClick={() => act(() => unloadModel(n), `${m.label} unloaded.`)}
-                          className="rounded-full border border-foreground/20 px-3 py-1.5 text-[12px] hover:bg-foreground/[0.05]"
-                        >
-                          Unload
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
+              (Object.keys(models.models) as ModelName[]).map((n) => (
+                <ModelStatusRow key={n} m={models.models[n]} tokenConfigured={models.hfTokenConfigured} />
+              ))}
           </div>
         </section>
       </main>

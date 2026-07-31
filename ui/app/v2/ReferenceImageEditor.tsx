@@ -204,8 +204,12 @@ export function ReferenceImageEditor({
   };
 
   return (
+    // Contained in the shell's content area (below the title bar,
+    // above the status bar, right of the Explorer side bar via
+    // --pk-content-left) — same containment as the dataset image
+    // editor, the app chrome stays visible.
     <div
-      className="fixed inset-0 z-[400] backdrop-blur-xl flex flex-col"
+      className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] z-[400] backdrop-blur-xl flex flex-col"
       // Theme-aware scrim: --background-rgb resolves to a light tone in
       // light mode and a dark tone in dark mode, so the blur reads
       // white-on-light and dark-on-dark instead of always-black.

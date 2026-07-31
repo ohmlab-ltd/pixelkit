@@ -74,14 +74,9 @@ export const setHfToken = (token: string) =>
 export const clearHfToken = () =>
   apiFetch("/api/settings/hf-token", { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r));
 
-export const downloadModel = (name: ModelName) =>
-  apiFetch(`/api/models/${name}/download`, { method: "POST" }).then((r) => json<unknown>(r));
-
-export const loadModel = (name: ModelName) =>
-  apiFetch(`/api/models/${name}/load`, { method: "POST" }).then((r) => json<unknown>(r));
-
-export const unloadModel = (name: ModelName) =>
-  apiFetch(`/api/models/${name}/unload`, { method: "POST" }).then((r) => json<unknown>(r));
+// NOTE: the per-model download/load/unload client calls are gone —
+// models are engine-managed plumbing (auto-download + auto-load once
+// the HF token exists); the UI only ever READS /api/models/status.
 
 export const setWorkspacePath = (path: string) =>
   apiFetch("/api/settings/workspace", {

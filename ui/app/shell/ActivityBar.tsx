@@ -1,13 +1,15 @@
 "use client";
 
 // VS Code-style activity bar: a 48px vertical icon column on the left
-// edge. Explorer / Models / Guide at the top, Settings gear pinned to
-// the bottom. The active item shows a 2px left accent and renders at
+// edge. Explorer / Guide at the top, Settings gear pinned to the
+// bottom. The active item shows a 2px left accent and renders at
 // full opacity; inactive items sit at 55% and lift to 85% on hover.
+// (Models is invisible plumbing now — the engine downloads and loads
+// everything itself, so there is no Models activity.)
 
 import type { ReactNode } from "react";
 
-export type ActivityKey = "explorer" | "models" | "guide";
+export type ActivityKey = "explorer" | "guide";
 
 const STROKE = {
   fill: "none",
@@ -24,17 +26,6 @@ function ExplorerIcon() {
       <path d="M15 3H8a1.5 1.5 0 0 0-1.5 1.5V17A1.5 1.5 0 0 0 8 18.5h9a1.5 1.5 0 0 0 1.5-1.5V6.5L15 3Z" />
       <path d="M15 3v3.5h3.5" />
       <path d="M4.5 7.5V19A1.5 1.5 0 0 0 6 20.5h9" />
-    </svg>
-  );
-}
-
-function ModelsIcon() {
-  // Isometric cube.
-  return (
-    <svg viewBox="0 0 24 24" width={20} height={20} {...STROKE} aria-hidden>
-      <path d="M12 3 4.5 7.25v9.5L12 21l7.5-4.25v-9.5L12 3Z" />
-      <path d="M4.5 7.25 12 11.5l7.5-4.25" />
-      <path d="M12 11.5V21" />
     </svg>
   );
 }
@@ -117,13 +108,6 @@ export function ActivityBar({
         onClick={() => onSelect("explorer")}
       >
         <ExplorerIcon />
-      </ActivityButton>
-      <ActivityButton
-        active={activity === "models"}
-        label="Models"
-        onClick={() => onSelect("models")}
-      >
-        <ModelsIcon />
       </ActivityButton>
       <ActivityButton
         active={activity === "guide"}

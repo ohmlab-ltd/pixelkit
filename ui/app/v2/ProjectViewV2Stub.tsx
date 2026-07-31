@@ -14,7 +14,6 @@ import { AugmentationsCard } from "./AugmentationsCard";
 import { DerivedDatasetsBar } from "./DerivedDatasets";
 import { OverviewPanel } from "./OverviewPanel";
 import { DatasetHealthModal } from "./DatasetHealthModal";
-import { SidebarNav, type SidebarItem } from "./SidebarNav";
 import { DeleteLabelModal } from "./DeleteLabelModal";
 import { ClearAllAnnotationsModal } from "./ClearAllAnnotationsModal";
 import { OpenverseInlinePanel } from "./OpenverseInlinePanel";
@@ -179,7 +178,11 @@ const INPUT_SHAPES = [
   "96x96", "128x128", "160x160", "192x192", "224x224", "256x256",
   "320x320", "480x480", "512x512", "640x640",
 ];
-type ProjectTab = "overview" | "references" | "dataset" | "augmentations";
+// Dataset view sections. State is OWNED BY THE SHELL (app/page.tsx —
+// the Explorer tree's third level drives it); this view receives the
+// active section + a setter via props. Exported so the page can type
+// its state; keep in sync with ExplorerPane's DatasetSection.
+export type ProjectTab = "overview" | "references" | "dataset" | "augmentations";
 
 // Parse a createdAt value (ms epoch number, ms epoch string, or ISO
 // timestamp) into ms-since-epoch. Returns NaN for unparseable values
@@ -261,6 +264,8 @@ export function ProjectViewV2Stub({
   originTab = "workspaces",
   backToProjectId = null,
   firstLoad = null,
+  section = "overview",
+  onSectionChange,
   onClose,
   onReferencesChange,
 }: {
@@ -298,6 +303,12 @@ export function ProjectViewV2Stub({
    *  null         → normal load, full-screen mount loader behaves as
    *                 it always has. */
   firstLoad?: "onboarding" | null;
+  /** Active dataset section. Owned by the shell (app/page.tsx) so the
+   *  Explorer tree's third-level rows and this view stay in sync; the
+   *  view's own section jumps (Overview cards etc.) go through
+   *  onSectionChange. */
+  section?: ProjectTab;
+  onSectionChange?: (section: ProjectTab) => void;
   onClose: () => void;
   onReferencesChange?: (next: ReferenceImage[]) => void;
 }) {
@@ -1410,17 +1421,8 @@ export function ProjectViewV2Stub({
   // and label-colour saves feed setProjectTitle / setLabelColours
   // (declared further down) so the bar + chips repaint live.
   const [settingsOpen, setSettingsOpen] = useState(false);
-  // Mobile sidebar drawer. The sidebar is the nav at ALL sizes now; on narrow
-  // screens it's hidden and slides out as a left overlay from a small button.
-  const [sidebarOpen, setSidebarOpen] = useState(false);
   // Overview health card opens the full dataset-stats + embeddings modal.
   const [healthOpen, setHealthOpen] = useState(false);
-  useEffect(() => {
-    if (!sidebarOpen) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setSidebarOpen(false); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [sidebarOpen]);
   const [exportOpen, setExportOpen] = useState(false);
 
   // ─── Imports (Drop media) ─────────────────────────────────────────
@@ -4723,13 +4725,28 @@ export function ProjectViewV2Stub({
     if (adding) addInputRef.current?.focus();
   }, [adding]);
 
-  // Tab / input shape / references / annotations state.
-  // Default landing = Overview (the new IA). Read-only public views have only
-  // the Dataset section, so they still open there.
-  const [tab, setTab] = useState<ProjectTab>(readOnly ? "dataset" : "overview");
-  // Swapping sections always returns to the top of the page.
+  // Active section. The SHELL owns this state (the Explorer tree's
+  // third-level rows are the nav); the view just renders it and routes
+  // its internal section jumps through the setter prop. Read-only
+  // public views have no Overview/Augmentations sections, so those
+  // section values degrade to Dataset there (the historical landing).
+  const tab: ProjectTab =
+    readOnly && (section === "overview" || section === "augmentations")
+      ? "dataset"
+      : section;
+  const setTab = useCallback(
+    (next: ProjectTab) => onSectionChange?.(next),
+    [onSectionChange],
+  );
+  // Swapping sections always returns to the top of the page. The
+  // dataset view scrolls inside the shell's content-area overlay
+  // (data-dataset-scroll), not the window — fall back to the window
+  // for any standalone mount.
   useEffect(() => {
-    if (typeof window !== "undefined") window.scrollTo({ top: 0 });
+    if (typeof window === "undefined") return;
+    const scroller = document.querySelector<HTMLElement>("[data-dataset-scroll]");
+    if (scroller) scroller.scrollTo({ top: 0 });
+    else window.scrollTo({ top: 0 });
   }, [tab]);
 
   // Whenever the user lands on the dataset tab, force a one-shot
@@ -4898,11 +4915,13 @@ export function ProjectViewV2Stub({
   // the workspace list lands the user mid-page, typically inside
   // the imports drop zone with the project header off-screen.
   // `auto` (instant) instead of "smooth" so the user doesn't see
-  // the page animate down.
+  // the page animate down. Targets the shell's content-area overlay
+  // scroller when present (the window as a standalone fallback).
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      window.scrollTo({ top: 0, behavior: "auto" });
-    }
+    if (typeof window === "undefined") return;
+    const scroller = document.querySelector<HTMLElement>("[data-dataset-scroll]");
+    if (scroller) scroller.scrollTo({ top: 0, behavior: "auto" });
+    else window.scrollTo({ top: 0, behavior: "auto" });
   }, [projectId]);
 
   const fade = (delay = 0): CSSProperties => ({
@@ -4965,61 +4984,26 @@ export function ProjectViewV2Stub({
   // "specific" (reference scoring). Reads may lag the fetch, so a
   // project that already has refs counts as specific immediately.
   const isSpecific = datasetType?.type === "specific" || refs.length > 0;
-  // Left-sidebar nav: Overview, References (optional), Dataset,
-  // Augmentations. Read-only public views keep References only when
-  // the project actually has any. Derived datasets don't manage their
-  // own references, so the entry is disabled for them.
-  const sidebarItems: SidebarItem[] = readOnly
-    ? [
-        { key: "dataset", label: "Dataset", count: imports.length },
-        ...(refs.length > 0 ? [{ key: "references", label: "References", count: refs.length } as SidebarItem] : []),
-      ]
-    : [
-        { key: "overview", label: "Overview" },
-        { key: "references", label: "References", count: refs.length, disabled: !!derivedInfo, disabledHint: "Derived datasets don't manage their own reference images" },
-        { key: "dataset", label: "Dataset", count: imports.length },
-        { key: "augmentations", label: "Augmentations" },
-      ];
 
-  // Sidebar contents, shared by the full-height md+ sidebar and the mobile
-  // drawer: back row at the top, the section nav in the middle, and
-  // "Need help?" pinned to the bottom. Shell density: flat 13px rows,
-  // no pill chrome, matching the Explorer pane.
+  // The view has NO nav column of its own any more — the shell's
+  // Explorer tree owns section navigation (third-level rows). Only the
+  // mount loader's bail-out button still needs the "Back to …" copy.
   const backTo = backToProjectId
     ? "project"
     : (readOnly || originTab === "projects") ? "projects" : "workspace";
-  const sidebarBody = (
-    <>
-      <button
-        type="button"
-        onClick={onClose}
-        title={`Back to ${backTo}`}
-        className="flex h-[26px] w-full shrink-0 items-center gap-1.5 px-2.5 text-left text-[13px] text-foreground/60 outline-none transition-colors hover:bg-foreground/[0.05] hover:text-foreground focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
-      >
-        <span aria-hidden>←</span> Back to {backTo}
-      </button>
-      <div className="mt-2 min-h-0 flex-1 overflow-y-auto">
-        <SidebarNav items={sidebarItems} active={tab} onSelect={(k) => { setTab(k as ProjectTab); setSidebarOpen(false); }} />
-      </div>
-      <a
-        href="/app?tab=guide"
-        className="flex h-[26px] shrink-0 items-center gap-2 px-2.5 text-[13px] text-foreground/55 outline-none transition-colors hover:bg-foreground/[0.05] hover:text-foreground/90 focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
-      >
-        <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M9.5 9.2a2.5 2.5 0 1 1 3.4 2.3c-.7.3-1 .8-1 1.6M12 17h.01" /></svg>
-        Need help?
-      </a>
-    </>
-  );
 
   return (
-    // Sidebar + content are one centred block (max-w cap) so on wide screens
-    // the content fills more and the sidebar is pushed in off the screen edge,
-    // sitting right beside the content. Below md the sidebar is a left overlay
-    // drawer and the content is full width.
+    // The dataset view fills the shell's content-area overlay (right of
+    // the Explorer side bar, between title and status bars). Navigation
+    // lives in the shell's tree, so the content takes the full width.
     <main className="min-h-screen bg-[var(--background)]">
       {showFullscreenLoader && (
+        // Mount loader covers the CONTENT AREA only (below the 36px
+        // title bar, above the 24px status bar, right of the shell
+        // side bar via --pk-content-left) — the tree stays reachable
+        // while a cold load spins.
         <div
-          className="fixed inset-0 z-[900] grid place-items-center"
+          className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] z-[900] grid place-items-center"
           style={{
             background: "rgb(var(--background-rgb) / 0.92)",
             opacity: pageReady ? 0 : 1,
@@ -5049,40 +5033,10 @@ export function ProjectViewV2Stub({
           <PixelKitLoader size={120} message="Loading project…" />
         </div>
       )}
-      {/* Below md the sidebar is a left overlay drawer opened from the menu
-          button (a fixed overlay over the content). */}
-      {sidebarOpen && (
-        <div className="pk-backdrop fixed inset-0 z-40 md:hidden" onClick={() => setSidebarOpen(false)} aria-hidden />
-      )}
-      <button
-        type="button"
-        onClick={() => setSidebarOpen(true)}
-        aria-label="Open project menu"
-        className="fixed left-3 top-1/2 z-30 grid h-10 w-10 -translate-y-1/2 place-items-center rounded-full border border-foreground/10 bg-[var(--modal-surface)] text-foreground/70 shadow-sm backdrop-blur transition-colors hover:text-foreground md:hidden"
-      >
-        <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-          <path d="M4 7h16M4 12h16M4 17h16" />
-        </svg>
-      </button>
-      <aside
-        className={[
-          "fixed inset-y-0 left-0 z-50 flex w-[14rem] flex-col px-2 py-2 transition-transform duration-200 md:hidden",
-          "border-r border-[var(--modal-border)] bg-[var(--modal-surface)] shadow-2xl backdrop-blur-xl",
-          sidebarOpen ? "translate-x-0" : "-translate-x-full",
-        ].join(" ")}
-      >
-        {sidebarBody}
-      </aside>
-      {/* Sidebar: a FIXED column (never moves on scroll) spanning the
-          shell's content region — below the title bar (top-9), above the
-          status bar (bottom-6), flush against the activity bar's right
-          edge (left-12: the shell side bar auto-hides while a dataset
-          view is open, so this is the only sidebar on screen). */}
-      <aside className="fixed top-9 bottom-6 left-12 z-20 hidden w-[13rem] flex-col border-r border-[var(--border)] bg-foreground/[0.02] px-2 py-2 md:flex">
-        {sidebarBody}
-      </aside>
-      {/* Content block with room for the fixed sidebar. */}
-      <div className="w-full min-w-0 max-w-[2000px] md:pl-[13rem]">
+      {/* Content block. Full width — section navigation lives in the
+          shell's Explorer tree, so the old fixed nav column (and its
+          mobile drawer) are gone and the content reclaims the space. */}
+      <div className="w-full min-w-0 max-w-[2000px]">
       {/* Title section as a cover hero: content overlaid on the dataset cover
           with a content-aware left gradient-blur (white scrim + dark text on a
           light cover, dark scrim + white text on a dark one). */}
@@ -5526,8 +5480,8 @@ export function ProjectViewV2Stub({
         </div>
       </section>
 
-      {/* Project section nav is the left sidebar (a left overlay drawer on
-          narrow screens) - no separate tab strip. */}
+      {/* Section navigation lives in the shell's Explorer tree - no
+          in-view nav column or tab strip. */}
 
       {/* Overview tab: compact stats + recent images / label distribution /
           recent activity, then the Derived datasets strip. Mounted only while
@@ -9254,8 +9208,11 @@ function AugmentationsViewer({
   if (typeof window === "undefined") return null;
 
   return createPortal(
+    // Same containment as the image editor: the viewer fills the
+    // shell's content area only (title bar / status bar / Explorer
+    // side bar stay visible and interactive).
     <div
-      className="fixed inset-0 z-[700] overflow-auto"
+      className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] z-[700] overflow-auto"
       role="dialog"
       aria-modal="true"
       onClick={onClose}
@@ -9277,7 +9234,7 @@ function AugmentationsViewer({
           hover / delete. */}
       <div
         aria-hidden
-        className="fixed inset-0 pointer-events-none"
+        className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] pointer-events-none"
         style={{
           background: "rgb(var(--background-rgb) / 0.78)",
           backdropFilter: "blur(10px)",
@@ -11101,8 +11058,13 @@ function DatasetViewer({
   if (!media) return null;
 
   return (
+    // Contained in the shell's content area: below the 36px title bar,
+    // above the 24px status bar, right of the Explorer side bar (the
+    // shell publishes its live edge as --pk-content-left, so a
+    // collapsed side bar widens the editor). The editor never covers
+    // the app chrome.
     <div
-      className="fixed inset-0 z-[400] flex flex-col bg-[var(--background)]"
+      className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] z-[400] flex flex-col bg-[var(--background)]"
       role="dialog"
       aria-modal="true"
     >

@@ -104,6 +104,11 @@ SAM3_MIN_GLOBAL_RELATIVE_AREA = float(os.environ.get("SAM3_MIN_GLOBAL_RELATIVE_A
 # photo and a 4000×3000 photo yield masks with the same vertex
 # density, so jaggy edges on small uploads disappear. 0 disables.
 SAM3_TARGET_LONGEST_EDGE = int(os.environ.get("SAM3_TARGET_LONGEST_EDGE", "1500"))  # LOCKED
+# Interactive tools (click-to-detect / box-to-mask) trade a little mask
+# resolution for latency: the vision encoder is ~O(pixels), so 1008 px is
+# roughly 2.2x faster than 1500 px per first click on an image. Batch
+# labelling keeps the full-resolution target above.
+SAM3_INTERACTIVE_LONGEST_EDGE = int(os.environ.get("SAM3_INTERACTIVE_LONGEST_EDGE", "1008"))
 
 # Douglas-Peucker simplification factor for output polygons, as a
 # fraction of each contour's perimeter. 0.0015 (0.15 %) collapses
@@ -326,6 +331,7 @@ def clear_sam3() -> None:
     global _MODEL, _PROCESSOR
     _MODEL = None
     _PROCESSOR = None
+    _VISION_CACHE.clear()
 
 
 def _detect_sharp_corners(
@@ -1197,8 +1203,8 @@ def _build_detection(
     }
 
 
-def _resize_for_inference(image: Image.Image) -> tuple[Image.Image, float]:
-    """Resize `image` so its longest edge is SAM3_TARGET_LONGEST_EDGE
+def _resize_for_inference(image: Image.Image, target: int | None = None) -> tuple[Image.Image, float]:
+    """Resize `image` so its longest edge is (target or SAM3_TARGET_LONGEST_EDGE)
     px. Returns (image_inf, scale_back) where scale_back multiplies
     inference-space coords back to original-image coords.
 
@@ -1213,18 +1219,45 @@ def _resize_for_inference(image: Image.Image) -> tuple[Image.Image, float]:
     Returns the original image untouched only when the resize target
     is 0 / disabled, or the input is already exactly at target size.
     """
-    if SAM3_TARGET_LONGEST_EDGE <= 0:
+    if (target or SAM3_TARGET_LONGEST_EDGE) <= 0:
         return image, 1.0
     W, H = image.size
     longest = max(W, H)
-    if longest == SAM3_TARGET_LONGEST_EDGE:
+    if longest == (target or SAM3_TARGET_LONGEST_EDGE):
         return image, 1.0
-    inf_scale = SAM3_TARGET_LONGEST_EDGE / longest
+    inf_scale = (target or SAM3_TARGET_LONGEST_EDGE) / longest
     new_size = (max(1, int(round(W * inf_scale))), max(1, int(round(H * inf_scale))))
     # LANCZOS works well for both up and down — for upscaling it gives
     # smoother interpolation than NEAREST without introducing the
     # ringing that BICUBIC sometimes shows on edges.
     return image.resize(new_size, Image.LANCZOS), 1.0 / inf_scale
+
+
+# Cross-call vision-embed cache for INTERACTIVE tools. A click re-runs the
+# heavy SAM3 vision encoder on the same image every time; caching the encoder
+# output per image makes every click after the first skip it entirely
+# (the per-label text passes are cheap by comparison). Keyed by caller-supplied
+# id + inference size; tiny LRU because entries hold GPU tensors.
+from collections import OrderedDict as _OrderedDict
+
+_VISION_CACHE: "_OrderedDict[str, tuple]" = _OrderedDict()
+_VISION_CACHE_MAX = 3
+
+
+def _get_image_embeds_cached(image: Image.Image, cache_key: str | None):
+    if not cache_key:
+        return _try_get_image_embeds(image)
+    key = f"{cache_key}:{image.size[0]}x{image.size[1]}"
+    hit = _VISION_CACHE.get(key)
+    if hit is not None:
+        _VISION_CACHE.move_to_end(key)
+        return hit
+    out = _try_get_image_embeds(image)
+    if out[0] is not None:
+        _VISION_CACHE[key] = out
+        while len(_VISION_CACHE) > _VISION_CACHE_MAX:
+            _VISION_CACHE.popitem(last=False)
+    return out
 
 
 def _try_get_image_embeds(image: Image.Image):
@@ -1907,6 +1940,7 @@ def segment_point(
     image: Image.Image,
     point: list[float],
     candidate_labels: Iterable[str] | None = None,
+    cache_key: str | None = None,
 ) -> tuple[dict | None, dict]:
     """Click-to-detect via SAM3 text prompts.
 
@@ -1949,7 +1983,7 @@ def segment_point(
         return None, timings
 
     t_resize = time.perf_counter()
-    image_inf, scale_back = _resize_for_inference(image)
+    image_inf, scale_back = _resize_for_inference(image, SAM3_INTERACTIVE_LONGEST_EDGE)
     inf_scale = 1.0 / scale_back if scale_back != 0 else 1.0
     timings["resize_ms"] = (time.perf_counter() - t_resize) * 1000.0
     timings["inference_size"] = list(image_inf.size)
@@ -1967,7 +2001,7 @@ def segment_point(
     # forwards if the cache path doesn't work on this transformers
     # build.
     t_cache = time.perf_counter()
-    cached_embeds, cached_sizes, cached_pixels = _try_get_image_embeds(image_inf)
+    cached_embeds, cached_sizes, cached_pixels = _get_image_embeds_cached(image_inf, cache_key)
     cache_ms = (time.perf_counter() - t_cache) * 1000.0
     timings["vision_encode_ms"] = cache_ms
     timings["vision_cache_hit"] = cached_embeds is not None
@@ -2069,6 +2103,7 @@ def segment_box(
     image: Image.Image,
     box: list[float],
     candidate_labels: Iterable[str] | None = None,
+    cache_key: str | None = None,
 ) -> tuple[dict | None, dict]:
     """User-drawn bbox → mask via SAM3 text prompts.
 
@@ -2104,7 +2139,7 @@ def segment_box(
         return None, timings
 
     t_resize = time.perf_counter()
-    image_inf, scale_back = _resize_for_inference(image)
+    image_inf, scale_back = _resize_for_inference(image, SAM3_INTERACTIVE_LONGEST_EDGE)
     inf_scale = 1.0 / scale_back if scale_back != 0 else 1.0
     timings["resize_ms"] = (time.perf_counter() - t_resize) * 1000.0
     timings["inference_size"] = list(image_inf.size)
@@ -2118,7 +2153,7 @@ def segment_box(
     ]
 
     t_cache = time.perf_counter()
-    cached_embeds, cached_sizes, cached_pixels = _try_get_image_embeds(image_inf)
+    cached_embeds, cached_sizes, cached_pixels = _get_image_embeds_cached(image_inf, cache_key)
     timings["vision_encode_ms"] = (time.perf_counter() - t_cache) * 1000.0
     timings["vision_cache_hit"] = cached_embeds is not None
 

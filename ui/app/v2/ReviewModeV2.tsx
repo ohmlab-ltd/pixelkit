@@ -230,7 +230,10 @@ export function ReviewModeV2({
     const unsures = Object.values(verdicts).filter((v) => v === "unsure").length;
     return (
       <div
-        className="fixed inset-0 z-[1200] grid place-items-center p-6"
+        // Contained in the shell's content area (below the title bar,
+        // above the status bar, right of the Explorer side bar) so the
+        // app chrome stays visible — same containment as the editor.
+        className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] z-[1200] grid place-items-center p-6"
         // Themable wash: white frosted-glass in light mode, near-black
         // in dark. Reads cleanly on either palette without overriding
         // the page's accent.
@@ -271,8 +274,10 @@ export function ReviewModeV2({
   const tintOpacity = animating ? 0 : Math.min(0.18, tintIntensity * 0.18);
 
   return (
+    // Contained in the shell's content area — the Explorer tree, title
+    // bar and status bar stay visible while reviewing.
     <div
-      className="fixed inset-0 z-[1200] flex flex-col"
+      className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] z-[1200] flex flex-col"
       role="dialog"
       aria-modal="true"
       aria-label="Fast review"

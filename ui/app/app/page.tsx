@@ -13,7 +13,7 @@ import { SideBar } from "../shell/SideBar";
 import { StatusBar } from "../shell/StatusBar";
 import { broadcastCurrentTab, onAppNavigate, requestNewDataset } from "@/lib/appNav";
 import type { ReferenceImage } from "../v2/OnboardReferencesV2";
-import { ProjectViewV2Stub } from "../v2/ProjectViewV2Stub";
+import { ProjectViewV2Stub, type ProjectTab } from "../v2/ProjectViewV2Stub";
 import { patchProjectMeta, readProjectMeta } from "@/lib/projectMetaCache";
 import { apiFetch } from "@/lib/apiFetch";
 import { fetchModelsStatus } from "@/lib/models";
@@ -65,6 +65,11 @@ export default function Page() {
   // (name + labels + references) inline so the V2 path here is a
   // single piece of state, flipping back to V1 is one tweak.
   const [openV2Project, setOpenV2Project] = useState<V2Result | null>(null);
+  // Active section of the open V2 dataset. Owned HERE (not inside the
+  // dataset view) so the Explorer tree's third-level rows and the view
+  // stay in sync. Defaults to Overview and resets whenever a different
+  // dataset opens (openProj / onV2Begin below).
+  const [datasetSection, setDatasetSection] = useState<ProjectTab>("overview");
   // First-run setup wizard. Shown when the engine reports missing model
   // weights AND the user hasn't dismissed it before ("pk-setup-dismissed").
   const [setupOpen, setSetupOpen] = useState(false);
@@ -96,6 +101,10 @@ export default function Page() {
   ) => {
     setProjectOriginTab(activity === "guide" ? "guide" : "workspaces");
     setNotFoundProjectId(null);
+    // Every open lands on Overview. Callers that want a specific
+    // section (the tree's section rows) call setDatasetSection right
+    // after — the later update wins within the same batch.
+    setDatasetSection("overview");
     syncUrl(id);
     if (v2) {
       // Opening a V2 dataset replaces any open V1 view (the sidebar
@@ -223,8 +232,8 @@ export default function Page() {
   }, []);
 
   // Broadcast the resolved view so components on the legacy appNav bus
-  // keep working. The Explorer/Models activities both surface the
-  // workspace, so they broadcast as "workspaces".
+  // keep working. The Explorer activity surfaces the workspace, so it
+  // broadcasts as "workspaces".
   useEffect(() => {
     broadcastCurrentTab(activity === "guide" ? "guide" : "workspaces");
   }, [activity]);
@@ -366,24 +375,37 @@ export default function Page() {
     ? (openProjectName || openProject)
     : "";
 
-  // While a dataset view is open the shell side bar auto-hides — the
-  // dataset has its own internal left nav, and stacking both was two
-  // sidebars deep. The ActivityBar, TitleBar and StatusBar stay, and
-  // the side bar comes back (with its previous open/collapsed state)
-  // as soon as the dataset closes.
-  const datasetOpen = !!openV2Project || !!openProject;
-  const sidebarVisible = sidebarOpen && activity !== "guide" && !datasetOpen;
+  // ONE tree, ALWAYS visible: the Explorer side bar stays up while a
+  // dataset is open (the dataset view has no internal nav column any
+  // more — the tree's third-level section rows are the navigation).
+  // Only the Guide view and an explicit collapse (clicking the active
+  // activity icon) hide it.
+  const sidebarVisible = sidebarOpen && activity !== "guide";
   // Dataset views (and the not-found message) render as fixed overlays
   // above the content pane: below the title bar, above the status bar,
-  // and to the right of the activity bar (plus the side bar for the
-  // not-found case, where the Explorer tree stays reachable). Their
-  // internal modals (BoxEditor, viewers) are fixed inset-0 with higher
-  // z-indices and still cover everything, which matches their previous
-  // behaviour.
+  // and to the right of the side bar (or the activity bar when the
+  // side bar is collapsed). Their internal full-screen surfaces
+  // (BoxEditor viewer, review mode, augmentations viewer, mount
+  // loader) are constrained to the same content area via the
+  // --pk-content-left variable published below.
   const overlayCls = [
     "fixed top-9 bottom-6 right-0 z-[200] bg-[var(--background)]",
     sidebarVisible ? "left-[308px]" : "left-12",
   ].join(" ");
+
+  // Publish the content area's live left edge (activity bar 48px +
+  // side bar 260px when expanded) for the dataset view's contained
+  // overlays. Set on <html> so even document.body portals (the image
+  // editor, augmentations viewer) can read it.
+  useEffect(() => {
+    document.documentElement.style.setProperty(
+      "--pk-content-left",
+      sidebarVisible ? "308px" : "48px",
+    );
+    return () => {
+      document.documentElement.style.removeProperty("--pk-content-left");
+    };
+  }, [sidebarVisible]);
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-[var(--background)] text-[var(--foreground)]">
@@ -397,9 +419,9 @@ export default function Page() {
         />
         {sidebarVisible && (
           <SideBar
-            pane={activity === "models" ? "models" : "explorer"}
             username={user.username}
             selectedDatasetId={openDatasetId}
+            activeSection={openV2Project ? datasetSection : null}
             onOpenDataset={(ds) => {
               if (openDatasetId === ds.id) return;
               setProfileOpen(false);
@@ -408,6 +430,16 @@ export default function Page() {
               // carry the container id so the V2 view's back button
               // returns to that Project page.
               openProj(ds.id, ds.owner, ds.name, ds.v2, ds.containerId ?? undefined);
+            }}
+            onOpenSection={(ds, section) => {
+              setProfileOpen(false);
+              if (openDatasetId !== ds.id) {
+                // Open the dataset first (resets the section to
+                // "overview"), then activate the requested section —
+                // the later state update wins within the batch.
+                openProj(ds.id, ds.owner, ds.name, ds.v2, ds.containerId ?? undefined);
+              }
+              setDatasetSection(section);
             }}
             onNewDataset={handleNewDataset}
           />
@@ -424,8 +456,7 @@ export default function Page() {
               card grid, scroll position, and any in-flight pollers all
               survive the round-trip. Dataset views render on top as
               fixed overlays, so HomeView is hidden visually while one
-              of those is up. The Models activity only swaps the side
-              bar pane, so the workspace stays in the content slot. */}
+              of those is up. */}
           {loggedIn && activity !== "guide" && (
             <div hidden={!!profileOpen || !!openV2Project || !!openProject || !!notFoundProjectId}>
               <HomeView
@@ -437,6 +468,8 @@ export default function Page() {
                   // via openProj (which calls syncUrl) — so a reload or
                   // share-link mid-session lost the project.
                   if (projectId) syncUrl(projectId);
+                  // Fresh dataset always lands on Overview.
+                  setDatasetSection("overview");
                   setOpenV2Project({
                     name,
                     labels,
@@ -485,6 +518,7 @@ export default function Page() {
         // tree remounts the view cleanly (it hydrates on mount).
         <div
           key={openV2Project.projectId ?? "v2-onboarding"}
+          data-dataset-scroll
           className={`${overlayCls} overflow-y-auto overscroll-contain`}
         >
           <ProjectViewV2Stub
@@ -519,6 +553,12 @@ export default function Page() {
             // the project's full-screen mount loader because HomeView
             // is still showing its "Opening project…" overlay.
             firstLoad={openV2Project.firstLoad ?? null}
+            // Section state lives HERE so the Explorer tree's
+            // third-level rows and the view's internal jumps (Overview
+            // cards → References/Dataset etc.) share one source of
+            // truth.
+            section={datasetSection}
+            onSectionChange={setDatasetSection}
             onClose={() => {
               const proj = openV2Project.fromProjectId;
               if (proj) {
@@ -546,7 +586,7 @@ export default function Page() {
         // No key here: ProjectView refetches itself when `name` changes
         // (rename + tree switches), and keying by name would force a
         // full remount on every rename.
-        <div className={`${overlayCls} overflow-y-auto overscroll-contain`}>
+        <div data-dataset-scroll className={`${overlayCls} overflow-y-auto overscroll-contain`}>
           <ProjectView
             name={openProject}
             initialDisplayName={openProjectName}

@@ -1,18 +1,20 @@
 "use client";
 
-// First-run setup: HF token -> model downloads -> ready. Shown by the
-// workspace shell whenever SAM3 isn't usable yet; skippable — manual
-// annotation works with no models at all.
+// First-run setup: HF token -> models download themselves -> ready.
+// Shown by the workspace shell whenever SAM3 isn't usable yet;
+// skippable — manual annotation works with no models at all. There
+// are NO per-model buttons: once a valid token exists the engine
+// auto-downloads and auto-loads everything, this card just shows the
+// passive progress and flips to "All set" when both weights are in.
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   ModelsStatus,
   ModelName,
-  downloadModel,
-  downloadPct,
   fetchModelsStatus,
   setHfToken,
 } from "@/lib/models";
+import { ModelStatusRow } from "./SettingsView";
 
 export function setupNeeded(s: ModelsStatus | null): boolean {
   if (!s) return false;
@@ -61,15 +63,6 @@ export function SetupWizard({ onClose }: { onClose: () => void }) {
       setTokenError(e instanceof Error ? e.message : "Token validation failed.");
     } finally {
       setTokenBusy(false);
-    }
-  };
-
-  const start = async (name: ModelName) => {
-    try {
-      await downloadModel(name);
-      refresh();
-    } catch (e) {
-      setTokenError(e instanceof Error ? e.message : "Download failed to start.");
     }
   };
 
@@ -141,47 +134,20 @@ export function SetupWizard({ onClose }: { onClose: () => void }) {
             <h3 className="text-sm font-medium">
               {needsToken ? "2 · " : ""}Model weights
             </h3>
+            <p className="mt-1.5 text-[13px] leading-relaxed text-foreground/60">
+              Models are built in and managed automatically — PixelKit downloads and
+              loads them itself.
+            </p>
             <div className="mt-3 space-y-3">
               {(Object.keys(s.models) as ModelName[])
                 .filter((n) => n !== "vlm")
-                .map((n) => {
-                  const m = s.models[n];
-                  const pct = downloadPct(m.download);
-                  return (
-                    <div key={n} className="flex items-center gap-3">
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm truncate">{m.label}</p>
-                        <p className="text-[12px] text-foreground/45">
-                          {m.repo} · ~{m.approxGb} GB
-                          {m.download?.status === "error" && (
-                            <span className="text-red-500"> — {m.download.error}</span>
-                          )}
-                        </p>
-                        {pct !== null && (
-                          <div className="mt-1.5 h-1.5 rounded-full bg-foreground/10 overflow-hidden">
-                            <div
-                              className="h-full rounded-full bg-foreground/70 transition-[width]"
-                              style={{ width: `${pct}%` }}
-                            />
-                          </div>
-                        )}
-                      </div>
-                      {m.downloaded ? (
-                        <span className="text-[12px] text-emerald-500 shrink-0">Ready</span>
-                      ) : pct !== null ? (
-                        <span className="text-[12px] text-foreground/50 shrink-0">{pct}%</span>
-                      ) : (
-                        <button
-                          onClick={() => start(n)}
-                          disabled={n === "sam3" && !s.hfTokenConfigured}
-                          className="shrink-0 rounded-full border border-foreground/20 px-3 py-1.5 text-[12px] hover:bg-foreground/[0.05] disabled:opacity-40"
-                        >
-                          Download
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
+                .map((n) => (
+                  <ModelStatusRow
+                    key={n}
+                    m={s.models[n]}
+                    tokenConfigured={s.hfTokenConfigured}
+                  />
+                ))}
             </div>
           </div>
         )}
