@@ -24,6 +24,27 @@ export function onAppNavigate(handler: (tab: AppTab) => void): () => void {
   return () => window.removeEventListener(EVENT_NAME, listener);
 }
 
+// "New dataset" request bus. The desktop shell's Explorer side bar
+// exposes a "+" button, but the onboarding flow (name popup → labels →
+// references) is owned entirely by HomeView. Rather than prop-drilling
+// a begin-callback out of HomeView, the shell fires this event and
+// HomeView (which stays mounted under the workspace view) reacts by
+// opening its existing CreateDatasetModal — the exact same entry the
+// "+ Add Dataset" toolbar button uses.
+const NEW_DATASET_EVENT = "pixelkit:new-dataset";
+
+export function requestNewDataset() {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(NEW_DATASET_EVENT));
+}
+
+export function onNewDatasetRequest(handler: () => void): () => void {
+  if (typeof window === "undefined") return () => {};
+  const listener = () => handler();
+  window.addEventListener(NEW_DATASET_EVENT, listener);
+  return () => window.removeEventListener(NEW_DATASET_EVENT, listener);
+}
+
 // Broadcast the resolved current tab from /app/page.tsx. Components
 // outside the page (e.g. ScrollToTop in the root layout) can listen
 // to gate themselves on a specific tab without having to read the

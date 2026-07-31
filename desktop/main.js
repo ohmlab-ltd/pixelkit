@@ -267,6 +267,8 @@ function openExternally(url) {
   if (/^https?:/i.test(url)) shell.openExternal(url);
 }
 
+const APP_ICON = path.join(__dirname, 'build', 'icon.png');
+
 function createMainWindow() {
   const state = loadWindowState();
   mainWindow = new BrowserWindow({
@@ -277,6 +279,7 @@ function createMainWindow() {
     minWidth: 1100,
     minHeight: 700,
     show: false,
+    icon: APP_ICON,
     backgroundColor: '#101014',
     ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' } : {}),
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
@@ -377,6 +380,10 @@ function buildMenu() {
 // ---------------------------------------------------------------------------
 
 app.whenReady().then(async () => {
+  // Dev-mode dock icon (packaged builds get it from electron-builder).
+  if (process.platform === 'darwin' && app.dock) {
+    try { app.dock.setIcon(APP_ICON); } catch {}
+  }
   if (!gotLock) return;
   buildMenu();
   createSplash();

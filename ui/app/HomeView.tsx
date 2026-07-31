@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Footer } from "./Footer";
 import { ProjectTagsRow } from "./components/ProjectTagsRow";
 import { containsProfanity } from "./profanity";
 import { BlurhashCanvas } from "react-blurhash";
@@ -18,6 +17,7 @@ import { ProjectsSection } from "./ProjectsSection";
 import { ProjectPage } from "./ProjectPage";
 import { CreateDatasetModal } from "./CreateDatasetModal";
 import { apiFetch } from "@/lib/apiFetch";
+import { onNewDatasetRequest } from "@/lib/appNav";
 import { addDataset } from "@/lib/containers";
 import { isProPlan } from "@/lib/plans";
 import { patchProjectMeta, readProjectMetaCache, writeProjectMetaCache, type ProjectMetaCache } from "@/lib/projectMetaCache";
@@ -527,6 +527,24 @@ export function HomeView({
   // alongside the type (the type travels via firstLoad).
   const v2DatasetReasonRef = useRef<string>("");
   useEffect(() => { v2ProjectIdRef.current = v2ProjectId; }, [v2ProjectId]);
+
+  // Desktop shell: the Explorer side bar's "+" button fires a
+  // new-dataset request on the appNav bus. React exactly like the
+  // workspace toolbar's "+ Add Dataset" button — workspace-scoped
+  // (never attached to a Project), same CreateDatasetModal entry.
+  // If onboarding is already underway the request is a no-op rather
+  // than a cancel, "+" should never destroy in-progress work.
+  useEffect(() => {
+    return onNewDatasetRequest(() => {
+      if (v2Stage !== "idle") return;
+      pendingContainerRef.current = null;
+      setV2ReturnProjectId(null);
+      setProjectViewId(null);
+      if (creating) setCreating(false);
+      if (onV2Begin) setShowWorkspaceCreate(true);
+      else setCreating(true);
+    });
+  }, [creating, v2Stage, onV2Begin]);
 
   // Persist reference box/label edits made in the onboarding editor to
   // the backend so they survive into the project. The reference was
@@ -1842,14 +1860,14 @@ export function HomeView({
   // (Logged-out marketing view removed — the portable build has no accounts.)
 
   return (
-    <main className="min-h-screen bg-[var(--background)] overflow-x-hidden">
+    <main className="min-h-full bg-[var(--background)] overflow-x-hidden">
       {/* Title + controls strip. Stays mounted across all stages ,
           the H1 / subtitle / search-add buttons crossfade rather
           than reflow so the page never visibly jumps. `relative
           z-20` puts the title above the V2 wrapper, which uses a
           negative top margin to overlap with this band so the
           centred V2 body lands at exactly 50vh of the viewport. */}
-      <section className="relative z-20 mx-auto max-w-6xl px-6 pt-16 pb-10 flex items-end justify-between gap-6 flex-wrap">
+      <section className="relative z-20 mx-auto max-w-[1400px] px-6 pt-8 pb-6 flex items-end justify-between gap-6 flex-wrap">
         <div className="min-w-0 flex-1">
           {/* Heading stack: "Workspace" → project name. The two H1s'
               transitions are sequenced, the leaving one fades out
@@ -1866,7 +1884,7 @@ export function HomeView({
           <div className="relative pb-2">
             <h1
               className={[
-                "text-5xl md:text-6xl font-medium tracking-tight leading-[1.3] transition-all duration-150 ease-out",
+                "text-2xl font-medium tracking-tight leading-[1.3] transition-all duration-150 ease-out",
                 v2Active
                   ? "opacity-0 -translate-y-5 pointer-events-none select-none"
                   : "opacity-100 translate-y-0 delay-150",
@@ -1877,7 +1895,7 @@ export function HomeView({
             <h1
               aria-hidden={!v2Active}
               className={[
-                "absolute inset-0 text-5xl md:text-6xl font-medium tracking-tight leading-[1.3] transition-all duration-150 ease-out truncate",
+                "absolute inset-0 text-2xl font-medium tracking-tight leading-[1.3] transition-all duration-150 ease-out truncate",
                 v2Active
                   ? "opacity-100 translate-y-0 delay-150"
                   : "opacity-0 translate-y-4 pointer-events-none select-none",
@@ -1890,10 +1908,10 @@ export function HomeView({
               the workspace tagline is replaced by the project's
               creator + creation date so the user can read off the
               metadata for the project they just named. */}
-          <div className="relative mt-4 max-w-2xl">
+          <div className="relative mt-2 max-w-2xl">
             <p
               className={[
-                "text-foreground/50 text-lg transition-all duration-150 ease-out",
+                "text-foreground/50 text-sm transition-all duration-150 ease-out",
                 v2Active
                   ? "opacity-0 -translate-y-3 pointer-events-none select-none"
                   : "opacity-100 translate-y-0 delay-150",
@@ -1976,8 +1994,10 @@ export function HomeView({
             // The classifying stage shares the same vertically-centred
             // layout as the labels stage so the swap is in-place, no
             // wrapper-level layout shift, no flicker between forms.
+            // Pull-up tuned against the denser title band (was -13rem
+            // when the workspace heading was text-6xl marketing scale).
             v2Stage === "labels" || v2Stage === "classifying"
-              ? "-mt-[13rem] min-h-[calc(100vh-6rem)] flex items-center justify-center pointer-events-none"
+              ? "-mt-[6rem] min-h-[calc(100vh-10rem)] flex items-center justify-center pointer-events-none"
               : "pt-4 pb-16 pointer-events-none",
           ].join(" ")}
         >
@@ -2028,7 +2048,7 @@ export function HomeView({
                   Back to project
                 </button>
               )}
-              <h2 className="text-4xl md:text-5xl font-light tracking-tight text-[var(--foreground)] leading-tight">
+              <h2 className="text-2xl font-light tracking-tight text-[var(--foreground)] leading-tight">
                 What do you want to detect?
               </h2>
               <p className="mt-3 text-sm text-foreground/50 leading-relaxed">
@@ -2200,7 +2220,7 @@ export function HomeView({
                 <span aria-hidden>←</span>
                 Back to labels
               </button>
-              <h2 className="text-4xl md:text-5xl font-light tracking-tight text-[var(--foreground)] leading-tight">
+              <h2 className="text-2xl font-light tracking-tight text-[var(--foreground)] leading-tight">
                 Import a labelled dataset
               </h2>
               <p className="mt-3 text-sm text-foreground/50 leading-relaxed">
@@ -2410,7 +2430,7 @@ export function HomeView({
                 <span aria-hidden>←</span>
                 Back to labels
               </button>
-              <h2 className="text-4xl md:text-5xl font-light tracking-tight text-[var(--foreground)] leading-tight">
+              <h2 className="text-2xl font-light tracking-tight text-[var(--foreground)] leading-tight">
                 Reference images
               </h2>
               <p className="mt-3 text-sm text-foreground/50 leading-relaxed">
@@ -2678,7 +2698,7 @@ export function HomeView({
           projects collapse out. Footer stays mounted (below) so the
           page still feels grounded. */}
       {!v2Active && (
-        <section className="mx-auto max-w-6xl px-6 pb-24 grid gap-8">
+        <section className="mx-auto max-w-[1400px] px-6 pb-24 grid gap-8">
           {creating && (
             <div className="rounded-xl border border-[var(--border)] p-5 grid gap-4 animate-[fadeIn_180ms_ease-out]">
               <div className="flex flex-wrap items-center gap-3">
@@ -2884,14 +2904,6 @@ export function HomeView({
           )}
         </section>
       )}
-
-      {/* Footer is always mounted, full multi-column footer in
-          every state. During V2 the wrapper above sizes itself to
-          (100vh - title height) so the centred body sits at the
-          viewport's vertical middle when scrolled to the top, and
-          the footer lives in normal flow below, visible by
-          scrolling, and counted in the page height. */}
-      <Footer />
 
       {deleteTarget && (
         <DeleteProjectDialog

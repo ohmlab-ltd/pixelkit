@@ -7,8 +7,11 @@ import { ScrollToTop } from "../components/ScrollToTop";
 import { GuideView } from "../GuideView";
 import { SettingsView } from "../SettingsView";
 import { SetupWizard, setupNeeded } from "../SetupWizard";
-import { TopNav, NavTab } from "../TopNav";
-import { broadcastCurrentTab, onAppNavigate } from "@/lib/appNav";
+import { TitleBar } from "../shell/TitleBar";
+import { ActivityBar, type ActivityKey } from "../shell/ActivityBar";
+import { SideBar } from "../shell/SideBar";
+import { StatusBar } from "../shell/StatusBar";
+import { broadcastCurrentTab, onAppNavigate, requestNewDataset } from "@/lib/appNav";
 import type { ReferenceImage } from "../v2/OnboardReferencesV2";
 import { ProjectViewV2Stub } from "../v2/ProjectViewV2Stub";
 import { patchProjectMeta, readProjectMeta } from "@/lib/projectMetaCache";
@@ -48,8 +51,17 @@ type V2Result = {
   firstLoad?: "general" | "specific" | null;
 };
 
+// Legacy tab identity kept for the appNav bus + ProjectViewV2Stub's
+// originTab prop ("Back to …" copy). The desktop shell's activity
+// state maps onto it: guide ↔ "guide", everything else "workspaces".
+type OriginTab = "workspaces" | "guide";
+
 export default function Page() {
-  const [tab, setTab] = useState<NavTab>("workspaces");
+  // Desktop-shell state: which activity-bar item is active, and
+  // whether the 260px side bar is expanded. Clicking the active
+  // activity icon again collapses/expands the side bar.
+  const [activity, setActivity] = useState<ActivityKey>("explorer");
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [openProject, setOpenProject] = useState<string | null>(null);
   const [openProjectName, setOpenProjectName] = useState<string>("");
   const [profileOpen, setProfileOpen] = useState(false);
@@ -61,7 +73,7 @@ export default function Page() {
   // weights AND the user hasn't dismissed it before ("pk-setup-dismissed").
   const [setupOpen, setSetupOpen] = useState(false);
 
-  const [projectOriginTab, setProjectOriginTab] = useState<NavTab>("workspaces");
+  const [projectOriginTab, setProjectOriginTab] = useState<OriginTab>("workspaces");
   // Set when the user deep-links to a project id that the backend
   // doesn't recognise (deleted, never existed, wrong owner).
   // Drives the centred "This project cannot be found…" overlay.
@@ -71,7 +83,7 @@ export default function Page() {
   // the same page but with the matching project pre-opened. We
   // push the URL on every open so a reload or back-button keeps
   // the user on the right project, and the workspace card +
-  // public feed can both produce shareable deep-links.
+  // sidebar tree can both produce shareable deep-links.
   const syncUrl = (id: string | null) => {
     if (typeof window === "undefined") return;
     const target = id ? `/app/${id}` : "/app";
@@ -86,9 +98,13 @@ export default function Page() {
     v2 = false,
     fromProjectId?: string,
   ) => {
-    setProjectOriginTab(tab);
+    setProjectOriginTab(activity === "guide" ? "guide" : "workspaces");
+    setNotFoundProjectId(null);
     syncUrl(id);
     if (v2) {
+      // Opening a V2 dataset replaces any open V1 view (the sidebar
+      // tree can switch datasets without going through the workspace).
+      setOpenProject(null);
       // V2 project: seed name + labels from the per-project meta
       // cache (populated by HomeView's workspace list refresh) so
       // the page paints with chips, dataset health, and the
@@ -157,6 +173,7 @@ export default function Page() {
         .catch(() => { /* silent — owner check still grants the creator access */ });
       return;
     }
+    setOpenV2Project(null);
     setOpenProject(id);
     setOpenProjectName(displayName);
   };
@@ -165,16 +182,17 @@ export default function Page() {
   // there is no logged-out state (the /login route doesn't exist).
   const loggedIn = true;
 
-  // A `?tab=` query param deep-links into a specific tab without needing a
-  // separate top-level route per tab. `?profile=1` re-opens the settings
-  // pane after a hard reload (e.g. post-settings-save); strip the param
-  // afterwards so back/refresh don't reopen it forever.
+  // A `?tab=` query param deep-links into a specific view without needing a
+  // separate top-level route per view (legacy values: "workspaces" maps to
+  // the Explorer activity). `?profile=1` re-opens the settings pane after a
+  // hard reload (e.g. post-settings-save); strip the param afterwards so
+  // back/refresh don't reopen it forever.
   useEffect(() => {
     if (typeof window === "undefined") return;
     const search = new URLSearchParams(window.location.search);
     const t = search.get("tab");
-    const valid: NavTab[] = ["workspaces", "guide"];
-    if (t && (valid as string[]).includes(t)) setTab(t as NavTab);
+    if (t === "guide") setActivity("guide");
+    else if (t === "workspaces") setActivity("explorer");
     if (search.get("profile") === "1") {
       setProfileOpen(true);
       const cleaned = new URLSearchParams(window.location.search);
@@ -208,13 +226,12 @@ export default function Page() {
     };
   }, []);
 
-  // Broadcast the resolved tab so root-layout components (e.g.
-  // ScrollToTop) can gate themselves on the current section without
-  // having to read query params, the URL doesn't update when tabs
-  // change in place, so URL-driven gates miss every tab switch.
+  // Broadcast the resolved view so components on the legacy appNav bus
+  // keep working. The Explorer/Models activities both surface the
+  // workspace, so they broadcast as "workspaces".
   useEffect(() => {
-    broadcastCurrentTab(tab);
-  }, [tab]);
+    broadcastCurrentTab(activity === "guide" ? "guide" : "workspaces");
+  }, [activity]);
 
   // Hydrate openProject from the URL on first mount. /app/<id>
   // means "open this project on load" so deep-links + reloads
@@ -290,12 +307,12 @@ export default function Page() {
   }, []);
 
   // Listen for in-app navigation events. Lets any nested component ask to
-  // switch tabs without prop-drilling. Legacy tabs (pricing / projects /
+  // switch views without prop-drilling. Legacy tabs (pricing / projects /
   // terminal) no longer exist in the portable build, ignore those events.
   useEffect(() => {
     return onAppNavigate((next) => {
       if (next !== "workspaces" && next !== "guide") return;
-      setTab(next);
+      setActivity(next === "guide" ? "guide" : "explorer");
       setOpenProject(null);
       setOpenV2Project(null);
       setProfileOpen(false);
@@ -311,194 +328,237 @@ export default function Page() {
     image: null,
   };
 
+  // Activity-bar click: switch views, or collapse/expand the side bar
+  // when the active icon is clicked again. Guide has no side-bar pane.
+  const handleActivitySelect = (key: ActivityKey) => {
+    if (key === activity) {
+      if (key !== "guide") setSidebarOpen((v) => !v);
+      return;
+    }
+    setActivity(key);
+    setProfileOpen(false);
+    if (key === "guide") {
+      // Guide replaces the content pane — close any dataset overlay so
+      // the user actually sees it (mirrors the old tab-switch flow).
+      setOpenProject(null);
+      setOpenV2Project(null);
+      setNotFoundProjectId(null);
+      syncUrl(null);
+    } else {
+      setSidebarOpen(true);
+    }
+  };
+
+  // Side-bar "+": make the workspace visible again, then hand off to
+  // HomeView's existing onboarding entry (the CreateDatasetModal) via
+  // the appNav event bus — HomeView stays mounted for every
+  // non-guide activity, so the listener is guaranteed to be attached.
+  const handleNewDataset = () => {
+    setActivity("explorer");
+    setOpenProject(null);
+    setOpenV2Project(null);
+    setProfileOpen(false);
+    setNotFoundProjectId(null);
+    syncUrl(null);
+    requestNewDataset();
+  };
+
+  const openDatasetId = openProject ?? openV2Project?.projectId ?? null;
+  const titleBarName = openV2Project
+    ? openV2Project.name
+    : openProject
+    ? (openProjectName || openProject)
+    : "";
+
+  const sidebarVisible = sidebarOpen && activity !== "guide";
+  // Dataset views (and the not-found message) render as fixed overlays
+  // above the content pane: below the title bar, above the status bar,
+  // and to the right of the activity bar + side bar — so the window
+  // chrome and the Explorer tree stay reachable while a dataset is
+  // open. Their internal modals (BoxEditor, viewers) are fixed
+  // inset-0 with higher z-indices and still cover everything, which
+  // matches their previous behaviour.
+  const overlayCls = [
+    "fixed top-9 bottom-6 right-0 z-[200] bg-[var(--background)]",
+    sidebarVisible ? "left-[308px]" : "left-12",
+  ].join(" ");
+
   return (
-    <>
-      <TopNav
-        current={(openProject || openV2Project) ? projectOriginTab : tab}
-        onNavigate={(t) => {
-          // Clicking the tab you're already on is a "scroll to top"
-          // gesture, not a no-op. Only counts when no project (V1
-          // OR V2) / profile pane is open over the tab, otherwise
-          // the click should close that and switch tabs as normal.
-          const onSameTab =
-            t === tab && !openProject && !openV2Project && !profileOpen;
-          if (onSameTab) {
-            window.scrollTo({ top: 0, behavior: "smooth" });
-            return;
-          }
-          setTab(t);
-          setOpenProject(null);
-          setOpenV2Project(null);
-          setProfileOpen(false);
-          setNotFoundProjectId(null);
-          syncUrl(null);
-        }}
-        onProfile={() => {
-          // Already on the profile pane → smooth-scroll to top
-          // instead of a no-op (mirrors the iOS "tap status bar"
-          // pattern). Otherwise open the pane.
-          if (profileOpen) {
-            window.scrollTo({ top: 0, behavior: "smooth" });
-          } else {
-            setProfileOpen(true);
-          }
-        }}
-        onHome={() => {
-          if (profileOpen) {
-            window.scrollTo({ top: 0, behavior: "smooth" });
-            return;
-          }
-          // Hard navigation so the marketing home re-mounts cleanly.
-          // router.push("/") sometimes left the /app SPA shell up
-          // because the layout boundary isn't crossed; window.location
-          // forces a real GET and the marketing routes load fresh.
-          window.location.href = "/";
-        }}
-        user={user}
-      />
-      {/* HomeView stays mounted under the project overlay so coming
-          back from a project is instant, its `projects` state, the
-          card grid, scroll position, and any in-flight pollers all
-          survive the round-trip. ProjectView / ProjectViewV2Stub /
-          ProfileView render on top as fixed-position overlays, so
-          HomeView is hidden visually while one of those is up.
-          Only show HomeView when the user actually wants the
-          workspace tab and they're logged in, anonymous viewers
-          and other tabs render through the lower switch below. */}
-      {loggedIn && tab === "workspaces" && (
-        <div hidden={!!profileOpen || !!openV2Project || !!openProject || !!notFoundProjectId}>
-          <HomeView
-            onOpen={openProj}
-            onV2Begin={(name, labels, references, projectId, firstLoad) => {
-              // Reflect the freshly-created project in the address bar
-              // (/app/<id>) right away. Without this the URL stayed /app
-              // until the user navigated off and re-opened the project
-              // via openProj (which calls syncUrl) — so a reload or
-              // share-link mid-session lost the project.
-              if (projectId) syncUrl(projectId);
-              setOpenV2Project({
-                name,
-                labels,
-                references,
-                projectId,
-                // The creator is always the owner, without this the
-                // readOnly default fires and hides the drop card on
-                // the freshly-created project page until the
-                // /api/projects/<id> fetch resolves, which broke
-                // uploads on first-mount.
-                owner: user.username,
-                firstLoad: firstLoad ?? null,
-              });
-            }}
+    <div className="flex h-screen flex-col overflow-hidden bg-[var(--background)] text-[var(--foreground)]">
+      <TitleBar title={titleBarName} />
+      <div className="flex min-h-0 flex-1">
+        <ActivityBar
+          activity={activity}
+          onSelect={handleActivitySelect}
+          onSettings={() => setProfileOpen(true)}
+          settingsActive={profileOpen}
+        />
+        {sidebarVisible && (
+          <SideBar
+            pane={activity === "models" ? "models" : "explorer"}
             username={user.username}
-            userImage={user.image}
-            loggedIn={loggedIn}
+            selectedDatasetId={openDatasetId}
+            onOpenDataset={(ds) => {
+              if (openDatasetId === ds.id) return;
+              setProfileOpen(false);
+              // Same code path as the workspace cards (openProj), with
+              // the dataset's real v2 flag; datasets inside a Project
+              // carry the container id so the V2 view's back button
+              // returns to that Project page.
+              openProj(ds.id, ds.owner, ds.name, ds.v2, ds.containerId ?? undefined);
+            }}
+            onNewDataset={handleNewDataset}
           />
-          {/* Back-to-top inside the workspace too, the user's own
-              project grid scrolls just like the public feed. The
-              `hidden` parent eats the button when an overlay is up. */}
-          <ScrollToTop />
+        )}
+        {/* Content pane: the ONLY scroll container for the embedded
+            legacy views (HomeView / GuideView). data-app-scroll lets
+            those views target it for their scroll-to-top calls. */}
+        <div
+          data-app-scroll
+          className="relative min-w-0 flex-1 overflow-y-auto overscroll-contain"
+        >
+          {/* HomeView stays mounted under the project overlay so coming
+              back from a project is instant, its `projects` state, the
+              card grid, scroll position, and any in-flight pollers all
+              survive the round-trip. Dataset views render on top as
+              fixed overlays, so HomeView is hidden visually while one
+              of those is up. The Models activity only swaps the side
+              bar pane, so the workspace stays in the content slot. */}
+          {loggedIn && activity !== "guide" && (
+            <div hidden={!!profileOpen || !!openV2Project || !!openProject || !!notFoundProjectId}>
+              <HomeView
+                onOpen={openProj}
+                onV2Begin={(name, labels, references, projectId, firstLoad) => {
+                  // Reflect the freshly-created project in the address bar
+                  // (/app/<id>) right away. Without this the URL stayed /app
+                  // until the user navigated off and re-opened the project
+                  // via openProj (which calls syncUrl) — so a reload or
+                  // share-link mid-session lost the project.
+                  if (projectId) syncUrl(projectId);
+                  setOpenV2Project({
+                    name,
+                    labels,
+                    references,
+                    projectId,
+                    // The creator is always the owner, without this the
+                    // readOnly default fires and hides the drop card on
+                    // the freshly-created project page until the
+                    // /api/projects/<id> fetch resolves, which broke
+                    // uploads on first-mount.
+                    owner: user.username,
+                    firstLoad: firstLoad ?? null,
+                  });
+                }}
+                username={user.username}
+                userImage={user.image}
+                loggedIn={loggedIn}
+              />
+              {/* Back-to-top inside the workspace too — it finds the
+                  content pane as its scroll container. The `hidden`
+                  parent eats the button when an overlay is up. */}
+              <ScrollToTop />
+            </div>
+          )}
+          {activity === "guide" && <GuideView />}
         </div>
-      )}
+      </div>
+      <StatusBar onOpenSettings={() => setProfileOpen(true)} />
+
       {notFoundProjectId ? (
         // Deep-link to a project the backend doesn't know about.
-        // Keep TopNav above and Footer below; centre a quiet
-        // white-on-dark message between them. No retry / back
-        // button, the user can hit the nav at the top.
-        <main className="min-h-[calc(100vh-9rem)] grid place-items-center px-6">
-          <p className="text-base text-foreground/85 font-light">
-            This project cannot be found...
-          </p>
-        </main>
+        // The shell chrome stays up; centre a quiet message in the
+        // content region. No retry / back button — the Explorer tree
+        // and activity bar remain reachable.
+        <div className={overlayCls}>
+          <main className="grid h-full place-items-center px-6">
+            <p className="text-base text-foreground/85 font-light">
+              This project cannot be found...
+            </p>
+          </main>
+        </div>
       ) : profileOpen ? (
         <SettingsView onClose={() => setProfileOpen(false)} />
       ) : openV2Project ? (
-        <>
-        <ProjectViewV2Stub
-          projectName={openV2Project.name}
-          labels={openV2Project.labels}
-          references={openV2Project.references}
-          projectId={openV2Project.projectId}
-          username={user.username}
-          userImage={user.image}
-          ownerUsername={openV2Project.owner ?? null}
-          // Read-only is the SAFE default: until the manifest fetch
-          // confirms this viewer owns the project, render the public
-          // view (no drop card, no annotations card, etc). The owner
-          // gets a brief flash of read-only at most, which is the
-          // lesser evil compared to a non-owner momentarily seeing
-          // owner-only chrome on every refresh of /app/<id>.
-          //
-          // Previously this also gated on projectOriginTab === "projects"
-          // which was the bug: on hard-refresh of a public project URL
-          // the tab defaulted to "workspaces" and readOnly stayed false
-          // until the next navigation. Dropping that gate.
-          readOnly={
-            // Editable if you own it OR you have write access via the Project
-            // (editor+). Read-only is the safe default until those resolve.
-            !(
-              (!!openV2Project.owner && openV2Project.owner === user.username) ||
-              openV2Project.writable === true
-            )
-          }
-          // Origin tab feeds the "Back to …" copy on the loader +
-          // header, opening from /projects reads "Back to projects"
-          // even when the project happens to be the viewer's own.
-          originTab={projectOriginTab}
-          // When the dataset was opened from inside a Project, the back button
-          // reads "Back to project" and returns to that Project page.
-          backToProjectId={openV2Project.fromProjectId ?? null}
-          // First-load hint from onboarding. "general" suppresses
-          // the project's full-screen mount loader because HomeView
-          // is still showing its overlay; "specific" swaps in the
-          // smaller in-page "Loading project…" card.
-          firstLoad={openV2Project.firstLoad ?? null}
-          onClose={() => {
-            const proj = openV2Project.fromProjectId;
-            if (proj) {
-              // Return to the Project page: pushing ?project=<id> + a synthetic
-              // popstate clears this dataset view (app/page popstate handler)
-              // AND re-opens the Project (HomeView's ?project deep-link).
-              window.history.pushState(null, "", `/app?project=${proj}`);
-              window.dispatchEvent(new PopStateEvent("popstate"));
-            } else {
-              setOpenV2Project(null);
-              syncUrl(null);
+        // Keyed by project id so switching datasets from the sidebar
+        // tree remounts the view cleanly (it hydrates on mount).
+        <div
+          key={openV2Project.projectId ?? "v2-onboarding"}
+          className={`${overlayCls} overflow-y-auto overscroll-contain`}
+        >
+          <ProjectViewV2Stub
+            projectName={openV2Project.name}
+            labels={openV2Project.labels}
+            references={openV2Project.references}
+            projectId={openV2Project.projectId}
+            username={user.username}
+            userImage={user.image}
+            ownerUsername={openV2Project.owner ?? null}
+            // Read-only is the SAFE default: until the manifest fetch
+            // confirms this viewer owns the project, render the public
+            // view (no drop card, no annotations card, etc). The owner
+            // gets a brief flash of read-only at most, which is the
+            // lesser evil compared to a non-owner momentarily seeing
+            // owner-only chrome on every refresh of /app/<id>.
+            readOnly={
+              // Editable if you own it OR you have write access via the Project
+              // (editor+). Read-only is the safe default until those resolve.
+              !(
+                (!!openV2Project.owner && openV2Project.owner === user.username) ||
+                openV2Project.writable === true
+              )
             }
-          }}
-          onReferencesChange={(next) =>
-            setOpenV2Project((cur) =>
-              cur ? { ...cur, references: next } : cur,
-            )
-          }
-        />
-        {/* Back-to-top is now rendered INSIDE ProjectViewV2Stub
-            so it can suppress itself while the image viewer or
-            augmentations viewer modal is open — those modals
-            cover the dataset section the button was meant to
-            return to, and the floating affordance over the modal
-            chrome looked stray. */}
-        </>
+            // Origin tab feeds the "Back to …" copy on the loader +
+            // header.
+            originTab={projectOriginTab}
+            // When the dataset was opened from inside a Project, the back button
+            // reads "Back to project" and returns to that Project page.
+            backToProjectId={openV2Project.fromProjectId ?? null}
+            // First-load hint from onboarding. "general" suppresses
+            // the project's full-screen mount loader because HomeView
+            // is still showing its overlay; "specific" swaps in the
+            // smaller in-page "Loading project…" card.
+            firstLoad={openV2Project.firstLoad ?? null}
+            onClose={() => {
+              const proj = openV2Project.fromProjectId;
+              if (proj) {
+                // Return to the Project page: pushing ?project=<id> + a synthetic
+                // popstate clears this dataset view (app/page popstate handler)
+                // AND re-opens the Project (HomeView's ?project deep-link).
+                window.history.pushState(null, "", `/app?project=${proj}`);
+                window.dispatchEvent(new PopStateEvent("popstate"));
+              } else {
+                setOpenV2Project(null);
+                syncUrl(null);
+              }
+            }}
+            onReferencesChange={(next) =>
+              setOpenV2Project((cur) =>
+                cur ? { ...cur, references: next } : cur,
+              )
+            }
+          />
+          {/* Back-to-top is rendered INSIDE ProjectViewV2Stub so it can
+              suppress itself while the image viewer or augmentations
+              viewer modal is open. */}
+        </div>
       ) : openProject ? (
-        <>
-        <ProjectView
-          name={openProject}
-          initialDisplayName={openProjectName}
-          username={user.username}
-          // Portable build: single local user, every legacy (V1) dataset on
-          // this machine is theirs — always editable.
-          readOnly={false}
-          onClose={() => { setOpenProject(null); syncUrl(null); }}
-          onRename={(newName) => { setOpenProject(newName); syncUrl(newName); }}
-        />
-        <ScrollToTop />
-        </>
-      ) : tab === "guide" ? (
-        <GuideView />
-      ) : (
-        // Workspace renders via the always-mounted block above.
-        null
-      )}
+        // No key here: ProjectView refetches itself when `name` changes
+        // (rename + tree switches), and keying by name would force a
+        // full remount on every rename.
+        <div className={`${overlayCls} overflow-y-auto overscroll-contain`}>
+          <ProjectView
+            name={openProject}
+            initialDisplayName={openProjectName}
+            username={user.username}
+            // Portable build: single local user, every legacy (V1) dataset on
+            // this machine is theirs — always editable.
+            readOnly={false}
+            onClose={() => { setOpenProject(null); syncUrl(null); }}
+            onRename={(newName) => { setOpenProject(newName); syncUrl(newName); }}
+          />
+          <ScrollToTop />
+        </div>
+      ) : null}
       {setupOpen && (
         <SetupWizard
           onClose={() => {
@@ -507,6 +567,6 @@ export default function Page() {
           }}
         />
       )}
-    </>
+    </div>
   );
 }

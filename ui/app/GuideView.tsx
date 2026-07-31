@@ -52,11 +52,16 @@ export function GuideView() {
     if (key === "overview") url.searchParams.delete("section");
     else url.searchParams.set("section", key);
     window.history.replaceState(null, "", url.toString());
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    // Inside the desktop shell the Guide scrolls within the content
+    // pane ([data-app-scroll]), not the page — scroll that back to the
+    // top. The standalone /guide route still scrolls the window.
+    const pane = document.querySelector<HTMLElement>("[data-app-scroll]");
+    if (pane) pane.scrollTo({ top: 0, behavior: "smooth" });
+    else window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   return (
-    <main className="min-h-[calc(100vh-9rem)] mx-auto max-w-6xl px-6 pt-8 pb-16">
+    <main className="min-h-full mx-auto max-w-6xl px-6 pt-8 pb-16">
       <nav
         aria-label="Guide sections"
         className="flex flex-wrap gap-1.5 mb-8 pb-2 border-b border-foreground/[0.06]"
