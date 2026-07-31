@@ -31,8 +31,16 @@ choose.
 - [x] **Phase 0 — bootstrap:** fresh-history monorepo; training stack, cloud
       deploy, billing/auth/telemetry SaaS surface and dead code removed;
       UI builds with a static local session.
-- [ ] Phase 1 — local filesystem storage, no-auth engine, workspace folder
-- [ ] Phase 2 — per-project folders; images separated from annotations
+- [x] **Phase 1 — local engine:** R2 → workspace filesystem storage, auth
+      stubbed to a single local user, localhost-only binding, GroundingDINO/
+      SAM2/SigLIP/8B-VLM stack removed (SAM3 + DINOv2 + optional 2B VLM),
+      Claude/NSFW/credits/telemetry gone. Engine boots with zero config.
+- [x] **Phase 2 — workspace schema:** one folder per project, one per
+      dataset (`<workspace>/projects/<project>/<dataset>/`), the old
+      monolithic manifest split into `dataset.json` + one annotation JSON
+      per image, originals alone in `images/`, weights under
+      `<workspace>/weights`; `import_legacy.py` migrates SaaS-era data.
+      Golden-path test green (create → upload → annotate → export → delete).
 - [ ] Phase 3 — Metal (MPS) + CPU fallback
 - [ ] Phase 4 — model manager + Hugging Face token flow (SAM 3 is gated)
 - [ ] Phase 5 — UI slimming, first-run wizard, static export
@@ -48,11 +56,16 @@ Hugging Face and provide your own access token in the app's setup screen.
 ## Development (current state)
 
 ```bash
-# engine — full run needs CUDA until Phase 3 lands
+# engine — boots anywhere; ML endpoints need CUDA until the MPS phase lands
 cd engine && pip install -r requirements.txt && python gd/server.py
+# → http://127.0.0.1:8001, workspace auto-created at ~/PixelKit
+#   (override with PIXELKIT_WORKSPACE)
 
 # ui
-cd ui && npm install && npm run dev
+cd ui && npm install && npm run dev   # http://localhost:3000
+
+# migrate data from the SaaS deployment
+cd engine && python import_legacy.py <old-backend-dir-or-backup.zip>
 ```
 
 ## License

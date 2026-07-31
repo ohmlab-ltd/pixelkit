@@ -137,16 +137,11 @@ def _enforce_upload_caps(blobs: list[tuple[str, bytes, str | None]]) -> None:
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-from run_groundingdino import DEFAULT_CHECKPOINT, DEFAULT_CONFIG, draw_preview, load_model, predict, predict_tiled
-from segmentation import segment_boxes, segment_boxes_windowed, segment_point
-from vlm_validate import validate_box
 from jobs import JobManager
-from nsfw import load_classifier as _load_nsfw, nsfw_score, EXPOSED_CLASSES
-from storage import R2Storage, from_env as _r2_from_env
+from storage import LocalStorage, from_env as _storage_from_env
+from storage import R2Storage  # alias of LocalStorage; legacy name at ~20 call sites
 import audit
-# Training/quantising stack (ml_jobs, model_registry, quantise) removed in the
-# portable build — the /api/training/* and /api/quantising/* blocks below are
-# dead and are deleted wholesale in Phase 1.
+import store
 from auth import (
     current_user,
     resolve_terminal_token,
@@ -159,9 +154,22 @@ from auth import (
     request_username,
 )
 import containers
-import plans
 
-NSFW_THRESHOLD = 0.3
+NSFW_THRESHOLD = 0.3  # referenced by dead guarded branches; gate itself removed
+EXPOSED_CLASSES: tuple = ()  # dead-branch stub (NSFW gate removed)
+
+
+def nsfw_score(*_a, **_k):  # dead-branch stub — state["nsfw"] is always None
+    return 0.0, ""
+
+
+def segment_point(*_a, **_k):  # dead-branch stub — SAM2 removed, guards keep these unreached
+    return None
+
+
+def segment_boxes(*_a, **_k):  # dead-branch stub — SAM2 removed
+    return []
+
 
 
 def _enforce_nsfw_or_451(
@@ -172,120 +180,38 @@ def _enforce_nsfw_or_451(
     file: str = "",
     user: str = "",
 ) -> None:
-    """Run the NSFW classifier on raw image bytes and raise 451 if it
-    scores at or above NSFW_THRESHOLD. Silently passes when the model
-    isn't loaded (NSFW_GATE=off in env). Same gate that protects
-    /imports/raw + /imports/from_urls — pulled into a helper so every
-    new image-accepting endpoint (background upload, object-overlay
-    upload, etc.) gets identical behaviour without copy-paste.
-
-    When project/file/user are supplied the block is logged to the
-    audit DB so the Terminal's NSFW panel shows it immediately."""
-    if state.get("nsfw") is None:
-        return
-    import tempfile as _tempfile
-    with _tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as _tmp:
-        _tmp.write(raw)
-        _tmp_path = Path(_tmp.name)
-    try:
-        # Strict EXPOSED-only class set. The broad BLOCK_CLASSES (which
-        # also flags COVERED breast/genitalia/buttocks) false-positives
-        # hard on innocuous dataset images — red round fruit
-        # (strawberries/tomatoes), skin-toned objects, people in PPE /
-        # swimwear — and a false 451 here silently deletes the upload +
-        # its manifest entry, leaving a white un-labellable ghost tile.
-        # Genuinely explicit content still scores on the EXPOSED classes.
-        score, cls = nsfw_score(state["nsfw"], _tmp_path, classes=EXPOSED_CLASSES)
-    except Exception as e:
-        print(f"[{label}] nsfw check failed: {e}")
-        score, cls = 0.0, ""
-    finally:
-        try:
-            _tmp_path.unlink()
-        except Exception:
-            pass
-    if score >= NSFW_THRESHOLD:
-        print(f"[{label}] 451 nsfw — score={score:.3f} class={cls or '-'}")
-        add_event(
-            "nsfw_block",
-            project=project or label,
-            file=file,
-            score=round(float(score), 3),
-            classification=cls or "",
-            user=user,
-        )
-        raise HTTPException(451, detail={"rejected": "nsfw"})
-
-# R2: image bytes live in Cloudflare R2; manifest.json stays local. None when
-# env vars aren't set — endpoints that need storage will 503 in that case.
-R2: R2Storage | None = _r2_from_env()
+    """NSFW gate removed in the portable build — a local user labelling
+    their own images doesn't get content-policed."""
+    return
 
 
-def r2_required() -> R2Storage:
-    if R2 is None:
-        raise HTTPException(503, "R2 storage not configured (set R2_* env vars)")
+# Local filesystem storage rooted in the workspace. The `R2` name survives
+# because ~25 call sites read it; it now always resolves.
+R2: LocalStorage = _storage_from_env()
+
+
+def r2_required() -> LocalStorage:
     return R2
 
 
-# In-memory presigned URL cache. Same R2 key → same signed URL for several
-# hours, so the browser keeps hitting its own disk cache for the same URL
-# rather than asking us to re-sign and rather than re-downloading from R2.
-#
-# Signed URLs are valid 6h (R2_PRESIGN_TTL default), so 5h gives an hour
-# of margin before expiry — beyond that, browsers using a stale-while-
-# revalidate cached 302 might follow an expired URL.
-_URL_CACHE_TTL = 5 * 60 * 60
-_URL_CACHE_MAX = 4096  # cap to avoid unbounded growth across many projects
-_url_cache: dict[str, tuple[str, float]] = {}
-
-
-def _cached_presigned_url(key: str) -> str:
-    """Reuse the same signed URL for a given R2 key across requests within
-    the TTL. Falls back to a fresh URL when expired or evicted."""
-    now = time.time()
-    cached = _url_cache.get(key)
-    if cached and cached[1] > now:
-        return cached[0]
-    # No explicit expires — let R2Storage use _DEFAULT_TTL (24h) so signed URLs
-    # outlive every level of cache (in-process, edge, browser SWR) above us.
-    url = r2_required().presigned_get_url(key)
-    if len(_url_cache) >= _URL_CACHE_MAX:
-        # Evict the oldest expired entries; if everything is fresh, drop one
-        # arbitrarily so we don't OOM.
-        for k, (_u, exp) in list(_url_cache.items()):
-            if exp <= now:
-                del _url_cache[k]
-        if len(_url_cache) >= _URL_CACHE_MAX:
-            _url_cache.pop(next(iter(_url_cache)), None)
-    _url_cache[key] = (url, now + _URL_CACHE_TTL)
-    return url
-
-
-def _redirect_to_r2(key: str) -> RedirectResponse:
-    """Standard cached-redirect helper. Browser caches the redirect itself
-    for 15 min (instant revisits, zero backend hits), then can serve stale
-    for ~4h while revalidating in the background. Stays well inside the
-    presign TTL so a stale 302 still points at a valid URL."""
-    url = _cached_presigned_url(key)
-    return RedirectResponse(
-        url,
-        status_code=302,
-        headers={"Cache-Control": "public, max-age=900, stale-while-revalidate=14400"},
-    )
+def _redirect_to_r2(key: str) -> FileResponse:
+    """SaaS build 302'd to a presigned R2 URL. Locally we serve the file
+    directly. Name kept — many call sites."""
+    try:
+        path = R2.resolve(key)
+    except FileNotFoundError:
+        raise HTTPException(404, "not found")
+    if not path.is_file():
+        raise HTTPException(404, "not found")
+    return FileResponse(path, headers={"Cache-Control": "public, max-age=900"})
 
 
 def _invalidate_url_cache(key: str) -> None:
-    """Drop the cached signed URL for a key. Call this on any code path
-    that overwrites or deletes the underlying R2 object so the next request
-    builds a fresh URL (the browser cache will also expire on its own
-    schedule, but FE pages can cache-bust via the existing ?v= query
-    pattern)."""
-    _url_cache.pop(key, None)
+    """Presigned-URL cache is gone; kept as a no-op for its call sites."""
+    return
 
 
-# Audit events (NSFW blocks, signups, completed jobs) persist to a local
-# SQLite at backend/audit.db. Use this instead of any direct DB writes —
-# the terminal page reads events via /api/events.
+# Job/activity events persist to a local SQLite in the workspace.
 def add_event(kind: str, **data) -> None:
     try:
         audit.add_event(kind, **data)
@@ -294,64 +220,22 @@ def add_event(kind: str, **data) -> None:
         print(f"[audit] add_event({kind}) failed: {e}")
 
 
-# Live-presence tracker. Frontends ping /api/heartbeat every ~15s with their
-# username. We list anyone seen in the last 30s as currently online. Pure
-# in-memory — no need to persist this; restart = empty room.
 import threading as _threading  # noqa: E402
-
-_LIVE_TTL_S = 30
-_live_users: dict[str, float] = {}
-_live_lock = _threading.Lock()
-
-
-def mark_live(username: str) -> None:
-    if not username:
-        return
-    with _live_lock:
-        _live_users[username] = time.time()
-
-
-def list_live() -> list[str]:
-    cutoff = time.time() - _LIVE_TTL_S
-    with _live_lock:
-        # Evict expired entries while we're here so the dict can't grow.
-        for u in list(_live_users.keys()):
-            if _live_users[u] < cutoff:
-                del _live_users[u]
-        return sorted(_live_users.keys())
 
 
 def _pil_from_r2(project: str, filename: str) -> PILImage.Image:
-    """Download an image from R2 into memory, apply EXIF orientation, return RGB.
-    Mirrors what gd.run_groundingdino.load_image does for on-disk paths."""
-    data = r2_required().get_bytes(R2Storage.image_key(project, filename))
+    """Load an image from workspace storage, apply EXIF orientation, return RGB."""
+    data = r2_required().get_bytes(LocalStorage.image_key(project, filename))
     img = PILImage.open(io.BytesIO(data))
     return ImageOps.exif_transpose(img).convert("RGB")
 
-ROOT = Path(__file__).resolve().parent.parent
-PROJECTS_DIR = ROOT / "projects"
-PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+import workspace  # noqa: E402
+
+ROOT = workspace.dir()
+PROJECTS_DIR = workspace.projects_dir()
 
 NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 RESERVED = {"_jobs"}
-
-# Terminal-only access. The TERMINAL_TOKEN env var is REQUIRED — there is no
-# hardcoded fallback (a literal in source leaks via git history and grants admin
-# to anyone with the code). When it's unset we fail closed: every terminal
-# endpoint returns 503, mirroring the BACKEND_AUTH_SECRET posture in auth.py.
-# The Terminal page won't load without the matching X-Terminal-Token header,
-# so the dashboard is unreachable from any other browser/host.
-TERMINAL_TOKEN = resolve_terminal_token()
-TERMINAL_USER = os.environ.get("TERMINAL_USER", "hamish")
-
-
-def require_terminal_token(x_terminal_token: str | None = Header(default=None)) -> None:
-    if not TERMINAL_TOKEN:
-        # Fail-closed: a deploy without a configured token is a
-        # misconfiguration, not a free-pass to anonymous admin access.
-        raise HTTPException(503, "terminal access not configured")
-    if not x_terminal_token or not secrets.compare_digest(x_terminal_token, TERMINAL_TOKEN):
-        raise HTTPException(401, "terminal access denied")
 
 
 state: dict[str, Any] = {"model": None, "segmenter": None, "device": "cpu", "jobs": JobManager()}
@@ -669,44 +553,33 @@ async def lifespan(app: FastAPI):
     # gate instead of competing with the job.
     state["embed_sem"] = asyncio.Semaphore(2)
 
-    # Durable, restart-safe queue + token accounting for training /
-    # quantising jobs (separate from the in-memory JobManager, which
-    # loses its queue on restart). The GPU work is done by an ML worker:
-    # the RTX 3060 rig's pull-agent, or an in-process loop here when
-    # ML_WORKER_INPROCESS=1 — off by default so the main box keeps
-    # serving inference and the existing `train` job path is untouched.
-    # ML job store removed with the training stack (portable build).
-
-    print(f"[server] loading MM-Grounding-DINO-L on {device}...")
-    state["model"] = load_model(DEFAULT_CONFIG, DEFAULT_CHECKPOINT, device)
     state["device"] = device
+    state["model"] = None       # GroundingDINO removed in the portable build
+    state["segmenter"] = None   # SAM2 removed — SAM3 covers interactive segmentation
+    state["nsfw"] = None        # NSFW gate removed
 
-    print(f"[server] loading SAM2.1 Hiera Large on {device}...")
-    from segmentation import _build_predictor
-    state["segmenter"] = _build_predictor(device)
+    # Model loading policy for the portable build: SAM3 + DINOv2, with the
+    # small VLM tiebreak opt-in (VLM_ENABLED=1). Until the Metal/MPS device
+    # phase lands, model loads only happen on CUDA; on other devices the
+    # engine boots fully for dataset/annotation work and the ML endpoints
+    # return 503. PK_DISABLE_MODELS=1 forces that mode anywhere.
+    models_disabled = (
+        os.environ.get("PK_DISABLE_MODELS", "").lower() in ("1", "true", "yes", "on")
+        or device != "cuda"
+    )
+    if models_disabled:
+        print(
+            f"[server] models disabled (device={device}"
+            + (", PK_DISABLE_MODELS set" if os.environ.get("PK_DISABLE_MODELS") else "")
+            + ") — labelling endpoints 503; dataset/annotation APIs fully live."
+        )
 
-    # NSFW gate is optional. On VRAM-tight cards (12 GB and below) it's
-    # the cheapest model to drop — ~340 MB resident — and the upload
-    # path's `nsfw_score` call already tolerates `state["nsfw"]` being
-    # None via its surrounding try/except. Set NSFW_GATE=on (or leave
-    # unset) to load it; NSFW_GATE=off skips the load entirely.
-    if os.environ.get("NSFW_GATE", "on").lower() not in ("off", "false", "0"):
-        print(f"[server] loading NSFW gate on {device}...")
-        state["nsfw"] = _load_nsfw(device)
-    else:
-        print(f"[server] NSFW gate disabled (NSFW_GATE=off) — uploads bypass content check.")
-        state["nsfw"] = None
+    if not models_disabled and os.environ.get("VLM_ENABLED", "").lower() in ("1", "true", "yes", "on"):
+        await asyncio.get_event_loop().run_in_executor(None, _load_vlm_into_state)
 
-    await asyncio.get_event_loop().run_in_executor(None, _load_vlm_into_state)
-    await asyncio.get_event_loop().run_in_executor(None, _load_dinov2_into_state)
-
-    # V2-only DINOv2 + SigLIP2 for reference-crop embeddings.
-    # Loaded async so a slow first download doesn't block warmup.
-    # The two encoders are scored independently and their per-label
-    # sims are weighted-combined in the resolver — DINOv2 carries
-    # visual structure, SigLIP2 carries text-aligned semantics, and
-    # together they cover each other's blind spots on fine-grained
-    # pairs (hare/rabbit, horse standing/lying).
+    # DINOv2 for reference-crop embeddings (specific-dataset resolver +
+    # near-duplicate scan). Loaded async so a slow first download doesn't
+    # block startup.
     async def _load_v2_dino() -> None:
         try:
             import v2_dinov2
@@ -716,22 +589,12 @@ async def lifespan(app: FastAPI):
             await asyncio.get_event_loop().run_in_executor(None, v2_dinov2.warmup)
         except Exception as e:
             print(f"[server] v2 DINOv2 load failed: {e}")
-    asyncio.create_task(_load_v2_dino())
+    if not models_disabled:
+        asyncio.create_task(_load_v2_dino())
 
-    async def _load_v2_siglip() -> None:
-        try:
-            import v2_siglip
-            await asyncio.get_event_loop().run_in_executor(
-                None, lambda: v2_siglip.load(state["device"]),
-            )
-            await asyncio.get_event_loop().run_in_executor(None, v2_siglip.warmup)
-        except Exception as e:
-            print(f"[server] v2 SigLIP2 load failed: {e}")
-    asyncio.create_task(_load_v2_siglip())
-
-    # Pipeline Charlie — V3-style endpoints backed by SAM3 (gated on
-    # HF; needs HF_TOKEN). Loads in a background task so a slow first
-    # download or transient HF outage doesn't block server startup.
+    # Pipeline Charlie — SAM3 (gated on HF; needs HF_TOKEN). Loads in a
+    # background task so a slow first download or transient HF outage
+    # doesn't block server startup.
     async def _load_charlie() -> None:
         if os.environ.get("CHARLIE_DISABLED", "").lower() in ("1", "true", "yes", "on"):
             print("[server] CHARLIE_DISABLED set — pipeline_charlie endpoints will return 503.")
@@ -747,13 +610,13 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"[server] pipeline_charlie load failed: {e} — /api/charlie/* will return 503.")
             state["charlie"] = None
-    asyncio.create_task(_load_charlie())
+    if not models_disabled:
+        asyncio.create_task(_load_charlie())
+    else:
+        state["charlie"] = None
 
-    state["jobs"].register_runner("label", _run_label_job)
-    state["jobs"].register_runner("label_lite", _run_label_lite_job)
     state["jobs"].register_runner("label_charlie", _run_label_charlie_job)
     state["jobs"].register_runner("purge_label", _run_purge_label_job)
-    state["jobs"].register_runner("segment", _run_segment_job)
     state["jobs"].register_runner("augment_generate", _gpu_job_guarded(_run_augment_generate_job))
 
     # Restore Terminal job history across restarts. Past completed jobs
@@ -769,30 +632,6 @@ async def lifespan(app: FastAPI):
 
     state["jobs"].start_worker()
 
-    # ML jobs (training/quantising): recover any that were mid-run when a
-    # previous process died (stale heartbeat → failed/interrupted) so they
-    # don't sit "running" forever. The in-process worker is opt-in via
-    # ML_WORKER_INPROCESS — by default the RTX 3060 rig's pull-agent is the
-    # executor and the main box only serves the queue/APIs.
-    # ML worker loop removed with the training stack (portable build).
-
-    # Restore any containers (Projects) whose local copy is missing from their
-    # R2 mirror, so Projects survive a disk wipe / fresh box the same way dataset
-    # image bytes do. Network IO, so run it off the event loop.
-    try:
-        n_restored = await asyncio.get_event_loop().run_in_executor(
-            None, _restore_containers_from_r2,
-        )
-        if n_restored:
-            print(f"[containers] restored {n_restored} container(s) from R2 on boot")
-    except Exception as e:
-        print(f"[containers] R2 restore failed: {e}")
-
-    # Nightly backup of backend/projects/ → R2 backups/. The task self-
-    # schedules each day; cancelled on shutdown.
-    backup_task = asyncio.create_task(_nightly_backup_loop())
-    state["_backup_task"] = backup_task
-
     # Worker watchdog: if any of the JobManager's worker tasks exits
     # (shouldn't happen — we hardened it — but be paranoid), revive the
     # missing slots. `start_worker(n=...)` is idempotent: live workers
@@ -807,42 +646,11 @@ async def lifespan(app: FastAPI):
                 state["jobs"].start_worker()
     state["_worker_watchdog"] = asyncio.create_task(_worker_watchdog())
 
-    print(f"[server] terminal user: {TERMINAL_USER}")
-    print("[server] terminal auth: " + ("configured" if TERMINAL_TOKEN else "DISABLED (set TERMINAL_TOKEN)"))
-    print("[server] all models ready, job worker started.")
+    import workspace as _ws
+    print(f"[server] workspace: {_ws.dir()}")
+    print("[server] ready, job worker started.")
     _log_manifest_cache_capacity()
     yield
-    backup_task.cancel()
-    _ml_worker = state.get("_ml_worker_task")
-    if _ml_worker is not None:
-        _ml_worker.cancel()
-
-
-async def _nightly_backup_loop() -> None:
-    """Sleep until the next 00:00 UTC, run the backup, repeat."""
-    import sys as _sys
-    _sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from backup_projects import run_backup as _run_backup
-
-    while True:
-        now = datetime.now(timezone.utc)
-        # Next midnight UTC.
-        next_run = (now.replace(hour=0, minute=0, second=0, microsecond=0)
-                    .replace(day=now.day) )
-        # If we're past today's midnight, target tomorrow.
-        if next_run <= now:
-            from datetime import timedelta
-            next_run = next_run + timedelta(days=1)
-        sleep_s = max(60.0, (next_run - now).total_seconds())
-        try:
-            await asyncio.sleep(sleep_s)
-        except asyncio.CancelledError:
-            return
-        try:
-            await asyncio.get_event_loop().run_in_executor(None, _run_backup, True)
-        except Exception as e:
-            print(f"[backup] loop error: {e}")
-
 
 app = FastAPI(
     lifespan=lifespan,
@@ -856,39 +664,16 @@ app = FastAPI(
     openapi_url=None,
 )
 
-# Comma-separated extra origins (e.g. https://your.vercel.app) layered on top
-# of the local dev hosts. Set FRONTEND_ORIGINS in the backend env when you deploy.
-_extra_origins = [o.strip() for o in os.getenv("FRONTEND_ORIGINS", "").split(",") if o.strip()]
+# Localhost-only: the UI is either served by this process or a local dev
+# server on :3000. No cloud origins in the portable build.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", *_extra_origins],
-    # Regex layered on top of the exact list so the FE can deploy at
-    # any pixelkit.ai subdomain (www, app, dev, staging) AND any
-    # Vercel preview URL without each one needing to be enumerated
-    # in FRONTEND_ORIGINS. Browsers that hit `www.pixelkit.ai` were
-    # being rejected because only the bare apex was on the list;
-    # the regex covers the subdomain case as well.
-    allow_origin_regex=(
-        r"^https://([a-z0-9-]+\.)?pixelkit\.ai$"
-        r"|^https://[a-z0-9-]+\.vercel\.app$"
-    ),
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
 )
-
-# Perf instrumentation. Adds middleware that logs response size +
-# elapsed time on v2/v3 project endpoints, and a POST /api/perf/log
-# the FE batches client-side events into. All gated on the
-# PIXELKIT_PERF_LOG=1 env var so it stays cheap when disabled.
-from perf import PerfMiddleware, PerfBatch, perf_log_handler  # noqa: E402
-app.add_middleware(PerfMiddleware)
-
-
-@app.post("/api/perf/log")
-async def _perf_log_route(batch: PerfBatch, request: Request):
-    return await perf_log_handler(batch, request)
-
 
 # ---- helpers ----
 
@@ -899,17 +684,19 @@ def slug(raw: str) -> str:
 
 
 def project_dir(project_id: str) -> Path:
-    # UUIDs are 32-char hex; keep RESERVED check so e.g. "_jobs" doesn't
-    # collide. Drop the slug-style NAME_RE since legitimate UUIDs match it
-    # but legacy slugs may contain dashes outside [a-z0-9_-] — we accept
-    # any non-empty path-safe string for backwards compat.
+    """Resolve a dataset id to its workspace folder (store index)."""
     if project_id in RESERVED or not project_id or "/" in project_id or ".." in project_id:
         raise HTTPException(400, f"invalid project id: {project_id}")
-    return PROJECTS_DIR / project_id
+    try:
+        return store.dataset_dir(project_id)
+    except KeyError:
+        raise HTTPException(404, f"unknown project: {project_id}")
 
 
 def manifest_path(project_id: str) -> Path:
-    return project_dir(project_id) / "manifest.json"
+    """Kept for existence checks; the actual manifest is split across
+    dataset.json + annotations/ (see store.py)."""
+    return project_dir(project_id) / "dataset.json"
 
 
 # ─── Manifest RAM cache ──────────────────────────────────────────
@@ -1461,14 +1248,10 @@ def _is_project_deleted(project_id: str) -> bool:
 
 
 def _manifest_disk_mtime(project_id: str) -> float:
-    """File mtime in seconds, or 0 if missing / stat failed. Used as
-    the cache validity marker — comparing this against the cached
-    mtime tells us whether the cache is fresh."""
-    p = manifest_path(project_id)
-    try:
-        return p.stat().st_mtime if p.exists() else 0.0
-    except OSError:
-        return 0.0
+    """Change stamp in seconds, or 0 if missing. store.save() always
+    rewrites dataset.json, so its mtime moves on every persisted change —
+    the cache validity marker survives the manifest split unchanged."""
+    return store.manifest_stamp(project_id)
 
 
 def load_manifest(project_id: str, copy: bool = True) -> dict:
@@ -1509,16 +1292,12 @@ def load_manifest(project_id: str, copy: bool = True) -> dict:
             _manifest_cache_stale += 1
         _manifest_cache_misses += 1
 
-    p = manifest_path(project_id)
-    if not p.exists():
-        return {}
     try:
-        # read_bytes + orjson is ~3× faster than read_text + json.loads
-        # on a multi-MB manifest because orjson skips the str decode
-        # step (it parses bytes directly).
-        data = _json_loads(p.read_bytes())
+        data = store.load(project_id)
     except Exception as e:
         print(f"[manifest-cache] read failed for {project_id}: {e}")
+        return {}
+    if data is None:
         return {}
     with _MANIFEST_CACHE_LOCK:
         _MANIFEST_CACHE[project_id] = data if not copy else _copy.deepcopy(data)
@@ -1544,8 +1323,14 @@ def save_manifest(project_id: str, manifest: dict, *, cache_by_ref: bool = False
     # folder + manifest below via mkdir, bringing the project back.
     if _is_project_deleted(project_id):
         return
-    p = manifest_path(project_id)
-    p.parent.mkdir(parents=True, exist_ok=True)
+    # New datasets get their workspace folder on first save — creation
+    # flows (create, duplicate, derive) don't need a separate step.
+    if not store.dataset_exists(project_id):
+        store.create_dataset_dir(
+            project_id,
+            str(manifest.get("name") or project_id),
+            str(manifest.get("container_id") or "") or None,
+        )
     # One-time slim: older label_charlie runs persisted the raw DINOv2
     # (1024-d) + SigLIP (768-d) embedding vectors on every TEST-IMAGE
     # detection. Those vectors are never read back for imports — the
@@ -1569,21 +1354,9 @@ def save_manifest(project_id: str, manifest: dict, *, cache_by_ref: bool = False
                         if _k in _d:
                             del _d[_k]
         manifest["_imports_embeddings_stripped"] = True
-    # Atomic write — write to a temp file then rename so a crash
-    # mid-write can't leave half a manifest on disk.
-    # orjson with OPT_INDENT_2 produces the same human-readable
-    # output we used to get from json.dumps(indent=2) but at a
-    # fraction of the CPU on multi-MB manifests. That matters here
-    # because label_charlie writes the whole manifest after each
-    # image — the json.dumps cost was the dominant per-image work
-    # past ~100 labelled images. stdlib json is the fallback when
-    # orjson isn't installed.
-    tmp = p.with_suffix(".json.tmp")
-    if _orjson is not None:
-        tmp.write_bytes(_orjson.dumps(manifest, option=_orjson.OPT_INDENT_2))
-    else:
-        tmp.write_text(json.dumps(manifest, indent=2))
-    tmp.replace(p)
+    # Persist through the split store: dataset.json + per-image
+    # annotations/, atomic writes, only-changed annotation files.
+    store.save(project_id, manifest)
     # Stat the freshly-replaced file so the cache mtime matches what
     # any other worker will see when they read disk.
     disk_mtime = _manifest_disk_mtime(project_id)
@@ -1641,7 +1414,7 @@ _DERIVED_TIMERS: dict[str, _threading.Timer] = {}
 
 def _iter_project_ids() -> list[str]:
     try:
-        return [p.name for p in PROJECTS_DIR.iterdir() if p.is_dir()]
+        return store.iter_dataset_ids()
     except Exception:
         return []
 
@@ -1700,8 +1473,8 @@ def resync_child(child_id: str) -> bool:
         return False
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     _derived_mod.resync(child, parent,
-                        project_dir(parent_id) / "imports",
-                        project_dir(child_id) / "imports", now_iso=now)
+                        project_dir(parent_id) / "images",
+                        project_dir(child_id) / "images", now_iso=now)
     child["updatedAt"] = now
     save_manifest(child_id, child)
     return True
@@ -1844,157 +1617,6 @@ require_project_manage = _require_project_manage_factory(load_manifest)
 require_dataset_creator = _require_dataset_creator_factory(load_manifest)
 
 
-def _user_usage_counters(user: str, since_iso: str) -> dict:
-    """Pull the four raw counters the credit ledger needs:
-    projects, images-labelled-this-period, images-uploaded-this-
-    period, images-stored-now. Used by both the /api/users/.../usage
-    HTTP endpoint and the credit-enforcement gate so they can't
-    drift."""
-    project_count = 0
-    images_stored = 0
-    for p in PROJECTS_DIR.iterdir():
-        if not p.is_dir() or p.name in RESERVED or p.name.startswith("."):
-            continue
-        # Fast path: read the tiny workspace-card sidecar (owner +
-        # n_images) instead of opening the multi-MB manifest. This is
-        # what kept the credit gate — and therefore the "Start
-        # labelling" click — fast: on a cold cache the old full-manifest
-        # loop took ~16s across a multi-project account, which is
-        # exactly how long the FE sat on "Starting…". The sidecar is
-        # rebuilt on every save_manifest so its count is current.
-        card = _read_workspace_card_sidecar(p.name)
-        if card is not None:
-            if (card.get("owner") or "") != user:
-                continue
-            project_count += 1
-            try:
-                images_stored += int(card.get("n_images") or 0)
-            except (TypeError, ValueError):
-                pass
-            continue
-        # Fallback: no sidecar yet (project predates the sidecar, or
-        # was just created). Read the manifest copy=False (no deepcopy).
-        try:
-            m = load_manifest(p.name, copy=False)
-        except Exception:
-            continue
-        proj_owner = m.get("owner") or m.get("createdBy") or ""
-        if proj_owner != user:
-            continue
-        project_count += 1
-        try:
-            n_imports = len(m.get("imports") or [])
-        except TypeError:
-            n_imports = 0
-        try:
-            n_results = len(m.get("results") or [])
-        except TypeError:
-            n_results = 0
-        images_stored += n_imports + n_results
-    images_labelled = audit.sum_labelled_images_for_user(user, since_iso=since_iso)
-    images_uploaded = audit.sum_uploaded_images_for_user(user, since_iso=since_iso)
-    return {
-        "projects": project_count,
-        "imagesLabelledThisPeriod": images_labelled,
-        "imagesUploadedThisPeriod": images_uploaded,
-        "imagesStoredNow": images_stored,
-    }
-
-
-def _cycle_start_iso(payload: dict, now: datetime | None = None) -> str:
-    """Resolve the start of the user's current billing cycle. Prefers
-    the `cycle_start` claim baked into the JWT by the FE (which uses
-    the same lib/plans.ts cycleWindow logic the UI displays); falls
-    back to a 30-day rolling window when the claim is absent so an
-    older token still gets a sane gate."""
-    cs = payload.get("cycle_start") if isinstance(payload, dict) else None
-    if isinstance(cs, str) and cs.strip():
-        return cs.strip()
-    now = now or datetime.now(timezone.utc)
-    return (now - timedelta(days=30)).isoformat(timespec="seconds")
-
-
-# Per-user TTL cache so a flurry of per-click AI calls
-# (detect_point, segment_box, classify_box) don't each iterate the
-# projects directory + double-hit audit.db. 10 s is short enough
-# that a user just below the cap will see the gate engage shortly
-# after the offending call lands; long enough to absorb the noisy
-# common case (rapid clicks in the box editor).
-_CREDIT_GATE_TTL_SECONDS = 10.0
-_credit_gate_cache: dict[str, tuple[float, "plans.CreditState"]] = {}
-
-
-def _enforce_credits_cached(user: str, payload: dict) -> "plans.CreditState":
-    """Resolve the credit state for `user`, using a brief per-user
-    TTL cache. The cache key includes the JWT's cycle_start so a
-    user whose cycle just rolled over picks up the fresh window on
-    the next call."""
-    cycle_start = _cycle_start_iso(payload)
-    cache_key = f"{user}::{cycle_start}"
-    now = time.monotonic()
-    hit = _credit_gate_cache.get(cache_key)
-    if hit and (now - hit[0]) < _CREDIT_GATE_TTL_SECONDS:
-        return hit[1]
-    plan_id = payload.get("plan") if isinstance(payload, dict) else None
-    status = payload.get("sub_status") if isinstance(payload, dict) else None
-    beta_exp = payload.get("beta_exp") if isinstance(payload, dict) else None
-    counters = _user_usage_counters(user, cycle_start)
-    # Training time draws from the same monthly credit pool: 1 credit per
-    # completed 15-min active-training block, summed from the ml_billing
-    # audit ledger for the current cycle.
-    training_blocks = audit.sum_training_blocks_for_user(user, since_iso=cycle_start)
-    state_ = plans.evaluate_credits(
-        username=user,
-        plan_id=plan_id if isinstance(plan_id, str) else None,
-        status=status if isinstance(status, str) else None,
-        beta_expires_at=beta_exp if isinstance(beta_exp, str) else None,
-        labelled_this_month=int(counters["imagesLabelledThisPeriod"] or 0),
-        uploaded_this_month=int(counters["imagesUploadedThisPeriod"] or 0),
-        stored_now=int(counters["imagesStoredNow"] or 0),
-        training_blocks_this_period=int(training_blocks or 0),
-    )
-    _credit_gate_cache[cache_key] = (now, state_)
-    # Bound the cache so a flood of distinct users (or rolled cycles)
-    # can't grow it unbounded. Evict the oldest half when it gets too
-    # large; cheap and rarely triggered.
-    if len(_credit_gate_cache) > 2048:
-        for k in sorted(_credit_gate_cache, key=lambda k: _credit_gate_cache[k][0])[:1024]:
-            _credit_gate_cache.pop(k, None)
-    return state_
-
-
-def enforce_credits(
-    request: Request,
-    user: str = Depends(current_user),
-) -> "plans.CreditState":
-    """Dependency: block AI-spending requests when the caller is at
-    or over their monthly credit cap.
-
-    Reads plan + status + beta_exp + cycle_start from the verified
-    JWT payload (stashed on request.state by current_user), pulls the
-    user's live counters via _user_usage_counters, and raises 402
-    Payment Required when over the cap. Returns the resolved
-    CreditState so the route handler can inspect it if needed (most
-    won't bother).
-
-    Apply with `Depends(enforce_credits)` on every route that consumes
-    a credit: labelling jobs, per-image AI calls, batched uploads.
-    Read endpoints and free UI actions should NOT use this gate."""
-    payload = getattr(request.state, "token_payload", {}) or {}
-    state_ = _enforce_credits_cached(user, payload if isinstance(payload, dict) else {})
-    if state_["over_credits"]:
-        # 402 Payment Required is the HTTP spec's "you need to pay /
-        # upgrade to do this", which matches the user-visible message.
-        raise HTTPException(
-            402,
-            (
-                f"credit limit reached for plan {state_['plan']} "
-                f"({int(state_['limits']['creditsPerMonth'])} credits/month). "
-                "Upgrade to keep labelling."
-            ),
-        )
-    return state_
-
 
 def empty_manifest(name: str, owner: str = "", project_id: str | None = None) -> dict:
     return {
@@ -2077,1061 +1699,6 @@ def image_size(p: Path) -> dict[str, int]:
 # them on disk, and on each inference run pass GD the merged list.
 # Detected variants are mapped back to the user's canonical tag in
 # post so the manifest never sees the synthetic labels.
-
-def _synonyms_cache_path(project_id: str) -> Path:
-    return project_dir(project_id) / "synonyms.json"
-
-
-def _load_synonyms_cache(project_id: str) -> dict[str, list[str]]:
-    p = _synonyms_cache_path(project_id)
-    if not p.exists():
-        return {}
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception as e:
-        print(f"[synonyms] cache read failed for {project_id}: {e}")
-        return {}
-
-
-def _save_synonyms_cache(project_id: str, cache: dict[str, list[str]]) -> None:
-    try:
-        _synonyms_cache_path(project_id).write_text(
-            json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8",
-        )
-    except Exception as e:
-        print(f"[synonyms] cache save failed for {project_id}: {e}")
-
-
-def _prune_synonyms_by_stats(
-    project_id: str,
-    variant_stats: dict[tuple[str, str], dict[str, int]],
-    *,
-    min_keep_rate: float = 0.3,
-    min_samples: int = 3,
-) -> list[dict]:
-    """Drop variants from the synonyms cache when the user's review
-    verdicts say they're hurting more than helping.
-
-    A variant is pruned when:
-      • it produced at least `min_samples` detections during the
-        review batch (so we don't over-react to a single false hit),
-      • AND fewer than `min_keep_rate` of those detections were kept.
-
-    The canonical tag itself is never pruned — even if the user
-    deleted every "dog" detection, "dog" stays in the prompt because
-    that's the label they actually want. We only trim *synonyms* of
-    the canonical tag.
-
-    Returns a list of {canonical, variant, kept, total, keep_rate}
-    entries describing what was dropped, mostly for logging."""
-    if not variant_stats:
-        return []
-    cache = _load_synonyms_cache(project_id)
-    if not cache:
-        return []
-    pruned: list[dict] = []
-    dirty = False
-    for (canonical, variant), counts in variant_stats.items():
-        if not canonical or not variant or canonical == variant:
-            continue
-        total = int(counts.get("total") or 0)
-        if total < min_samples:
-            continue
-        kept = int(counts.get("kept") or 0)
-        keep_rate = kept / total if total else 0.0
-        if keep_rate >= min_keep_rate:
-            continue
-        existing = cache.get(canonical) or []
-        if variant not in existing:
-            continue
-        cache[canonical] = [v for v in existing if v != variant]
-        pruned.append({
-            "canonical": canonical,
-            "variant": variant,
-            "kept": kept,
-            "total": total,
-            "keep_rate": round(keep_rate, 3),
-        })
-        dirty = True
-    if dirty:
-        _save_synonyms_cache(project_id, cache)
-        for p in pruned:
-            print(
-                f"[synonyms] pruned '{p['variant']}' from '{p['canonical']}' "
-                f"(kept {p['kept']}/{p['total']} = {p['keep_rate']:.0%})"
-            )
-    return pruned
-
-
-_SYNONYMS_ENABLED_DEFAULT = True
-
-
-def expand_tags_with_cache(project_id: str, tags: list[str], *, synonyms_enabled: bool | None = None) -> tuple[list[str], dict[str, str], dict]:
-    """Build the GD prompt list for `tags`, with colour-aware base
-    extraction and (when enabled) Claude-generated synonyms.
-
-    Returns:
-      (prompt_tags, canonical, color_info)
-
-      * prompt_tags — merged list handed to GD: colour-stripped bases
-        first, then synonym variants when `_SYNONYMS_ENABLED` is on.
-        Colour adjectives are stripped before this list is built
-        ("red car" → "car") because GD's caption-trained head loses
-        recall when the prompt carries a colour qualifier.
-
-      * canonical — lowercased {phrase → user_tag} map used to fold
-        GD detections back into the user's vocabulary. For colour-
-        qualified inputs the canonical points to the bare base
-        ("automobile" → "car"); the post-segmentation colour filter
-        is what relabels the detection to "red car".
-
-      * color_info — `{"specs": {base_lower: [(colour, full_tag)]},
-        "plain": set[base_lower]}`. The downstream pipeline uses this
-        after segmentation to either relabel a detection to its
-        colour-qualified user tag or drop it when the user only
-        wanted a specific colour.
-
-    Synonym strategy: a SINGLE Claude call (`expand_tags_batch`) sees
-    every base tag together so it can avoid synonyms that overlap
-    siblings, and the prompt explicitly distinguishes GENERIC bases
-    (broad — "car", "dog") from SPECIFIC ones ("pothole", "stop sign")
-    so it stays conservative on narrow categories. Cache is per-
-    project on disk so repeated runs don't re-call the API.
-    """
-    from color_detect import parse_color_label
-
-    # Phase 1 — strip colour adjectives. Build the unique base list
-    # (in user order) and the colour spec map in one pass.
-    color_specs: dict[str, list[tuple[str, str]]] = {}
-    plain_bases: set[str] = set()
-    bases_in_order: list[str] = []
-    seen_bases: set[str] = set()
-    for raw in tags:
-        tag = (raw or "").strip()
-        if not tag:
-            continue
-        color, base = parse_color_label(tag)
-        base_lower = base.lower()
-        if base_lower not in seen_bases:
-            seen_bases.add(base_lower)
-            bases_in_order.append(base)
-        if color is None:
-            plain_bases.add(base_lower)
-        else:
-            color_specs.setdefault(base_lower, []).append((color, tag))
-
-    # Phase 2 — seed prompt_tags + canonical from the base list.
-    # The canonical map starts as base_lower → base; synonyms layer
-    # on top point at the same base so colour filtering downstream
-    # always works against the bare-object label.
-    prompt_tags: list[str] = list(bases_in_order)
-    canonical: dict[str, str] = {b.lower(): b for b in bases_in_order}
-    color_info = {"specs": color_specs, "plain": plain_bases}
-
-    # Resolve the synonyms toggle. Per-call override wins; otherwise
-    # fall back to the project's manifest setting; otherwise default.
-    if synonyms_enabled is None:
-        try:
-            manifest = load_manifest(project_id) or {}
-            synonyms_enabled = bool(manifest.get("synonyms_enabled", _SYNONYMS_ENABLED_DEFAULT))
-        except Exception:
-            synonyms_enabled = _SYNONYMS_ENABLED_DEFAULT
-
-    if not synonyms_enabled or not bases_in_order:
-        return prompt_tags, canonical, color_info
-
-    # Phase 3 — synonym expansion (cached + Claude batch call).
-    try:
-        from llm import expand_tags_batch, is_configured
-    except Exception as e:
-        print(f"[synonyms] llm import failed: {e}")
-        return prompt_tags, canonical, color_info
-
-    cache = _load_synonyms_cache(project_id)
-    uncached = [b for b in bases_in_order if b.lower() not in cache]
-
-    fresh: dict[str, list[str]] = {}
-    if uncached and is_configured():
-        try:
-            # Hand Claude the FULL base list as context (siblings
-            # included) so it can avoid overlapping variants ("vehicle"
-            # for car when truck is also a tag). The prompt itself
-            # tells the model to be permissive on GENERIC bases and
-            # strict on SPECIFIC ones — that's what stops "pothole"
-            # from getting "road damage" / "asphalt crack" suggestions
-            # while still letting "car" pull in "sedan" / "automobile".
-            response = expand_tags_batch(bases_in_order)
-            for t in uncached:
-                fresh[t] = response.get(t, []) or []
-        except Exception as e:
-            print(f"[synonyms] batch expand failed: {e}")
-            fresh = {t: [] for t in uncached}
-
-    dirty = False
-    for tag in uncached:
-        cache[tag.lower()] = fresh.get(tag, [])
-        dirty = True
-
-    # Layer synonyms into prompt_tags. First-base-wins for any
-    # variant string that two bases happen to share — keeps the
-    # canonical map single-valued.
-    for base in bases_in_order:
-        for s in cache.get(base.lower()) or []:
-            sl = s.strip().lower()
-            if not sl or sl in canonical:
-                continue
-            if s not in prompt_tags:
-                prompt_tags.append(s)
-            canonical[sl] = base
-
-    if dirty:
-        _save_synonyms_cache(project_id, cache)
-    return prompt_tags, canonical, color_info
-
-
-_PHRASE_PARSE_RE = re.compile(r"^(.*?)\s*\(([\d.]+)\)\s*$")
-
-
-def canonicalize_detections(
-    boxes,
-    phrases: list[str],
-    canonical: dict[str, str],
-    nms_iou: float,
-    *,
-    defer_aggressive: bool = False,
-):
-    """Rewrite phrase labels via the canonical map, then de-duplicate
-    boxes that the synonym expansion produced multiple copies of.
-
-    Three dedup passes run in order:
-
-      1. Per-canonical-class NMS at `nms_iou` — catches synonym
-         pairs that overlap heavily (IoU >= threshold).
-      2. Per-canonical-class containment drop at 70% — catches
-         pairs where one box is mostly INSIDE the other but their
-         IoU sits below the NMS threshold (e.g. a tight road box
-         and a "whole tarmac" box for the same physical road).
-      3. Same-class IoU drop at 0.5 — catches the gap between the
-         high NMS threshold and full containment, where two
-         synonym detections of the same object overlap a lot but
-         neither contains the other.
-
-    Set `defer_aggressive=True` to skip passes 2 and 3 — used by
-    the segmentation pipeline so post-segment mask-merge can decide
-    based on actual mask alignment instead of bbox overlap alone.
-    Two distinct objects with overlapping bboxes (e.g. two adjacent
-    dogs) survive both passes when their masks confirm they're not
-    the same shape; same-object synonyms still get merged via the
-    mask-IoU pass downstream.
-
-    Returns (boxes, phrases, variants) — the third element is the
-    raw GD label that produced each surviving phrase, kept aligned
-    with the dedup passes so callers can still attribute verdicts
-    back to the firing synonym.
-    """
-    if not phrases:
-        return boxes, phrases, []
-    canon_labels: list[str] = []
-    variant_labels: list[str] = []
-    scores: list[float] = []
-    for p in phrases:
-        m = _PHRASE_PARSE_RE.match(p)
-        if m:
-            lab = m.group(1).strip().lower()
-            sc = float(m.group(2))
-        else:
-            lab, sc = p.strip().lower(), 0.5
-        variant_labels.append(lab)
-        canon_labels.append(canonical.get(lab, lab))
-        scores.append(sc)
-
-    boxes_t = boxes if isinstance(boxes, torch.Tensor) else torch.as_tensor(boxes)
-
-    # Pass 1: per-canonical-class NMS.
-    if len(canon_labels) > 1:
-        try:
-            from torchvision.ops import batched_nms
-
-            scores_t = torch.as_tensor(scores, dtype=torch.float32)
-            label_to_idx = {l: i for i, l in enumerate(dict.fromkeys(canon_labels))}
-            idxs = torch.tensor([label_to_idx[l] for l in canon_labels])
-            keep = batched_nms(boxes_t, scores_t, idxs, float(nms_iou))
-            keep_list = keep.tolist()
-            boxes_t = boxes_t[keep]
-            canon_labels = [canon_labels[i] for i in keep_list]
-            variant_labels = [variant_labels[i] for i in keep_list]
-            scores = [scores[i] for i in keep_list]
-        except Exception as e:
-            print(f"[synonyms] post-NMS failed: {e}")
-
-    # Pass 2 + 3: containment + relaxed-IoU dedup, both within the
-    # same canonical label. We do these together because they share
-    # the same setup (descending-score order, area cache, pairwise
-    # scan). Pass 2 fires first per pair (containment is the
-    # stronger signal); pass 3 picks up anything that survived.
-    # Skipped when the segmentation pipeline will run a mask-based
-    # merge afterwards — bbox overlap on its own is a poor signal
-    # for two distinct adjacent objects.
-    if len(canon_labels) > 1 and not defer_aggressive:
-        try:
-            n = len(canon_labels)
-            order = sorted(range(n), key=lambda i: -scores[i])
-            keep_mask = [True] * n
-            xy = boxes_t.tolist() if hasattr(boxes_t, "tolist") else [list(b) for b in boxes_t]
-            areas = [max(1.0, (b[2] - b[0]) * (b[3] - b[1])) for b in xy]
-            FRAC = 0.70   # containment: ≥70% of one box inside the other
-            IOU_RELAXED = 0.50  # secondary IoU threshold below NMS
-
-            for ii in range(n):
-                i = order[ii]
-                if not keep_mask[i]:
-                    continue
-                for jj in range(ii + 1, n):
-                    j = order[jj]
-                    if not keep_mask[j]:
-                        continue
-                    if canon_labels[i] != canon_labels[j]:
-                        continue
-                    bi, bj = xy[i], xy[j]
-                    ix0 = max(bi[0], bj[0]); iy0 = max(bi[1], bj[1])
-                    ix1 = min(bi[2], bj[2]); iy1 = min(bi[3], bj[3])
-                    iw = max(0.0, ix1 - ix0); ih = max(0.0, iy1 - iy0)
-                    inter = iw * ih
-                    if inter <= 0:
-                        continue
-                    # Containment — drop the lower-scored if either
-                    # box is mostly inside the other.
-                    if inter / areas[j] >= FRAC or inter / areas[i] >= FRAC:
-                        keep_mask[j] = False
-                        continue
-                    # Relaxed IoU — catches the "highly overlapping
-                    # but neither contains the other" case the NMS
-                    # threshold would have left through.
-                    union = areas[i] + areas[j] - inter
-                    if union > 0 and inter / union >= IOU_RELAXED:
-                        keep_mask[j] = False
-
-            keep_idx = [k for k, m in enumerate(keep_mask) if m]
-            if len(keep_idx) < n:
-                keep_t = torch.tensor(keep_idx, dtype=torch.long)
-                boxes_t = boxes_t[keep_t]
-                canon_labels = [canon_labels[k] for k in keep_idx]
-                variant_labels = [variant_labels[k] for k in keep_idx]
-                scores = [scores[k] for k in keep_idx]
-        except Exception as e:
-            print(f"[synonyms] containment dedup failed: {e}")
-
-    rebuilt = [f"{lab} ({s:.2f})" for lab, s in zip(canon_labels, scores)]
-    return boxes_t, rebuilt, variant_labels
-
-
-# merge_synonyms_by_mask now lives in gd/merge_synonyms.py — re-exported
-# at module level so the rest of server.py keeps importing it the same way.
-from merge_synonyms import merge_synonyms_by_mask  # noqa: E402,F401
-
-
-async def run_inference(emit, cancel_event, project_id: str, image_filenames: list[str], tags: list[str], box_thr: float, text_thr: float, nms_iou: float, segmentation: bool = False, vlm_action: str = "manual", tile_native: bool = False, tile_size: int = 1024, tile_overlap: float = 0.2) -> None:
-    r2 = r2_required()
-    loop = asyncio.get_running_loop()
-    auto_reject = vlm_action == "auto_reject"
-
-    # Expand each user tag with cached synonyms once per run. The
-    # blocking work (file IO + Claude call on cache miss) is dispatched
-    # to the executor so the asyncio loop stays responsive.
-    prompt_tags, canonical_map, color_info = await loop.run_in_executor(
-        None, expand_tags_with_cache, project_id, tags,
-    )
-    color_specs: dict[str, list[tuple[str, str]]] = color_info.get("specs", {}) if color_info else {}
-    plain_bases: set[str] = color_info.get("plain", set()) if color_info else set()
-
-    await emit("status", {
-        "phase": "running",
-        "total": len(image_filenames),
-        "segmentation": segmentation,
-        "vlm_action": vlm_action,
-    })
-
-    for i, img_name in enumerate(image_filenames, 1):
-        if cancel_event.is_set():
-            break
-        # Every 5 images, drop CUDA's cached blocks so the allocator
-        # doesn't fragment over a long run. Qwen's per-call generate
-        # allocates intermediate tensors that build up without this and
-        # eventually slow forward passes 2-3×. Cheap (~10-50ms) at this
-        # cadence; saves seconds-per-image at image #50+.
-        if i > 1:
-            try:
-                import gc
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except Exception as e:
-                print(f"[run_inference] cache clear failed: {e}")
-        await emit("progress", {"index": i, "total": len(image_filenames), "image": img_name})
-
-        def infer():
-            # Cancel checks at every sub-step. The runner thread can't be
-            # killed from outside (Python doesn't support that), so cancel
-            # works by polling this flag at every safe boundary so we
-            # bail before the next expensive operation. Models stay
-            # loaded — cancel never touches VRAM.
-            if cancel_event.is_set():
-                return None
-            image_pil = _pil_from_r2(project_id, img_name)
-            if cancel_event.is_set():
-                return None
-            if tile_native:
-                # Native-resolution tiled pass for large frames: keeps
-                # small objects at full pixel size instead of letting the
-                # processor's ~800/1333px resize shrink them below
-                # detectability. Heavier (one GD pass per tile) — the
-                # user opted in via the labelling config.
-                boxes_xyxy, phrases = predict_tiled(
-                    state["model"], image_pil, prompt_tags,
-                    box_thr, text_thr, state["device"], nms_iou=nms_iou,
-                    tile_size=tile_size, overlap=tile_overlap,
-                    cancel_check=cancel_event.is_set,
-                )
-            else:
-                boxes_xyxy, phrases = predict(
-                    state["model"], image_pil, prompt_tags,
-                    box_thr, text_thr, state["device"], nms_iou=nms_iou,
-                )
-            # Fold variant labels back into the user's canonical tags
-            # and re-run NMS on the canonical class IDs so two synonyms
-            # that hit the same object don't leave duplicate boxes.
-            # When segmentation is on we defer the aggressive bbox-only
-            # passes (containment, relaxed-IoU) to a smarter mask-based
-            # merge after SAM runs — bbox overlap on its own can't
-            # tell two adjacent objects apart from one duplicated one.
-            boxes_xyxy, phrases, variants = canonicalize_detections(
-                boxes_xyxy, phrases, canonical_map, nms_iou,
-                defer_aggressive=bool(segmentation),
-            )
-            if cancel_event.is_set():
-                return None
-            W, H = image_pil.size
-            box_list = boxes_xyxy.tolist() if hasattr(boxes_xyxy, "tolist") else list(boxes_xyxy)
-
-            masks_payload = [None] * len(box_list)
-            if segmentation and box_list:
-                # Tiled mode routes small boxes through native-resolution
-                # SAM2 windows — a 27px animal stays 27px in encoder space
-                # instead of ~7px, so it gets a real mask, not a blob.
-                if tile_native:
-                    masks_payload = segment_boxes_windowed(
-                        state, image_pil, box_list,
-                        cancel_check=cancel_event.is_set,
-                    )
-                else:
-                    masks_payload = segment_boxes(state, image_pil, box_list)
-                if cancel_event.is_set():
-                    return None
-                # Mask-based dedup: only collapse synonym duplicates
-                # whose masks confirm they're the same instance. Same
-                # canonical class only — different classes don't
-                # interact even if their masks overlap.
-                box_list, phrases, variants, masks_payload = merge_synonyms_by_mask(
-                    box_list, phrases, variants, masks_payload, (W, H),
-                )
-
-            detections = []
-            kept_boxes: list[list[float]] = []
-            kept_phrases: list[str] = []
-            kept_masks: list[dict | None] = []
-            # Pad variants with empty strings if for any reason the
-            # length doesn't line up with phrases — defensive only.
-            if len(variants) != len(phrases):
-                variants = list(variants) + [""] * max(0, len(phrases) - len(variants))
-            for box, phrase, mask, variant in zip(box_list, phrases, masks_payload, variants):
-                # Per-detection cancel check — VLM call can take seconds,
-                # so without this cancel could feel sticky on busy images.
-                if cancel_event.is_set():
-                    return None
-                label, score = parse_phrase(phrase)
-                # Colour-aware relabel. The user may have asked for
-                # "red car" — GD was prompted with "car" (colour
-                # adjectives hurt its recall), so we now sample the
-                # mask's dominant colour and either remap to the
-                # coloured tag or fall back to the plain base. If the
-                # detection has no plain-base fallback and no colour
-                # match, drop it — the user explicitly didn't ask for
-                # this colour.
-                base_lower = label.strip().lower()
-                specs = color_specs.get(base_lower) or []
-                if specs:
-                    try:
-                        from color_detect import mask_dominant_color, color_matches
-                        polys = (mask or {}).get("polygons") if isinstance(mask, dict) else None
-                        observed = mask_dominant_color(image_pil, polys or [])
-                    except Exception as e:
-                        print(f"[color] mask classify failed: {e}")
-                        observed = None
-                    matched_tag: str | None = None
-                    for spec_color, full_tag in specs:
-                        if color_matches(observed, spec_color):
-                            matched_tag = full_tag
-                            break
-                    if matched_tag is not None:
-                        label = matched_tag
-                    elif base_lower not in plain_bases:
-                        # User only wanted the coloured variant; this
-                        # detection's colour didn't match any spec.
-                        continue
-                if vlm_action == "off":
-                    validation = None
-                else:
-                    validation = validate_box(image_pil, box, label)
-                if auto_reject and validation and validation.get("match") is False:
-                    continue
-                # Stamp `kind: "vlm"` on every validation (verified or
-                # rejected) so the frontend chip can render the small
-                # "VLM" subtext below the verdict label.
-                if validation and "kind" not in validation:
-                    validation["kind"] = "vlm"
-                det = {
-                    "label": label,
-                    "score": score,
-                    "box_xyxy": [round(v, 1) for v in box],
-                }
-                # Carry the raw GD variant (synonym) that fired so the
-                # preference-model trainer can attribute kept/deleted
-                # verdicts back to specific synonyms and prune the bad
-                # ones from the cache. Skip when the variant equals the
-                # canonical label — saves a few bytes in the manifest
-                # and the trainer falls back to label gracefully.
-                if variant and variant != label:
-                    det["variant_label"] = variant
-                if mask is not None:
-                    det["mask"] = mask
-                if validation is not None:
-                    det["validation"] = validation
-                detections.append(det)
-                kept_boxes.append(box)
-                kept_phrases.append(phrase)
-                kept_masks.append(mask)
-            annotated_name = f"{Path(img_name).stem}_annotated.jpg"
-            # Bake a preview JPEG with translucent green mask fills (no boxes,
-            # no labels). Frontends just <img>-load this as the thumbnail —
-            # no per-frame SVG rendering in the browser.
-            buf = io.BytesIO()
-            draw_preview(image_pil.copy(), kept_masks).save(buf, format="JPEG", quality=72, optimize=True, progressive=True)
-            output_key = R2Storage.output_key(project_id, annotated_name)
-            r2.put_bytes(output_key, buf.getvalue(), content_type="image/jpeg")
-            _invalidate_url_cache(output_key)
-            return {
-                "image": img_name,
-                "annotated": annotated_name,
-                "size": {"width": W, "height": H},
-                "detections": detections,
-                "pending": False,
-            }
-
-        try:
-            r = await loop.run_in_executor(None, infer)
-            # If cancel landed mid-image, infer() returns None — bail out
-            # of the outer loop without persisting partial detections.
-            if r is None:
-                break
-            manifest = load_manifest(project_id)
-            results = manifest.get("results", []) or []
-            replaced = False
-            for idx, existing in enumerate(results):
-                if existing.get("image") == img_name:
-                    results[idx] = r
-                    replaced = True
-                    break
-            if not replaced:
-                results.append(r)
-            manifest["results"] = results
-            manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            save_manifest(project_id, manifest)
-            await emit("result", {"index": i, "result": r})
-        except Exception as e:
-            await emit("error", {"index": i, "image": img_name, "error": str(e)})
-
-    final = load_manifest(project_id).get("results", [])
-    await emit("complete", {"results": final})
-
-
-def _iou_xyxy(a: list[float], b: list[float]) -> float:
-    """Standard axis-aligned IoU. Used by the lite re-run to avoid stacking
-    a freshly-detected box on top of an existing detection that already
-    covers the same object under a different label."""
-    ax0, ay0, ax1, ay1 = a
-    bx0, by0, bx1, by1 = b
-    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
-    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
-    iw, ih = max(0.0, ix1 - ix0), max(0.0, iy1 - iy0)
-    inter = iw * ih
-    if inter <= 0.0:
-        return 0.0
-    aa = max(0.0, ax1 - ax0) * max(0.0, ay1 - ay0)
-    bb = max(0.0, bx1 - bx0) * max(0.0, by1 - by0)
-    return inter / (aa + bb - inter)
-
-
-async def run_inference_lite(
-    emit,
-    cancel_event,
-    project_id: str,
-    image_filenames: list[str],
-    new_tags: list[str],
-    box_thr: float,
-    text_thr: float,
-    nms_iou: float,
-    vlm_action: str = "manual",
-    iou_dedup: float = 0.7,
-    tile_native: bool = False,
-    tile_size: int = 1024,
-    tile_overlap: float = 0.2,
-) -> None:
-    """Re-run GD with only `new_tags` and *append* survivors to each image's
-    detections + editedBoxes. Existing boxes (manual edits, prior auto
-    detections, verdicts) are never touched. Skips any new box whose IoU
-    against an existing one exceeds `iou_dedup` so we don't stack labels
-    on top of objects already detected."""
-    loop = asyncio.get_running_loop()
-    prompt_tags, canonical_map, color_info = await loop.run_in_executor(
-        None, expand_tags_with_cache, project_id, new_tags,
-    )
-    color_specs: dict[str, list[tuple[str, str]]] = color_info.get("specs", {}) if color_info else {}
-    plain_bases: set[str] = color_info.get("plain", set()) if color_info else set()
-    r2 = r2_required()
-    loop = asyncio.get_running_loop()
-    auto_reject = vlm_action == "auto_reject"
-
-    await emit("status", {"phase": "running", "total": len(image_filenames), "lite": True, "tags": new_tags})
-
-    for i, img_name in enumerate(image_filenames, 1):
-        if cancel_event.is_set():
-            break
-        # Same anti-fragmentation pass as run_inference. See comment there.
-        if i > 1 and (i - 1) % 10 == 0:
-            try:
-                import gc
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except Exception as e:
-                print(f"[run_inference_lite] cache clear failed: {e}")
-        await emit("progress", {"index": i, "total": len(image_filenames), "image": img_name})
-
-        def infer():
-            image_pil = _pil_from_r2(project_id, img_name)
-            if tile_native:
-                boxes_xyxy, phrases = predict_tiled(
-                    state["model"], image_pil, prompt_tags,
-                    box_thr, text_thr, state["device"], nms_iou=nms_iou,
-                    tile_size=tile_size, overlap=tile_overlap,
-                    cancel_check=cancel_event.is_set,
-                )
-            else:
-                boxes_xyxy, phrases = predict(
-                    state["model"], image_pil, prompt_tags,
-                    box_thr, text_thr, state["device"], nms_iou=nms_iou,
-                )
-            # Lite always segments, so defer the aggressive bbox-only
-            # passes to mask-based merging downstream.
-            boxes_xyxy, phrases, variants = canonicalize_detections(
-                boxes_xyxy, phrases, canonical_map, nms_iou,
-                defer_aggressive=True,
-            )
-            W, H = image_pil.size
-            box_list = boxes_xyxy.tolist() if hasattr(boxes_xyxy, "tolist") else list(boxes_xyxy)
-
-            # Collect existing rectangles for IoU dedup. Look at both manifest
-            # detections and editedBoxes — either source may already cover
-            # the object we're about to detect.
-            manifest = load_manifest(project_id) or empty_manifest(project_id)
-            results_now = manifest.get("results", []) or []
-            row = next((r for r in results_now if r.get("image") == img_name), None)
-            existing_boxes: list[list[float]] = []
-            if row:
-                for d in row.get("detections", []) or []:
-                    if isinstance(d.get("box_xyxy"), list) and len(d["box_xyxy"]) == 4:
-                        existing_boxes.append([float(v) for v in d["box_xyxy"]])
-            edited_for_img = (manifest.get("editedBoxes", {}) or {}).get(img_name, []) or []
-            for b in edited_for_img:
-                rect = _edited_box_xyxy(b) if isinstance(b, dict) else None
-                if rect:
-                    existing_boxes.append(rect)
-
-            # Filter, segment, validate.
-            kept_indices: list[int] = []
-            for idx, box in enumerate(box_list):
-                if any(_iou_xyxy(box, eb) >= iou_dedup for eb in existing_boxes):
-                    continue
-                kept_indices.append(idx)
-            if not kept_indices:
-                return None  # nothing new on this image
-
-            kept_boxes = [box_list[k] for k in kept_indices]
-            kept_phrases = [phrases[k] for k in kept_indices]
-            kept_variants = [variants[k] if k < len(variants) else "" for k in kept_indices]
-            if kept_boxes and tile_native:
-                masks_payload = segment_boxes_windowed(
-                    state, image_pil, kept_boxes,
-                    cancel_check=cancel_event.is_set,
-                )
-                # Mirror run_inference: discard a cancel that landed mid-
-                # segmentation so we never persist detections with some
-                # masks silently missing.
-                if cancel_event.is_set():
-                    return None
-            else:
-                masks_payload = segment_boxes(state, image_pil, kept_boxes) if kept_boxes else []
-            if kept_boxes and masks_payload:
-                # Mask-based dedup of synonym duplicates — same logic
-                # as run_inference. Only collapses pairs whose masks
-                # confirm they're the same object.
-                kept_boxes, kept_phrases, kept_variants, masks_payload = merge_synonyms_by_mask(
-                    list(kept_boxes), list(kept_phrases), list(kept_variants),
-                    list(masks_payload), (W, H),
-                )
-
-            new_detections: list[dict] = []
-            kept_masks: list[dict | None] = []
-            for box, phrase, mask, variant in zip(kept_boxes, kept_phrases, masks_payload, kept_variants):
-                label, score = parse_phrase(phrase)
-                # Colour-aware relabel — same logic as run_inference.
-                # See that function's docstring for the rationale.
-                base_lower = label.strip().lower()
-                specs = color_specs.get(base_lower) or []
-                if specs:
-                    try:
-                        from color_detect import mask_dominant_color, color_matches
-                        polys = (mask or {}).get("polygons") if isinstance(mask, dict) else None
-                        observed = mask_dominant_color(image_pil, polys or [])
-                    except Exception as e:
-                        print(f"[color] mask classify failed: {e}")
-                        observed = None
-                    matched_tag: str | None = None
-                    for spec_color, full_tag in specs:
-                        if color_matches(observed, spec_color):
-                            matched_tag = full_tag
-                            break
-                    if matched_tag is not None:
-                        label = matched_tag
-                    elif base_lower not in plain_bases:
-                        continue
-                if vlm_action == "off":
-                    validation = None
-                else:
-                    try:
-                        validation = validate_box(image_pil, box, label)
-                    except Exception:
-                        validation = None
-                if auto_reject and validation and validation.get("match") is False:
-                    continue
-                det = {
-                    "label": label,
-                    "score": score,
-                    "box_xyxy": [round(v, 1) for v in box],
-                }
-                if variant and variant != label:
-                    det["variant_label"] = variant
-                if mask is not None:
-                    det["mask"] = mask
-                if validation is not None:
-                    det["validation"] = validation
-                new_detections.append(det)
-                kept_masks.append(mask)
-
-            if not new_detections:
-                return None
-
-            # Re-bake the annotated preview using the union of old + new masks
-            # so the green fills cover everything currently labelled.
-            old_masks = [d.get("mask") for d in (row.get("detections", []) if row else [])]
-            all_masks = old_masks + kept_masks
-            buf = io.BytesIO()
-            draw_preview(image_pil.copy(), all_masks).save(
-                buf, format="JPEG", quality=72, optimize=True, progressive=True,
-            )
-            stem = Path(img_name).stem
-            annotated_name = f"{stem}_annotated.jpg"
-            output_key = R2Storage.output_key(project_id, annotated_name)
-            r2.put_bytes(output_key, buf.getvalue(), content_type="image/jpeg")
-            _invalidate_url_cache(output_key)
-
-            return {
-                "image": img_name,
-                "annotated": annotated_name,
-                "size": {"width": W, "height": H},
-                "new_detections": new_detections,
-            }
-
-        try:
-            r = await loop.run_in_executor(None, infer)
-            if r is None:
-                # Nothing new on this image — still emit progress so the UI
-                # doesn't stall, but skip the manifest write.
-                continue
-            manifest = load_manifest(project_id)
-            results = manifest.get("results", []) or []
-            replaced = False
-            for idx, existing in enumerate(results):
-                if existing.get("image") == img_name:
-                    existing.setdefault("detections", []).extend(r["new_detections"])
-                    existing["annotated"] = r["annotated"]
-                    existing["size"] = r["size"]
-                    existing["pending"] = False
-                    results[idx] = existing
-                    replaced = True
-                    break
-            if not replaced:
-                # Edge case: image wasn't in the manifest yet.
-                results.append({
-                    "image": img_name,
-                    "annotated": r["annotated"],
-                    "size": r["size"],
-                    "detections": r["new_detections"],
-                    "pending": False,
-                })
-            # Also append to editedBoxes so the BoxEditor (which reads from
-            # editedBoxes, not detections) immediately sees the new labels
-            # after a manifest refetch. Existing entries are preserved.
-            edited_all = manifest.setdefault("editedBoxes", {})
-            new_edited: list[dict] = []
-            ts = int(time.time() * 1000)
-            for k, d in enumerate(r["new_detections"]):
-                bx = d.get("box_xyxy") or [0, 0, 0, 0]
-                eb: dict = {
-                    "id": f"lite_{ts}_{i}_{k}",
-                    "label": d.get("label") or "label",
-                    "x0": float(bx[0]),
-                    "y0": float(bx[1]),
-                    "x1": float(bx[2]),
-                    "y1": float(bx[3]),
-                    "score": d.get("score"),
-                }
-                if d.get("mask") is not None:
-                    eb["mask"] = d["mask"]
-                if d.get("validation") is not None:
-                    eb["validation"] = d["validation"]
-                new_edited.append(eb)
-            edited_all.setdefault(img_name, []).extend(new_edited)
-            manifest["results"] = results
-            manifest["editedBoxes"] = edited_all
-            manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            save_manifest(project_id, manifest)
-            await emit("result", {"index": i, "image": img_name, "added": len(r["new_detections"])})
-        except Exception as e:
-            await emit("error", {"index": i, "image": img_name, "error": str(e)})
-
-    final = load_manifest(project_id).get("results", [])
-    await emit("complete", {"results": final})
-
-
-def _edited_box_xyxy(b: dict) -> list[float] | None:
-    if "box_xyxy" in b and isinstance(b["box_xyxy"], (list, tuple)) and len(b["box_xyxy"]) == 4:
-        return [float(v) for v in b["box_xyxy"]]
-    if all(k in b for k in ("x0", "y0", "x1", "y1")):
-        return [float(b["x0"]), float(b["y0"]), float(b["x1"]), float(b["y1"])]
-    return None
-
-
-async def run_segmentation_pass(emit, cancel_event, project_id: str) -> None:
-    """Backfill SAM2 masks across every image in the manifest, covering both
-    auto detections and editedBoxes. Streams SSE so the UI can show progress."""
-    r2 = r2_required()
-    loop = asyncio.get_running_loop()
-    manifest = load_manifest(project_id)
-    results = manifest.get("results", []) or []
-    edited_all: dict = manifest.get("editedBoxes", {}) or {}
-
-    targets = []
-    for r in results:
-        img_name = r.get("image")
-        if not img_name:
-            continue
-        if r.get("detections") or edited_all.get(img_name):
-            targets.append((img_name, r))
-
-    await emit("status", {"phase": "segmenting", "total": len(targets)})
-
-    for i, (img_name, r) in enumerate(targets, 1):
-        if cancel_event.is_set():
-            break
-        await emit("progress", {"index": i, "total": len(targets), "image": img_name})
-
-        def seg():
-            image_pil = _pil_from_r2(project_id, img_name)
-            detections = r.get("detections", []) or []
-            edited = (load_manifest(project_id).get("editedBoxes", {}) or {}).get(img_name, []) or []
-
-            det_boxes = [d.get("box_xyxy") for d in detections]
-            det_idx = [k for k, b in enumerate(det_boxes) if isinstance(b, (list, tuple)) and len(b) == 4]
-
-            edited_boxes = []
-            edited_idx = []
-            for k, b in enumerate(edited):
-                xyxy = _edited_box_xyxy(b) if isinstance(b, dict) else None
-                if xyxy is not None:
-                    edited_boxes.append(xyxy)
-                    edited_idx.append(k)
-
-            all_boxes = [det_boxes[k] for k in det_idx] + edited_boxes
-            if not all_boxes:
-                return None
-
-            # Windowed unconditionally: it falls back to the plain pass for
-            # small images / large boxes, and fixes mask backfill for tiny
-            # objects on 4K frames regardless of how they were detected.
-            masks = segment_boxes_windowed(state, image_pil, all_boxes, cancel_check=cancel_event.is_set)
-
-            n_det = len(det_idx)
-            for slot, k in enumerate(det_idx):
-                # Preserve an existing mask if this pass produced None for the
-                # slot. segment_boxes_windowed swallows per-window SAM2 errors
-                # (e.g. a transient CUDA OOM) and returns None there; assigning
-                # it unconditionally would destructively wipe good masks during
-                # a backfill. Only overwrite on a real result.
-                if masks[slot] is not None:
-                    detections[k]["mask"] = masks[slot]
-            for slot, k in enumerate(edited_idx):
-                # Same preserve-on-None rule as the detections loop above.
-                if masks[n_det + slot] is not None:
-                    edited[k]["mask"] = masks[n_det + slot]
-
-            # Re-bake the preview JPEG so the thumbnail picks up the masks
-            # without requiring another auto-label run.
-            annotated_name = f"{Path(img_name).stem}_annotated.jpg"
-            buf = io.BytesIO()
-            draw_preview(image_pil.copy(), masks).save(buf, format="JPEG", quality=72, optimize=True, progressive=True)
-            output_key = R2Storage.output_key(project_id, annotated_name)
-            r2.put_bytes(output_key, buf.getvalue(), content_type="image/jpeg")
-            _invalidate_url_cache(output_key)
-
-            return {"detections": detections, "edited": edited, "annotated": annotated_name}
-
-        try:
-            updated = await loop.run_in_executor(None, seg)
-            if updated is None:
-                continue
-            manifest = load_manifest(project_id)
-            for existing in manifest.get("results", []) or []:
-                if existing.get("image") == img_name:
-                    existing["detections"] = updated["detections"]
-                    break
-            edits = manifest.setdefault("editedBoxes", {})
-            if img_name in edits or updated["edited"]:
-                edits[img_name] = updated["edited"]
-            manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            save_manifest(project_id, manifest)
-            await emit("result", {"index": i, "image": img_name})
-        except Exception as e:
-            await emit("error", {"index": i, "image": img_name, "error": str(e)})
-
-    await emit("complete", {"phase": "segmenting"})
-
-
-# ---- job runners ----
-
-async def _run_label_job(job, emit, cancel_event):
-    p = job.params
-    proj = project_dir(job.project)
-    if not proj.exists():
-        raise HTTPException(404, "project not found")
-
-    manifest = load_manifest(job.project) or empty_manifest(job.project)
-    pending_filenames: list[str] = [
-        r["image"] for r in (manifest.get("results", []) or [])
-        if r.get("pending") and r.get("image")
-    ]
-    if not pending_filenames:
-        raise RuntimeError("no pending images")
-
-    job.n_images = len(pending_filenames)
-    inference_tags = list(p.get("tags") or [])
-    if not inference_tags:
-        prompt = str(p.get("prompt") or "")
-        inference_tags = [t.strip() for t in prompt.replace(",", ".").split(".") if t.strip()]
-
-    manifest["prompt"] = p.get("prompt") or ""
-    manifest["tags"] = list(p.get("tags") or [])
-    manifest["thresholds"] = {
-        "box": float(p.get("box_threshold", 0.25)),
-        "text": float(p.get("text_threshold", 0.25)),
-        "nms": float(p.get("nms_iou", 0.5)),
-    }
-    # Persist the resolution choice next to the thresholds so the FE
-    # re-hydrates the Downscale/Tile control on next open, same pattern
-    # as thresholds/vlm_action.
-    manifest["tiling"] = {
-        "native": bool(p.get("tile_native")),
-        "tileSize": int(p.get("tile_size") or 1024),
-    }
-    manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    save_manifest(job.project, manifest)
-
-    await run_inference(
-        emit, cancel_event,
-        job.project, pending_filenames, inference_tags,
-        float(p.get("box_threshold", 0.25)),
-        float(p.get("text_threshold", 0.25)),
-        float(p.get("nms_iou", 0.5)),
-        segmentation=True,
-        vlm_action=str(p.get("vlm_action", "manual")),
-        # Native-resolution tiling opt-in ("Downscale vs Tile"). Params
-        # flow verbatim from the FE's /api/jobs POST.
-        tile_native=bool(p.get("tile_native")),
-        tile_size=int(p.get("tile_size") or 1024),
-        tile_overlap=float(p.get("tile_overlap") or 0.2),
-    )
-
-
-async def _run_label_lite_job(job, emit, cancel_event):
-    """Lite re-run: detect a subset of tags across selected images and APPEND
-    results — never replace. Used when the user adds a new label and wants
-    to backfill detections without re-doing the whole project."""
-    p = job.params
-    proj = project_dir(job.project)
-    if not proj.exists():
-        raise HTTPException(404, "project not found")
-
-    manifest = load_manifest(job.project) or empty_manifest(job.project)
-    new_tags = [t.strip() for t in (p.get("tags") or []) if isinstance(t, str) and t.strip()]
-    if not new_tags:
-        raise RuntimeError("no tags supplied for lite re-run")
-
-    requested = p.get("images")
-    all_images = [r["image"] for r in (manifest.get("results", []) or []) if r.get("image")]
-    if requested:
-        wanted = set(requested)
-        target_images = [n for n in all_images if n in wanted]
-    else:
-        target_images = all_images
-    if not target_images:
-        raise RuntimeError("no images to process")
-
-    job.n_images = len(target_images)
-    thresholds = manifest.get("thresholds") or {}
-    # Persist the resolution choice exactly like the full label job does —
-    # a lite-only run with tiling flipped would otherwise leave the FE's
-    # control re-hydrating a stale manifest["tiling"] on reload.
-    manifest["tiling"] = {
-        "native": bool(p.get("tile_native")),
-        "tileSize": int(p.get("tile_size") or 1024),
-    }
-    manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    save_manifest(job.project, manifest)
-    await run_inference_lite(
-        emit, cancel_event,
-        job.project, target_images, new_tags,
-        float(p.get("box_threshold", thresholds.get("box", 0.25))),
-        float(p.get("text_threshold", thresholds.get("text", 0.25))),
-        float(p.get("nms_iou", thresholds.get("nms", 0.5))),
-        vlm_action=str(p.get("vlm_action", manifest.get("vlm_action", "manual"))),
-        tile_native=bool(p.get("tile_native")),
-        tile_size=int(p.get("tile_size") or 1024),
-        tile_overlap=float(p.get("tile_overlap") or 0.2),
-    )
-    # Per-image missing-objects check runs inline inside the lite
-    # inference loop now — no follow-up job needed.
-
 
 def _charlie_embed_detections(
     pil: "PILImage.Image",
@@ -3984,7 +2551,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
             class_thresholds = None
     print(f"[label-charlie] {job.id} dataset_type={dataset_type}")
 
-    imports_dir = proj / "imports"
+    imports_dir = proj / "images"
     pending: list[dict] = []
     # `force_relabel` flips the runner from "process only unlabelled
     # images" to "re-process every image". Used by the FE when the
@@ -4806,1209 +3373,6 @@ async def _run_purge_label_job(job, emit, cancel_event):
     )
 
 
-async def _run_segment_job(job, emit, cancel_event):
-    proj = project_dir(job.project)
-    if not proj.exists():
-        raise HTTPException(404, "project not found")
-    manifest = load_manifest(job.project) or empty_manifest(job.project)
-    job.n_images = sum(
-        1 for r in (manifest.get("results", []) or [])
-        if (r.get("detections") or (manifest.get("editedBoxes", {}) or {}).get(r.get("image")))
-    )
-    await run_segmentation_pass(emit, cancel_event, job.project)
-
-
-# ---- training -------------------------------------------------------------
-
-def _vram_mb() -> float:
-    if not torch.cuda.is_available():
-        return 0.0
-    return round(torch.cuda.memory_allocated() / (1024 * 1024), 1)
-
-
-def _unload_inference_models() -> None:
-    """Free VRAM held by the labelling pipeline so a training job has the
-    GPU to itself. GroundingDINO, SAM2 segmenter, and the Qwen VLM all get
-    released; the (small) NSFW classifier stays as it's negligible. Each
-    step emits a `system` audit event so the Terminal can show what the
-    backend is doing."""
-    import gc
-
-    before = _vram_mb()
-    add_event("system", action="inference_unload_start", vram_mb=before)
-
-    state["model"] = None
-    add_event("system", action="model_unload", model="grounding_dino")
-    state["segmenter"] = None
-    add_event("system", action="model_unload", model="sam2")
-
-    # Drop the in-process VLM too — its weights are the largest single
-    # tenant in VRAM (~4 GB at int4) and training needs that headroom.
-    try:
-        from vlm_validate import clear_vlm
-        state["vlm_model"] = None
-        state["vlm_processor"] = None
-        clear_vlm()
-        add_event("system", action="model_unload", model="qwen_vlm")
-    except Exception as e:
-        print(f"[train] VLM unload skipped: {e}")
-        add_event("system", action="model_unload_failed", model="qwen_vlm", error=str(e))
-
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-    after = _vram_mb()
-    add_event("system", action="vram_clear", before_mb=before, after_mb=after, freed_mb=round(before - after, 1))
-
-
-async def _restart_inference_stack() -> None:
-    """Hard-restart the entire inference stack: unload GD-L + SAM2 + Qwen,
-    free CUDA cache, then reload everything on GPU-only. Reserved for
-    explicit administrative use."""
-    add_event("system", action="inference_restart_start", reason="manual")
-    try:
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _unload_inference_models)
-        await _ensure_inference_models()
-        add_event("system", action="inference_restart_done")
-    except Exception as e:
-        print(f"[server] inference restart failed: {e}")
-        add_event("system", action="inference_restart_failed", error=str(e))
-
-
-async def _ensure_inference_models() -> None:
-    """Reload GD-L + SAM2 onto the GPU after a training job ran. Strictly
-    GPU-only — if CUDA isn't available or the load fails, raise, never fall
-    back to CPU. Frees VRAM aggressively before each load so we make room
-    for the model rather than letting torch decide it can't fit."""
-    if state["model"] is not None and state["segmenter"] is not None:
-        return
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA not available — refusing to load labelling models on CPU")
-
-    device = state["device"]
-    if str(device) == "cpu":
-        # Belt-and-braces: state["device"] should be "cuda" from boot, but
-        # if something downgraded it, refuse rather than load on CPU.
-        raise RuntimeError(f"labelling models require GPU (got device={device!r})")
-
-    import gc
-
-    def _free():
-        before = _vram_mb()
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            try:
-                torch.cuda.ipc_collect()
-            except Exception:
-                pass
-            torch.cuda.synchronize()
-        after = _vram_mb()
-        add_event(
-            "system", action="vram_clear",
-            before_mb=before, after_mb=after, freed_mb=round(before - after, 1),
-        )
-
-    loop = asyncio.get_running_loop()
-
-    if state["model"] is None:
-        _free()
-        add_event("system", action="model_load_start", model="grounding_dino", vram_mb=_vram_mb())
-        print(f"[server] reloading MM-Grounding-DINO-L on {device}...")
-        state["model"] = await loop.run_in_executor(
-            None, lambda: load_model(DEFAULT_CONFIG, DEFAULT_CHECKPOINT, device),
-        )
-        add_event("system", action="model_load", model="grounding_dino", vram_mb=_vram_mb())
-    if state["segmenter"] is None:
-        _free()
-        add_event("system", action="model_load_start", model="sam2", vram_mb=_vram_mb())
-        print(f"[server] reloading SAM2.1 Hiera Large on {device}...")
-        from segmentation import _build_predictor
-        state["segmenter"] = await loop.run_in_executor(None, lambda: _build_predictor(device))
-        add_event("system", action="model_load", model="sam2", vram_mb=_vram_mb())
-
-    # Reload the in-process VLM so the next labelling job has it ready.
-    if state.get("vlm_model") is None:
-        _free()
-        add_event("system", action="model_load_start", model="qwen_vlm", vram_mb=_vram_mb())
-        try:
-            await loop.run_in_executor(None, _load_vlm_into_state)
-            add_event("system", action="model_load", model="qwen_vlm", vram_mb=_vram_mb())
-        except Exception as e:
-            print(f"[server] VLM reload failed: {e}")
-            add_event("system", action="model_load_failed", model="qwen_vlm", error=str(e))
-
-
-async def _run_train_job(job, emit, cancel_event):
-    """Train a small detection model on the project's labelled data.
-    Labelling has priority: this runner waits until the job queue is idle
-    (no other queued/running jobs) before unloading inference models and
-    starting training."""
-    p = job.params
-    proj = project_dir(job.project)
-    if not proj.exists():
-        raise HTTPException(404, "project not found")
-    manifest = load_manifest(job.project)
-    if not manifest:
-        raise HTTPException(404, "no manifest")
-
-    # Wait for any other jobs to drain. Polls cheaply rather than holding
-    # a lock — the JobManager runs jobs serially so this is just a courtesy
-    # to non-train work that might have queued behind us.
-    await emit("status", {"phase": "waiting"})
-    add_event("system", action="train_wait_for_queue", project=job.project)
-    while True:
-        if cancel_event.is_set():
-            return
-        others = [
-            j for j in state["jobs"].list()
-            if j.id != job.id and j.kind != "train" and j.status in ("queued", "running")
-        ]
-        if not others:
-            break
-        await asyncio.sleep(2)
-
-    await emit("status", {"phase": "preparing"})
-    add_event("system", action="train_start", project=job.project, vram_mb=_vram_mb())
-    _unload_inference_models()
-
-    out_dir = project_dir(job.project) / "models"
-    loop = asyncio.get_running_loop()
-
-    def progress_cb(epoch: int, total: int, train_loss: float, val_loss: float):
-        # Called from the training thread; bounce onto the event loop.
-        asyncio.run_coroutine_threadsafe(
-            emit("progress", {
-                "index": epoch, "total": total,
-                "train_loss": round(train_loss, 4),
-                "val_loss": round(val_loss, 4),
-            }),
-            loop,
-        )
-
-    def run():
-        from training import train_ssdlite
-        return train_ssdlite(
-            job.project, manifest, r2_required(), out_dir,
-            epochs=int(p.get("epochs", 50)),
-            batch=int(p.get("batch", 16)),
-            imgsz=int(p.get("imgsz", 320)),
-            lr=float(p.get("learning_rate", 1e-3)),
-            include_vlm_rejected=bool(p.get("include_vlm_rejected", False)),
-            min_box_px=float(p.get("min_box_px", 12.0)),
-            on_epoch=progress_cb,
-        )
-
-    try:
-        weights, cats, summary = await loop.run_in_executor(None, run)
-        # Stamp the manifest so the FE can show "trained model" state.
-        manifest["hasModel"] = True
-        manifest["model"] = {
-            "kind": "ssdlite_mobilenetv3_large",
-            "weights": str(weights.relative_to(project_dir(job.project))),
-            "classes": cats,
-            "imgsz": int(p.get("imgsz", 320)),
-            "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "summary": summary,
-        }
-        save_manifest(job.project, manifest)
-        add_event("system", action="train_done", project=job.project, **summary)
-        await emit("complete", {"weights": str(weights), "summary": summary})
-    except Exception as e:
-        add_event("system", action="train_failed", project=job.project, error=str(e))
-        raise
-    finally:
-        # Reload labelling models so the next label/lite job is fast and
-        # has the VLM warm in VRAM.
-        try:
-            await _ensure_inference_models()
-        except Exception as e:
-            print(f"[train] failed to reload inference models: {e}")
-            await emit("warning", {"message": f"models did not reload: {e}"})
-
-
-# ── Standalone training / quantising system ──────────────────────────
-# Durable, billable ML jobs on top of MLJobStore (gd/ml_jobs.py). The
-# GPU work runs on an ML worker — the RTX 3060 rig's pull-agent, or the
-# opt-in in-process loop below (ML_WORKER_INPROCESS=1). Token billing:
-# 1 credit per completed 15-min block of ACTIVE training, drawn from the
-# same monthly credit pool (see plans.credits_used). NOTHING here depends
-# on ST Model Zoo — it is an avoided external dependency, not used.
-
-_ML_WORKER_ID = f"inproc-{os.getpid()}"
-
-
-def _ml_log_path(project_id: str, job_id: str) -> Path:
-    return project_dir(project_id) / "ml_logs" / f"{job_id}.log"
-
-
-def _append_ml_log(path: Path, msg: str) -> None:
-    """Best-effort append of a timestamped line to a job log."""
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(f"{datetime.now(timezone.utc).isoformat(timespec='seconds')}  {msg}\n")
-    except Exception as e:
-        print(f"[ml-worker] log write failed: {e}")
-
-
-def _tail_file(path: Path, n: int) -> list[str]:
-    try:
-        if not path.exists():
-            return []
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        return lines[-max(1, int(n)):]
-    except Exception:
-        return []
-
-
-def _public_ml_job(job: dict) -> dict:
-    """Strip internal fields (captured billing claims) and add the live
-    queue position before returning a job to the client."""
-    j = dict(job)
-    cfg = dict(j.get("config") or {})
-    cfg.pop("_billing", None)
-    j["config"] = cfg
-    if j.get("status") == ml_jobs.STATUS_QUEUED:
-        j["queue_position"] = state["ml_jobs"].queue_position(j["id"])
-    return j
-
-
-def _get_owned_ml_job(job_id: str, user: str) -> dict:
-    """Fetch a job the caller owns, else 404 (not 403 — don't confirm a
-    job id exists to a non-owner)."""
-    job = state["ml_jobs"].get_job(job_id)
-    if not job or (job.get("user_id") or "").lower() != user.lower():
-        raise HTTPException(404, "job not found")
-    return job
-
-
-def _ml_evaluate_credits(user: str, billing: dict | None) -> "plans.CreditState":
-    """Resolve the user's credit state from the billing claims captured
-    at job-creation time (the worker has no request/JWT of its own)."""
-    billing = billing or {}
-    cycle_start = billing.get("cycle_start") or _cycle_start_iso({})
-    counters = _user_usage_counters(user, cycle_start)
-    training_blocks = audit.sum_training_blocks_for_user(user, since_iso=cycle_start)
-    return plans.evaluate_credits(
-        username=user,
-        plan_id=billing.get("plan") if isinstance(billing.get("plan"), str) else None,
-        status=billing.get("sub_status") if isinstance(billing.get("sub_status"), str) else None,
-        beta_expires_at=billing.get("beta_exp") if isinstance(billing.get("beta_exp"), str) else None,
-        labelled_this_month=int(counters["imagesLabelledThisPeriod"] or 0),
-        uploaded_this_month=int(counters["imagesUploadedThisPeriod"] or 0),
-        stored_now=int(counters["imagesStoredNow"] or 0),
-        training_blocks_this_period=int(training_blocks or 0),
-    )
-
-
-def _ml_user_over_credits(user: str, billing: dict | None) -> bool:
-    try:
-        return bool(_ml_evaluate_credits(user, billing)["over_credits"])
-    except Exception as e:
-        # Never block/charge on a billing-eval hiccup; log and let the run continue.
-        print(f"[ml-worker] credit eval failed for {user}: {e}")
-        return False
-
-
-def _ml_error_message(e: Exception) -> str:
-    """Map common training failures to clear, user-facing messages."""
-    s = str(e)
-    low = s.lower()
-    if "out of memory" in low or "cuda oom" in low or "cublas" in low:
-        return "GPU ran out of memory. Lower the batch size or image size and try again."
-    if "cuda" in low and ("not available" in low or "no kernel" in low or "driver" in low):
-        return "No usable CUDA GPU on the training worker."
-    if "no labels" in low or "no usable training samples" in low or "nothing to train" in low:
-        return "This project has no labelled images to train on yet."
-    return s[:500] or "training failed"
-
-
-def _upload_model_artifact_to_r2(project_id: str, job_id: str, weights_path: Path, cats: list, summary: dict) -> dict:
-    """Upload the trained weights to R2 so the artifact is reachable from
-    the backend regardless of which machine trained it (the rig and the
-    main box don't share a filesystem). Returns the artifact descriptor."""
-    r2 = r2_required()
-    key = f"projects/{project_id}/models/{job_id}/{weights_path.name}"
-    r2.put_bytes(key, weights_path.read_bytes(), content_type="application/octet-stream")
-    return {
-        "weights_r2_key": key,
-        "weights_filename": weights_path.name,
-        "classes": list(cats or []),
-        "summary": summary or {},
-    }
-
-
-async def _run_ml_training_job(job: dict) -> None:
-    """Execute one claimed training job: prepare → run (charging active
-    runtime) → upload artifact → complete. Cancellation, OOM, missing
-    data and credit-exhaustion are all handled with a clear status +
-    message. Charged blocks are committed incrementally so a crash never
-    double-charges and never charges queued/idle time."""
-    store = state["ml_jobs"]
-    loop = asyncio.get_running_loop()
-    jid = job["id"]
-    user = job["user_id"]
-    project_id = job["project_id"]
-    billing = (job.get("config") or {}).get("_billing") or {}
-    log = _ml_log_path(project_id, jid)
-    store.set_log_path(jid, str(log))
-
-    def w(msg: str) -> None:
-        _append_ml_log(log, msg)
-
-    unloaded = False
-    try:
-        w(f"preparing training job {jid} (model={job.get('model_id')})")
-        if not project_dir(project_id).exists():
-            raise RuntimeError("project not found")
-        manifest = load_manifest(project_id)
-        if not manifest:
-            raise RuntimeError("no manifest for project")
-        trainer = model_registry.get_trainer(job.get("model_id"))
-        r2 = r2_required()  # fail fast + clearly if storage isn't configured
-        out_dir = project_dir(project_id) / "models"
-
-        # Re-check credits at start (gated at create time too, but the job
-        # may have queued behind others and the user may have run dry).
-        if _ml_user_over_credits(user, billing):
-            raise RuntimeError("not enough credits to start training")
-        if store.is_cancel_requested(jid):
-            store.set_status(jid, ml_jobs.STATUS_CANCELLED)
-            w("cancelled before start")
-            return
-
-        def should_cancel() -> bool:
-            return store.is_cancel_requested(jid)
-
-        def on_epoch(ep: int, total: int, tl: float, vl: float) -> None:
-            store.update_progress(jid, {
-                "epoch": int(ep), "total": int(total),
-                "train_loss": round(float(tl), 4), "val_loss": round(float(vl), 4),
-            })
-            w(f"epoch {ep}/{total}  train={tl:.4f}  val={vl:.4f}")
-
-        # Free VRAM for training on the main box; harmless no-op on the rig.
-        try:
-            _unload_inference_models()
-            unloaded = True
-        except Exception:
-            pass
-
-        # Serialise on the GPU gate so training never collides with
-        # interactive inference / labelling jobs (single active GPU job).
-        async with state["gpu_lock"]:
-            store.mark_running(jid)
-            w("training started")
-            fut = loop.run_in_executor(None, lambda: trainer(
-                project_id=project_id, manifest=manifest, r2=r2, out_dir=out_dir,
-                config=job.get("config") or {}, on_epoch=on_epoch, should_cancel=should_cancel,
-            ))
-            last = time.monotonic()
-            while not fut.done():
-                await asyncio.wait({fut}, timeout=30)
-                now = time.monotonic()
-                delta = now - last
-                last = now
-                view = store.tick_active_runtime(jid, delta)
-                if view["uncharged_blocks"] > 0:
-                    if _ml_user_over_credits(user, billing):
-                        store.request_cancel(jid)  # should_cancel picks this up
-                        w("out of credits — stopping training")
-                    else:
-                        store.commit_charge(jid, user_id=user, blocks=view["uncharged_blocks"])
-                        w(f"charged {view['uncharged_blocks']} credit(s) "
-                          f"(total {view['charged_blocks'] + view['uncharged_blocks']})")
-                store.heartbeat(jid)
-            weights, cats, summary = fut.result()
-
-        # Final reconcile: charge any last completed block (still skipping
-        # the partial block in progress) unless the user is out of credits.
-        view = store.tick_active_runtime(jid, 0)
-        if view["uncharged_blocks"] > 0 and not _ml_user_over_credits(user, billing):
-            store.commit_charge(jid, user_id=user, blocks=view["uncharged_blocks"])
-
-        if store.is_cancel_requested(jid):
-            store.set_status(jid, ml_jobs.STATUS_CANCELLED)
-            w("cancelled (charged only completed active-training blocks)")
-            return
-
-        # Persist the artifact to R2 + stamp the manifest (same shape the
-        # legacy train path uses, so /model/download + FE keep working).
-        artifacts = _upload_model_artifact_to_r2(project_id, jid, weights, cats, summary)
-        store.set_artifacts(jid, artifacts)
-        try:
-            mm = load_manifest(project_id)
-            mm["hasModel"] = True
-            mm["model"] = {
-                "kind": job.get("model_id") or "ssdlite_mobilenetv3_large",
-                "weights": str(weights.relative_to(project_dir(project_id))),
-                "weights_r2_key": artifacts["weights_r2_key"],
-                "classes": list(cats or []),
-                "imgsz": int((job.get("config") or {}).get("imgsz", 320)),
-                "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "job_id": jid,
-                "summary": summary or {},
-            }
-            save_manifest(project_id, mm)
-        except Exception as e:
-            w(f"manifest stamp failed (artifact still saved): {e}")
-        store.set_status(jid, ml_jobs.STATUS_COMPLETED)
-        w("completed")
-    except asyncio.CancelledError:
-        # Worker shutting down. Leave the job recoverable on next boot.
-        store.set_status(jid, ml_jobs.STATUS_FAILED, error="worker shutdown (interrupted)")
-        w("worker shutdown — job interrupted")
-        raise
-    except Exception as e:
-        msg = _ml_error_message(e)
-        store.set_status(jid, ml_jobs.STATUS_FAILED, error=msg)
-        w(f"FAILED: {msg}")
-    finally:
-        if unloaded:
-            try:
-                await _ensure_inference_models()
-            except Exception as e:
-                print(f"[ml-worker] reload inference models failed: {e}")
-
-
-def _resolve_source_checkpoint(store, r2, project_id: str, user: str, cfg: dict, w) -> "tuple[str, str | None, int]":
-    """Resolve a quantise job's source model to (local .pt path, source
-    model_id/arch, imgsz). Prefers the referenced completed training job's
-    R2 artifact; falls back to the project manifest's model (R2 key, then a
-    legacy local path). Downloads R2 artifacts to a temp file the caller
-    must clean up. arch + imgsz tell quantise.run_quantise how to export."""
-    key = None
-    arch: str | None = None
-    imgsz = 640
-    source_job_id = (cfg or {}).get("source_job_id")
-    if source_job_id:
-        src = store.get_job(source_job_id)
-        if (not src or (src.get("user_id") or "").lower() != user.lower()
-                or src.get("project_id") != project_id):
-            raise RuntimeError("source model not found")
-        if src.get("status") != ml_jobs.STATUS_COMPLETED:
-            raise RuntimeError("source training job has not completed")
-        key = (src.get("artifacts") or {}).get("weights_r2_key")
-        arch = src.get("model_id")
-        try:
-            imgsz = int((src.get("config") or {}).get("imgsz") or 640)
-        except (TypeError, ValueError):
-            imgsz = 640
-    if not key:
-        model = (load_manifest(project_id, copy=False).get("model") or {})
-        key = model.get("weights_r2_key")
-        arch = arch or model.get("kind")
-        try:
-            imgsz = int(model.get("imgsz") or imgsz)
-        except (TypeError, ValueError):
-            pass
-        if not key:
-            local = model.get("weights")
-            if local:
-                lp = project_dir(project_id) / local
-                if lp.exists():
-                    w(f"using local source weights {local}")
-                    return str(lp), arch, imgsz
-            raise RuntimeError("no trained model artifact found to quantise — train a model first")
-    data = r2.get_bytes(key)
-    tf = tempfile.NamedTemporaryFile(delete=False, suffix=".pt")
-    tf.write(data)
-    tf.close()
-    w(f"downloaded source model ({len(data)} bytes, arch={arch})")
-    return tf.name, arch, imgsz
-
-
-async def _run_ml_quantise_job(job: dict) -> None:
-    """Execute one quantise job: resolve source .pt → ONNX export + INT8
-    static PTQ (gd/quantise.py) calibrated on the project's R2 images →
-    upload artifacts to R2. Quantising is FREE — the worker never charges
-    tokens for it (no tick_active_runtime / commit_charge here)."""
-    store = state["ml_jobs"]
-    loop = asyncio.get_running_loop()
-    jid = job["id"]
-    user = job["user_id"]
-    project_id = job["project_id"]
-    cfg = job.get("config") or {}
-    log = _ml_log_path(project_id, jid)
-    store.set_log_path(jid, str(log))
-    tmp_pt: str | None = None
-
-    def w(msg: str) -> None:
-        _append_ml_log(log, msg)
-
-    try:
-        import training  # lazy: pulls torch/torchvision (worker host only)
-        w(f"preparing quantise job {jid}")
-        if not project_dir(project_id).exists():
-            raise RuntimeError("project not found")
-        manifest = load_manifest(project_id)
-        if not manifest:
-            raise RuntimeError("no manifest for project")
-        r2 = r2_required()
-        store.set_status(jid, ml_jobs.STATUS_PREPARING)
-        tmp_pt, src_arch, src_imgsz = _resolve_source_checkpoint(store, r2, project_id, user, cfg, w)
-        samples = int(cfg.get("calibration_samples") or quantise.DEFAULT_CALIBRATION_SAMPLES)
-        cal = await loop.run_in_executor(
-            None, lambda: training.collect_calibration_images(project_id, manifest, r2, limit=samples)
-        )
-        w(f"collected {len(cal)} calibration image(s)")
-        if store.is_cancel_requested(jid):
-            store.set_status(jid, ml_jobs.STATUS_CANCELLED)
-            w("cancelled before run")
-            return
-        store.mark_running(jid)
-        store.heartbeat(jid)
-        w("quantising (ONNX export + INT8 static PTQ)")
-        out_dir = project_dir(project_id) / "models" / f"quantise_{jid}"
-        result = await loop.run_in_executor(
-            None, lambda: quantise.run_quantise(
-                source_checkpoint_path=tmp_pt, calibration_images=cal,
-                out_dir=out_dir, config=cfg, arch=src_arch, imgsz=src_imgsz, log=w,
-            )
-        )
-        if store.is_cancel_requested(jid):
-            store.set_status(jid, ml_jobs.STATUS_CANCELLED)
-            w("cancelled")
-            return
-        artifacts: dict = {"format": quantise.OUTPUT_FORMAT, "classes": result["classes"],
-                           "imgsz": result["imgsz"], "sizes": result["sizes"]}
-        for which, p in (("float_onnx", result["float_onnx"]), ("int8_onnx", result["int8_onnx"])):
-            key = f"projects/{project_id}/models/{jid}/{Path(p).name}"
-            r2.put_bytes(key, Path(p).read_bytes(), content_type="application/octet-stream")
-            artifacts[f"{which}_r2_key"] = key
-        store.set_artifacts(jid, artifacts)
-        store.set_status(jid, ml_jobs.STATUS_COMPLETED)
-        w("completed")
-    except asyncio.CancelledError:
-        store.set_status(jid, ml_jobs.STATUS_FAILED, error="worker shutdown (interrupted)")
-        raise
-    except Exception as e:
-        msg = _ml_error_message(e)
-        store.set_status(jid, ml_jobs.STATUS_FAILED, error=msg)
-        w(f"FAILED: {msg}")
-    finally:
-        if tmp_pt:
-            try:
-                Path(tmp_pt).unlink(missing_ok=True)
-            except Exception:
-                pass
-
-
-async def _ml_worker_loop() -> None:
-    """In-process ML worker (opt-in via ML_WORKER_INPROCESS). Claims one
-    training/quantising job at a time and runs it. The same logic powers
-    the rig's pull-agent. Single active GPU-heavy job by construction
-    (claims one, runs to completion, then loops)."""
-    store = state["ml_jobs"]
-    print(f"[ml-worker] loop online ({_ML_WORKER_ID})")
-    while True:
-        try:
-            job = store.claim_next(
-                _ML_WORKER_ID,
-                job_types=(ml_jobs.JOB_TYPE_TRAINING, ml_jobs.JOB_TYPE_QUANTISING),
-            )
-            if job is None:
-                try:
-                    store.recover_stale()
-                except Exception:
-                    pass
-                await asyncio.sleep(3)
-                continue
-            if job.get("job_type") == ml_jobs.JOB_TYPE_QUANTISING:
-                await _run_ml_quantise_job(job)
-            else:
-                await _run_ml_training_job(job)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            print(f"[ml-worker] loop recovered from unexpected error: {e}")
-            await asyncio.sleep(2)
-
-
-# ---- training API ----
-
-class CreateTrainingJobIn(BaseModel):
-    model_id: str | None = None
-    config: dict = {}
-
-
-@app.get("/api/training/models")
-async def list_training_models(user: str = Depends(current_user)):
-    """Available training models + their config schema/defaults. One
-    model today (SSDLite); structured so more can be registered later."""
-    return {"models": model_registry.list_models(), "default": model_registry.default_model_id()}
-
-
-@app.post(
-    "/api/training/projects/{project_id}/jobs",
-    dependencies=[Depends(require_project_owner)],
-)
-async def create_training_job(
-    project_id: str,
-    payload: CreateTrainingJobIn,
-    request: Request,
-    user: str = Depends(current_user),
-    _credits: "plans.CreditState" = Depends(enforce_credits),
-):
-    """Queue a training job. `enforce_credits` blocks creation when the
-    user is already at their cap. Returns the job plus a clearly-labelled
-    token ESTIMATE — actual billing charges measured active runtime."""
-    model_id = (payload.model_id or model_registry.default_model_id() or "").strip()
-    spec = model_registry.get_model(model_id)
-    if spec is None:
-        raise HTTPException(400, f"unknown model_id {model_id!r}")
-    clean, errors = spec.validate(payload.config or {})
-    if errors:
-        raise HTTPException(400, "; ".join(errors))
-    manifest = load_manifest(project_id, copy=False)
-    # Default the output model name to "{project}-{model}-{n}" (lowercase,
-    # hyphenated) when the user didn't set one — e.g. "people-st-yoloxn-1",
-    # where n counts the project's training jobs so far.
-    if not (clean.get("output_name") or "").strip():
-        def _slugify(s) -> str:
-            return re.sub(r"[^a-z0-9]+", "-", str(s or "").lower()).strip("-")
-        _proj = _slugify((manifest or {}).get("name"))[:40]
-        _model = _slugify(model_id) or "model"
-        _n = len(state["ml_jobs"].list_jobs(
-            user_id=user, project_id=project_id, job_type=ml_jobs.JOB_TYPE_TRAINING)) + 1
-        clean["output_name"] = "-".join(p for p in (_proj, _model) if p) + f"-{_n}"
-    n_images = len(manifest.get("imports") or []) or len(manifest.get("results") or [])
-    if n_images <= 0:
-        raise HTTPException(400, "project has no images to train on")
-
-    # Capture the billing claims now so the worker (which has no request
-    # of its own) can enforce credits mid-run against this cycle.
-    tok = getattr(request.state, "token_payload", {}) or {}
-    cfg = {
-        **clean,
-        "_billing": {
-            "plan": tok.get("plan"),
-            "sub_status": tok.get("sub_status"),
-            "beta_exp": tok.get("beta_exp"),
-            "cycle_start": _cycle_start_iso(tok if isinstance(tok, dict) else {}),
-        },
-    }
-    est_seconds = model_registry.estimate_training_seconds(model_id, clean, n_images)
-    est_blocks = int((est_seconds + ml_jobs.BLOCK_SECONDS - 1) // ml_jobs.BLOCK_SECONDS) if est_seconds > 0 else 0
-    job = state["ml_jobs"].create_job(
-        user_id=user, project_id=project_id, job_type=ml_jobs.JOB_TYPE_TRAINING,
-        model_id=model_id, config=cfg,
-    )
-    return {
-        "job": _public_ml_job(job),
-        "estimate": {
-            "isEstimate": True,
-            "seconds": int(round(est_seconds)),
-            "blocks": est_blocks,
-            "credits": est_blocks,
-            "note": "Estimate only. Tokens are charged for actual active training time; queued time is free.",
-        },
-    }
-
-
-@app.get("/api/training/jobs")
-async def list_training_jobs(project_id: str | None = None, user: str = Depends(current_user)):
-    jobs = state["ml_jobs"].list_jobs(
-        user_id=user, project_id=project_id, job_type=ml_jobs.JOB_TYPE_TRAINING,
-    )
-    return {"jobs": [_public_ml_job(j) for j in jobs]}
-
-
-@app.get("/api/training/jobs/{job_id}")
-async def get_training_job(job_id: str, user: str = Depends(current_user)):
-    return {"job": _public_ml_job(_get_owned_ml_job(job_id, user))}
-
-
-@app.post("/api/training/jobs/{job_id}/cancel")
-async def cancel_training_job(job_id: str, user: str = Depends(current_user)):
-    _get_owned_ml_job(job_id, user)
-    ok = state["ml_jobs"].request_cancel(job_id)
-    return {"ok": ok, "job": _public_ml_job(state["ml_jobs"].get_job(job_id))}
-
-
-@app.get("/api/training/jobs/{job_id}/logs")
-async def get_training_job_logs(job_id: str, user: str = Depends(current_user), tail: int = 200):
-    job = _get_owned_ml_job(job_id, user)
-    lp = job.get("log_path")
-    return {
-        "status": job["status"],
-        "progress": job.get("progress") or {},
-        "logs": _tail_file(Path(lp), tail) if lp else [],
-    }
-
-
-@app.get("/api/training/jobs/{job_id}/artifact")
-async def download_training_artifact(job_id: str, user: str = Depends(current_user)):
-    """Short-lived presigned R2 URL for a completed job's trained weights.
-    JSON (not a 302) so the bearer-authed FE can fetch + open it. Works
-    regardless of which machine trained the model (artifact is in R2)."""
-    job = _get_owned_ml_job(job_id, user)
-    key = (job.get("artifacts") or {}).get("weights_r2_key")
-    if not key:
-        raise HTTPException(404, "artifact not found")
-    return {"url": r2_required().presigned_get_url(key)}
-
-
-# ---- quantising API ----
-# Quantising is FREE (no training-token billing) — there is no separate
-# quantise billing concept in the product, so it is intentionally left
-# uncharged (TODO: add a quantise billing dimension if that ever changes).
-
-class CreateQuantiseJobIn(BaseModel):
-    source_job_id: str | None = None
-    mode: str | None = None
-    calibration_samples: int | None = None
-    output_name: str | None = None
-
-
-@app.get("/api/quantising/options")
-async def quantising_options(user: str = Depends(current_user)):
-    return quantise.quantise_options()
-
-
-@app.get(
-    "/api/quantising/projects/{project_id}/source-models",
-    dependencies=[Depends(require_project_owner)],
-)
-async def quantising_source_models(project_id: str, user: str = Depends(current_user)):
-    """Completed training jobs (with an uploaded artifact) that can be
-    quantised, newest first."""
-    jobs = state["ml_jobs"].list_jobs(
-        user_id=user, project_id=project_id, job_type=ml_jobs.JOB_TYPE_TRAINING,
-        statuses=(ml_jobs.STATUS_COMPLETED,),
-    )
-    out = []
-    for j in jobs:
-        art = j.get("artifacts") or {}
-        if art.get("weights_r2_key"):
-            out.append({
-                "source_job_id": j["id"],
-                "model_id": j.get("model_id"),
-                "trained_at": j.get("finished_at"),
-                "classes": art.get("classes") or [],
-                "name": (j.get("config") or {}).get("output_name") or j.get("model_id"),
-            })
-    return {"models": out}
-
-
-def _iou_xyxy(a, b) -> float:
-    ax0, ay0, ax1, ay1 = a; bx0, by0, bx1, by1 = b
-    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
-    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
-    iw, ih = max(0.0, ix1 - ix0), max(0.0, iy1 - iy0)
-    inter = iw * ih
-    ua = max(0.0, ax1 - ax0) * max(0.0, ay1 - ay0) + max(0.0, bx1 - bx0) * max(0.0, by1 - by0) - inter
-    return inter / ua if ua > 0 else 0.0
-
-
-@app.post(
-    "/api/training/projects/{project_id}/analyse",
-    dependencies=[Depends(require_project_owner)],
-)
-async def analyse_image(
-    project_id: str,
-    image: UploadFile = File(...),
-    source_job_id: str = Form(""),
-    user: str = Depends(current_user),
-):
-    """Run the project's labelling pipeline + the TRAINED model (float ONNX) +
-    the quantised model (int8 ONNX, if present) on one uploaded image, and flag
-    which pipeline labels each model MISSED. All on the backend (onnxruntime
-    CPU for the models; the existing GroundingDINO+VLM pipeline for reference)."""
-    store = state["ml_jobs"]
-    jobs = store.list_jobs(
-        user_id=user, project_id=project_id, job_type=ml_jobs.JOB_TYPE_TRAINING,
-        statuses=(ml_jobs.STATUS_COMPLETED,),
-    )
-    if not jobs:
-        raise HTTPException(400, "Train a model first — there's no trained model to analyse yet.")
-    trained = None
-    if source_job_id:
-        trained = next((j for j in jobs if j["id"] == source_job_id), None)
-    if trained is None:
-        trained = jobs[0]  # newest completed training (list_jobs is created_at DESC)
-    art = trained.get("artifacts") or {}
-    classes = list(art.get("classes") or [])
-    imgsz = int(((art.get("summary") or {}).get("imgsz")) or 480)
-
-    # Quantise job for this trained model (newest matching, else newest overall).
-    qjobs = store.list_jobs(
-        user_id=user, project_id=project_id, job_type=ml_jobs.JOB_TYPE_QUANTISING,
-        statuses=(ml_jobs.STATUS_COMPLETED,),
-    )
-    qmatch = next((q for q in qjobs if (q.get("config") or {}).get("source_job_id") == trained["id"]), None)
-    if qmatch is None and qjobs:
-        qmatch = qjobs[0]
-    qart = (qmatch.get("artifacts") or {}) if qmatch else {}
-
-    # Float ONNX = the trained model. Prefer the training artifact (new trainings
-    # auto-export it); fall back to the quantise job's float ONNX (same model) so
-    # models trained before the auto-export are still analysable once quantised.
-    float_key = art.get("float_onnx_r2_key") or qart.get("float_onnx_r2_key")
-    int8_key = qart.get("int8_onnx_r2_key")
-    if not classes:
-        classes = list(qart.get("classes") or [])
-    if not float_key:
-        raise HTTPException(400, "This model has no ONNX export yet — re-train it (newer trainings export automatically) or run a Quantise job to generate it.")
-
-    data = await image.read()
-    if not data or len(data) > MAX_UPLOAD_BYTES_PER_FILE:
-        raise HTTPException(413, "image missing or too large")
-    try:
-        image_pil = ImageOps.exif_transpose(PILImage.open(io.BytesIO(data))).convert("RGB")
-    except Exception:
-        raise HTTPException(400, "not an image")
-    W, H = image_pil.size
-    r2 = r2_required()
-    loop = asyncio.get_running_loop()
-
-    def work():
-        import st_yoloxn_infer as INF
-        # Reference = the project's labelling pipeline (GroundingDINO + VLM),
-        # using the model's class names as the prompt.
-        reference = []
-        tags = classes or ["object"]
-        try:
-            # Tighter than the demo: the reference should be the clean labels the
-            # project would keep, not GroundingDINO's every-guess (which clutters
-            # the overlay). Higher box/text thresholds + firmer NMS.
-            boxes_xyxy, phrases = predict(
-                state["model"], image_pil, tags,
-                box_threshold=0.35, text_threshold=0.25,
-                device=state["device"], nms_iou=0.5,
-            )
-            box_list = boxes_xyxy.tolist() if hasattr(boxes_xyxy, "tolist") else list(boxes_xyxy)
-            for box, phrase in zip(box_list, phrases):
-                label, sc = parse_phrase(phrase)
-                try:
-                    validation = validate_box(image_pil, box, label)
-                except Exception:
-                    validation = None
-                if validation is not None and validation.get("match") is False:
-                    continue  # VLM rejected — not part of the curated reference
-                reference.append({"label": label, "score": round(float(sc), 4),
-                                  "box_xyxy": [round(float(v), 1) for v in box]})
-        except Exception as e:
-            print(f"[analyse] labelling pipeline failed: {e}", flush=True)
-
-        # Low floor here — the FE confidence slider does the cutoff client-side,
-        # so it needs the full range of detections to filter (default cut ~0.4).
-        fsess = INF.make_session(r2.get_bytes(float_key))
-        float_d = INF.detect_trained(image_pil, fsess, classes, imgsz=imgsz,
-                                     conf_thresh=0.10, max_boxes=100)
-        int8_d = None
-        if int8_key:
-            try:
-                int8_d = INF.detect_trained(image_pil, INF.make_session(r2.get_bytes(int8_key)),
-                                            classes, imgsz=imgsz, conf_thresh=0.10, max_boxes=100)
-            except Exception as e:
-                print(f"[analyse] int8 inference failed: {e}", flush=True)
-        reference.sort(key=lambda d: d["score"], reverse=True)
-        return reference[:100], float_d, int8_d
-
-    reference, float_d, int8_d = await loop.run_in_executor(None, work)
-
-    def missed(dets):
-        return [r for r in reference
-                if not any(d["label"] == r["label"] and _iou_xyxy(r["box_xyxy"], d["box_xyxy"]) >= 0.5
-                           for d in dets)]
-
-    return {
-        "size": {"width": W, "height": H},
-        "classes": classes,
-        "source_job_id": trained["id"],
-        "quantised": int8_d is not None,
-        "reference": reference,
-        "float": float_d,
-        "int8": int8_d,
-        "missed_by_float": missed(float_d),
-        "missed_by_int8": missed(int8_d) if int8_d is not None else None,
-    }
-
-
-@app.post(
-    "/api/quantising/projects/{project_id}/jobs",
-    dependencies=[Depends(require_project_owner)],
-)
-async def create_quantising_job(
-    project_id: str,
-    payload: CreateQuantiseJobIn,
-    user: str = Depends(current_user),
-):
-    clean, errors = quantise.validate_config({
-        "source_job_id": payload.source_job_id,
-        "mode": payload.mode,
-        "calibration_samples": payload.calibration_samples,
-        "output_name": payload.output_name,
-    })
-    if errors:
-        raise HTTPException(400, "; ".join(errors))
-    manifest = load_manifest(project_id, copy=False)
-    model = manifest.get("model") or {}
-    has_source = bool(clean.get("source_job_id")) or bool(model.get("weights_r2_key") or model.get("weights"))
-    if not has_source:
-        raise HTTPException(400, "no trained model available to quantise — train a model first")
-    job = state["ml_jobs"].create_job(
-        user_id=user, project_id=project_id, job_type=ml_jobs.JOB_TYPE_QUANTISING,
-        model_id="onnx-int8", config=clean,
-    )
-    return {"job": _public_ml_job(job)}
-
-
-@app.get("/api/quantising/jobs")
-async def list_quantising_jobs(project_id: str | None = None, user: str = Depends(current_user)):
-    jobs = state["ml_jobs"].list_jobs(
-        user_id=user, project_id=project_id, job_type=ml_jobs.JOB_TYPE_QUANTISING,
-    )
-    return {"jobs": [_public_ml_job(j) for j in jobs]}
-
-
-@app.get("/api/quantising/jobs/{job_id}")
-async def get_quantising_job(job_id: str, user: str = Depends(current_user)):
-    return {"job": _public_ml_job(_get_owned_ml_job(job_id, user))}
-
-
-@app.post("/api/quantising/jobs/{job_id}/cancel")
-async def cancel_quantising_job(job_id: str, user: str = Depends(current_user)):
-    _get_owned_ml_job(job_id, user)
-    ok = state["ml_jobs"].request_cancel(job_id)
-    return {"ok": ok, "job": _public_ml_job(state["ml_jobs"].get_job(job_id))}
-
-
-@app.get("/api/quantising/jobs/{job_id}/logs")
-async def get_quantising_job_logs(job_id: str, user: str = Depends(current_user), tail: int = 200):
-    job = _get_owned_ml_job(job_id, user)
-    lp = job.get("log_path")
-    return {
-        "status": job["status"],
-        "progress": job.get("progress") or {},
-        "logs": _tail_file(Path(lp), tail) if lp else [],
-    }
-
-
-@app.get("/api/quantising/jobs/{job_id}/artifact/{which}")
-async def download_quantising_artifact(job_id: str, which: str, user: str = Depends(current_user)):
-    """Return a short-lived presigned R2 URL for the artifact. JSON (not a
-    302) so the bearer-authed FE can fetch it then open the URL — a plain
-    browser navigation to this endpoint wouldn't carry the auth header."""
-    if which not in ("float_onnx", "int8_onnx"):
-        raise HTTPException(400, "which must be 'float_onnx' or 'int8_onnx'")
-    job = _get_owned_ml_job(job_id, user)
-    key = (job.get("artifacts") or {}).get(f"{which}_r2_key")
-    if not key:
-        raise HTTPException(404, "artifact not found")
-    return {"url": r2_required().presigned_get_url(key), "which": which}
-
-
-# ── ML worker pull-protocol (RTX 3060 rig) ───────────────────────────
-# A remote worker (the rig's train-worker/ agent) claims jobs over HTTP,
-# runs them locally against the shared gd/ modules + R2, and reports back.
-# Outbound-only from the worker's side (works behind NAT). Gated by a
-# shared secret ML_WORKER_TOKEN (mirrors the VLM worker's auth model).
-# Billing stays HERE (authoritative + audited): the worker reports active
-# runtime deltas via /charge; the backend ticks + charges + can tell the
-# worker to stop (cancel / out of credits).
-
-ML_WORKER_TOKEN = os.environ.get("ML_WORKER_TOKEN", "").strip()
-
-
-def require_ml_worker_token(authorization: str = Header(default="")):
-    if not ML_WORKER_TOKEN:
-        raise HTTPException(503, "ML worker token not configured")
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(401, "missing bearer token")
-    token = authorization.split(None, 1)[1].strip()
-    if not hmac.compare_digest(token, ML_WORKER_TOKEN):
-        raise HTTPException(401, "bad worker token")
-
-
-def _ml_source_info(store, project_id: str, user: str, cfg: dict):
-    """Resolve a quantise job's source model for the claim response (no
-    download): (R2 key, classes, arch, imgsz). The rig needs `classes` for the
-    artifact; `arch`/`imgsz` are export hints (quantise also auto-detects the
-    source type and reads imgsz off the model, so these are best-effort)."""
-    sid = (cfg or {}).get("source_job_id")
-    if sid:
-        src = store.get_job(sid)
-        if (src and (src.get("user_id") or "").lower() == user.lower()
-                and src.get("project_id") == project_id
-                and src.get("status") == ml_jobs.STATUS_COMPLETED):
-            arts = src.get("artifacts") or {}
-            k = arts.get("weights_r2_key")
-            if k:
-                try:
-                    imgsz = int((src.get("config") or {}).get("imgsz") or 0) or None
-                except (TypeError, ValueError):
-                    imgsz = None
-                return k, list(arts.get("classes") or []), src.get("model_id"), imgsz
-    model = (load_manifest(project_id, copy=False).get("model") or {})
-    return (model.get("weights_r2_key"),
-            list(model.get("classes") or model.get("tags") or []),
-            model.get("kind"), None)
-
-
-class WorkerClaimIn(BaseModel):
-    worker_id: str
-    job_types: list[str] | None = None
-
-
-@app.post("/api/ml-worker/claim", dependencies=[Depends(require_ml_worker_token)])
-async def ml_worker_claim(payload: WorkerClaimIn):
-    """Claim the next queued job for a remote worker. Returns the job +
-    the project manifest (the rig needs it to stage the dataset) and, for
-    quantise jobs, the source model's R2 key."""
-    store = state["ml_jobs"]
-    types = tuple(payload.job_types) if payload.job_types else (
-        ml_jobs.JOB_TYPE_TRAINING, ml_jobs.JOB_TYPE_QUANTISING)
-    job = store.claim_next(payload.worker_id, job_types=types)
-    if job is None:
-        try:
-            store.recover_stale()
-        except Exception:
-            pass
-        return {"job": None}
-    manifest = load_manifest(job["project_id"]) or {}
-    resp = {"job": _public_ml_job(job), "manifest": manifest}
-    if job.get("job_type") == ml_jobs.JOB_TYPE_QUANTISING:
-        key, sclasses, sarch, simgsz = _ml_source_info(
-            store, job["project_id"], job["user_id"], job.get("config") or {})
-        resp["source_weights_r2_key"] = key
-        resp["source_classes"] = sclasses
-        resp["source_arch"] = sarch
-        if simgsz:
-            resp["source_imgsz"] = simgsz
-    return resp
-
-
-@app.get("/api/ml-worker/projects/{project_id}/image/{filename}",
-         dependencies=[Depends(require_ml_worker_token)])
-def ml_worker_image(project_id: str, filename: str):
-    """Serve a project image's bytes to the rig training/quantising worker.
-
-    V2 originals live on the backend's DISK (project_dir/imports/{filename})
-    and are never mirrored to R2, so the R2-only worker can't read them
-    directly. It pulls originals through here instead; we serve from disk and
-    fall back to R2 for V1 / mirrored images.
-
-    Deliberately a SYNC handler: the disk read / R2 fetch are blocking, so
-    FastAPI runs this in its threadpool — that lets the worker's concurrent
-    image pulls actually run in parallel instead of serialising on the event
-    loop (which made staging a few-hundred-image project take minutes)."""
-    fn = Path(filename).name
-    p = project_dir(project_id) / "imports" / fn
-    if p.exists():
-        return Response(content=p.read_bytes(), media_type="image/jpeg")
-    try:
-        data = r2_required().get_bytes(R2Storage.image_key(project_id, fn))
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(404, "image not found")
-    return Response(content=data, media_type="image/jpeg")
-
-
-class WorkerHeartbeatIn(BaseModel):
-    worker_id: str
-    running: bool = False
-    progress: dict | None = None
-    log: str | None = None
-
-
-@app.post("/api/ml-worker/{job_id}/heartbeat", dependencies=[Depends(require_ml_worker_token)])
-async def ml_worker_heartbeat(job_id: str, payload: WorkerHeartbeatIn):
-    store = state["ml_jobs"]
-    job = store.get_job(job_id)
-    if not job:
-        raise HTTPException(404, "job not found")
-    store.heartbeat(job_id, payload.worker_id)
-    if payload.running and job["status"] == ml_jobs.STATUS_PREPARING:
-        store.mark_running(job_id)
-    if payload.progress is not None:
-        store.update_progress(job_id, payload.progress)
-    if payload.log:
-        lp = _ml_log_path(job["project_id"], job_id)
-        _append_ml_log(lp, payload.log)
-        store.set_log_path(job_id, str(lp))
-    return {"cancel_requested": store.is_cancel_requested(job_id), "status": store.get_job(job_id)["status"]}
-
-
-class WorkerChargeIn(BaseModel):
-    delta_seconds: float
-
-
-@app.post("/api/ml-worker/{job_id}/charge", dependencies=[Depends(require_ml_worker_token)])
-async def ml_worker_charge(job_id: str, payload: WorkerChargeIn):
-    """Record a slice of active TRAINING runtime and bill any completed
-    15-min blocks (server-side, audited). Returns whether the worker
-    should stop (cancelled or out of credits). Quantise jobs are free —
-    runtime isn't billed."""
-    store = state["ml_jobs"]
-    job = store.get_job(job_id)
-    if not job:
-        raise HTTPException(404, "job not found")
-    if job.get("job_type") != ml_jobs.JOB_TYPE_TRAINING:
-        return {"charged_blocks": 0, "over_credits": False, "cancel_requested": store.is_cancel_requested(job_id)}
-    billing = (job.get("config") or {}).get("_billing") or {}
-    view = store.tick_active_runtime(job_id, max(0.0, float(payload.delta_seconds)))
-    over = _ml_user_over_credits(job["user_id"], billing)
-    if view["uncharged_blocks"] > 0:
-        if over:
-            store.request_cancel(job_id)
-        else:
-            store.commit_charge(job_id, user_id=job["user_id"], blocks=view["uncharged_blocks"])
-    return {
-        "charged_blocks": store.get_job(job_id)["charged_blocks"],
-        "over_credits": over,
-        "cancel_requested": store.is_cancel_requested(job_id),
-    }
-
-
-class WorkerCompleteIn(BaseModel):
-    status: str  # completed | failed | cancelled
-    error: str | None = None
-    artifacts: dict | None = None
-
-
-@app.post("/api/ml-worker/{job_id}/complete", dependencies=[Depends(require_ml_worker_token)])
-async def ml_worker_complete(job_id: str, payload: WorkerCompleteIn):
-    store = state["ml_jobs"]
-    job = store.get_job(job_id)
-    if not job:
-        raise HTTPException(404, "job not found")
-    status = payload.status if payload.status in (
-        ml_jobs.STATUS_COMPLETED, ml_jobs.STATUS_FAILED, ml_jobs.STATUS_CANCELLED) else ml_jobs.STATUS_FAILED
-    if payload.artifacts:
-        store.set_artifacts(job_id, payload.artifacts)
-    if job.get("job_type") == ml_jobs.JOB_TYPE_TRAINING and status == ml_jobs.STATUS_COMPLETED:
-        billing = (job.get("config") or {}).get("_billing") or {}
-        view = store.tick_active_runtime(job_id, 0)  # reconcile final completed block
-        if view["uncharged_blocks"] > 0 and not _ml_user_over_credits(job["user_id"], billing):
-            store.commit_charge(job_id, user_id=job["user_id"], blocks=view["uncharged_blocks"])
-        try:
-            art = payload.artifacts or {}
-            mm = load_manifest(job["project_id"])
-            mm["hasModel"] = True
-            mm["model"] = {
-                "kind": job.get("model_id") or "ssdlite_mobilenetv3_large",
-                "weights_r2_key": art.get("weights_r2_key"),
-                "classes": list(art.get("classes") or []),
-                "imgsz": int((job.get("config") or {}).get("imgsz", 320)),
-                "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "job_id": job_id,
-                "summary": art.get("summary") or {},
-            }
-            save_manifest(job["project_id"], mm)
-        except Exception as e:
-            print(f"[ml-worker] manifest stamp failed for {job_id}: {e}")
-    store.set_status(job_id, status, error=payload.error)
-    return {"ok": True}
-
-
-# ---- endpoints ----
-
 @app.get("/api/health")
 async def health():
     return {"ok": True, "device": state["device"], "model_loaded": state["model"] is not None}
@@ -6059,7 +3423,6 @@ async def v2_process_reference(
     text_thr: float = Form(0.25),
     nms_iou: float = Form(0.50),
     force_label: str = Form(""),
-    _credits: "plans.CreditState" = Depends(enforce_credits),
 ):
     """Detect + segment a single reference image, no VLM, no project
     context. Prefers SAM3 (Charlie) — the same detector as the project
@@ -6151,41 +3514,9 @@ async def v2_process_reference(
                     for d in charlie_dets:
                         d["box"] = [round(c, 2) for c in d["box"]]
                 return charlie_dets
-            print(f"[v2-ref] predict tags={tags} thrs=({box_thr},{text_thr},{nms_iou}) size={W}x{H} (orig {W_orig}x{H_orig})")
-            boxes_xyxy, phrases = predict(
-                state["model"], image_pil, tags,
-                float(box_thr), float(text_thr), state["device"], nms_iou=float(nms_iou),
-            )
-            box_list = boxes_xyxy.tolist() if hasattr(boxes_xyxy, "tolist") else list(boxes_xyxy)
-            print(f"[v2-ref] predict → {len(box_list)} box(es), phrases={phrases}")
-            masks_payload: list[dict | None] = []
-            if box_list:
-                masks_payload = segment_boxes(state, image_pil, box_list)
-                print(f"[v2-ref] segment → {sum(1 for m in masks_payload if m)} mask(s)")
-            detections: list[dict] = []
-            for box, phrase, mask in zip(box_list, phrases, masks_payload or [None] * len(box_list)):
-                det_label, det_score = parse_phrase(phrase)
-                # Scale box coords back to original resolution so the FE
-                # displays boxes in the correct position on the full image.
-                if scale != 1.0:
-                    box = [round(c / scale, 2) for c in box]
-                    # Also rescale polygon points inside the mask payload.
-                    if mask and isinstance(mask, dict):
-                        polys = mask.get("polygons") or []
-                        mask = {
-                            **mask,
-                            "polygons": [
-                                [[pt[0] / scale, pt[1] / scale] for pt in poly]
-                                for poly in polys
-                            ],
-                        }
-                detections.append({
-                    "label": det_label,
-                    "score": round(float(det_score), 4),
-                    "box": [round(float(c), 2) for c in box],
-                    "mask": mask,
-                })
-            return detections
+            # GD+SAM2 fallback removed in the portable build — SAM3 is the
+            # only reference detector. None here means it isn't loaded yet.
+            raise RuntimeError("SAM3 not loaded — reference processing unavailable")
         except Exception as exc:
             import traceback
             traceback.print_exc()
@@ -6263,8 +3594,7 @@ async def v2_create_project(
         colour_map = {}
 
     project_id = _uuid.uuid4().hex
-    proj = project_dir(project_id)
-    proj.mkdir(parents=True, exist_ok=True)
+    proj = store.create_dataset_dir(project_id, name)
     (proj / "references").mkdir(exist_ok=True)
 
     manifest = empty_manifest(name, owner=user, project_id=project_id)
@@ -6341,10 +3671,9 @@ async def v2_derive_project(
     make_project = str(create_project).strip().lower() in ("1", "true", "yes", "on")
 
     child_id = _uuid.uuid4().hex
-    proj = project_dir(child_id)
-    proj.mkdir(parents=True, exist_ok=True)
+    proj = store.create_dataset_dir(child_id, name)
     (proj / "references").mkdir(exist_ok=True)
-    (proj / "imports").mkdir(exist_ok=True)
+    (proj / "images").mkdir(exist_ok=True)
 
     child = empty_manifest(name, owner=user, project_id=child_id)
     child["v2"] = True
@@ -6599,30 +3928,9 @@ async def v2_upload_reference(
                         d["box"] = [round(c, 2) for c in d["box"]]
                     print(f"[v2-ref-upload] inline SAM3 tags={tags} → {len(charlie_dets)} det(s)")
                     return charlie_dets
-                W, H = image_pil.size
-                print(
-                    f"[v2-ref-upload] inline GD+SAM tags={tags} "
-                    f"thrs=({box_thr},{text_thr},{nms_iou}) size={W}x{H}"
-                )
-                boxes_xyxy, phrases = predict(
-                    state["model"], image_pil, tags,
-                    float(box_thr), float(text_thr), state["device"],
-                    nms_iou=float(nms_iou),
-                )
-                box_list = boxes_xyxy.tolist() if hasattr(boxes_xyxy, "tolist") else list(boxes_xyxy)
-                masks_payload: list[dict | None] = []
-                if box_list:
-                    masks_payload = segment_boxes(state, image_pil, box_list)
-                out: list[dict] = []
-                for b, p, mk in zip(box_list, phrases, masks_payload or [None] * len(box_list)):
-                    lbl, sc = parse_phrase(p)
-                    out.append({
-                        "label": lbl,
-                        "score": round(float(sc), 4),
-                        "box": [round(float(c), 2) for c in b],
-                        "mask": mk,
-                    })
-                return out
+                # GD+SAM2 fallback removed — no detections when SAM3 isn't
+                # loaded; the whole-image fallback box below still applies.
+                return []
 
             try:
                 async with state["gpu_lock"].interactive():
@@ -7054,7 +4362,7 @@ async def v2_upload_import(
     if not raw:
         raise HTTPException(400, "empty image upload")
 
-    imports_dir = proj / "imports"
+    imports_dir = proj / "images"
     imports_dir.mkdir(exist_ok=True)
     import_id = _uuid.uuid4().hex
     ext = Path(image.filename or "image").suffix or ".jpg"
@@ -7245,7 +4553,7 @@ async def v2_upload_import_raw(
     except Exception as _e:
         raise HTTPException(400, f"cannot decode image: {_e}")
 
-    imports_dir = proj / "imports"
+    imports_dir = proj / "images"
     imports_dir.mkdir(exist_ok=True)
     import_id = _uuid.uuid4().hex
     # Stored format is always server-decodable: JPEG sources keep their
@@ -7545,7 +4853,7 @@ async def v2_upload_import_raw_batch(
             f"too many files in one batch ({len(images)} > {MAX_FILES_PER_UPLOAD_BATCH})",
         )
 
-    imports_dir = proj / "imports"
+    imports_dir = proj / "images"
     imports_dir.mkdir(exist_ok=True)
     loop = asyncio.get_running_loop()
 
@@ -7837,7 +5145,6 @@ class V2ImportsFromUrlsRequest(BaseModel):
     "/api/v2/projects/{project_id}/imports/from_urls",
     dependencies=[
         Depends(require_project_owner),
-        Depends(enforce_credits),
     ],
 )
 async def v2_imports_from_urls(
@@ -7910,7 +5217,7 @@ async def v2_imports_from_urls(
             if isinstance(u, str) and u:
                 existing_sources.add(u)
 
-    imports_dir = proj / "imports"
+    imports_dir = proj / "images"
     imports_dir.mkdir(exist_ok=True)
 
     added: list[str] = []
@@ -8163,7 +5470,7 @@ async def v2_update_import(project_id: str, import_id: str, payload: V2ImportPat
                 _invalidate_labelled_preview(project_id, import_id)
                 fn = imp.get("filename")
                 if fn:
-                    src = proj / "imports" / fn
+                    src = proj / "images" / fn
                     edited = imp.get("editedBoxes")
                     edited_set = bool(imp.get("editedBoxesSet"))
                     # Trust an explicit user-cleared state (set=True,
@@ -8215,7 +5522,7 @@ async def v2_delete_import(project_id: str, import_id: str):
                 fn = imp.get("filename")
                 if fn:
                     try:
-                        (proj / "imports" / fn).unlink(missing_ok=True)
+                        (proj / "images" / fn).unlink(missing_ok=True)
                     except Exception as e:
                         print(f"[v2-import-delete] couldn't unlink {fn}: {e}")
                 _invalidate_labelled_preview(project_id, import_id)
@@ -8298,7 +5605,7 @@ async def v2_delete_imports_batch(project_id: str, payload: DeleteImportsBatchIn
                 fn = imp.get("filename")
                 if fn:
                     try:
-                        (proj / "imports" / fn).unlink(missing_ok=True)
+                        (proj / "images" / fn).unlink(missing_ok=True)
                     except Exception as e:
                         print(f"[v2-import-delete-batch] couldn't unlink {fn}: {e}")
                 _invalidate_labelled_preview(project_id, iid)
@@ -8385,7 +5692,7 @@ def _import_file_sha256(project_id: str, filename: str) -> str | None:
     """SHA256 of an import's file bytes. None on missing/unreadable —
     those imports just don't participate in the exact-dedup groups."""
     import hashlib
-    p = project_dir(project_id) / "imports" / filename
+    p = project_dir(project_id) / "images" / filename
     if not p.exists():
         return None
     try:
@@ -8625,7 +5932,7 @@ async def v2_dedupe_imports(project_id: str, payload: DedupeIn):
                 fn = imp.get("filename")
                 if fn:
                     try:
-                        (proj / "imports" / fn).unlink(missing_ok=True)
+                        (proj / "images" / fn).unlink(missing_ok=True)
                     except Exception as e:
                         print(f"[v2-dedupe] couldn't unlink {fn}: {e}")
                 _invalidate_labelled_preview(project_id, iid)
@@ -8780,7 +6087,7 @@ async def v2_serve_import(project_id: str, filename: str, w: int = 0):
     variant (longest edge <= N) so 4K originals load fast; ?w=0 (default) serves
     the full original."""
     proj = project_dir(project_id)
-    imports_root = (proj / "imports").resolve()
+    imports_root = (proj / "images").resolve()
     target = (imports_root / filename).resolve()
     try:
         target.relative_to(imports_root)
@@ -10276,7 +7583,7 @@ def _backfill_missing_embeddings(project_id: str, imports: list[dict], limit: in
             continue
         if _load_image_embedding(project_id, iid) is not None:
             continue
-        src = proj / "imports" / fn
+        src = proj / "images" / fn
         if not src.exists():
             continue
         try:
@@ -10904,7 +8211,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
         filename = imp.get("filename")
         if not import_id or not filename:
             return 0
-        src_path = proj / "imports" / filename
+        src_path = proj / "images" / filename
         if not src_path.exists():
             print(f"[augment_generate] src missing for {filename} ({import_id}) — skipping")
             return 0
@@ -11747,7 +9054,7 @@ async def v2_serve_labelled_preview(project_id: str, import_id: str):
     fn = imp.get("filename")
     if not fn:
         raise HTTPException(404, "import has no stored filename")
-    src_path = proj / "imports" / fn
+    src_path = proj / "images" / fn
     if not src_path.exists():
         raise HTTPException(404, "source image missing on disk")
 
@@ -11937,7 +9244,7 @@ async def serve_cover_thumb(project_id: str, w: int = 480, ai: int = 0):
         # cover-from-import flow). The first existing path wins.
         candidates: list[Path] = [
             proj / "references" / cover,
-            proj / "imports" / cover,
+            proj / "images" / cover,
         ]
         src_path = next((p for p in candidates if p.exists()), None)
         if src_path is None:
@@ -12070,393 +9377,11 @@ def _load_reference_image_pil(raw: bytes, project_id: str, filename: str):
     raise HTTPException(400, "no image bytes and no project_id/filename to load from disk")
 
 
-@app.post("/api/v2/references/segment_box")
-async def v2_segment_box(
-    image: UploadFile | None = File(None),
-    box: str = Form(...),
-    project_id: str = Form(""),
-    filename: str = Form(""),
-    _credits: "plans.CreditState" = Depends(enforce_credits),
-):
-    """SAM2 on one ad-hoc box on an uploaded image. Stateless mirror of
-    /api/projects/{id}/segment_box used by the V2 reference editor."""
-    if state.get("segmenter") is None:
-        raise HTTPException(503, "SAM2 not loaded")
-    try:
-        box_list = json.loads(box)
-        if not (isinstance(box_list, list) and len(box_list) == 4):
-            raise ValueError("box must be [x0,y0,x1,y1]")
-        box_xyxy = [float(c) for c in box_list]
-    except Exception as e:
-        raise HTTPException(400, f"invalid box payload: {e}")
-
-    raw = await image.read() if image is not None else b""
-    image_pil = _load_reference_image_pil(raw, project_id, filename)
-
-    loop = asyncio.get_running_loop()
-
-    def _run():
-        try:
-            masks = segment_boxes(state, image_pil, [box_xyxy])
-            return masks[0] if masks else None
-        except Exception as exc:
-            import traceback
-            traceback.print_exc()
-            raise RuntimeError(f"segment_box failed: {exc}") from exc
-
-    try:
-        # Interactive priority — user clicked "add box" / dragged a
-        # box in the references editor and is waiting on the result.
-        # Jumps ahead of background augment / label runners.
-        async with state["gpu_lock"].interactive():
-            mask = await loop.run_in_executor(None, _run)
-    except Exception as exc:
-        raise HTTPException(500, f"segment_box error: {exc}")
-    return {"mask": mask}
-
-
-@app.post("/api/v2/references/classify_box")
-async def v2_classify_box(
-    image: UploadFile | None = File(None),
-    box: str = Form(...),
-    labels: str = Form(...),
-    project_id: str = Form(""),
-    filename: str = Form(""),
-    _credits: "plans.CreditState" = Depends(enforce_credits),
-):
-    """Pick a label for an ad-hoc box from the supplied label list, by
-    re-running GroundingDINO on a small padded crop. Stateless mirror of
-    /api/projects/{id}/classify_box."""
-    if state.get("model") is None:
-        raise HTTPException(503, "GroundingDINO not loaded")
-    try:
-        box_list = json.loads(box)
-        if not (isinstance(box_list, list) and len(box_list) == 4):
-            raise ValueError("box must be [x0,y0,x1,y1]")
-        x0, y0, x1, y1 = (float(c) for c in box_list)
-    except Exception as e:
-        raise HTTPException(400, f"invalid box payload: {e}")
-    try:
-        tag_list = json.loads(labels)
-        if not isinstance(tag_list, list) or not all(isinstance(t, str) for t in tag_list):
-            raise ValueError("labels must be a JSON array of strings")
-    except Exception as e:
-        raise HTTPException(400, f"invalid labels payload: {e}")
-    tags = [t.strip() for t in tag_list if t and t.strip()]
-    if not tags:
-        return {"label": None, "score": None, "reason": "no labels"}
-
-    raw = await image.read() if image is not None else b""
-    image_pil = _load_reference_image_pil(raw, project_id, filename)
-    W, H = image_pil.size
-    x0, x1 = sorted((max(0.0, x0), min(float(W), x1)))
-    y0, y1 = sorted((max(0.0, y0), min(float(H), y1)))
-    if x1 - x0 < 2 or y1 - y0 < 2:
-        return {"label": None, "score": None, "reason": "box too small"}
-
-    # Pad the crop with ~10% context on each side so GD has scene info.
-    pad = 0.10
-    bw = x1 - x0
-    bh = y1 - y0
-    cx0 = max(0.0, x0 - bw * pad)
-    cy0 = max(0.0, y0 - bh * pad)
-    cx1 = min(float(W), x1 + bw * pad)
-    cy1 = min(float(H), y1 + bh * pad)
-
-    loop = asyncio.get_running_loop()
-
-    def _run():
-        try:
-            crop = image_pil.crop((int(cx0), int(cy0), int(cx1), int(cy1)))
-            boxes_xyxy, phrases = predict(
-                state["model"], crop, tags,
-                0.20, 0.20, state["device"], nms_iou=0.5,
-            )
-            if not phrases:
-                return None, None
-            best_score = -1.0
-            best_label: str | None = None
-            for phrase in phrases:
-                lbl, sc = parse_phrase(phrase)
-                if lbl and sc is not None and sc > best_score:
-                    best_score = float(sc)
-                    best_label = lbl
-            return best_label, best_score if best_score >= 0 else None
-        except Exception as exc:
-            import traceback
-            traceback.print_exc()
-            raise RuntimeError(f"classify_box failed: {exc}") from exc
-
-    try:
-        # Interactive priority — VLM label decision blocking the
-        # user's relabel UI.
-        async with state["gpu_lock"].interactive():
-            label, score = await loop.run_in_executor(None, _run)
-    except Exception as exc:
-        raise HTTPException(500, f"classify_box error: {exc}")
-    return {"label": label, "score": score}
-
-
-@app.post("/api/v2/references/detect_point")
-async def v2_detect_point(
-    image: UploadFile | None = File(None),
-    point: str = Form(...),
-    project_id: str = Form(""),
-    filename: str = Form(""),
-    _credits: "plans.CreditState" = Depends(enforce_credits),
-):
-    """One-click detection on a reference image. Routes through the shared
-    _detect_point_unified helper so the reference editor's click-to-detect
-    behaves exactly like the dataset viewer's (SAM2 floor, bounds-clamp,
-    never dead-ends). The image comes from the upload when present, else is
-    loaded from disk by project_id + filename so saved references work even
-    when the browser can't re-upload the bytes. The label stays None here;
-    the reference editor assigns the class via classify_box."""
-    try:
-        pt = json.loads(point)
-        if not (isinstance(pt, list) and len(pt) == 2):
-            raise ValueError("point must be [x, y]")
-        px, py = float(pt[0]), float(pt[1])
-    except Exception as e:
-        raise HTTPException(400, f"invalid point payload: {e}")
-
-    raw = await image.read() if image is not None else b""
-    image_pil = _load_reference_image_pil(raw, project_id, filename)
-
-    result = await _detect_point_unified(
-        image_pil, [px, py],
-        candidate_labels=[],
-        project_id=None,
-        dataset_type_hint="generic",
-        allow_sam3=False,
-        allow_reject=False,
-        is_labelled=False,
-    )
-    return {
-        "box_xyxy": result["box_xyxy"],
-        "mask": result["mask"],
-        "label": result.get("label"),
-        "score": result.get("score"),
-        "mask_score": result.get("mask_score"),
-    }
-
-
-@app.post("/api/v2/imports/detect_point")
-async def v2_imports_detect_point(
-    image: UploadFile = File(...),
-    point: str = Form(...),
-    project_id: str = Form(""),
-    _credits: "plans.CreditState" = Depends(enforce_credits),
-):
-    """One-click detection that runs the V2 imports resolver on a
-    bbox derived from a single click point. SAM2 segments → DINOv2
-    embeds (mask grey-fill + TTA, same as full-image imports) →
-    resolver picks a label from the project's reference centroids.
-
-    Score mode follows the project's dataset_type (cached via
-    `/api/v2/projects/{id}/dataset-type`):
-      - general → centroid scoring (sharp peak/valley contrast)
-      - specific → top-K kNN scoring (multimodal references)
-
-    Falls back gracefully:
-      - no project_id → returns box+mask but label=None
-      - no reference embeddings yet → ditto
-      - too small / no mask → 422
-    """
-    if state.get("segmenter") is None:
-        raise HTTPException(503, "SAM2 not loaded")
-    import v2_dinov2
-    if not v2_dinov2.is_loaded():
-        raise HTTPException(503, "DINOv2 not loaded yet (still warming up)")
-
-    try:
-        pt = json.loads(point)
-        if not (isinstance(pt, list) and len(pt) == 2):
-            raise ValueError("point must be [x, y]")
-        px, py = float(pt[0]), float(pt[1])
-    except Exception as e:
-        raise HTTPException(400, f"invalid point payload: {e}")
-
-    raw = await image.read()
-    if not raw:
-        raise HTTPException(400, "empty image upload")
-    try:
-        image_pil = PILImage.open(io.BytesIO(raw)).convert("RGB")
-    except Exception as e:
-        raise HTTPException(400, f"could not decode image: {e}")
-    W, H = image_pil.size
-
-    loop = asyncio.get_running_loop()
-
-    # Split into a GPU phase (SAM2 + encoders) and a CPU/IO resolve
-    # phase (reference load + manifest read + dataset-type + resolver).
-    # Only the GPU phase holds the interactive GPU lock, so the lock
-    # isn't pinned during the manifest read / Claude dataset-type lookup
-    # / numpy resolver — those used to block every other GPU user (and
-    # each other) for the full click latency. Box + mask come straight
-    # out of the GPU phase, so the canvas paints the segmentation the
-    # moment SAM2 returns even though the label resolves a beat later.
-    def _run_gpu():
-        seg = segment_point(state, image_pil, [px, py])
-        if seg is None:
-            return None
-        bx = seg["box_xyxy"]
-        x0 = max(0, int(round(float(bx[0]))))
-        y0 = max(0, int(round(float(bx[1]))))
-        x1 = min(W, int(round(float(bx[2]))))
-        y1 = min(H, int(round(float(bx[3]))))
-        if x1 - x0 < 4 or y1 - y0 < 4:
-            return None
-        mask_polys = seg["polygons"]
-
-        # Embed via the same procedure as the full-image imports path.
-        # Both encoders see the same square; SigLIP runs only when
-        # loaded (the resolver tolerates a None query embedding for
-        # SigLIP and falls back to DINOv2-only scoring).
-        import v2_siglip as _v2s
-        clean = v2_dinov2.inpaint_bbox_crop(image_pil, (x0, y0, x1, y1), mask_polys)
-        square = v2_dinov2.center_square_crop(clean)
-        vecs = v2_dinov2.encode_images_batch([square])
-        if vecs is None or vecs.shape[0] == 0:
-            return None
-        emb = [round(float(x), 6) for x in vecs[0].tolist()]
-        emb_siglip: list[float] | None = None
-        if _v2s.is_loaded():
-            try:
-                s_vecs = _v2s.encode_images_batch([square])
-                if s_vecs is not None and s_vecs.shape[0] > 0:
-                    emb_siglip = [round(float(x), 6) for x in s_vecs[0].tolist()]
-            except Exception as e:
-                print(f"[v2-detect_point] siglip encode failed: {e}")
-        return {
-            "bx": bx,
-            "mask_polys": mask_polys,
-            "mask_score": seg.get("score"),
-            "emb": emb,
-            "emb_siglip": emb_siglip,
-        }
-
-    def _resolve(gpu_out: dict) -> dict:
-        bx = gpu_out["bx"]
-        mask_polys = gpu_out["mask_polys"]
-        emb = gpu_out["emb"]
-        emb_siglip = gpu_out["emb_siglip"]
-        base_response = {
-            "box_xyxy": [round(float(c), 2) for c in bx],
-            "mask": {"polygons": mask_polys},
-            "mask_score": gpu_out["mask_score"],
-        }
-
-        if not project_id:
-            return {
-                **base_response,
-                "label": None,
-                "score": None,
-                "rejected": False,
-                "reject_reason": None,
-                "reason": "no project_id supplied",
-            }
-
-        try:
-            by_label, by_label_siglip, _dirty = _v2_load_or_backfill_reference_embeddings(project_id)
-        except Exception as e:
-            print(f"[v2-detect_point] reference embeddings load failed: {e}")
-            by_label = {}
-            by_label_siglip = {}
-        refs_by_label_arr = _v2_stack_refs(by_label)
-        refs_by_label_siglip_arr = _v2_stack_refs(by_label_siglip)
-        if not refs_by_label_arr:
-            return {
-                **base_response,
-                "label": None,
-                "score": None,
-                "rejected": False,
-                "reject_reason": None,
-                "reason": "no reference embeddings yet — upload references first",
-            }
-
-        # Project's labels in canonical casing for the response.
-        # copy=False — read-only, skips the manifest deepcopy.
-        manifest = load_manifest(project_id, copy=False) or {}
-        proj_tags = manifest.get("tags") or []
-        label_display = {str(t).lower().strip(): str(t) for t in proj_tags}
-
-        # Dataset type → score mode dispatch.
-        try:
-            dt = _classify_dataset_type_cached(project_id, list(proj_tags))
-            dataset_type = dt.get("type") if isinstance(dt, dict) else "general"
-        except Exception as e:
-            print(f"[v2-detect_point] dataset-type lookup failed: {e}")
-            dataset_type = "general"
-        score_mode = "knn" if dataset_type == "specific" else "centroid"
-
-        # The specific resolver handles gd_label=None gracefully:
-        # the relabel rule fires when best_sim ≥ 0.5 and there's no
-        # GD label to defend against. So we route both general and
-        # specific click-to-detect through it, just toggling the
-        # score_mode so general gets centroid contrast.
-        # Per-class thresholds from the LOO distribution of the
-        # DINOv2 refs (the primary signal). DINOv2-only because
-        # combining encoder thresholds is non-trivial and the final
-        # `sims` is mostly DINOv2-driven at the default 40% siglip
-        # weight. Cheap to compute on every call (vectorised over
-        # ~5-50 refs per class) so we don't need to cache.
-        class_thresholds = _v2_compute_class_thresholds(refs_by_label_arr)
-        verdict = _v2_resolve_label_specific(
-            emb,
-            None,
-            refs_by_label_arr,
-            label_display,
-            score_mode=score_mode,
-            gd_score=None,
-            embedding_siglip=emb_siglip,
-            refs_by_label_siglip=refs_by_label_siglip_arr or None,
-            class_thresholds=class_thresholds,
-        )
-
-        return {
-            **base_response,
-            "label": verdict.get("pred_label"),
-            "score": verdict.get("embed_sim_for_label"),
-            "rejected": verdict.get("rejected", False),
-            "reject_reason": verdict.get("reject_reason"),
-            "embed_nearest_label": verdict.get("embed_nearest_label"),
-            "embed_nearest_sim": verdict.get("embed_nearest_sim"),
-            "embed_sims": verdict.get("sims") or {},
-            "dataset_type": dataset_type,
-            "score_mode": score_mode,
-        }
-
-    try:
-        # Interactive priority — the user just clicked-to-detect on
-        # a dataset image and is staring at the canvas. This is THE
-        # main "user-facing" GPU path the user wants prioritised.
-        # The GPU lock is held ONLY for SAM2 + encoders.
-        async with state["gpu_lock"].interactive():
-            gpu_out = await loop.run_in_executor(None, _run_gpu)
-    except Exception as exc:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(500, f"detect_point error: {exc}")
-    if gpu_out is None:
-        raise HTTPException(422, "no mask found at that point")
-    # Resolve phase runs WITHOUT the GPU lock — reference load, manifest
-    # read, dataset-type lookup, and the numpy resolver are CPU/IO.
-    try:
-        detection = await loop.run_in_executor(None, _resolve, gpu_out)
-    except Exception as exc:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(500, f"detect_point resolve error: {exc}")
-    return detection
-
-
 @app.post("/api/v2/references/embed_crops")
 async def v2_embed_crops(
     image: UploadFile = File(...),
     boxes: str = Form(...),
     return_crop: bool = Form(False),
-    _credits: "plans.CreditState" = Depends(enforce_credits),
 ):
     """Crop each box from `image` and embed each crop with DINOv2-base
     (matches `detect_and_crop.py` in the repo root). Embeddings are
@@ -14491,6 +11416,10 @@ def _v2_apply_containment(
             #     Bigger is the more confident one in that case.
             # Confidence here = gd_score + embed_sim_for_label. We
             # reject whichever side has the lower combined score.
+            # (`small_key` was never assigned in the SaaS build — a latent
+            # NameError on this path; the intended value is the smaller
+            # box's normalised label, mirroring the sibling NMS pass.)
+            small_key = str(small_label).strip().lower()
             all_agree = (
                 big_gd_key == small_key
                 and big_embed_nearest_key == small_key
@@ -14856,11 +11785,12 @@ def _classify_dataset_type_cached(project_id: str, tags: list[str]) -> dict:
             out.setdefault("source", "auto")
             return out
 
-    from llm import classify_dataset_type as _classify
-    type_, reason = _classify(list(tags))
+    # Portable build: no Claude auto-classification. Datasets default to
+    # "general"; adding reference images or the explicit POST /dataset-type
+    # override (both handled above) flip it to "specific".
     out = {
-        "type": type_,
-        "reason": reason,
+        "type": "general",
+        "reason": "default (set reference images or choose manually to switch)",
         "labels_signature": sig,
         "prompt_version": _DATASET_TYPE_PROMPT_VERSION,
         "source": "auto",
@@ -14968,110 +11898,6 @@ async def v2_dataset_type(project_id: str):
 # Built from a COMPACT numeric summary (no images) and cached by a coarse
 # signature so Claude is only hit when the dataset materially changes.
 
-def _ai_insight_cache_path(project_id: str) -> Path:
-    return project_dir(project_id) / "ai_insight.json"
-
-
-def _read_ai_insight_sidecar(project_id: str) -> dict | None:
-    p = _ai_insight_cache_path(project_id)
-    if not p.exists():
-        return None
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
-
-
-def _write_ai_insight_sidecar(project_id: str, data: dict) -> None:
-    try:
-        p = _ai_insight_cache_path(project_id)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(data), encoding="utf-8")
-    except Exception as e:
-        print(f"[ai-insight] cache write failed for {project_id}: {e}")
-
-
-def _ai_insight_summary(stats: dict) -> dict:
-    counts = (stats or {}).get("counts") or {}
-    labels = (stats or {}).get("labels") or []
-    health = (stats or {}).get("health") or {}
-    images = int(counts.get("imports") or 0)
-    with_det = counts.get("with_detections")
-    with_det = int(with_det) if isinstance(with_det, (int, float)) else None
-    no_det = max(0, images - with_det) if with_det is not None else None
-    top = sorted(
-        (l for l in labels if isinstance(l, dict) and l.get("label")),
-        key=lambda l: -(l.get("count") or 0),
-    )[:8]
-    score = health.get("score")
-    return {
-        "images": images,
-        "labelled": with_det,
-        "no_detections": no_det,
-        "near_duplicates": counts.get("near_duplicates"),
-        "labels": {str(l.get("label")): int(l.get("count") or 0) for l in top},
-        "health": round(score) if isinstance(score, (int, float)) else None,
-    }
-
-
-def _ai_insight_signature(summary: dict) -> str:
-    # COARSE signature — the insight should regenerate (a Claude call) only on a
-    # genuinely material change, not on every few images. Counts collapse to wide
-    # magnitude tiers, health is excluded entirely (it drifts with every label),
-    # and only the SET of label names + the coverage/duplicate booleans round out
-    # the key. This keeps token usage to roughly one call per real milestone.
-    def tier(n) -> int | None:
-        if not isinstance(n, (int, float)):
-            return None
-        n = int(n)
-        for t in (0, 10, 50, 150, 500, 1500, 5000, 15000):
-            if n <= t:
-                return t
-        return 50000
-    key = {
-        "img": tier(summary.get("images")),
-        "lab": tier(summary.get("labelled")),
-        "nod": (summary.get("no_detections") or 0) > 0,
-        "dup": (summary.get("near_duplicates") or 0) > 0,
-        "labels": sorted((summary.get("labels") or {}).keys()),
-    }
-    return hashlib.sha1(json.dumps(key, sort_keys=True).encode("utf-8")).hexdigest()[:16]
-
-
-@app.get(
-    "/api/v2/projects/{project_id}/ai-insight",
-    dependencies=[Depends(require_project_read_access)],
-)
-async def v2_ai_insight(project_id: str):
-    """One Claude-written coaching insight for the Overview, cached by a coarse
-    signature so the model is only called when the dataset materially changes."""
-    if not project_dir(project_id).exists():
-        raise HTTPException(404)
-    try:
-        stats = await asyncio.to_thread(_compute_dataset_stats_v2, project_id, True)
-    except Exception:
-        stats = {}
-    summary = _ai_insight_summary(stats or {})
-    # Not worth a model call on a near-empty dataset.
-    if (summary.get("images") or 0) < 3:
-        return {"insight": None}
-    sig = _ai_insight_signature(summary)
-    cached = _read_ai_insight_sidecar(project_id)
-    if isinstance(cached, dict) and cached.get("sig") == sig and cached.get("insight"):
-        return {"insight": cached["insight"]}
-    from llm import dataset_insight as _dataset_insight
-    insight = await asyncio.to_thread(_dataset_insight, summary)
-    if insight:
-        _write_ai_insight_sidecar(project_id, {"sig": sig, "insight": insight})
-        return {"insight": insight}
-    # Generation failed (no key / API error): serve a stale insight if we have
-    # one rather than nothing, so the card doesn't flicker empty.
-    if isinstance(cached, dict) and cached.get("insight"):
-        return {"insight": cached["insight"]}
-    return {"insight": None}
-
-
 @app.get(
     "/api/v2/projects/{project_id}/access",
     dependencies=[Depends(require_project_read_access)],
@@ -15127,746 +11953,6 @@ async def v2_set_dataset_type(project_id: str, payload: DatasetTypeOverrideIn):
 
 class DatasetTypePreviewBody(BaseModel):
     labels: list[str]
-
-
-@app.post("/api/v2/dataset-type/preview")
-async def v2_dataset_type_preview(body: DatasetTypePreviewBody):
-    """Classify a label set as general or specific BEFORE a project
-    exists — used by onboarding so we can skip the references stage
-    when the labels describe distinct categories. Stateless: no
-    project_id, no caching, no manifest write. Returns
-    {type, reason}."""
-    from llm import classify_dataset_type
-    loop = asyncio.get_running_loop()
-    type_, reason = await loop.run_in_executor(
-        None, classify_dataset_type, list(body.labels or []),
-    )
-    return {"type": type_, "reason": reason}
-
-
-@app.post("/api/v2/imports/process")
-async def v2_import_process(
-    image: UploadFile = File(...),
-    labels: str = Form(...),
-    project_id: str = Form(""),
-    # Lower box threshold than V1's "normal" preset (was 0.05) so the
-    # dataset gallery surfaces more candidate objects — VLM + embedding
-    # QC downstream can still discriminate noise from real objects.
-    box_thr: float = Form(0.02),
-    text_thr: float = Form(0.10),
-    nms_iou: float = Form(0.70),
-    # Native-resolution tiling opt-in for large frames (e.g. 4K aerial):
-    # "false" = classic single-pass (processor downscales), truthy = run
-    # GD per overlapping native tile and merge. Heavier; user opted in.
-    tile_native: str = Form("false"),
-    tile_size: int = Form(1024),
-    _credits: "plans.CreditState" = Depends(enforce_credits),
-):
-    """V2 import pipeline: GroundingDINO → SAM2 → VLM (label) → DINOv2 (QC).
-
-    GD locates candidate boxes (with synonym-expanded prompts via
-    Claude — always on for V2). SAM2 segments each box. The VLM
-    (`vlm_classify`) chooses the canonical user label per box from the
-    project's label list. DINOv2-base embeds each box for QC: the
-    client compares the embedding against per-label centroids of the
-    reference set so you can spot "VLM said X but visually it's Y".
-
-    Response:
-        {
-          "width": int, "height": int,
-          "prompt_tags": str[],           # final prompt list passed to GD
-          "timings": {
-            "gd_ms": float,               # GroundingDINO predict (image-level)
-            "sam_ms": float,              # SAM2 segment_boxes (image-level)
-            "embed_ms": float,            # DINOv2 batched forward (image-level)
-            "vlm_total_ms": float         # sum of per-box VLM calls
-          },
-          "detections": [
-            {
-              "box": [x0,y0,x1,y1],
-              "mask": {"polygons": ...} | null,
-              "embedding": float[D],      # DINOv2 (D=1024 for large, 768 for base), L2-normalised
-              "gd_label": str | null,     # canonical user tag (post-canonicalise)
-              "gd_variant": str | null,   # raw GD phrase that fired
-              "gd_score": float | null,   # GD confidence
-              "vlm_label": str | null,    # VLM's chosen label (canonical)
-              "vlm_score": float | null,  # VLM confidence (0..1)
-              "vlm_ms": float,            # per-box VLM latency
-              "crop_jpg_b64": str         # for visualisation
-            }
-          ]
-        }
-    """
-    import base64
-    import v2_dinov2
-    # VLM is re-enabled for V2 — it's INFORMATIONAL ONLY now. The
-    # backend's label resolver (`_v2_resolve_label`) decides labels
-    # purely from GD + embedding centroids; vlm_classify just runs
-    # alongside so the pipeline popup can display "what would the
-    # VLM call this?" as a third opinion the user can sanity-check
-    # disagreements against. VLM_WORKER_URL still routes to the
-    # remote worker box when configured.
-    from vlm_validate import vlm_classify
-
-    if state.get("model") is None:
-        raise HTTPException(503, "GroundingDINO not loaded")
-    if state.get("segmenter") is None:
-        raise HTTPException(503, "SAM2 not loaded")
-    if not v2_dinov2.is_loaded():
-        raise HTTPException(503, "DINOv2-base not loaded yet (still warming up)")
-
-    try:
-        tag_list = json.loads(labels)
-        if not isinstance(tag_list, list) or not all(isinstance(t, str) for t in tag_list):
-            raise ValueError("labels must be a JSON array of strings")
-    except Exception as e:
-        raise HTTPException(400, f"invalid labels payload: {e}")
-    tags = [t.strip() for t in tag_list if t and t.strip()]
-
-    # Extract any project labels mentioned in the uploaded image's
-    # filename — used as a tiebreak hint for fence-tied label sims.
-    image_filename = getattr(image, "filename", None)
-    filename_labels = _v2_filename_labels(image_filename, tags)
-    if filename_labels:
-        print(f"[v2-import] filename hint: {image_filename!r} → {sorted(filename_labels)}")
-
-    raw = await image.read()
-    if len(raw) > MAX_UPLOAD_BYTES_PER_FILE:
-        raise HTTPException(
-            413,
-            f"image too large: {len(raw)} bytes (max {MAX_UPLOAD_BYTES_PER_FILE})",
-        )
-    if not raw:
-        raise HTTPException(400, "empty image upload")
-    try:
-        image_pil = PILImage.open(io.BytesIO(raw)).convert("RGB")
-    except Exception as e:
-        raise HTTPException(400, f"could not decode image: {e}")
-    W, H = image_pil.size
-
-    if not tags:
-        return {"width": W, "height": H, "prompt_tags": [], "detections": []}
-
-    loop = asyncio.get_running_loop()
-
-    # Synonyms are ALWAYS on for V2 labelling tasks. When project_id is
-    # known the per-project synonyms cache + Claude batch call kicks
-    # in (same path V1 uses); without project_id we fall back to base
-    # tags only since the cache is project-scoped.
-    import time as _t
-    syn_t0 = _t.perf_counter()
-    if project_id:
-        try:
-            prompt_tags, canonical_map, _color_info = await loop.run_in_executor(
-                None, expand_tags_with_cache, project_id, tags,
-            )
-            syn_ms = (_t.perf_counter() - syn_t0) * 1000.0
-            print(f"[v2-import] synonyms expanded {tags} → {prompt_tags} ({len(prompt_tags)} tags, {syn_ms:.0f} ms)")
-        except Exception as e:
-            print(f"[v2-import] synonym expansion failed: {e} — falling back to base tags")
-            prompt_tags = list(tags)
-            canonical_map = {t.lower(): t for t in tags}
-    else:
-        prompt_tags = list(tags)
-        canonical_map = {t.lower(): t for t in tags}
-
-    def _infer():
-        import time as _time
-        try:
-            print(f"[v2-import] predict {len(prompt_tags)} tag(s) thrs=({box_thr},{text_thr},{nms_iou}) size={W}x{H} tags={prompt_tags}")
-            # Split the GD step so we can see whether time is going to
-            # the model forward pass (GPU) or the post-processing
-            # (CPU NMS / containment / canonicalise).
-            t_predict = _time.perf_counter()
-            tile_on = (tile_native or "").strip().lower() in ("1", "true", "yes", "on")
-            if tile_on:
-                boxes_xyxy, phrases = predict_tiled(
-                    state["model"], image_pil, prompt_tags,
-                    float(box_thr), float(text_thr), state["device"], nms_iou=float(nms_iou),
-                    tile_size=int(tile_size or 1024),
-                )
-            else:
-                boxes_xyxy, phrases = predict(
-                    state["model"], image_pil, prompt_tags,
-                    float(box_thr), float(text_thr), state["device"], nms_iou=float(nms_iou),
-                )
-            predict_ms = (_time.perf_counter() - t_predict) * 1000.0
-            n_raw = boxes_xyxy.shape[0] if hasattr(boxes_xyxy, "shape") else len(boxes_xyxy)
-            t_canon = _time.perf_counter()
-            boxes_xyxy, phrases, variants = canonicalize_detections(
-                boxes_xyxy, phrases, canonical_map, float(nms_iou),
-            )
-            canon_ms = (_time.perf_counter() - t_canon) * 1000.0
-            gd_ms = predict_ms + canon_ms
-            box_list = boxes_xyxy.tolist() if hasattr(boxes_xyxy, "tolist") else list(boxes_xyxy)
-            print(f"[v2-import] GD breakdown — predict {predict_ms:.0f} ms ({n_raw} raw boxes), canonicalise {canon_ms:.0f} ms ({len(box_list)} kept) → total {gd_ms:.0f} ms")
-
-            # SAM2: one call segments all boxes for this image at once.
-            sam_ms = 0.0
-            masks_payload: list[dict | None] = []
-            if box_list:
-                t1 = _time.perf_counter()
-                if tile_on:
-                    masks_payload = segment_boxes_windowed(state, image_pil, box_list)
-                else:
-                    masks_payload = segment_boxes(state, image_pil, box_list)
-                sam_ms = (_time.perf_counter() - t1) * 1000.0
-                print(f"[v2-import] segment → {sum(1 for m in masks_payload if m)} mask(s) in {sam_ms:.1f} ms")
-            if len(variants) < len(box_list):
-                variants = list(variants) + [""] * (len(box_list) - len(variants))
-
-            # Pass 1: validate + crop everything for the embedding batch
-            # and the VLM call.
-            kept_meta: list[dict] = []
-            kept_boxes: list[list[float]] = []
-            kept_squares: list[PILImage.Image] = []
-            kept_crops: list[PILImage.Image] = []
-            for box, phrase, variant, mask in zip(
-                box_list,
-                phrases,
-                variants,
-                masks_payload or [None] * len(box_list),
-            ):
-                gd_label, gd_score = parse_phrase(phrase)
-                x0 = max(0, int(round(float(box[0]))))
-                y0 = max(0, int(round(float(box[1]))))
-                x1 = min(W, int(round(float(box[2]))))
-                y1 = min(H, int(round(float(box[3]))))
-                if x1 - x0 < 4 or y1 - y0 < 4:
-                    continue
-                # Plain bbox crop is what we ship to the frontend as
-                # the visualisation thumbnail (crop_jpg_b64). The
-                # MASK-INPAINTED variant is what we feed to DINOv2 —
-                # inpaints occluder pixels (everything in the bbox
-                # that isn't part of the SAM mask) using surrounding
-                # object texture, so the embedding represents only
-                # the object and isn't distracted by foreground
-                # occluders that happen to overlap the bbox.
-                crop = image_pil.crop((x0, y0, x1, y1))
-                mask_polys = mask.get("polygons") if isinstance(mask, dict) else None
-                clean = v2_dinov2.inpaint_bbox_crop(image_pil, (x0, y0, x1, y1), mask_polys)
-                kept_squares.append(v2_dinov2.center_square_crop(clean))
-                kept_crops.append(crop)
-                kept_boxes.append([float(box[0]), float(box[1]), float(box[2]), float(box[3])])
-                kept_meta.append({
-                    "box": [round(float(c), 2) for c in box],
-                    "mask": mask,
-                    "gd_label": gd_label,
-                    "gd_variant": variant or None,
-                    "gd_score": round(float(gd_score), 4) if gd_score is not None else None,
-                })
-
-            # Resolve dataset_type up-front so we can gate the heavy
-            # SigLIP + patch-token encodes behind it. General projects
-            # only consume DINOv2 pooled cosine; running SigLIP and
-            # patch tokens for them is wasted GPU time. The lookup is
-            # cached on disk (dataset_type.json) so this is effectively
-            # free. dataset_type is read again lower down for the
-            # resolver dispatch — the second read hits the same cache.
-            try:
-                _dt_record_pre = (
-                    _classify_dataset_type_cached(project_id, list(tags))
-                    if project_id else {"type": "general"}
-                )
-                dataset_type_pre = (
-                    (_dt_record_pre.get("type") or "general")
-                    if isinstance(_dt_record_pre, dict) else "general"
-                )
-            except Exception:
-                dataset_type_pre = "general"
-
-            # Pass 2a: batched DINOv2 embed.
-            embed_ms = 0.0
-            vecs = None
-            sig_vecs = None
-            patch_results: list[tuple[Any, Any] | None] = [None] * len(kept_squares)
-            patch_results_siglip: list[tuple[Any, Any] | None] = [None] * len(kept_squares)
-            if kept_squares:
-                t2 = _time.perf_counter()
-                vecs = v2_dinov2.encode_images_batch(kept_squares)
-                # SigLIP + patch tokens — fine-grained signals only
-                # the SPECIFIC resolver consumes. General falls
-                # through to DINOv2 pooled centroid scoring, so
-                # spending GPU time on SigLIP / patch encoding for
-                # general projects is pure overhead. Gating here
-                # keeps the existing specific-pipeline behaviour
-                # untouched and gives general back its pre-SigLIP
-                # latency.
-                if dataset_type_pre == "specific":
-                    import v2_siglip as _v2s
-                    if _v2s.is_loaded():
-                        try:
-                            sig_vecs = _v2s.encode_images_batch(kept_squares)
-                        except Exception as e:
-                            print(f"[v2-import] siglip encode failed: {e}")
-                            sig_vecs = None
-                    # Patch-level query encoding — one pass per crop
-                    # per encoder, no TTA. Both encoders run when
-                    # patch matching is enabled and the encoder loaded.
-                    if _v2_patch_match_enabled():
-                        try:
-                            for k, sq in enumerate(kept_squares):
-                                patch_results[k] = v2_dinov2.encode_image_patches(sq)
-                        except Exception as e:
-                            print(f"[v2-import] patch (dino) encode failed: {e}")
-                        if _v2s.is_loaded():
-                            try:
-                                for k, sq in enumerate(kept_squares):
-                                    patch_results_siglip[k] = _v2s.encode_image_patches(sq)
-                            except Exception as e:
-                                print(f"[v2-import] patch (siglip) encode failed: {e}")
-                embed_ms = (_time.perf_counter() - t2) * 1000.0
-                bits = ["dino"]
-                if sig_vecs is not None: bits.append("siglip")
-                if any(pr is not None for pr in patch_results): bits.append("patch")
-                if any(pr is not None for pr in patch_results_siglip): bits.append("patch-siglip")
-                print(
-                    f"[v2-import] embed → {len(kept_squares)} crops in {embed_ms:.1f} ms "
-                    f"(batched, {'+'.join(bits)}, dataset_type={dataset_type_pre})"
-                )
-
-            # ─── Centroid-based resolve (lazy VLM) ──────────────────
-            # Per-label centroids from the project's reference images
-            # decide each detection's final label and whether it gets
-            # rejected. GD's label is the default; embedding can
-            # override it when a competitor centroid has higher sim
-            # AND is above the relabel threshold.
-            #
-            # VLM is LAZY: we run a preliminary resolve pass with no
-            # VLM input, identify boxes the resolver flagged as
-            # ambiguous (low GD, embed disagrees with GD, or top1-top2
-            # margin too tight), and call vlm_classify only on that
-            # subset. Most detections clear without ambiguity, and
-            # Qwen-VL was the dominant per-image latency.
-            try:
-                if project_id:
-                    by_label, by_label_siglip, _dirty = _v2_load_or_backfill_reference_embeddings(project_id)
-                else:
-                    by_label, by_label_siglip = {}, {}
-                # Pre-stack each label's references into an (N, D)
-                # matrix so the resolver can score every detection
-                # via top-K kNN (no centroid reduction).
-                refs_by_label_arr = _v2_stack_refs(by_label)
-                refs_by_label_siglip_arr = _v2_stack_refs(by_label_siglip)
-                # Fisher per-dim reweighting (Level 1 metric adaptation).
-                # Computed from the project's own references so the
-                # embedding space "auto-adapts" — discriminative dims
-                # for THIS project's classes are amplified, generic
-                # dims are damped. Applied to BOTH refs and query
-                # before scoring so the comparison is consistent.
-                # Returns None on 2-class projects with <2 refs per
-                # class — in that case scoring falls through to the
-                # raw cosine path unchanged.
-                fisher_dino = _v2_get_fisher_weights(refs_by_label_arr, project_id)
-                fisher_siglip = _v2_get_fisher_weights(refs_by_label_siglip_arr, project_id)
-                if fisher_dino is not None:
-                    refs_by_label_arr = _v2_apply_fisher_to_refs(refs_by_label_arr, fisher_dino)
-                    print(f"[v2-import] fisher dino weights applied (mean={float(fisher_dino.mean()):.3f}, max={float(fisher_dino.max()):.3f})")
-                if fisher_siglip is not None:
-                    refs_by_label_siglip_arr = _v2_apply_fisher_to_refs(refs_by_label_siglip_arr, fisher_siglip)
-                    print(f"[v2-import] fisher siglip weights applied (mean={float(fisher_siglip.mean()):.3f}, max={float(fisher_siglip.max()):.3f})")
-                # Per-class accept thresholds from the LOO self-score
-                # distribution. Adapts the embed-low reject in the
-                # specific resolver per-class instead of using a flat
-                # 0.4 — tight clusters get a higher bar, loose ones
-                # lower. Computed once per import (not per detection)
-                # since the references don't change across the loop.
-                # Note: thresholds are derived from the FISHER-WEIGHTED
-                # ref array, so they reflect the same metric space the
-                # resolver scores in.
-                class_thresholds = _v2_compute_class_thresholds(refs_by_label_arr)
-                if class_thresholds:
-                    print(
-                        f"[v2-import] per-class thresholds: "
-                        + ", ".join(f"{k}={v:.3f}" for k, v in class_thresholds.items())
-                    )
-                # Patch-level reference store. Loads the per-project
-                # NPZ; backfills any detections that don't have patch
-                # tokens stored yet. Empty dict when V2_PATCH_MATCH
-                # is off — the resolver then falls back to pooled
-                # cosine scoring. Wrapped in its own try/except so
-                # that any patch-side failure (NPZ corruption, missing
-                # disk perms, encoder error) can't take down the
-                # pool-side refs that the rest of the pipeline needs.
-                # Skipped entirely on general projects since only the
-                # specific resolver consumes patch tokens.
-                refs_by_label_patches: dict = {}
-                refs_by_label_patches_siglip: dict = {}
-                if dataset_type_pre == "specific":
-                    try:
-                        if project_id:
-                            refs_by_label_patches, refs_by_label_patches_siglip = (
-                                _v2_load_or_backfill_patch_tokens(project_id)
-                            )
-                    except Exception as e:
-                        print(f"[v2-import] patch refs load failed (non-fatal): {e}")
-                        refs_by_label_patches = {}
-                        refs_by_label_patches_siglip = {}
-                # Display-name map: lowercased label key → original
-                # casing from the project's tags (so "Pothole" stays
-                # "Pothole" in the response, not "pothole").
-                label_display = {t.lower(): t for t in tags}
-            except Exception as e:
-                print(f"[v2-import] reference embeddings load failed: {e}")
-                refs_by_label_arr = {}
-                refs_by_label_siglip_arr = {}
-                refs_by_label_patches = {}
-                refs_by_label_patches_siglip = {}
-                class_thresholds = {}
-                fisher_dino = None
-                fisher_siglip = None
-                label_display = {t.lower(): t for t in tags}
-
-            # Pick the resolver based on the project's dataset type.
-            # General datasets get the rich rule tree (GD-confident
-            # lock, VLM tiebreak, 3-way reject, confusion check, etc.);
-            # specific datasets (hare/rabbit, horse poses, chess
-            # pieces) bypass all of that and let the embedding
-            # centroids drive the decision — GD scores barely move
-            # between sibling labels and Qwen-VL can't discriminate
-            # them either, so leaning on per-label centroids is the
-            # only signal that actually works.
-            try:
-                dt_record = (
-                    _classify_dataset_type_cached(project_id, list(tags))
-                    if project_id else {"type": "general"}
-                )
-                dataset_type = (
-                    (dt_record.get("type") or "general")
-                    if isinstance(dt_record, dict) else "general"
-                )
-            except Exception as e:
-                print(f"[v2-import] dataset-type lookup failed: {e}, defaulting to general")
-                dataset_type = "general"
-            print(f"[v2-import] dataset_type={dataset_type}")
-
-            # Per-box VLM placeholders. Only populated for general-
-            # dataset cases where the lazy-VLM gate fires; specific
-            # datasets never call the VLM.
-            vlm_results: list[tuple[str | None, float | None, float]] = [
-                (None, None, 0.0) for _ in kept_boxes
-            ]
-            vlm_total_ms = 0.0
-            ambiguous_indices: list[int] = []
-            preliminary_verdicts: list[dict] = []
-
-            if dataset_type == "specific":
-                # Embed-driven path: resolver runs once per box and
-                # the embedding centroids drive the final label.
-                # VLM is invoked on a SECOND pass for detections the
-                # resolver flagged as ambiguous (margin < 0.005) —
-                # those are coin-flip cases where the embedding
-                # genuinely can't separate top-1 and top-2, so
-                # asking the VLM to pick between just those two
-                # labels acts as a tie-breaker. Confident embed
-                # decisions still skip the VLM entirely.
-                # Apply Fisher reweighting to the QUERY embeddings for
-                # SCORING only. The response below stores the RAW
-                # embeddings (vec_list) as the import's persistent
-                # representation — Fisher weights change as the ref
-                # set grows, so a stored Fisher-weighted vector would
-                # be incomparable to anything next time refs change.
-                import numpy as _np_ann
-                vecs_for_scoring = vecs
-                sig_vecs_for_scoring = sig_vecs
-                if fisher_dino is not None and vecs is not None:
-                    vecs_for_scoring = _v2_apply_fisher_to_arr(_np_ann.asarray(vecs), fisher_dino)
-                if fisher_siglip is not None and sig_vecs is not None:
-                    sig_vecs_for_scoring = _v2_apply_fisher_to_arr(_np_ann.asarray(sig_vecs), fisher_siglip)
-                for k in range(len(kept_boxes)):
-                    # vec_list is RAW (gets stored in the response).
-                    vec_list = (
-                        [round(float(x), 6) for x in vecs[k].tolist()]
-                        if vecs is not None else []
-                    )
-                    sig_vec_list = (
-                        [round(float(x), 6) for x in sig_vecs[k].tolist()]
-                        if sig_vecs is not None else None
-                    )
-                    # vec_for_scoring is the Fisher-weighted version
-                    # the resolver compares against the (also Fisher-
-                    # weighted) refs.
-                    vec_list_for_scoring = (
-                        [round(float(x), 6) for x in vecs_for_scoring[k].tolist()]
-                        if vecs_for_scoring is not None else []
-                    )
-                    sig_vec_list_for_scoring = (
-                        [round(float(x), 6) for x in sig_vecs_for_scoring[k].tolist()]
-                        if sig_vecs_for_scoring is not None else None
-                    )
-                    meta = kept_meta[k]
-                    pr = patch_results[k] if k < len(patch_results) else None
-                    q_patch_tokens, q_patch_fg = (pr if pr is not None else (None, None))
-                    pr_s = patch_results_siglip[k] if k < len(patch_results_siglip) else None
-                    q_patch_tokens_s, q_patch_fg_s = (pr_s if pr_s is not None else (None, None))
-                    v = _v2_resolve_label_specific(
-                        vec_list_for_scoring,
-                        meta.get("gd_label"),
-                        refs_by_label_arr,
-                        label_display,
-                        score_mode="knn",
-                        filename_labels=filename_labels,
-                        gd_score=meta.get("gd_score"),
-                        embedding_siglip=sig_vec_list_for_scoring,
-                        refs_by_label_siglip=refs_by_label_siglip_arr or None,
-                        class_thresholds=class_thresholds or None,
-                        query_patch_tokens=q_patch_tokens,
-                        query_patch_fg=q_patch_fg,
-                        refs_by_label_patches=refs_by_label_patches or None,
-                        query_patch_tokens_siglip=q_patch_tokens_s,
-                        query_patch_fg_siglip=q_patch_fg_s,
-                        refs_by_label_patches_siglip=refs_by_label_patches_siglip or None,
-                    )
-                    preliminary_verdicts.append(v)
-
-                # Pass 2: VLM tiebreak on ambiguous-margin detections.
-                # The resolver flagged these (margin < V2_AMBIGUOUS_MARGIN,
-                # default 0.005) as coin-flip calls. Run vlm_classify
-                # restricted to the top-2 embedding labels for each
-                # one — VLM picks one, we apply it. If VLM picks the
-                # current pred, just confirm it; if it picks the
-                # runner-up, flip the prediction to that. Either way
-                # we clear `ambiguous` since the user no longer needs
-                # to review it manually.
-                ambiguous_indices_specific = [
-                    k for k, v in enumerate(preliminary_verdicts)
-                    if v.get("ambiguous") and not v.get("rejected")
-                ]
-                if ambiguous_indices_specific:
-                    print(
-                        f"[v2-import] specific: VLM tiebreak on "
-                        f"{len(ambiguous_indices_specific)} ambiguous detection(s)"
-                    )
-                    _tiebreak_t0 = _time.perf_counter()
-                    for k in ambiguous_indices_specific:
-                        verdict = preliminary_verdicts[k]
-                        sims_dict = verdict.get("sims") or {}
-                        if len(sims_dict) < 2:
-                            continue
-                        # Top-2 by combined sim. Keys are the project's
-                        # display labels (preserved case) so we can
-                        # pass them straight to vlm_classify's options.
-                        top2 = sorted(
-                            sims_dict.items(), key=lambda kv: -kv[1],
-                        )[:2]
-                        top2_labels = [lab for lab, _ in top2]
-                        bx = kept_boxes[k]
-                        meta = kept_meta[k]
-                        mask_obj = meta.get("mask") if meta else None
-                        mask_polys = mask_obj.get("polygons") if isinstance(mask_obj, dict) else None
-                        t3 = _time.perf_counter()
-                        try:
-                            v_label, v_score = vlm_classify(
-                                image_pil, bx, top2_labels, mask_polygons=mask_polys,
-                            )
-                        except Exception as e:
-                            print(f"[v2-import] specific VLM tiebreak failed for box {bx}: {e}")
-                            v_label, v_score = None, None
-                        vlm_ms = (_time.perf_counter() - t3) * 1000.0
-                        vlm_results[k] = (v_label, v_score, vlm_ms)
-                        vlm_total_ms += vlm_ms
-
-                        # Apply VLM's pick when it falls in the top-2.
-                        if v_label:
-                            v_lower = v_label.strip().lower()
-                            top2_lower = [l.strip().lower() for l in top2_labels]
-                            if v_lower in top2_lower:
-                                cur_pred = (verdict.get("pred_label") or "").strip().lower()
-                                if v_lower != cur_pred:
-                                    # VLM picked the runner-up — flip.
-                                    verdict["pred_label"] = v_label
-                                    verdict["pred_source"] = "vlm-tiebreak"
-                                    verdict["vlm_action"] = "tiebreak"
-                                else:
-                                    # VLM agreed with embed top-1.
-                                    verdict["vlm_action"] = "confirm"
-                                # Resolver's no longer ambiguous — VLM
-                                # made the call.
-                                verdict["ambiguous"] = False
-                                # Update embed_sim_for_label to match
-                                # the (possibly flipped) prediction.
-                                new_pred_key = (verdict["pred_label"] or "").strip().lower()
-                                # sims_dict is keyed by display label,
-                                # case-insensitive lookup.
-                                for kk, vv in sims_dict.items():
-                                    if kk.strip().lower() == new_pred_key:
-                                        verdict["embed_sim_for_label"] = round(float(vv), 4)
-                                        break
-                    _tiebreak_total_ms = (_time.perf_counter() - _tiebreak_t0) * 1000.0
-                    print(
-                        f"[v2-import] specific: VLM tiebreak block done in "
-                        f"{_tiebreak_total_ms:.0f} ms total "
-                        f"(avg {_tiebreak_total_ms / max(1, len(ambiguous_indices_specific)):.0f} ms/call)"
-                    )
-            else:
-                # General path: preliminary resolve (no VLM) so we
-                # can decide who actually needs the VLM step.
-                for k in range(len(kept_boxes)):
-                    vec_list = (
-                        [round(float(x), 6) for x in vecs[k].tolist()]
-                        if vecs is not None else []
-                    )
-                    meta = kept_meta[k]
-                    v = _v2_resolve_label(
-                        vec_list,
-                        meta.get("gd_label"),
-                        refs_by_label_arr,
-                        label_display,
-                        score_mode="centroid",
-                        filename_labels=filename_labels,
-                        gd_score=meta.get("gd_score"),
-                        vlm_label=None,
-                        vlm_score=None,
-                    )
-                    preliminary_verdicts.append(v)
-
-                # Pass 2b: VLM dispatch on ambiguous-only.
-                ambiguous_indices = [
-                    k for k, v in enumerate(preliminary_verdicts)
-                    if v.get("ambiguous") and not v.get("rejected")
-                ]
-                if ambiguous_indices:
-                    print(f"[v2-import] VLM gating: {len(ambiguous_indices)} of {len(kept_boxes)} boxes flagged ambiguous → calling VLM")
-                    for k in ambiguous_indices:
-                        bx = kept_boxes[k]
-                        meta = kept_meta[k]
-                        mask_obj = meta.get("mask") if meta else None
-                        mask_polys = mask_obj.get("polygons") if isinstance(mask_obj, dict) else None
-                        t3 = _time.perf_counter()
-                        try:
-                            v_label, v_score = vlm_classify(
-                                image_pil, bx, tags, mask_polygons=mask_polys,
-                            )
-                        except Exception as e:
-                            print(f"[v2-import] vlm_classify failed for box {bx}: {e}")
-                            v_label, v_score = None, None
-                        vlm_results[k] = (v_label, v_score, (_time.perf_counter() - t3) * 1000.0)
-                else:
-                    print(f"[v2-import] VLM gating: no ambiguous boxes — skipping VLM entirely")
-                vlm_total_ms = sum(t for _, _, t in vlm_results)
-
-            # Assemble detections. For general+ambiguous boxes we
-            # re-run the resolver with VLM data so the tiebreak rule
-            # can fire; for everyone else we reuse the preliminary
-            # verdict (specific never re-runs since VLM never ran).
-            ambiguous_set = set(ambiguous_indices)
-            detections: list[dict] = []
-            for k, meta in enumerate(kept_meta):
-                buf = io.BytesIO()
-                kept_crops[k].convert("RGB").save(buf, format="JPEG", quality=82)
-                vlm_label, vlm_score, vlm_ms = vlm_results[k]
-                vec_list = (
-                    [round(float(x), 6) for x in vecs[k].tolist()]
-                    if vecs is not None else []
-                )
-                if dataset_type != "specific" and k in ambiguous_set and refs_by_label_arr:
-                    verdict = _v2_resolve_label(
-                        vec_list,
-                        meta.get("gd_label"),
-                        refs_by_label_arr,
-                        label_display,
-                        score_mode="centroid",
-                        filename_labels=filename_labels,
-                        gd_score=meta.get("gd_score"),
-                        vlm_label=vlm_label,
-                        vlm_score=vlm_score,
-                    )
-                else:
-                    verdict = preliminary_verdicts[k]
-                detections.append({
-                    **meta,
-                    "embedding": vec_list,
-                    "vlm_label": vlm_label,
-                    "vlm_score": round(float(vlm_score), 4) if vlm_score is not None else None,
-                    "vlm_ms": round(float(vlm_ms), 1) if vlm_ms is not None else None,
-                    "crop_jpg_b64": base64.b64encode(buf.getvalue()).decode("ascii"),
-                    "pred_label": verdict.get("pred_label"),
-                    "pred_source": verdict.get("pred_source"),
-                    "embed_nearest_label": verdict.get("embed_nearest_label"),
-                    "embed_nearest_sim": verdict.get("embed_nearest_sim"),
-                    "embed_sim_for_label": verdict.get("embed_sim_for_label"),
-                    "embed_margin": verdict.get("embed_margin"),
-                    "rejected": verdict.get("rejected", False),
-                    "reject_reason": verdict.get("reject_reason"),
-                    "ambiguous": verdict.get("ambiguous", False),
-                    "vlm_action": verdict.get("vlm_action"),
-                    "embed_sims": verdict.get("sims") or {},
-                    "embed_sims_dino": verdict.get("sims_dino") or {},
-                    "embed_sims_siglip": verdict.get("sims_siglip") or {},
-                    "embed_sims_patch": verdict.get("sims_patch") or {},
-                    "embed_sims_patch_siglip": verdict.get("sims_patch_siglip") or {},
-                    "siglip_weight": verdict.get("siglip_weight", 0.0),
-                    "patch_match_used": verdict.get("patch_match_used", False),
-                    "patch_match_used_siglip": verdict.get("patch_match_used_siglip", False),
-                })
-
-            # Containment post-pass: when a smaller detection is
-            # mostly inside a bigger one AND they share a label, the
-            # bigger box is almost always the wrong label (the user's
-            # "person wearing high-vis" case). Re-resolve the bigger
-            # box's label using the next-best centroid that ISN'T the
-            # smaller's label; if no good alternative exists, reject.
-            try:
-                _v2_apply_containment(detections, label_display)
-            except Exception as e:
-                print(f"[v2-import] containment pass failed: {e}")
-
-            # Same-label overlap pass: when two same-label boxes
-            # overlap, prefer the one whose SAM mask is a single
-            # connected region; reject the one whose mask has a
-            # secondary component (a "second entity" bleeding into
-            # the segmentation). Catches the case where containment
-            # didn't fire because the boxes are similar size, but
-            # they're still detecting the same object twice.
-            try:
-                _v2_apply_same_label_overlap(detections)
-            except Exception as e:
-                print(f"[v2-import] same-label overlap pass failed: {e}")
-
-            kept_count = sum(1 for d in detections if not d.get("rejected"))
-            n_labels_with_refs = len(refs_by_label_arr)
-            n_refs_total = sum(int(a.shape[0]) for a in refs_by_label_arr.values())
-            score_mode_used = "kNN top-K=%d" % KNN_TOP_K if dataset_type == "specific" else "centroid"
-            print(
-                f"[v2-import] {score_mode_used} resolve — {n_refs_total} reference "
-                f"embedding(s) across {n_labels_with_refs} label(s); "
-                f"{kept_count} kept, {len(detections) - kept_count} rejected"
-            )
-            timings = {
-                "gd_ms": round(float(gd_ms), 1),
-                "sam_ms": round(float(sam_ms), 1),
-                "embed_ms": round(float(embed_ms), 1),
-                "vlm_total_ms": round(float(vlm_total_ms), 1),
-            }
-            print(f"[v2-import] {len(detections)} detection(s) ready · timings={timings}")
-            return detections, timings
-        except Exception as exc:
-            import traceback
-            traceback.print_exc()
-            raise RuntimeError(f"v2 import pipeline failed: {exc}") from exc
-
-    try:
-        async with state["gpu_lock"]:
-            detections, timings = await loop.run_in_executor(None, _infer)
-    except Exception as exc:
-        raise HTTPException(500, f"pipeline error: {exc}")
-    finally:
-        # Reclaim CUDA cache after every request. GD vision attention,
-        # SAM2 mask buffers, DINOv2 features and per-box VLM activations
-        # all hold allocator slabs that Python's GC won't release in time
-        # — without this a 24 GB card grows from ~12 GB idle to 24 GB
-        # after a single image and OOMs on the next one inside GD.
-        import gc as _gc
-        _gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    return {
-        "width": W, "height": H,
-        "prompt_tags": prompt_tags,
-        "timings": timings,
-        "detections": detections,
-    }
 
 
 @app.get("/api/openverse/search")
@@ -16551,7 +12637,9 @@ def _labelled_preview_path(project_id: str, import_id: str) -> "Path":
     import_id so renames / re-uploads of the underlying file don't
     collide. Versioned filename so future tint / dim tweaks invalidate
     the whole project's previews on next request."""
-    return project_dir(project_id) / "imports" / f"{import_id}__lp_v4.jpg"
+    d = project_dir(project_id) / "thumbs"
+    d.mkdir(exist_ok=True)
+    return d / f"{import_id}__lp_v4.jpg"
 
 
 def _invalidate_labelled_preview(project_id: str, import_id: str) -> None:
@@ -16835,23 +12923,21 @@ async def list_projects(
     # building this response, so the response cache can later check
     # those files and invalidate the moment any of them changes.
     cache_mtimes: dict[str, float] = {}
-    for p in PROJECTS_DIR.iterdir():
-        if not p.is_dir() or p.name in RESERVED or p.name.startswith("."):
-            continue
-        manifest_mtime = _manifest_disk_mtime(p.name)
-        cache_mtimes[p.name] = manifest_mtime
+    for _pid in _iter_project_ids():
+        manifest_mtime = _manifest_disk_mtime(_pid)
+        cache_mtimes[_pid] = manifest_mtime
         # Fast path: the per-project card sidecar carries all the
         # static-per-write card fields. Skips the multi-MB manifest
         # read entirely when it's fresh — the workspace's 4 s poll
         # used to hit `load_manifest` 33+ times on every tick.
-        card = _read_workspace_card_sidecar(p.name)
+        card = _read_workspace_card_sidecar(_pid)
         if card is not None:
             try:
-                card_mtime = _workspace_card_sidecar_path(p.name).stat().st_mtime
+                card_mtime = _workspace_card_sidecar_path(_pid).stat().st_mtime
             except OSError:
                 card_mtime = 0.0
             if card_mtime >= manifest_mtime:
-                proj_id = card.get("id") or p.name
+                proj_id = card.get("id") or _pid
                 proj_owner = card.get("owner") or ""
                 if owner is not None and proj_owner != owner:
                     continue
@@ -16876,13 +12962,13 @@ async def list_projects(
         # warming via _kick_sidecar_refresh would also write
         # overview + initial sidecars we don't need here, so do the
         # workspace-card one directly. Dedup via a per-project guard.
-        _kick_workspace_card_refresh(p.name)
+        _kick_workspace_card_refresh(_pid)
         # Read-only consumer — skip the deepcopy. The async sidecar
         # write (kicked above) is the only mutation downstream and it
         # works from its own load_manifest call.
-        manifest = load_manifest(p.name, copy=False)
-        proj_id = manifest.get("id") or p.name
-        display_name = manifest.get("name") or p.name
+        manifest = load_manifest(_pid, copy=False)
+        proj_id = manifest.get("id") or _pid
+        display_name = manifest.get("name") or _pid
         proj_owner = manifest.get("owner") or manifest.get("createdBy") or ""
         if owner is not None and proj_owner != owner:
             continue
@@ -17114,50 +13200,6 @@ async def list_projects(
     return body
 
 
-class LikeIn(BaseModel):
-    user: str
-
-
-@app.post("/api/projects/{project_id}/favourite")
-async def toggle_favourite(project_id: str, user: str = Depends(current_user)):
-    """Toggle the authenticated user's favourite on this project. The actor is
-    the bearer-token user; the old spoofable `{user}` body is ignored (anyone
-    could previously favourite/unfavourite as anyone)."""
-    if not project_dir(project_id).exists():
-        raise HTTPException(404)
-    manifest = load_manifest(project_id)
-    fav_by = list(manifest.get("favouritedBy") or [])
-    if user in fav_by:
-        fav_by.remove(user)
-        favourited = False
-    else:
-        fav_by.append(user)
-        favourited = True
-    manifest["favouritedBy"] = fav_by
-    save_manifest(project_id, manifest)
-    return {"favourites": len(fav_by), "favouritedByMe": favourited}
-
-
-@app.post("/api/projects/{project_id}/like")
-async def toggle_like(project_id: str, user: str = Depends(current_user)):
-    """Toggle the authenticated user's like on this project. Returns
-    {likes, likedByMe}. The actor is the bearer-token user; the old spoofable
-    `{user}` body is ignored (anyone could previously like/unlike as anyone)."""
-    if not project_dir(project_id).exists():
-        raise HTTPException(404)
-    manifest = load_manifest(project_id)
-    liked_by = list(manifest.get("likedBy") or [])
-    if user in liked_by:
-        liked_by.remove(user)
-        liked = False
-    else:
-        liked_by.append(user)
-        liked = True
-    manifest["likedBy"] = liked_by
-    save_manifest(project_id, manifest)
-    return {"likes": len(liked_by), "likedByMe": liked}
-
-
 class CreateProjectIn(BaseModel):
     name: str
     owner: str | None = None
@@ -17175,10 +13217,8 @@ async def create_project(payload: CreateProjectIn, user: str = Depends(current_u
     display_name = (payload.name or "").strip() or "Untitled project"
     assert_clean(display_name, field="project name")
     project_id = _uuid.uuid4().hex
-    while (PROJECTS_DIR / project_id).exists():
+    while store.dataset_exists(project_id):
         project_id = _uuid.uuid4().hex
-    p = PROJECTS_DIR / project_id
-    p.mkdir(parents=True)
     save_manifest(
         project_id,
         empty_manifest(display_name, owner=user, project_id=project_id),
@@ -17259,75 +13299,6 @@ def _container_detail(c: dict, username: str | None) -> dict:
         "my_role": containers.member_role(c, username or ""),
         "datasets": datasets,
     }
-
-
-# ── Container durability: live R2 mirror + boot-time restore ──────────────────
-# Containers (Projects) are tiny JSON docs on local disk. To make them as
-# permanent as datasets — whose image bytes live in R2 — every container write
-# is mirrored to R2 and any container missing locally on boot is restored from
-# it. Best-effort throughout: R2 being down never blocks a local write/read.
-
-def _container_r2_key(container_id: str) -> str:
-    return f"containers/{container_id}/project.json"
-
-
-def _backup_container_to_r2(container: dict) -> None:
-    if R2 is None:
-        return
-    cid = container.get("id")
-    if not cid:
-        return
-    try:
-        data = json.dumps(container).encode("utf-8")
-        R2.put_bytes(_container_r2_key(cid), data, "application/json")
-    except Exception as e:
-        print(f"[container-backup] R2 put failed for {cid}: {e}")
-
-
-def _delete_container_from_r2(container_id: str) -> None:
-    if R2 is None:
-        return
-    try:
-        R2.delete_prefix(f"containers/{container_id}/")
-    except Exception as e:
-        print(f"[container-backup] R2 delete failed for {container_id}: {e}")
-
-
-def _restore_containers_from_r2() -> int:
-    """Repopulate any container whose local project.json is missing from its R2
-    mirror. Local wins when present (it's the freshest); R2 is the safety net for
-    a wiped or fresh disk. Returns the number restored."""
-    if R2 is None:
-        return 0
-    restored = 0
-    try:
-        for key in R2.list_keys("containers/"):
-            if not key.endswith("/project.json"):
-                continue
-            parts = key.split("/")  # containers/<id>/project.json
-            if len(parts) != 3:
-                continue
-            cid = parts[1]
-            local = containers.container_dir(cid) / "project.json"
-            if local.exists():
-                continue
-            try:
-                data = R2.get_bytes(key)
-                local.parent.mkdir(parents=True, exist_ok=True)
-                local.write_bytes(data)
-                restored += 1
-            except Exception as e:
-                print(f"[container-restore] {cid} failed: {e}")
-    except Exception as e:
-        print(f"[container-restore] list failed: {e}")
-    return restored
-
-
-# Wire the mirror into containers.py so every save/delete hits R2 automatically.
-containers.set_persistence_hooks(
-    on_save=_backup_container_to_r2,
-    on_delete=_delete_container_from_r2,
-)
 
 
 class ContainerCreateIn(BaseModel):
@@ -17507,6 +13478,13 @@ async def container_add_dataset(container_id: str, dataset_id: str, user: str = 
     if dataset_id not in (c.get("dataset_ids") or []):
         c.setdefault("dataset_ids", []).append(dataset_id)
         containers.save_container(c)
+    # Keep the workspace tree mirroring the logical nesting: the dataset
+    # folder physically moves into the project's folder (cosmetic only —
+    # identity lives in the JSONs, so a failed move is harmless).
+    try:
+        store.move_dataset(dataset_id, container_id)
+    except Exception as e:
+        print(f"[containers] folder move failed for {dataset_id}: {e}")
     add_event("dataset_add", container=container_id, dataset=dataset_id, actor=user)
     return {"ok": True}
 
@@ -17528,6 +13506,10 @@ async def container_remove_dataset(container_id: str, dataset_id: str, user: str
         save_manifest(dataset_id, m)
     c["dataset_ids"] = [d for d in (c.get("dataset_ids") or []) if d != dataset_id]
     containers.save_container(c)
+    try:
+        store.move_dataset(dataset_id, None)
+    except Exception as e:
+        print(f"[containers] folder move failed for {dataset_id}: {e}")
     add_event("dataset_remove", container=container_id, dataset=dataset_id, actor=user)
     return {"ok": True}
 
@@ -18426,7 +14408,7 @@ async def v3_dedupe_imports(project_id: str, apply: bool = False):
     proj = project_dir(project_id)
     if not proj.exists():
         raise HTTPException(404, "project not found")
-    imports_dir = proj / "imports"
+    imports_dir = proj / "images"
     if not imports_dir.exists():
         return {"applied": False, "would_delete": 0, "duplicates": []}
     manifest = await asyncio.to_thread(load_manifest, project_id, True)
@@ -18867,7 +14849,7 @@ def _rebake_previews_sync(project: str, image_names: list[str]) -> None:
             data = R2.get_bytes(R2Storage.image_key(project, img_name))
             image = PILImage.open(io.BytesIO(data))
             buf = io.BytesIO()
-            from run_groundingdino import draw_preview as _draw_preview
+            from preview import draw_preview as _draw_preview
             _draw_preview(image.copy(), masks).save(
                 buf, format="JPEG", quality=72, optimize=True, progressive=True,
             )
@@ -19069,445 +15051,6 @@ def _refresh_embeddings_sync(project_id: str, image_names: list[str] | None = No
         return {"computed": 0, "removed": 0, "error": str(e)}
 
 
-@app.post(
-    "/api/projects/{project_id}/embeddings/refresh",
-    dependencies=[Depends(require_project_owner)],
-)
-async def embeddings_refresh(project_id: str):
-    """Compute / refresh per-segmentation embeddings for every box
-    in the manifest. Idempotent — re-runs are cheap because matched
-    rows are skipped."""
-    if not project_dir(project_id).exists():
-        raise HTTPException(404)
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, _refresh_embeddings_sync, project_id, None)
-    return {"ok": True, **result}
-
-
-class FindSimilarLabelsIn(BaseModel):
-    image: str
-    box_id: str
-    new_label: str
-    old_label: str | None = None
-    threshold: float | None = None
-
-
-@app.post(
-    "/api/projects/{project_id}/embeddings/find_similar",
-    dependencies=[Depends(require_project_owner)],
-)
-async def embeddings_find_similar(project_id: str, payload: FindSimilarLabelsIn):
-    """After the user renames a box, return other boxes in the same
-    project whose embedding is highly similar but whose label is the
-    OLD value — strong candidates for the same correction."""
-    proj_dir = project_dir(project_id)
-    if not proj_dir.exists():
-        raise HTTPException(404)
-    try:
-        import embeddings as _emb
-    except Exception:
-        return {"matches": [], "reason": "embeddings_module_unavailable"}
-    if not _emb.is_loaded():
-        return {"matches": [], "reason": "dinov2_not_loaded"}
-
-    manifest = load_manifest(project_id) or {}
-    # Locate the trigger box in the manifest so we can compute / look
-    # up its embedding. We accept any box_id that's present in the
-    # editedBoxes for the named image.
-    target_box: dict | None = None
-    edited = (manifest.get("editedBoxes") or {}).get(payload.image, []) or []
-    for b in edited:
-        if isinstance(b, dict) and str(b.get("id")) == payload.box_id:
-            target_box = b
-            break
-    if target_box is None:
-        raise HTTPException(404, "box not found")
-
-    polys = ((target_box.get("mask") or {}).get("polygons") or [])
-    if not polys:
-        return {"matches": [], "reason": "no_mask"}
-    try:
-        box = [float(target_box.get("x0", 0)), float(target_box.get("y0", 0)),
-               float(target_box.get("x1", 0)), float(target_box.get("y1", 0))]
-    except Exception:
-        return {"matches": [], "reason": "bad_box"}
-
-    # Make sure the WHOLE project is encoded before we search — not
-    # just the image being edited. The previous version only
-    # refreshed the trigger image, so similar objects on other
-    # images had no embedding and the search came up empty. The
-    # full refresh is incremental: rows whose box geometry / label /
-    # size_frac haven't changed are skipped, so subsequent calls are
-    # cheap even on large projects.
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, _refresh_embeddings_sync, project_id, None)
-
-    # Compute the query embedding + size_frac in one shot. The size
-    # fraction is needed by the similarity search so a 5%-of-image
-    # box doesn't get matched against a 50%-of-image box just
-    # because the visual cues happen to overlap.
-    def _compute_query():
-        try:
-            image_pil = _pil_from_r2(project_id, payload.image)
-        except Exception:
-            return None, None
-        vec = _emb.encode_segmentation(image_pil, polys, box)
-        if vec is None:
-            return None, None
-        iw, ih = image_pil.size
-        bw = max(1.0, box[2] - box[0])
-        bh = max(1.0, box[3] - box[1])
-        return vec, float((bw * bh) / max(1.0, float(iw * ih)))
-    query, query_size_frac = await loop.run_in_executor(None, _compute_query)
-    if query is None:
-        return {"matches": [], "reason": "encode_failed"}
-
-    # Filter on the OLD label so we surface candidates that the user
-    # probably meant to relabel too.
-    threshold = float(payload.threshold) if payload.threshold else 0.35
-    label_filter = payload.old_label.strip() if payload.old_label else None
-    matches = await loop.run_in_executor(
-        None,
-        lambda: _emb.find_similar(
-            proj_dir,
-            query,
-            threshold=threshold,
-            max_results=24,
-            exclude_box_ids={payload.box_id},
-            label_filter=label_filter,
-            query_size_frac=query_size_frac,
-        ),
-    )
-    # Drop synthetic "auto:..." rows — those don't have a stable
-    # editedBox id the FE could relabel against.
-    matches = [m for m in matches if not str(m.get("box_id", "")).startswith("auto:")]
-    return {"matches": matches, "threshold": threshold}
-
-
-class RelabelBoxesIn(BaseModel):
-    targets: list[dict]   # [{image, box_id}, ...]
-    new_label: str
-
-
-class IgnoreCascadeIn(BaseModel):
-    targets: list[dict]   # [{image, box_id}, ...] or just box_ids
-
-
-def _seed_editedboxes_from_detections(project_id: str) -> bool:
-    """For any image with auto detections but no editedBoxes entries,
-    copy the detections across so they have stable ids the rest of
-    the pipeline (Label Cascade, embeddings, /relabel) can refer to.
-
-    This mirrors what the frontend does when an image is first
-    opened in the editor — but without it, project-wide flows that
-    fire BEFORE the user navigates to every image (post-auto-label
-    Cascade scan, etc.) only see synthetic `auto:` rows that the
-    rest of the pipeline can't relabel. Returns True if the
-    manifest was modified."""
-    manifest = load_manifest(project_id)
-    if not manifest:
-        return False
-    edited_all = manifest.setdefault("editedBoxes", {})
-    changed = False
-    for r in (manifest.get("results") or []):
-        img = r.get("image")
-        if not img:
-            continue
-        if edited_all.get(img):
-            continue  # already populated, leave alone
-        seeded: list[dict] = []
-        for i, det in enumerate(r.get("detections") or []):
-            if not isinstance(det, dict):
-                continue
-            box = det.get("box_xyxy") or []
-            if len(box) != 4:
-                continue
-            try:
-                bx = [float(v) for v in box]
-            except Exception:
-                continue
-            seeded.append({
-                "id": f"d{i}",  # match the FE's `detectionsToBoxes` scheme
-                "label": (det.get("label") or "").split(" (")[0].strip(),
-                "x0": bx[0], "y0": bx[1], "x1": bx[2], "y1": bx[3],
-                "score": det.get("score"),
-                "mask": det.get("mask"),
-                "validation": det.get("validation"),
-            })
-        if seeded:
-            edited_all[img] = seeded
-            changed = True
-    if changed:
-        manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        save_manifest(project_id, manifest)
-        print(f"[label-cascade] seeded editedBoxes for {project_id[:8]} from detections")
-    return changed
-
-
-def _scan_embeddings_sync(project_id: str, *, threshold: float = 0.10, max_group_size: int = 24) -> dict:
-    """Project-wide pairwise similarity scan. Builds a graph where
-    every pair of boxes whose cosine similarity ≥ `threshold` gets
-    an edge, then returns the connected components as `groups`.
-    Used by Label Cascade's post-label-run review surface — the
-    user sees every cluster of visually-similar boxes regardless of
-    current label, and can resolve inconsistencies in one pass.
-
-    Off the request thread; never raises. No-op when
-    `_EMBEDDINGS_ENABLED` is False so the post-auto-label scan and
-    the modal that consumes its response stay quiet.
-    """
-    if not _EMBEDDINGS_ENABLED:
-        return {"groups": [], "reason": "embeddings_disabled"}
-    try:
-        import embeddings as _emb
-        if not _emb.is_loaded():
-            print(f"[label-cascade] scan {project_id[:8]}: embedder not loaded")
-            return {"groups": [], "reason": "embedder_not_loaded"}
-
-        # Promote any auto detections to editedBoxes so the scan can
-        # work on stable ids and the relabel endpoint can find them.
-        _seed_editedboxes_from_detections(project_id)
-
-        # Make sure the store is current first.
-        _refresh_embeddings_sync(project_id, None)
-
-        proj_dir = project_dir(project_id)
-        arr, meta = _emb.load_store(proj_dir)
-        if arr.shape[0] < 2:
-            print(f"[label-cascade] scan {project_id[:8]}: only {arr.shape[0]} embeddings, need ≥ 2")
-            return {"groups": [], "total_boxes_indexed": int(arr.shape[0])}
-
-        # Drop locked rows. Auto: rows shouldn't appear after the
-        # seeding step above, but skip them if any leftover stragglers
-        # from older runs are still in the store.
-        keep_idx: list[int] = []
-        skipped_auto = skipped_ignored = 0
-        for i, m in enumerate(meta):
-            if m.get("cascade_ignored"):
-                skipped_ignored += 1
-                continue
-            bid = str(m.get("box_id") or "")
-            if not bid or bid.startswith("auto:"):
-                skipped_auto += 1
-                continue
-            keep_idx.append(i)
-        if len(keep_idx) < 2:
-            print(
-                f"[label-cascade] scan {project_id[:8]}: "
-                f"only {len(keep_idx)} usable rows after filtering "
-                f"(skipped {skipped_auto} auto, {skipped_ignored} ignored)"
-            )
-            return {"groups": [], "total_boxes_indexed": int(arr.shape[0])}
-        sub_arr = arr[keep_idx]
-        sub_meta = [meta[i] for i in keep_idx]
-
-        # Cosine matrix. For typical project sizes (≤ a few hundred
-        # boxes) this is fine as a dense matmul; if it ever grows
-        # past ~5k boxes we'd swap in an approximate-NN index.
-        sims = sub_arr @ sub_arr.T
-
-        # Union-Find over edges above threshold.
-        n = len(sub_meta)
-        parent = list(range(n))
-
-        def find(x: int) -> int:
-            while parent[x] != x:
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            return x
-
-        def union(a: int, b: int) -> None:
-            ra, rb = find(a), find(b)
-            if ra != rb:
-                parent[ra] = rb
-
-        for i in range(n):
-            for j in range(i + 1, n):
-                if float(sims[i, j]) >= threshold:
-                    union(i, j)
-
-        # Bucket by root.
-        buckets: dict[int, list[int]] = {}
-        for i in range(n):
-            buckets.setdefault(find(i), []).append(i)
-
-        groups: list[dict] = []
-        for root, indices in buckets.items():
-            if len(indices) < 2:
-                continue
-            members = []
-            # Pick a pivot for the row (highest summed similarity to
-            # the rest of the group — the "centroid-like" member).
-            scores = sims[np.ix_(indices, indices)].sum(axis=1)
-            pivot = int(indices[int(np.argmax(scores))])
-            for i in indices:
-                m = sub_meta[i]
-                members.append({
-                    "box_id": str(m.get("box_id") or ""),
-                    "image": str(m.get("image") or ""),
-                    "label": str(m.get("label") or ""),
-                    "box_xyxy": m.get("box_xyxy") or [0, 0, 0, 0],
-                    "size_frac": float(m.get("size_frac") or 0.0),
-                    "similarity": round(float(sims[pivot, i]), 4),
-                    "is_pivot": (i == pivot),
-                })
-            members.sort(key=lambda x: -x["similarity"])
-            if len(members) > max_group_size:
-                members = members[:max_group_size]
-            label_counts: dict[str, int] = {}
-            for x in members:
-                lab = x["label"] or ""
-                label_counts[lab] = label_counts.get(lab, 0) + 1
-            groups.append({
-                "id": f"g{root}",
-                "members": members,
-                "label_counts": label_counts,
-                "label_diversity": len(label_counts),
-            })
-
-        # Most interesting groups first: more distinct labels = more
-        # likely to be a labelling inconsistency the user wants to
-        # fix. Tie-break by group size descending.
-        groups.sort(key=lambda g: (-g["label_diversity"], -len(g["members"])))
-        # One-line readout so the operator can see whether the
-        # threshold is the right shape for their data without
-        # needing to instrument anything.
-        if n:
-            sims_off_diag = sims[~np.eye(n, dtype=bool)]
-            print(
-                f"[label-cascade] scan {project_id[:8]}: "
-                f"indexed {n}, threshold {threshold}, "
-                f"sim max {float(sims_off_diag.max()):.3f}, "
-                f"sim mean {float(sims_off_diag.mean()):.3f}, "
-                f"groups {len(groups)}"
-            )
-        return {"groups": groups, "threshold": threshold, "total_boxes_indexed": n}
-    except Exception as e:
-        print(f"[embeddings] scan failed for {project_id}: {e}")
-        return {"groups": [], "error": str(e)}
-
-
-@app.post(
-    "/api/projects/{project_id}/embeddings/scan",
-    dependencies=[Depends(require_project_owner)],
-)
-async def embeddings_scan(project_id: str):
-    """Run a full Label Cascade review. Returns visually-similar
-    clusters across the entire project, regardless of label, sorted
-    so groups with the most label diversity (the most likely
-    inconsistencies) come first."""
-    if not project_dir(project_id).exists():
-        raise HTTPException(404)
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, _scan_embeddings_sync, project_id)
-    return result
-
-
-@app.post(
-    "/api/projects/{project_id}/embeddings/ignore",
-    dependencies=[Depends(require_project_owner)],
-)
-async def embeddings_ignore(project_id: str, payload: IgnoreCascadeIn):
-    """Mark a list of box ids as 'never surface in Label Cascade
-    again'. Used by the modal's Don't ask again button — the user
-    is telling us those candidates aren't false positives waiting
-    to be relabelled, just unrelated boxes that happen to look
-    similar. Future find_similar passes filter them out."""
-    if not project_dir(project_id).exists():
-        raise HTTPException(404)
-    box_ids: list[str] = []
-    for t in payload.targets:
-        if isinstance(t, dict):
-            bid = t.get("box_id")
-            if bid:
-                box_ids.append(str(bid))
-        elif isinstance(t, str):
-            box_ids.append(t)
-    if not box_ids:
-        return {"ok": True, "ignored": 0}
-    try:
-        import embeddings as _emb
-        n = _emb.mark_ignored(project_dir(project_id), box_ids)
-    except Exception as e:
-        print(f"[embeddings] ignore failed: {e}")
-        return {"ok": False, "error": str(e)}
-    return {"ok": True, "ignored": n}
-
-
-@app.post(
-    "/api/projects/{project_id}/embeddings/relabel",
-    dependencies=[Depends(require_project_owner)],
-)
-async def embeddings_relabel(project_id: str, payload: RelabelBoxesIn):
-    """Apply `new_label` to a list of (image, box_id) pairs. Updates
-    both the manifest's editedBoxes AND the embedding store's label
-    column (no re-encode — visual content didn't change). Triggers
-    a preview rebake on the affected images."""
-    if not project_dir(project_id).exists():
-        raise HTTPException(404)
-    new_label = (payload.new_label or "").strip()
-    if not new_label:
-        raise HTTPException(400, "new_label is required")
-    from profanity import assert_clean
-    assert_clean(new_label, field="label")
-
-    manifest = load_manifest(project_id) or empty_manifest(project_id)
-    edited_all = manifest.get("editedBoxes") or {}
-    affected_images: set[str] = set()
-    affected_box_ids: list[str] = []
-    n_changed = 0
-    for tgt in payload.targets:
-        if not isinstance(tgt, dict):
-            continue
-        img_name = tgt.get("image")
-        bid = tgt.get("box_id")
-        if not img_name or not bid:
-            continue
-        boxes = edited_all.get(img_name) or []
-        for b in boxes:
-            if not isinstance(b, dict):
-                continue
-            if str(b.get("id")) != str(bid):
-                continue
-            if b.get("label") == new_label:
-                continue
-            b["label"] = new_label
-            # Stamp a Label Cascade validation so the editor's
-            # right-hand list can render the orange-glow chip
-            # ("Label Cascade") in place of the usual Verified/
-            # Manual badge — the user explicitly accepted this
-            # rename via the Cascade modal, so it's a meaningful
-            # provenance signal.
-            b["validation"] = {
-                "match": True,
-                "confidence": 1.0,
-                "reason": "Label Cascade",
-                "source": "cascade",
-                "kind": "cascade",
-            }
-            n_changed += 1
-            affected_images.add(str(img_name))
-            affected_box_ids.append(str(bid))
-
-    if n_changed:
-        manifest["editedBoxes"] = edited_all
-        manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        save_manifest(project_id, manifest)
-        # Update embedding rows' labels — no re-encode needed.
-        try:
-            import embeddings as _emb
-            _emb.update_label(project_dir(project_id), affected_box_ids, new_label)
-        except Exception as e:
-            print(f"[embeddings] label update failed: {e}")
-        # Rebake preview JPEGs for the affected images so the cover
-        # photo and all the listings reflect the new labels.
-        if affected_images and R2 is not None:
-            loop = asyncio.get_running_loop()
-            loop.run_in_executor(None, _rebake_previews_sync, project_id, list(affected_images))
-
-    return {"ok": True, "changed": n_changed}
-
-
 @app.delete(
     "/api/projects/{project_id}",
     # DESTROY is creator-only: a Project editor (or even the Project owner) can't
@@ -19606,10 +15149,9 @@ async def duplicate_project(
     # Fresh id; retry on the astronomically unlikely collision / tombstone.
     new_id = _uuid.uuid4().hex
     for _ in range(5):
-        if not project_dir(new_id).exists() and not _is_project_deleted(new_id):
+        if not store.dataset_exists(new_id) and not _is_project_deleted(new_id):
             break
         new_id = _uuid.uuid4().hex
-    dst = project_dir(new_id)
 
     name = (payload.name.strip() if (payload and payload.name and payload.name.strip()) else "")
     if not name:
@@ -19621,6 +15163,9 @@ async def duplicate_project(
         # A custom name that trips the gate falls back to a safe default
         # rather than failing the whole (potentially multi-GB) copy.
         name = f"Copy of {src_manifest.get('name') or 'dataset'}"
+
+    # Reserve the destination folder (copytree requires it not to exist).
+    dst = store.reserve_dataset_dir(new_id, name)
 
     loop = asyncio.get_running_loop()
 
@@ -19635,21 +15180,12 @@ async def duplicate_project(
         # top-level JSON that is source-of-truth, not a derivable cache.
         try:
             for f in dst.glob("*.json"):
-                if f.name != "manifest.json":
+                if f.name != "dataset.json":
                     f.unlink()
         except Exception as e:
             print(f"[duplicate] sidecar cleanup failed for {new_id}: {e}")
-        # Legacy V1 image/output bytes live in R2 under the project prefix;
-        # server-side copy each key (no download). V2 datasets keep their
-        # images on local disk, so this prefix is typically empty.
-        if R2 is not None:
-            try:
-                src_prefix = R2Storage.project_prefix(project_id)
-                dst_prefix = R2Storage.project_prefix(new_id)
-                for key in R2.list_keys(src_prefix):
-                    R2.copy(key, dst_prefix + key[len(src_prefix):])
-            except Exception as e:
-                print(f"[duplicate] R2 copy failed {project_id} -> {new_id}: {e}")
+        # (SaaS build also server-side-copied the R2 prefix here; locally the
+        # copytree above already carried every byte.)
 
     try:
         await loop.run_in_executor(None, _copy)
@@ -19722,7 +15258,6 @@ async def rename_project(project_id: str, payload: RenameIn):
         # Uploads burn credits (1 credit = 800 uploaded images). Gate
         # at the request boundary so an over-cap user can't keep
         # filling their storage column or the NSFW GPU queue.
-        Depends(enforce_credits),
     ],
 )
 async def add_images(project_id: str, images: list[UploadFile] = File(...), user: str | None = None):
@@ -19963,7 +15498,6 @@ class ImagesFromUrlsRequest(BaseModel):
     "/api/projects/{project_id}/images_from_urls",
     dependencies=[
         Depends(require_project_owner),
-        Depends(enforce_credits),
     ],
 )
 async def add_images_from_urls(project_id: str, body: ImagesFromUrlsRequest, user: str | None = None):
@@ -20278,15 +15812,7 @@ async def rename_label(project_id: str, body: RenameLabelRequest):
     manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     save_manifest(project_id, manifest)
 
-    # Drop the old tag from the synonyms cache so the renamed tag
-    # gets fresh variants on the next run instead of the stale
-    # synonyms-of-the-old-name list.
-    try:
-        cache = _load_synonyms_cache(project_id)
-        if cache.pop(old.lower(), None) is not None:
-            _save_synonyms_cache(project_id, cache)
-    except Exception as e:
-        print(f"[synonyms] cache invalidate on rename failed: {e}")
+    # (synonyms cache removed with the GroundingDINO pipeline)
 
     return {"ok": True, "renamed": renamed, "tags": out_tags}
 
@@ -20451,7 +15977,7 @@ async def schedule_job(
     dataset's own creator, OR (for a dataset in a Project) any editor/owner of
     that Project, so a Project editor can run auto-labelling / training on a
     dataset a teammate created."""
-    if payload.kind not in ("label", "label_lite", "label_charlie", "purge_label", "segment", "train"):
+    if payload.kind not in ("label_charlie", "purge_label"):
         raise HTTPException(400, f"unknown kind: {payload.kind}")
     proj = project_dir(payload.project)
     if not proj.exists():
@@ -20475,7 +16001,7 @@ async def schedule_job(
         # _user_usage_counters iterates all project manifests on a
         # cache miss (can take 2-5s on a multi-project account,
         # causing the FE "Starting…" state to linger).
-        await asyncio.to_thread(enforce_credits, request, user)
+        pass  # credit gate removed (portable build)
 
     n_images = 0
     # Reuse `project_manifest` (already loaded copy=False above) for
@@ -20548,445 +16074,6 @@ async def schedule_job(
     return {"jobId": job.id, **job.to_public()}
 
 
-@app.get("/api/terminal/whoami", dependencies=[Depends(require_terminal_token)])
-async def terminal_whoami():
-    """Cheap endpoint the frontend hits with a token to validate it before
-    storing. Returns the username if the token is correct."""
-    return {"user": TERMINAL_USER, "ok": True}
-
-
-@app.get("/api/jobs", dependencies=[Depends(require_terminal_token)])
-async def list_jobs(status: str | None = None, limit: int = 300):
-    all_jobs = list(state["jobs"].jobs.values())
-    if status:
-        all_jobs = [j for j in all_jobs if j.status == status]
-    # Always include active jobs regardless of limit so a running
-    # labelling job is never pushed off the list by newer inline jobs.
-    active = [j for j in all_jobs if j.status in ("running", "queued")]
-    history = sorted(
-        [j for j in all_jobs if j.status not in ("running", "queued")],
-        key=lambda j: j.queued_at, reverse=True,
-    )
-    combined = active + history[:limit]
-    combined.sort(key=lambda j: j.queued_at, reverse=True)
-    return [j.to_public() for j in combined]
-
-
-@app.get("/api/jobs/stats", dependencies=[Depends(require_terminal_token)])
-async def jobs_stats():
-    return state["jobs"].stats()
-
-
-@app.get("/api/events", dependencies=[Depends(require_terminal_token)])
-async def get_events(kind: str | None = None, limit: int = 200):
-    """Audit events (NSFW blocks, signups, completed jobs) — persisted in
-    audit.db so they survive restarts. Pass `?kind=` to filter."""
-    return audit.list_events(kind=kind, limit=max(1, min(500, limit)))
-
-
-@app.get("/api/users/live", dependencies=[Depends(require_terminal_token)])
-async def users_live():
-    """Currently active users (ping /api/heartbeat in the last 30s)."""
-    users = list_live()
-    return {"count": len(users), "users": users}
-
-
-@app.get("/api/stats/totals", dependencies=[Depends(require_terminal_token)])
-async def stats_totals():
-    """Cumulative counts across all projects on this backend. Computed by
-    walking project manifests; very fast at this dataset size, no DB hit."""
-    n_labelled = 0
-    n_images = 0
-    n_projects = 0
-    for p in PROJECTS_DIR.iterdir():
-        if not p.is_dir() or p.name in RESERVED or p.name.startswith("."):
-            continue
-        n_projects += 1
-        manifest = load_manifest(p.name)
-        for r in manifest.get("results") or []:
-            n_images += 1
-            if not r.get("pending"):
-                n_labelled += 1
-    return {
-        "projects": n_projects,
-        "images_total": n_images,
-        "images_labelled": n_labelled,
-        "nsfw_blocks_total": audit.count_events("nsfw_block"),
-        "signups_total": audit.count_events("signup"),
-    }
-
-
-@app.get("/api/terminal/users", dependencies=[Depends(require_terminal_token)])
-async def terminal_users():
-    """Per-user project summary — groups projects by owner, returns counts and
-    last-activity timestamps. Used by the Terminal dashboard's user-projects panel."""
-    by_user: dict[str, list[dict]] = {}
-    for p in PROJECTS_DIR.iterdir():
-        if not p.is_dir() or p.name in RESERVED or p.name.startswith("."):
-            continue
-        try:
-            m = load_manifest(p.name)
-        except Exception:
-            continue
-        owner = ((m.get("owner") or m.get("createdBy") or "unknown").strip()) or "unknown"
-        n_imports = len(m.get("imports") or [])
-        n_labelled = sum(1 for e in (m.get("imports") or []) if e.get("labelled"))
-        tags = (m.get("tags") or [])[:6]
-        updated = m.get("updatedAt") or m.get("createdAt") or ""
-        project_name = m.get("name") or p.name
-        if owner not in by_user:
-            by_user[owner] = []
-        by_user[owner].append({
-            "id": p.name,
-            "name": project_name,
-            "n_images": n_imports,
-            "n_labelled": n_labelled,
-            "tags": tags,
-            "updated": updated,
-        })
-    for projs in by_user.values():
-        projs.sort(key=lambda x: x.get("updated", ""), reverse=True)
-    return [
-        {"user": u, "projects": projs}
-        for u, projs in sorted(by_user.items(), key=lambda kv: -len(kv[1]))
-    ]
-
-
-class HeartbeatIn(BaseModel):
-    username: str
-
-
-@app.post("/api/heartbeat")
-async def heartbeat(payload: HeartbeatIn, user: str = Depends(current_user)):
-    """Frontends ping this every ~15s while a user is active. Lets the
-    Terminal show how many users are currently using the app — purely
-    in-memory, no DB. Authed: payload `username` must match the
-    bearer token, otherwise an attacker could brute-force valid
-    usernames by watching what 4xx vs 200 returns."""
-    if user.lower() != (payload.username or "").strip().lower():
-        raise HTTPException(403, "username mismatch")
-    mark_live(payload.username)
-    return {"ok": True}
-
-
-class SignupEventIn(BaseModel):
-    username: str | None = None
-    name: str | None = None
-    email: str | None = None
-    image: str | None = None
-    provider: str | None = None
-
-
-@app.post("/api/events/signup")
-async def event_signup(payload: SignupEventIn):
-    """Called by the Next.js auth flows on signup so the Terminal sees new
-    users without any Postgres queries. Open endpoint — not gated by the
-    terminal token because the Next API route, not the user, calls this."""
-    add_event("signup", **payload.model_dump(exclude_none=True))
-    return {"ok": True}
-
-
-class RenameUserIn(BaseModel):
-    new_username: str
-
-
-@app.post(
-    "/api/users/{username}/rename",
-    dependencies=[Depends(require_user_match("username"))],
-)
-async def rename_user(username: str, payload: RenameUserIn):
-    """Update the `owner` / `createdBy` fields on every project manifest
-    when a user changes their username, so their workspace doesn't go
-    invisible the moment the rename lands. Best-effort — projects with
-    unreadable manifests are skipped rather than failing the whole rename."""
-    old = (username or "").strip()
-    new = (payload.new_username or "").strip().lower()
-    if not old or not new:
-        raise HTTPException(400, "old + new username required")
-    if old == new:
-        return {"ok": True, "renamed": 0}
-
-    renamed = 0
-    for p in PROJECTS_DIR.iterdir():
-        if not p.is_dir() or p.name in RESERVED or p.name.startswith("."):
-            continue
-        try:
-            m = load_manifest(p.name)
-        except Exception:
-            continue
-        owner_was_old = (m.get("owner") or "") == old
-        creator_was_old = (m.get("createdBy") or "") == old
-        if not owner_was_old and not creator_was_old:
-            continue
-        if owner_was_old:
-            m["owner"] = new
-        if creator_was_old:
-            m["createdBy"] = new
-        # Also remap likes / favourites lists so the user's heart/star
-        # follows them across the rename.
-        for key in ("likedBy", "favouritedBy"):
-            arr = m.get(key) or []
-            if isinstance(arr, list) and old in arr:
-                m[key] = [new if u == old else u for u in arr]
-        try:
-            save_manifest(p.name, m)
-            renamed += 1
-        except Exception as e:
-            print(f"[rename_user] failed to save {p.name}: {e}")
-
-    # Also migrate the audit log so the user's monthly auto-label
-    # quota carries over with them. Without this, renaming would
-    # zero out usage — a free quota reset every time you change your
-    # handle.
-    audit_renamed = audit.rename_user_in_events(old, new)
-
-    return {
-        "ok": True,
-        "renamed": renamed,
-        "auditRenamed": audit_renamed,
-        "from": old,
-        "to": new,
-    }
-
-
-@app.delete(
-    "/api/users/{username}/data",
-    dependencies=[Depends(require_user_match("username"))],
-)
-async def delete_user_data(username: str):
-    """Wipe every project (and its R2 prefix) owned by `username`.
-
-    Called by the Next.js delete-account flow before the row in
-    Postgres is removed, so a deletion leaves no orphaned project
-    folders, manifests, or R2 objects behind. Idempotent — running
-    twice on a user with no projects is fine."""
-    user = (username or "").strip()
-    if not user:
-        raise HTTPException(400, "username required")
-
-    deleted = 0
-    failed = 0
-    for p in list(PROJECTS_DIR.iterdir()):
-        if not p.is_dir() or p.name in RESERVED or p.name.startswith("."):
-            continue
-        try:
-            m = load_manifest(p.name)
-        except Exception:
-            continue
-        if (m.get("owner") or m.get("createdBy") or "") != user:
-            continue
-        try:
-            # Tombstone before teardown so a racing write can't resurrect
-            # the folder (same guard as the per-project delete above).
-            _mark_project_deleted(p.name)
-            # Cancel any in-flight jobs for this project, same as the
-            # per-project delete endpoint above.
-            for j in list(state["jobs"].jobs.values()):
-                if j.project != p.name:
-                    continue
-                if j.status in ("queued", "running"):
-                    state["jobs"].cancel(j.id)
-                    j.status = "cancelled"
-                    if j.finished_at is None:
-                        j.finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            shutil.rmtree(p)
-            invalidate_manifest_cache(p.name)
-            if R2 is not None:
-                R2.delete_prefix(R2Storage.project_prefix(p.name))
-            deleted += 1
-        except Exception as e:
-            print(f"[delete_user_data] failed to delete {p.name}: {e}")
-            failed += 1
-
-    return {"ok": True, "username": user, "projectsDeleted": deleted, "failed": failed}
-
-
-@app.get(
-    "/api/users/{username}/usage",
-    dependencies=[Depends(require_user_match("username"))],
-)
-async def get_user_usage(username: str, since: str | None = None):
-    """Return per-user usage figures for the plan quota check.
-
-    `project_count` is the number of project manifests this user owns;
-    `images_labelled_this_period` rolls up successful `label` /
-    `label_lite` jobs from audit.db since the supplied `?since=ISO`
-    cutoff. Pro users pass their billing-period start; free users pass
-    the rolling monthly anchor based on their signup day.
-
-    If `since` is omitted we fall back to the start of the current
-    calendar month so older callers keep working."""
-    user = (username or "").strip()
-    if not user:
-        raise HTTPException(400, "username required")
-
-    now = datetime.now(timezone.utc)
-    if since:
-        since_iso = since
-    else:
-        since_iso = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat(timespec="seconds")
-    counters = _user_usage_counters(user, since_iso)
-    training_blocks = audit.sum_training_blocks_for_user(user, since_iso=since_iso)
-    return {
-        "username": user,
-        "projects": counters["projects"],
-        # Legacy alias kept so older clients don't break while they cut over.
-        "imagesLabelledThisMonth": counters["imagesLabelledThisPeriod"],
-        "imagesLabelledThisPeriod": counters["imagesLabelledThisPeriod"],
-        "imagesUploadedThisPeriod": counters["imagesUploadedThisPeriod"],
-        "imagesStoredNow": counters["imagesStoredNow"],
-        # Training credits consumed this cycle (1 block = 15 active min = 1 credit).
-        "trainingBlocksThisPeriod": int(training_blocks or 0),
-        "trainingCreditsThisPeriod": int(training_blocks or 0),
-        "since": since_iso,
-    }
-
-
-@app.get("/api/jobs/{job_id}", dependencies=[Depends(require_terminal_token)])
-async def get_job(job_id: str):
-    job = state["jobs"].jobs.get(job_id)
-    if not job:
-        raise HTTPException(404)
-    return job.to_public()
-
-
-# ── Marketing-site hero detections ────────────────────────────────
-# Pre-computed bounding boxes + segmentation polygons for the two
-# images the public homepage cycles through. Real charlie / SAM 3
-# output (the same pipeline /api/charlie/* uses), cached to disk so
-# subsequent loads of the marketing site don't re-run inference for
-# every visitor. Public (no auth) — it's marketing data.
-
-HERO_DEMOS_CONFIG: dict[str, dict] = {
-    "ppe": {
-        "filename": "ppe-demo.jpg",
-        "labels": ["person", "hard hat", "high vis vest"],
-    },
-    "road": {
-        "filename": "road-demo.jpg",
-        "labels": ["car"],
-    },
-}
-HERO_CACHE_DIR = ROOT / "hero_cache"
-HERO_IMAGE_DIR = ROOT / "hero_images"
-# Bump to invalidate every cached hero-detections JSON on disk.
-# Cached payloads include this version stamp; mismatches force a
-# fresh compute. Use this whenever you change the source images,
-# change the prompt labels, change the polygon serialisation, etc.
-HERO_CACHE_VERSION = 2
-# Frontend base URL the backend falls back to if the image isn't
-# bundled in backend/hero_images/. Lets the user deploy the backend
-# without copying the assets — it'll pull from the public site.
-HERO_FRONTEND_BASE_URL = os.environ.get(
-    "PIXELKIT_HERO_BASE_URL",
-    "https://www.pixelkit.ai",
-).rstrip("/")
-
-
-def _hero_load_image(filename: str) -> "PILImage.Image":
-    """Try the bundled copy first; fall back to fetching from the
-    marketing site. Either path returns an EXIF-corrected RGB PIL
-    image."""
-    local = HERO_IMAGE_DIR / filename
-    if local.exists():
-        with PILImage.open(local) as im:
-            return ImageOps.exif_transpose(im).convert("RGB")
-    import urllib.request
-    url = f"{HERO_FRONTEND_BASE_URL}/{filename}"
-    print(f"[hero-detections] fetching {url}")
-    with urllib.request.urlopen(url, timeout=15) as resp:
-        data = resp.read()
-    im = PILImage.open(io.BytesIO(data))
-    return ImageOps.exif_transpose(im).convert("RGB")
-
-
-@app.get("/api/hero-detections/{kind}")
-async def hero_detections(kind: str, refresh: int = 0):
-    """Return cached SAM 3 detections + polygons for the homepage
-    inference panel. First request per kind computes via the live
-    charlie pipeline and writes the result to disk; subsequent
-    requests serve the cache. Pass `?refresh=1` to force recompute."""
-    cfg = HERO_DEMOS_CONFIG.get(kind)
-    if cfg is None:
-        raise HTTPException(404, "unknown hero kind")
-
-    cache_path = HERO_CACHE_DIR / f"{kind}.json"
-    if refresh != 1 and cache_path.exists():
-        try:
-            cached = json.loads(cache_path.read_text())
-            # Version + kind sanity check. The road.json on disk had
-            # stale PPE data after an earlier deploy mismatch; the
-            # version stamp invalidates anything that wasn't written
-            # by the current code, and the kind check refuses to
-            # serve a payload whose recorded kind doesn't match the
-            # URL even if a downstream cache somehow swapped them.
-            if cached.get("version") == HERO_CACHE_VERSION and cached.get("kind") == kind:
-                return cached
-            print(
-                f"[hero-detections] cache stale for {kind} "
-                f"(version={cached.get('version')!r}, kind={cached.get('kind')!r}) — recomputing"
-            )
-        except Exception as e:
-            print(f"[hero-detections] cache read failed for {kind}: {e}")
-
-    charlie = state.get("charlie")
-    if charlie is None:
-        raise HTTPException(503, "charlie pipeline not loaded")
-
-    try:
-        pil = _hero_load_image(cfg["filename"])
-    except Exception as e:
-        raise HTTPException(500, f"could not load hero image: {e}")
-
-    width, height = pil.size
-    labels: list[str] = list(cfg["labels"])
-
-    # Run on the same GPU lock as the rest of the app so we don't
-    # contend with active project labelling.
-    loop = asyncio.get_running_loop()
-
-    def _infer() -> list[dict]:
-        return charlie.segment_labels(pil, labels, False)[0]
-
-    async with state["gpu_lock"]:
-        detections_raw = await loop.run_in_executor(None, _infer)
-
-    detections: list[dict] = []
-    for d in detections_raw:
-        box = d.get("box") or []
-        if not (isinstance(box, (list, tuple)) and len(box) == 4):
-            continue
-        mask = d.get("mask") or {}
-        polys = mask.get("polygons") if isinstance(mask, dict) else None
-        detections.append({
-            "label": d.get("gd_label") or "",
-            "score": round(float(d.get("gd_score") or 0.9), 3),
-            "box": [float(box[0]), float(box[1]), float(box[2]), float(box[3])],
-            "polygons": polys or [],
-        })
-
-    payload = {
-        "version": HERO_CACHE_VERSION,
-        "kind": kind,
-        "imageWidth": int(width),
-        "imageHeight": int(height),
-        "detections": detections,
-    }
-    try:
-        HERO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(payload))
-    except Exception as e:
-        print(f"[hero-detections] cache write failed for {kind}: {e}")
-    return payload
-
-
-@app.delete("/api/jobs/{job_id}", dependencies=[Depends(require_terminal_token)])
-async def delete_job(job_id: str):
-    if not state["jobs"].cancel(job_id):
-        raise HTTPException(404, "job not found or already finished")
-    return {"ok": True}
-
-
 @app.delete(
     "/api/v2/projects/{project_id}/jobs/{job_id}",
     dependencies=[Depends(require_project_owner)],
@@ -21039,256 +16126,6 @@ async def job_events(request: Request, job_id: str, authorization: str = Header(
 
 
 # Legacy endpoint kept as a thin shim so any old client still works.
-@app.post(
-    "/api/projects/{project_id}/run",
-    dependencies=[Depends(require_project_owner)],
-)
-async def run_project(
-    name: str,
-    prompt: str = Form(...),
-    tags: str = Form("[]"),
-    box_threshold: float = Form(0.25),
-    text_threshold: float = Form(0.25),
-    nms_iou: float = Form(0.5),
-    user: str | None = Form(None),
-):
-    """Schedules a label job — kept for backwards compatibility."""
-    try:
-        tag_list = json.loads(tags) if tags else []
-        if not isinstance(tag_list, list):
-            tag_list = []
-    except (ValueError, TypeError):
-        tag_list = []
-    payload = ScheduleJobIn(
-        project=project_id,
-        kind="label",
-        user=user,
-        params={
-            "prompt": prompt,
-            "tags": tag_list,
-            "box_threshold": box_threshold,
-            "text_threshold": text_threshold,
-            "nms_iou": nms_iou,
-        },
-    )
-    res = await schedule_job(payload)
-    return {"name": name, "n_images": res.get("n_images", 0), "jobId": res["jobId"]}
-
-
-class SegmentBoxIn(BaseModel):
-    image: str
-    box: list[float]
-
-
-@app.post(
-    "/api/projects/{project_id}/segment_box",
-    dependencies=[Depends(require_project_owner)],
-)
-async def segment_single_box(
-    project_id: str,
-    payload: SegmentBoxIn,
-    user: str | None = None,
-    _credits: "plans.CreditState" = Depends(enforce_credits),
-):
-    """Run SAM2 on one ad-hoc box and return its mask payload — used when the
-    user draws a box in the editor and we want to fill in a mask immediately."""
-    proj = project_dir(project_id)
-    if not proj.exists():
-        raise HTTPException(404, "project not found")
-    if len(payload.box) != 4:
-        raise HTTPException(400, "box must be [x0,y0,x1,y1]")
-
-    # Skip a HEAD probe before the GET — _pil_from_r2 raises on missing key
-    # with a clear error and saves a Class B op per click.
-    fn = Path(payload.image).name
-    r2_required()  # 503 fast if R2 unconfigured
-
-    loop = asyncio.get_running_loop()
-
-    async def runner(job, emit, cancel_event):
-        await emit("progress", {"index": 1, "total": 1, "image": payload.image})
-
-        def run():
-            image_pil = _pil_from_r2(project_id, fn)
-            masks = segment_boxes(state, image_pil, [payload.box])
-            return masks[0] if masks else None
-
-        return await loop.run_in_executor(None, run)
-
-    mask = await state["jobs"].run_inline(
-        kind="segment_box",
-        project=project_id,
-        params={"image": payload.image, "box": payload.box},
-        user=user or "anonymous",
-        runner=runner,
-    )
-    return {"mask": mask}
-
-
-class ClassifyBoxIn(BaseModel):
-    image: str
-    box: list[float]
-
-
-class DetectPointIn(BaseModel):
-    image: str
-    point: list[float]
-
-
-@app.post(
-    "/api/projects/{project_id}/detect_point",
-    dependencies=[Depends(require_project_owner)],
-)
-async def detect_from_point(
-    project_id: str,
-    payload: DetectPointIn,
-    user: str | None = None,
-    _credits: "plans.CreditState" = Depends(enforce_credits),
-):
-    """One-click detection: SAM2 from a single point → derived bbox → GD
-    classify on the crop with project tags. Returns the full detection in
-    one round-trip so the editor can drop a finished, labelled, masked box."""
-    proj = project_dir(project_id)
-    if not proj.exists():
-        raise HTTPException(404, "project not found")
-    if len(payload.point) != 2:
-        raise HTTPException(400, "point must be [x, y]")
-
-    # No HEAD probe — _pil_from_r2 raises clearly on a missing key.
-    fn = Path(payload.image).name
-    r2_required()
-
-    loop = asyncio.get_running_loop()
-
-    async def runner(job, emit, cancel_event):
-        await emit("progress", {"index": 1, "total": 1, "image": payload.image})
-
-        def run():
-            image_pil = _pil_from_r2(project_id, fn)
-            seg = segment_point(state, image_pil, payload.point)
-            if seg is None:
-                return None
-            # Frontend follows up with classify_box on the derived bbox so
-            # the mask can render the moment SAM finishes (without waiting
-            # for the GD pass).
-            return {
-                "box_xyxy": seg["box_xyxy"],
-                "mask": {"polygons": seg["polygons"]},
-                "label": None,
-                "score": None,
-                "mask_score": seg["score"],
-            }
-
-        return await loop.run_in_executor(None, run)
-
-    detection = await state["jobs"].run_inline(
-        kind="detect_point",
-        project=project_id,
-        params={"image": payload.image, "point": payload.point},
-        user=user or "anonymous",
-        runner=runner,
-    )
-    if detection is None:
-        raise HTTPException(422, "no mask found at that point")
-    return detection
-
-
-@app.post(
-    "/api/projects/{project_id}/classify_box",
-    dependencies=[Depends(require_project_owner)],
-)
-async def classify_single_box(
-    project_id: str,
-    payload: ClassifyBoxIn,
-    user: str | None = None,
-    _credits: "plans.CreditState" = Depends(enforce_credits),
-):
-    """Pick a label for an ad-hoc box by re-running GD on a small padded crop
-    with the project's tag vocabulary. Returns {"label": str|null, "score": ...}."""
-    proj = project_dir(project_id)
-    if not proj.exists():
-        raise HTTPException(404, "project not found")
-    if len(payload.box) != 4:
-        raise HTTPException(400, "box must be [x0,y0,x1,y1]")
-
-    # No HEAD probe — _pil_from_r2 raises clearly on a missing key.
-    fn = Path(payload.image).name
-    r2_required()
-
-    manifest = load_manifest(project_id)
-    tags = list(manifest.get("tags") or [])
-    if not tags:
-        return {"label": None, "score": None, "reason": "no project tags"}
-
-    loop = asyncio.get_running_loop()
-
-    def run():
-        image_pil = _pil_from_r2(project_id, fn)
-        W, H = image_pil.size
-        x0, y0, x1, y1 = payload.box
-        x0, x1 = sorted((max(0.0, x0), min(float(W), x1)))
-        y0, y1 = sorted((max(0.0, y0), min(float(H), y1)))
-        if x1 - x0 < 2 or y1 - y0 < 2:
-            return None, None
-        # Multi-choice classification via the in-process VLM. The user's
-        # already localised the object — we just need to pick a label
-        # from the project tags. VLM handles tight crops far better than
-        # GroundingDINO does (GD expects scene context to ground a phrase).
-        from vlm_validate import vlm_classify
-        return vlm_classify(image_pil, [x0, y0, x1, y1], tags)
-
-    async def runner(job, emit, cancel_event):
-        await emit("progress", {"index": 1, "total": 1, "image": payload.image})
-        return await loop.run_in_executor(None, run)
-
-    label, score = await state["jobs"].run_inline(
-        kind="classify_box",
-        project=project_id,
-        params={"image": payload.image, "box": payload.box, "tags": tags},
-        user=user or "anonymous",
-        runner=runner,
-    )
-    return {"label": label, "score": score}
-
-
-@app.post(
-    "/api/projects/{project_id}/segment",
-    dependencies=[Depends(require_project_owner)],
-)
-async def run_segment_only(project_id: str, user: str | None = Form(None)):
-    """Backfill SAM2 masks via a queued job — kept for the legacy "Segment now"
-    button. Returns jobId so the client can subscribe to /api/jobs/{id}/events."""
-    res = await schedule_job(ScheduleJobIn(project=project_id, kind="segment", user=user, params={}))
-    return {"name": name, "n_images": res.get("n_images", 0), "jobId": res["jobId"]}
-
-
-@app.get(
-    "/api/projects/{project_id}/model/download",
-    dependencies=[Depends(require_project_read_access)],
-)
-async def download_project_model(project_id: str):
-    """Stream the project's trained model weights. Returns 404 if the
-    project hasn't been trained yet."""
-    proj = project_dir(project_id)
-    if not proj.exists():
-        raise HTTPException(404, "project not found")
-    manifest = load_manifest(project_id)
-    model = (manifest or {}).get("model")
-    if not model or not model.get("weights"):
-        raise HTTPException(404, "no trained model for this project")
-    weights_path = proj / model["weights"]
-    if not weights_path.exists():
-        raise HTTPException(404, "weights file missing on disk")
-    safe_name = _safe_slug(manifest.get("name") or project_id)
-    kind = model.get("kind") or "model"
-    filename = f"{safe_name}-{kind}{weights_path.suffix or '.pt'}"
-    return FileResponse(
-        weights_path,
-        media_type="application/octet-stream",
-        filename=filename,
-    )
-
-
 @app.get(
     "/api/projects/{project_id}/jobs/active",
     dependencies=[Depends(require_project_read_access)],
@@ -21358,101 +16195,6 @@ async def project_original(project_id: str, filename: str):
     browser stops asking entirely for 5 min and serves stale up to 55."""
     fn = Path(filename).name
     return _redirect_to_r2(R2Storage.image_key(project_id, fn))
-
-
-@app.post(
-    "/api/avatars/{user_id}",
-    dependencies=[Depends(require_user_match("user_id"))],
-)
-async def upload_avatar(user_id: str, file: UploadFile = File(...)):
-    """Accept an image, NSFW-check it, normalise to JPEG, store at
-    avatars/{user_id}.jpg in R2. Returns the stable backend URL the FE should
-    save into user.image."""
-    r2 = r2_required()
-    if not re.match(r"^[a-zA-Z0-9_-]+$", user_id):
-        raise HTTPException(400, "invalid user_id")
-
-    data = await file.read()
-    if len(data) > MAX_UPLOAD_BYTES_PER_FILE:
-        raise HTTPException(
-            413,
-            f"avatar too large: {len(data)} bytes (max {MAX_UPLOAD_BYTES_PER_FILE})",
-        )
-    try:
-        img = PILImage.open(io.BytesIO(data))
-    except PILImage.DecompressionBombError:
-        raise HTTPException(413, "image dimensions exceed the maximum allowed")
-    except Exception:
-        raise HTTPException(400, "not an image")
-
-    # Same NSFW gate as project uploads — no skin-bypass on avatars.
-    with tempfile.NamedTemporaryFile(suffix=Path(file.filename or "").suffix or ".jpg", delete=False) as tmp:
-        tmp.write(data)
-        tmp_path = Path(tmp.name)
-    try:
-        try:
-            # Stricter EXPOSED-only check on avatars — project uploads also
-            # block COVERED variants but those false-positive on red round
-            # shapes (tomatoes, fruit) which are reasonable profile photos.
-            score, cls = nsfw_score(state["nsfw"], tmp_path, classes=EXPOSED_CLASSES)
-        except Exception:
-            score, cls = 0.0, ""
-    finally:
-        tmp_path.unlink(missing_ok=True)
-    if score >= NSFW_THRESHOLD:
-        add_event(
-            "nsfw_block",
-            project="<avatar>",
-            file=file.filename or "",
-            score=round(score, 3),
-            classification=cls,
-            user=user_id,
-        )
-        raise HTTPException(422, "image rejected by NSFW filter")
-
-    # Square-crop centre then re-encode JPEG so the served file is always small + sane.
-    img = ImageOps.exif_transpose(img).convert("RGB")
-    side = min(img.width, img.height)
-    left = (img.width - side) // 2
-    top = (img.height - side) // 2
-    img = img.crop((left, top, left + side, top + side)).resize((512, 512))
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=88)
-
-    avatar_key = R2Storage.avatar_key(user_id)
-    r2.put_bytes(avatar_key, buf.getvalue(), content_type="image/jpeg")
-    _invalidate_url_cache(avatar_key)
-    return {"ok": True}
-
-
-@app.get("/api/avatars/{user_id}")
-async def get_avatar(user_id: str):
-    """302 to a presigned URL of this user's avatar. URL + redirect both
-    cached so a page that renders the same avatar 20 times costs ~1 backend
-    call across a session."""
-    if not re.match(r"^[a-zA-Z0-9_-]+$", user_id):
-        raise HTTPException(400, "invalid user_id")
-    return _redirect_to_r2(R2Storage.avatar_key(user_id))
-
-
-@app.delete(
-    "/api/avatars/{user_id}",
-    dependencies=[Depends(require_user_match("user_id"))],
-)
-async def delete_avatar(user_id: str):
-    """Remove the avatar object from R2 and bust the URL cache.
-    Called from the Next.js account-deletion flow so a deleted user
-    doesn't leave an orphaned image in storage."""
-    if not re.match(r"^[a-zA-Z0-9_-]+$", user_id):
-        raise HTTPException(400, "invalid user_id")
-    key = R2Storage.avatar_key(user_id)
-    if R2 is not None:
-        try:
-            R2.delete(key)
-        except Exception as e:
-            print(f"[delete_avatar] r2 delete failed for {key}: {e}")
-    _invalidate_url_cache(key)
-    return {"ok": True}
 
 
 @app.get(
@@ -21808,7 +16550,7 @@ def _load_image_bytes(project_id: str, img_name: str) -> bytes | None:
     local filesystem; V1 projects keep them in R2. Try the cheap local
     path first and fall back to R2 — silently returns None if neither
     has the file so the caller can skip the entry."""
-    local_path = project_dir(project_id) / "imports" / img_name
+    local_path = project_dir(project_id) / "images" / img_name
     if local_path.exists():
         try:
             return local_path.read_bytes()
@@ -22339,1232 +17081,6 @@ def _aug_parent_lookup(project_id: str, manifest: dict) -> dict[str, str]:
     return out
 
 
-# ---- Public demo --------------------------------------------------------
-# Auto-label trial for logged-out visitors. The cap is per IP and lives in
-# audit.db — high enough that page reloads behave "as much as they want"
-# (~30 successful runs/IP/day on a single image OR multi-image session),
-# low enough that no single visitor can run the GPU into the ground.
-# Logged + surfaced in the Terminal so the operator can see who's playing
-# with the demo and where they came from. The FE caps in-session usage
-# tighter (10 images per mode) so the server-side number is just the
-# abuse floor, not the UX gate.
-DEMO_QUOTA = 100  # per visitor per day (per IP, resets at UTC midnight)
-
-# TEMPORARY KILL-SWITCH. When False, the per-visitor demo quota never
-# blocks a run (the 429 gates below are skipped) — used to open the demo
-# up without the daily cap. The /api/demo/quota endpoint also reports
-# unlimited so the FE hides its counter. Flip back to True to re-enable
-# the cap; no other code changes needed.
-DEMO_QUOTA_ENABLED = False
-
-# HMAC-signed token that lets a visitor re-run the demo on new images
-# without burning quota. Issued on the first successful run, validated
-# on subsequent calls. Tied to IP + UTC calendar date so a token from
-# yesterday is automatically invalid even if the user persists it.
-## Security (Phase 0): never fall back to a guessable hardcoded secret. With the
-## old "pk-demo-default-secret-2024" default, anyone could forge demo rerun
-## tokens and bypass the per-IP daily quota. Use the env if set, else a random
-## per-process secret (rerun tokens just don't survive a restart, which is fine
-## for the demo). Set DEMO_RUN_TOKEN_SECRET in prod for stable rerun tokens.
-DEMO_RUN_TOKEN_SECRET = os.environ.get("DEMO_RUN_TOKEN_SECRET", "").strip() or secrets.token_hex(32)
-
-
-def _make_run_token(ip: str) -> str:
-    # UTC calendar date — matches both the comment on DEMO_RUN_TOKEN_SECRET
-    # above ("Tied to IP + UTC calendar date") and audit.count_demo_for_ip's
-    # UTC-midnight day boundary. date.today() is server-LOCAL, so on a host
-    # not running in UTC the token would roll over at a different instant
-    # than the quota counter, desyncing rerun detection from the quota.
-    msg = f"{ip}:{datetime.now(timezone.utc).date().isoformat()}".encode()
-    return hmac.new(DEMO_RUN_TOKEN_SECRET.encode(), msg, hashlib.sha256).hexdigest()[:32]
-
-
-def _verify_run_token(token: str | None, ip: str) -> bool:
-    if not token:
-        return False
-    try:
-        return hmac.compare_digest(token, _make_run_token(ip))
-    except Exception:
-        return False
-
-
-# ─── Demo specific-mode reference-embedding cache ────────────────────
-# demo_run_specific builds per-label DINOv2/SigLIP reference embeddings.
-# We cache them keyed by the run_token (deterministic per IP+day) so the
-# stateless interactive endpoints (detect_point / classify_box) can
-# classify a clicked / drawn region against the SAME references the run
-# used — embedding-driven, exactly like the app. The token is derivable
-# server-side from the request IP, so no FE change is needed.
-_DEMO_REF_EMB_CACHE: dict[str, tuple] = {}
-_DEMO_REF_EMB_CACHE_MAX = 256
-_DEMO_REF_EMB_LOCK = _threading.Lock()
-
-
-def _demo_ref_emb_put(token: str, by_label: dict, by_label_siglip: dict, label_names: list[str]) -> None:
-    if not token or not by_label:
-        return
-    with _DEMO_REF_EMB_LOCK:
-        # Evict the oldest entry (dict preserves insertion order) when full.
-        if token not in _DEMO_REF_EMB_CACHE and len(_DEMO_REF_EMB_CACHE) >= _DEMO_REF_EMB_CACHE_MAX:
-            try:
-                _DEMO_REF_EMB_CACHE.pop(next(iter(_DEMO_REF_EMB_CACHE)))
-            except StopIteration:
-                pass
-        _DEMO_REF_EMB_CACHE[token] = (by_label, by_label_siglip or {}, list(label_names))
-
-
-def _demo_ref_emb_get(token: str | None):
-    if not token:
-        return None
-    with _DEMO_REF_EMB_LOCK:
-        return _DEMO_REF_EMB_CACHE.get(token)
-
-
-def _demo_resolve_label(image_pil, box_xyxy, mask_polys, by_label, by_label_siglip, label_names):
-    """Classify a box / point region against cached reference embeddings
-    with the EXACT resolver the demo specific BATCH uses (raw kNN, NO
-    Fisher, NO patches, gd_label=None). Returns (label, score), or
-    (None, None) so callers can fall back to the VLM / GD path.
-
-    Must be called inside the GPU lock (it runs DINOv2/SigLIP encode)."""
-    det = {"box": [float(c) for c in box_xyxy], "mask": {"polygons": mask_polys or []}}
-    try:
-        _charlie_embed_detections(image_pil, [det])
-    except Exception as e:
-        print(f"[demo/interactive] embed failed: {e}")
-        return None, None
-    emb = det.get("embedding")
-    if not emb:
-        return None, None
-    refs_arr = _v2_stack_refs(by_label)
-    if not refs_arr:
-        return None, None
-    refs_sig = _v2_stack_refs(by_label_siglip)
-    thr = _v2_compute_class_thresholds(refs_arr) or None
-    label_display = {t.lower(): t for t in label_names}
-    try:
-        verdict = _v2_resolve_label_specific(
-            emb, None, refs_arr, label_display,
-            score_mode="knn", gd_score=None,
-            embedding_siglip=det.get("siglip_embedding") or None,
-            refs_by_label_siglip=refs_sig or None,
-            class_thresholds=thr,
-            ambiguous_margin=_CHARLIE_AMBIGUOUS_MARGIN,
-        )
-    except Exception as e:
-        print(f"[demo/interactive] resolve failed: {e}")
-        return None, None
-    if not verdict:
-        return None, None
-    label = verdict.get("pred_label") or verdict.get("embed_nearest_label")
-    if not label:
-        return None, None
-    sim = verdict.get("embed_sim_for_label")
-    if sim is None:
-        sim = verdict.get("embed_nearest_sim")
-    return label, (round(float(sim), 4) if sim is not None else None)
-
-
-def _client_ip(request: Request) -> str:
-    """Resolve the user's IP. Trusts Cloudflare's CF-Connecting-IP
-    header (set by Cloudflare's edge, which strips any pre-existing
-    value so it can't be spoofed) when the backend sits behind a
-    tunnel; otherwise falls back to the direct socket peer.
-
-    Deliberately does NOT honour X-Forwarded-For. An attacker can
-    set that header to any value when posting directly to the
-    backend (bypassing Cloudflare), which previously let them reset
-    the per-IP demo quota indefinitely by rotating the header for
-    each request. cf-connecting-ip can't be spoofed because
-    Cloudflare overwrites it; the socket peer can't be spoofed at
-    all (TCP three-way handshake required)."""
-    h = request.headers
-    return (
-        h.get("cf-connecting-ip")
-        or (request.client.host if request.client else "")
-        or "unknown"
-    )
-
-
-def _client_country(request: Request) -> str:
-    # Cloudflare inserts a 2-letter ISO country code on every request that
-    # passes through their edge. Empty when running locally.
-    return (request.headers.get("cf-ipcountry") or "").upper()
-
-
-@app.get("/api/demo/quota")
-async def demo_quota(request: Request):
-    # Quota temporarily disabled → report `unlimited: true` so the FE
-    # hides its counter and never shows the "out of runs" state.
-    if not DEMO_QUOTA_ENABLED:
-        return {"used": 0, "quota": None, "remaining": None, "unlimited": True}
-    used = audit.count_demo_for_ip(_client_ip(request))
-    return {"used": used, "quota": DEMO_QUOTA, "remaining": max(0, DEMO_QUOTA - used)}
-
-
-@app.post("/api/demo/run")
-async def demo_run(
-    request: Request,
-    file: UploadFile = File(...),
-    prompt: str = Form(...),
-):
-    """One-image auto-label run for anonymous visitors. Quota is enforced
-    server-side off audit.db so the user can't refresh past it. Loose
-    thresholds — the demo is forgiving on purpose."""
-    ip = _client_ip(request)
-    country = _client_country(request)
-
-    used = audit.count_demo_for_ip(ip)
-    if DEMO_QUOTA_ENABLED and used >= DEMO_QUOTA:
-        raise HTTPException(429, f"demo quota exhausted ({DEMO_QUOTA} per visitor per day)")
-
-    prompt = (prompt or "").strip()
-    if not prompt:
-        raise HTTPException(400, "prompt required")
-
-    data = await file.read()
-    if len(data) > MAX_UPLOAD_BYTES_PER_FILE:
-        raise HTTPException(
-            413,
-            f"image too large: {len(data)} bytes (max {MAX_UPLOAD_BYTES_PER_FILE})",
-        )
-    try:
-        img = PILImage.open(io.BytesIO(data))
-    except PILImage.DecompressionBombError:
-        raise HTTPException(413, "image dimensions exceed the maximum allowed")
-    except Exception:
-        raise HTTPException(400, "not an image")
-
-    # NSFW gate — same threshold as project uploads. A blocked image does NOT
-    # burn quota; the user can pick a different photo without penalty.
-    with tempfile.NamedTemporaryFile(suffix=Path(file.filename or "").suffix or ".jpg", delete=False) as tmp:
-        tmp.write(data)
-        tmp_path = Path(tmp.name)
-    try:
-        try:
-            score, cls = nsfw_score(state["nsfw"], tmp_path)
-        except Exception:
-            score, cls = 0.0, ""
-    finally:
-        tmp_path.unlink(missing_ok=True)
-    if score >= NSFW_THRESHOLD:
-        add_event(
-            "demo",
-            ip=ip, country=country, status="nsfw_block",
-            prompt=prompt[:200], score=round(score, 3), classification=cls,
-        )
-        raise HTTPException(422, "image rejected by NSFW filter")
-
-    # Comma-separated tags; fall back to the whole prompt as a single phrase.
-    tags = [t.strip() for t in prompt.split(",") if t.strip()] or [prompt]
-
-    image_pil = ImageOps.exif_transpose(img).convert("RGB")
-    loop = asyncio.get_running_loop()
-
-    def infer():
-        # Loose preset to keep the demo forgiving — same numbers as the
-        # "Loose" PRESETS in the workspace UI (box=0.10, text=0.10, nms=0.7).
-        boxes_xyxy, phrases = predict(
-            state["model"], image_pil, tags,
-            box_threshold=0.10, text_threshold=0.10,
-            device=state["device"], nms_iou=0.7,
-        )
-        W, H = image_pil.size
-        box_list = boxes_xyxy.tolist() if hasattr(boxes_xyxy, "tolist") else list(boxes_xyxy)
-        # Segment each detection with SAM2 — same as the workspace path so
-        # demo results show the green mask fills, not just bounding boxes.
-        masks_payload: list[dict | None] = [None] * len(box_list)
-        if box_list:
-            try:
-                masks_payload = segment_boxes(state, image_pil, box_list)
-            except Exception:
-                masks_payload = [None] * len(box_list)
-        out = []
-        for box, phrase, mask in zip(box_list, phrases, masks_payload):
-            label, sc = parse_phrase(phrase)
-            # VLM second opinion — manual mode just attaches the verdict, no
-            # auto-drop. Failures surface as match=True+reason=vlm unreachable.
-            try:
-                validation = validate_box(image_pil, box, label)
-            except Exception:
-                validation = None
-            d = {"label": label, "score": sc, "box_xyxy": [round(v, 1) for v in box]}
-            if mask is not None:
-                d["mask"] = mask
-            if validation is not None:
-                d["validation"] = validation
-            out.append(d)
-        return W, H, out
-
-    W, H, detections = await loop.run_in_executor(None, infer)
-
-    add_event(
-        "demo",
-        ip=ip, country=country, status="ok",
-        prompt=prompt[:200], n_detections=len(detections),
-        image_size={"width": W, "height": H},
-    )
-
-    used_after = used + 1
-    return {
-        "detections": detections,
-        "size": {"width": W, "height": H},
-        "tags": tags,
-        "used": used_after,
-        "quota": DEMO_QUOTA if DEMO_QUOTA_ENABLED else None,
-        "remaining": max(0, DEMO_QUOTA - used_after) if DEMO_QUOTA_ENABLED else None,
-        "unlimited": not DEMO_QUOTA_ENABLED,
-    }
-
-
-# Multi-image variant of /api/demo/run. Same loose preset, same NSFW
-# gate, but accepts up to DEMO_GENERIC_MAX_IMAGES test images in one
-# request and counts as a single quota unit. Lets the FE present the
-# "label 10 images at once" generic-mode flow without burning a
-# quota slot per image.
-DEMO_GENERIC_MAX_IMAGES = 5
-
-
-@app.post("/api/demo/run_batch")
-async def demo_run_batch(
-    request: Request,
-    prompt: str = Form(...),
-    images: list[UploadFile] = File(...),
-    run_token: str = Form(None),
-):
-    ip = _client_ip(request)
-    country = _client_country(request)
-
-    is_rerun = _verify_run_token(run_token, ip)
-    used = audit.count_demo_for_ip(ip)
-    if DEMO_QUOTA_ENABLED and not is_rerun and used >= DEMO_QUOTA:
-        raise HTTPException(429, f"demo quota exhausted ({DEMO_QUOTA} per visitor per day)")
-
-    prompt = (prompt or "").strip()
-    if not prompt:
-        raise HTTPException(400, "prompt required")
-    if not images:
-        raise HTTPException(400, "at least one image required")
-    if len(images) > DEMO_GENERIC_MAX_IMAGES:
-        raise HTTPException(413, f"too many images (max {DEMO_GENERIC_MAX_IMAGES})")
-
-    # Decode + NSFW-gate each image. A single bad image kills the
-    # whole batch — keeps the contract simple, and the FE can drop
-    # the offender and retry.
-    pils: list[PILImage.Image] = []
-    names: list[str] = []
-    for uf in images:
-        data = await uf.read()
-        if len(data) > MAX_UPLOAD_BYTES_PER_FILE:
-            raise HTTPException(
-                413,
-                f"image too large: {uf.filename} {len(data)} bytes (max {MAX_UPLOAD_BYTES_PER_FILE})",
-            )
-        try:
-            img = PILImage.open(io.BytesIO(data))
-        except PILImage.DecompressionBombError:
-            raise HTTPException(413, f"image dimensions exceed maximum: {uf.filename}")
-        except Exception:
-            raise HTTPException(400, f"not an image: {uf.filename}")
-        with tempfile.NamedTemporaryFile(suffix=Path(uf.filename or "").suffix or ".jpg", delete=False) as tmp:
-            tmp.write(data)
-            tmp_path = Path(tmp.name)
-        try:
-            try:
-                # Strict EXPOSED-only set — the broad COVERED classes
-                # false-positive on innocuous demo imagery (fruit,
-                # animals, people in PPE) and would 422 the whole run.
-                score, _cls = nsfw_score(state["nsfw"], tmp_path, classes=EXPOSED_CLASSES)
-            except Exception:
-                score = 0.0
-        finally:
-            tmp_path.unlink(missing_ok=True)
-        if score >= NSFW_THRESHOLD:
-            raise HTTPException(422, f"image rejected by NSFW filter: {uf.filename}")
-        pils.append(ImageOps.exif_transpose(img).convert("RGB"))
-        names.append(uf.filename or f"img_{len(names)}.jpg")
-
-    tags = [t.strip() for t in prompt.split(",") if t.strip()] or [prompt]
-    loop = asyncio.get_running_loop()
-
-    # Use the SAME charlie pipeline (SAM3-based) the workspace runs for
-    # paying users so demo labels match what a logged-in user would see
-    # on the same image with the same labels. The earlier demo path
-    # used a loose GD-only preset which produced visibly worse labels;
-    # swapping to charlie closes that gap. charlie is held in process
-    # state under "charlie"; if it didn't load we fall back to a hard
-    # 503 rather than silently degrading.
-    charlie = state.get("charlie")
-    if charlie is None:
-        raise HTTPException(503, "labelling model not loaded; try again in a few seconds")
-
-    def _process_one(image_pil: PILImage.Image):
-        W, H = image_pil.size
-        try:
-            charlie_dets, _timings = charlie.segment_labels(
-                image_pil, tags, include_crops=False,
-            )
-        except Exception as exc:
-            print(f"[demo/run_batch] charlie failed: {exc}")
-            return W, H, []
-        # Same NMS the app's general charlie path runs (server.py ~4085):
-        # drop same-label duplicate masks on one object, then — for
-        # multi-label prompts only — drop cross-label duplicates so one
-        # box survives per physical object. Without this the demo showed
-        # overlapping duplicate boxes the workspace would have collapsed.
-        charlie_dets = _charlie_nms_same_label(charlie_dets)
-        if len(tags) > 1:
-            charlie_dets = _charlie_nms_post_resolve(charlie_dets, iou_thresh=0.9)
-        # Adapt charlie's detection envelope (box / mask{polygons} /
-        # gd_label / gd_score) to the demo frontend's expected shape
-        # (label / score / box_xyxy / mask). Drop the embedding +
-        # crop_jpg_b64 fields; the demo doesn't need them and they'd
-        # bloat the response.
-        out: list[dict] = []
-        for d in charlie_dets:
-            box = d.get("box") or []
-            if len(box) < 4:
-                continue
-            label = (d.get("gd_label") or "").strip()
-            score = float(d.get("gd_score") or 0.0)
-            entry: dict = {
-                "label": label,
-                "score": score,
-                "box_xyxy": [round(float(c), 1) for c in box[:4]],
-            }
-            mask = d.get("mask")
-            if mask:
-                entry["mask"] = mask
-            out.append(entry)
-        return W, H, out
-
-    results = []
-    # Run each image inside the GPU lock so SAM3 calls serialise across
-    # concurrent visitors. Interactive priority since this is a user-
-    # facing demo call.
-    for pil, name in zip(pils, names):
-        async with state["gpu_lock"].interactive():
-            W, H, dets = await loop.run_in_executor(None, _process_one, pil)
-        results.append({
-            "filename": name,
-            "size": {"width": W, "height": H},
-            "detections": dets,
-        })
-
-    # Always log to the Terminal so operators see every run — including
-    # reruns (which reuse the run_token). `rerun=True` is excluded from
-    # the per-IP quota count (see audit.count_demo_for_ip), so logging a
-    # rerun doesn't burn quota; it only surfaces the activity.
-    add_event(
-        "demo",
-        ip=ip, country=country, status="ok",
-        mode="generic_batch",
-        prompt=prompt[:200],
-        n_images=len(pils),
-        n_detections=sum(len(r["detections"]) for r in results),
-        rerun=is_rerun,
-    )
-    used_after = used if is_rerun else used + 1
-
-    return {
-        "tags": tags,
-        "results": results,
-        "used": used_after,
-        "quota": DEMO_QUOTA if DEMO_QUOTA_ENABLED else None,
-        "remaining": max(0, DEMO_QUOTA - used_after) if DEMO_QUOTA_ENABLED else None,
-        "unlimited": not DEMO_QUOTA_ENABLED,
-        "run_token": _make_run_token(ip),
-    }
-
-
-@app.post("/api/demo/detect_point")
-async def demo_detect_point(
-    request: Request,
-    file: UploadFile = File(...),
-    point_x: float = Form(...),
-    point_y: float = Form(...),
-    prompt: str = Form(""),
-):
-    """Click-to-detect for the demo: SAM2 from a single point → derived bbox →
-    optional GD classify against the prompt vocabulary. Refines results from a
-    prior /api/demo/run on the same image. Doesn't burn the quota — clicks
-    are cheap and the cap is on the heavy auto-label run."""
-    ip = _client_ip(request)
-    # Allow click-to-detect only after the user has actually triggered the
-    # main demo at least once. Stops a fresh visitor calling this directly.
-    if audit.count_demo_for_ip(ip) == 0:
-        raise HTTPException(403, "run a demo first")
-
-    data = await file.read()
-    try:
-        img = PILImage.open(io.BytesIO(data))
-    except Exception:
-        raise HTTPException(400, "not an image")
-
-    image_pil = ImageOps.exif_transpose(img).convert("RGB")
-    tags = [t.strip() for t in (prompt or "").split(",") if t.strip()]
-    loop = asyncio.get_running_loop()
-    # Reference embeddings from this visitor's last specific run (if any).
-    cached = _demo_ref_emb_get(_make_run_token(ip))
-
-    def infer():
-        seg = segment_point(state, image_pil, [point_x, point_y])
-        if seg is None:
-            return None
-        box = list(seg["box_xyxy"])
-        # Reject a degenerate / sub-pixel box the same way the app's
-        # detect_point does (server.py ~20569), so we never embed a
-        # near-empty crop and hand back a junk label.
-        if (box[2] - box[0]) < 4 or (box[3] - box[1]) < 4:
-            return None
-        polys = seg["polygons"]
-        label, lbl_score = None, None
-        # Specific datasets: classify the clicked region against the run's
-        # reference embeddings — the SAME basis as the batch, and the only
-        # path that labels objects whose word SAM3/VLM can't name (e.g.
-        # "orangutan", a made-up label).
-        if cached is not None:
-            by_label, by_label_siglip, ref_label_names = cached
-            label, lbl_score = _demo_resolve_label(
-                image_pil, box, polys, by_label, by_label_siglip, ref_label_names,
-            )
-        # Fallback: VLM over the prompt vocabulary (general mode, or when
-        # the reference resolver couldn't decide). Pass the SAM mask so the
-        # VLM sees the highlighted region rather than a plain crop.
-        if label is None and tags:
-            try:
-                from vlm_validate import vlm_classify
-                label, lbl_score = vlm_classify(image_pil, box, tags, polys)
-            except Exception as e:
-                print(f"[demo] vlm_classify failed: {e}")
-        return {
-            "box_xyxy": box,
-            "mask": {"polygons": polys},
-            "label": label,
-            "score": lbl_score,
-            "mask_score": seg["score"],
-        }
-
-    # Under the interactive GPU gate — infer now runs SAM2 + (embedding
-    # encode | VLM), all GPU work that must serialise with other calls.
-    try:
-        async with state["gpu_lock"].interactive():
-            detection = await loop.run_in_executor(None, infer)
-    except Exception as exc:
-        raise HTTPException(500, f"detect_point error: {exc}")
-    if detection is None:
-        raise HTTPException(422, "no mask found at that point")
-    return detection
-
-
-@app.post("/api/demo/segment_box")
-async def demo_segment_box(
-    image: UploadFile = File(...),
-    box: str = Form(...),
-):
-    """Anonymous SAM2-on-a-box for the demo reference editor. Mirror of
-    /api/v2/references/segment_box WITHOUT the auth + credits gate, so
-    the no-signup demo can draw boxes (the gated one 401s for visitors)."""
-    if state.get("segmenter") is None:
-        raise HTTPException(503, "SAM2 not loaded")
-    try:
-        box_list = json.loads(box)
-        if not (isinstance(box_list, list) and len(box_list) == 4):
-            raise ValueError("box must be [x0,y0,x1,y1]")
-        box_xyxy = [float(c) for c in box_list]
-    except Exception as e:
-        raise HTTPException(400, f"invalid box payload: {e}")
-    raw = await image.read()
-    if not raw:
-        raise HTTPException(400, "empty image upload")
-    try:
-        image_pil = PILImage.open(io.BytesIO(raw)).convert("RGB")
-    except Exception as e:
-        raise HTTPException(400, f"could not decode image: {e}")
-    loop = asyncio.get_running_loop()
-
-    def _run():
-        masks = segment_boxes(state, image_pil, [box_xyxy])
-        return masks[0] if masks else None
-
-    try:
-        async with state["gpu_lock"].interactive():
-            mask = await loop.run_in_executor(None, _run)
-    except Exception as exc:
-        raise HTTPException(500, f"segment_box error: {exc}")
-    return {"mask": mask}
-
-
-@app.post("/api/demo/classify_box")
-async def demo_classify_box(
-    request: Request,
-    image: UploadFile = File(...),
-    box: str = Form(...),
-    labels: str = Form(...),
-):
-    """Anonymous classify-a-box for the demo reference editor. Specific
-    datasets classify against the run's reference embeddings (same basis
-    as the app + batch); otherwise falls back to GroundingDINO over the
-    label text. Mirror of /api/v2/references/classify_box WITHOUT auth."""
-    try:
-        box_list = json.loads(box)
-        if not (isinstance(box_list, list) and len(box_list) == 4):
-            raise ValueError("box must be [x0,y0,x1,y1]")
-        x0, y0, x1, y1 = (float(c) for c in box_list)
-    except Exception as e:
-        raise HTTPException(400, f"invalid box payload: {e}")
-    try:
-        tag_list = json.loads(labels)
-        tags = [t.strip() for t in tag_list if isinstance(t, str) and t.strip()]
-    except Exception as e:
-        raise HTTPException(400, f"invalid labels payload: {e}")
-    if not tags:
-        return {"label": None, "score": None}
-    raw = await image.read()
-    if not raw:
-        raise HTTPException(400, "empty image upload")
-    try:
-        image_pil = PILImage.open(io.BytesIO(raw)).convert("RGB")
-    except Exception as e:
-        raise HTTPException(400, f"could not decode image: {e}")
-
-    # Specific datasets: classify the box against the run's reference
-    # embeddings (the SAME resolver the batch uses). Falls back to GD
-    # below when there are no cached refs (general mode / pre-run).
-    cached = _demo_ref_emb_get(_make_run_token(_client_ip(request)))
-    if cached is not None:
-        by_label, by_label_siglip, ref_label_names = cached
-        loop = asyncio.get_running_loop()
-        try:
-            async with state["gpu_lock"].interactive():
-                lbl, sc = await loop.run_in_executor(
-                    None, _demo_resolve_label,
-                    image_pil, [x0, y0, x1, y1], [], by_label, by_label_siglip, ref_label_names,
-                )
-        except Exception as exc:
-            print(f"[demo/classify_box] reference resolve failed: {exc}")
-            lbl, sc = None, None
-        if lbl is not None:
-            return {"label": lbl, "score": sc}
-        # else fall through to GD below.
-
-    if state.get("model") is None:
-        raise HTTPException(503, "GroundingDINO not loaded")
-    W, H = image_pil.size
-    x0, x1 = sorted((max(0.0, x0), min(float(W), x1)))
-    y0, y1 = sorted((max(0.0, y0), min(float(H), y1)))
-    if x1 - x0 < 2 or y1 - y0 < 2:
-        return {"label": None, "score": None}
-    pad = 0.10
-    bw = x1 - x0
-    bh = y1 - y0
-    cx0 = max(0.0, x0 - bw * pad)
-    cy0 = max(0.0, y0 - bh * pad)
-    cx1 = min(float(W), x1 + bw * pad)
-    cy1 = min(float(H), y1 + bh * pad)
-    loop = asyncio.get_running_loop()
-
-    def _run():
-        crop = image_pil.crop((int(cx0), int(cy0), int(cx1), int(cy1)))
-        _boxes, phrases = predict(
-            state["model"], crop, tags, 0.20, 0.20, state["device"], nms_iou=0.5,
-        )
-        best_score = -1.0
-        best_label: str | None = None
-        for phrase in phrases:
-            lbl, sc = parse_phrase(phrase)
-            if lbl and sc is not None and sc > best_score:
-                best_score = float(sc)
-                best_label = lbl
-        return best_label, (best_score if best_score >= 0 else None)
-
-    try:
-        async with state["gpu_lock"].interactive():
-            label, score = await loop.run_in_executor(None, _run)
-    except Exception as exc:
-        raise HTTPException(500, f"classify_box error: {exc}")
-    return {"label": label, "score": score}
-
-
-# ─── Demo reference annotation cache + bake ──────────────────────────
-# The public sample datasets ship fixed reference images. Detecting them
-# live on every visit is slow + wasteful, so we bake each reference's
-# SAM3 detection ONCE, keyed by the sha256 of the image bytes, and
-# persist it. After the first request warms a given image every later
-# request is an instant cache read, so the references render pre-labelled
-# with no live model call.
-_DEMO_REF_CACHE_PATH = Path(__file__).resolve().parent.parent / "demo_ref_cache.json"
-_DEMO_REF_CACHE: dict | None = None
-_DEMO_REF_CACHE_LOCK = _threading.Lock()
-
-
-def _demo_ref_cache() -> dict:
-    global _DEMO_REF_CACHE
-    if _DEMO_REF_CACHE is None:
-        try:
-            _DEMO_REF_CACHE = (
-                json.loads(_DEMO_REF_CACHE_PATH.read_text(encoding="utf-8"))
-                if _DEMO_REF_CACHE_PATH.exists() else {}
-            )
-        except Exception:
-            _DEMO_REF_CACHE = {}
-    return _DEMO_REF_CACHE
-
-
-def _demo_ref_cache_put(key: str, value: list) -> None:
-    with _DEMO_REF_CACHE_LOCK:
-        cache = _demo_ref_cache()
-        cache[key] = value
-        try:
-            _DEMO_REF_CACHE_PATH.write_text(json.dumps(cache), encoding="utf-8")
-        except Exception as e:
-            print(f"[demo/bake_refs] cache persist failed: {e}")
-
-
-@app.post("/api/demo/bake_refs")
-async def demo_bake_refs(
-    ref_images: list[UploadFile] = File(...),
-    labels: str = Form(...),
-    ref_label_indices: str = Form(...),
-):
-    """Pre-bake + cache reference-image annotations for a sample dataset.
-    Each reference is run through the SAME SAM3 detector the project's
-    reference upload uses (_charlie_reference_detections) and returned as
-    [{label, score, box_xyxy, mask}]. Results are cached by image content
-    hash + persisted, so the detection runs once ever and later loads are
-    instant — references render pre-labelled with no per-open model call.
-
-    Input shape mirrors run_specific (ref_images + ref_label_indices) so
-    the FE reuses its reference plumbing. Anonymous, no quota burn — this
-    is deterministic cached work, not a 'demo run'."""
-    charlie = state.get("charlie")
-    if charlie is None:
-        raise HTTPException(503, "labelling model not loaded; try again in a few seconds")
-    try:
-        label_names = json.loads(labels)
-        if not isinstance(label_names, list) or not all(isinstance(s, str) for s in label_names):
-            raise ValueError
-        label_names = [s.strip() for s in label_names if s.strip()]
-    except Exception:
-        raise HTTPException(400, "labels must be a JSON list of non-empty strings")
-    try:
-        ref_indices = [int(x.strip()) for x in ref_label_indices.split(",") if x.strip() != ""]
-    except Exception:
-        raise HTTPException(400, "ref_label_indices must be comma-separated ints")
-    if len(ref_indices) != len(ref_images):
-        raise HTTPException(400, "ref_label_indices length must match ref_images length")
-
-    loop = asyncio.get_running_loop()
-    out: list[dict] = []
-    for uf, idx in zip(ref_images, ref_indices):
-        raw = await uf.read()
-        if not raw or not (0 <= idx < len(label_names)):
-            out.append({"label": None, "detections": []})
-            continue
-        label_hint = label_names[idx]
-        cache_key = f"{hashlib.sha256(raw).hexdigest()}::{label_hint.lower()}"
-        cached = _demo_ref_cache().get(cache_key)
-        if cached is not None:
-            out.append({"label": label_hint, "detections": cached, "cached": True})
-            continue
-        try:
-            pil = PILImage.open(io.BytesIO(raw)).convert("RGB")
-        except Exception:
-            out.append({"label": label_hint, "detections": []})
-            continue
-        try:
-            async with state["gpu_lock"].interactive():
-                raw_dets = await loop.run_in_executor(
-                    None, _charlie_reference_detections, pil, [label_hint],
-                )
-            raw_dets = raw_dets or []
-        except Exception as exc:
-            print(f"[demo/bake_refs] detect failed for {label_hint!r}: {exc}")
-            raw_dets = []
-        # Map to the demo Detection shape the FE consumes (box_xyxy).
-        dets = [
-            {
-                "label": d.get("label"),
-                "score": d.get("score"),
-                "box_xyxy": d.get("box"),
-                "mask": d.get("mask"),
-            }
-            for d in raw_dets
-            if isinstance(d, dict) and d.get("box")
-        ]
-        _demo_ref_cache_put(cache_key, dets)
-        out.append({"label": label_hint, "detections": dets, "cached": False})
-
-    return {"labels": label_names, "annotations": out}
-
-
-# ───────────────────────────────────────────────────────────────────────
-# Specific-mode demo endpoint. Stateless: takes a batch of test images
-# plus reference images grouped by label, runs zero-shot detection on
-# each test image using the label names as text prompts, then assigns
-# each detection to the nearest per-label reference centroid in
-# v2_dinov2 embedding space. Reuses the existing v2_dinov2 encoder
-# (no Fisher reweighting / kNN here — those need 2+ refs per class
-# minimum and are the differentiator for the in-app workflow, not the
-# demo). One round-trip, no project rows, no audit-persisted refs.
-#
-# Caller schema (multipart/form-data):
-#   labels:              JSON list of label name strings, e.g.
-#                        '["hare", "rabbit"]'
-#   test_images:         list[file] — up to 10 query images
-#   ref_images:          list[file] — up to 10 reference images, in
-#                        any per-label order
-#   ref_label_indices:   comma-separated ints, one per ref_image,
-#                        each value is an index into the labels list
-#                        (e.g. "0,0,0,1,1,1" → first three refs are
-#                        for the first label, next three for the second)
-#
-# Response: list of {filename, size:{width,height}, detections:[…]}.
-# Each detection: {box_xyxy, mask, label, score, nearest_sim}.
-# ───────────────────────────────────────────────────────────────────────
-
-DEMO_SPECIFIC_MAX_TEST_IMAGES = 5
-DEMO_SPECIFIC_MAX_REFS = 10
-DEMO_SPECIFIC_QUOTA = 100  # per visitor per day (per IP, resets at UTC midnight)
-
-# Cosine accept threshold for a centroid match. Anything below this
-# falls back to the zero-shot GD label (which was already correct for
-# the query phrase, just not fine-grained-disambiguated). The number
-# is intentionally loose — the demo's purpose is to show reference-
-# driven discrimination working, not to gate aggressively.
-DEMO_SPECIFIC_MIN_SIM = 0.35
-
-
-@app.post("/api/demo/run_specific")
-async def demo_run_specific(
-    request: Request,
-    labels: str = Form(...),
-    test_images: list[UploadFile] = File(...),
-    ref_images: list[UploadFile] = File(...),
-    ref_label_indices: str = Form(...),
-    ref_detections: str = Form(""),
-    run_token: str = Form(None),
-):
-    """Reference-image specific-mode auto-label for the demo. See the
-    section banner above for the schema. Returns labelled detections
-    per test image, picked by per-label centroid cosine similarity
-    over v2_dinov2 embeddings of the reference crops vs the detection
-    crops."""
-    ip = _client_ip(request)
-    country = _client_country(request)
-
-    is_rerun = _verify_run_token(run_token, ip)
-    used = audit.count_demo_for_ip(ip)
-    if DEMO_QUOTA_ENABLED and not is_rerun and used >= DEMO_SPECIFIC_QUOTA:
-        raise HTTPException(429, f"demo quota exhausted ({DEMO_SPECIFIC_QUOTA} per visitor per day)")
-
-    # ── Parse + validate inputs ──────────────────────────────────────
-    try:
-        label_names: list[str] = json.loads(labels)
-        if not isinstance(label_names, list) or not all(isinstance(s, str) for s in label_names):
-            raise ValueError("labels must be a JSON list of strings")
-        label_names = [s.strip() for s in label_names if s.strip()]
-    except Exception:
-        raise HTTPException(400, "labels must be a JSON list of non-empty strings")
-
-    if len(label_names) < 1:
-        raise HTTPException(400, "at least one label required")
-
-    if not test_images:
-        raise HTTPException(400, "at least one test image required")
-    if len(test_images) > DEMO_SPECIFIC_MAX_TEST_IMAGES:
-        raise HTTPException(413, f"too many test images (max {DEMO_SPECIFIC_MAX_TEST_IMAGES})")
-
-    if not ref_images:
-        raise HTTPException(400, "at least one reference image required")
-    if len(ref_images) > DEMO_SPECIFIC_MAX_REFS:
-        raise HTTPException(413, f"too many reference images (max {DEMO_SPECIFIC_MAX_REFS})")
-
-    try:
-        ref_indices = [int(x.strip()) for x in ref_label_indices.split(",") if x.strip() != ""]
-    except Exception:
-        raise HTTPException(400, "ref_label_indices must be comma-separated ints")
-    if len(ref_indices) != len(ref_images):
-        raise HTTPException(400, "ref_label_indices length must match ref_images length")
-    if any(i < 0 or i >= len(label_names) for i in ref_indices):
-        raise HTTPException(400, "ref_label_indices contains out-of-range index")
-
-    # Optional client-refined reference boxes from the demo's reference
-    # editor. Parallel to ref_images; each entry is a list of
-    # {box:[x0,y0,x1,y1], mask?} for that reference, or null/empty to let
-    # the server auto-detect it. Best-effort: a malformed payload falls
-    # back to auto-detection rather than failing the run.
-    ref_dets_parsed: list = []
-    if ref_detections:
-        try:
-            _parsed = json.loads(ref_detections)
-            if isinstance(_parsed, list):
-                ref_dets_parsed = _parsed
-        except Exception as exc:
-            print(f"[demo/run_specific] ignoring bad ref_detections: {exc}")
-            ref_dets_parsed = []
-
-    # Require at least one reference per label so every centroid is
-    # well-defined. Labels with no references would fall back to the
-    # zero-shot label anyway, which defeats the point of the demo.
-    seen = set(ref_indices)
-    missing = [i for i in range(len(label_names)) if i not in seen]
-    if missing:
-        raise HTTPException(
-            400,
-            f"each label needs at least one reference; missing for: {[label_names[i] for i in missing]}",
-        )
-
-    # ── Decode all images ────────────────────────────────────────────
-    import numpy as _np
-    import v2_dinov2 as _v2d
-
-    if not _v2d.is_loaded():
-        raise HTTPException(503, "encoder model not loaded; try again in a few seconds")
-
-    async def _decode_pil(uf: UploadFile) -> PILImage.Image:
-        data = await uf.read()
-        if len(data) > MAX_UPLOAD_BYTES_PER_FILE:
-            raise HTTPException(
-                413,
-                f"image too large: {uf.filename} {len(data)} bytes (max {MAX_UPLOAD_BYTES_PER_FILE})",
-            )
-        try:
-            img = PILImage.open(io.BytesIO(data))
-        except PILImage.DecompressionBombError:
-            raise HTTPException(413, f"image dimensions exceed maximum: {uf.filename}")
-        except Exception:
-            raise HTTPException(400, f"not an image: {uf.filename}")
-        # NSFW gate — same as the basic demo. Run on a tempfile so
-        # the existing nsfw_score helper can stay disk-based.
-        with tempfile.NamedTemporaryFile(suffix=Path(uf.filename or "").suffix or ".jpg", delete=False) as tmp:
-            tmp.write(data)
-            tmp_path = Path(tmp.name)
-        try:
-            try:
-                # Strict EXPOSED-only set — the broad COVERED classes
-                # false-positive on innocuous demo imagery (fruit,
-                # animals, people in PPE) and would 422 the whole run.
-                score, _cls = nsfw_score(state["nsfw"], tmp_path, classes=EXPOSED_CLASSES)
-            except Exception:
-                score = 0.0
-        finally:
-            tmp_path.unlink(missing_ok=True)
-        if score >= NSFW_THRESHOLD:
-            raise HTTPException(422, f"image rejected by NSFW filter: {uf.filename}")
-        return ImageOps.exif_transpose(img).convert("RGB")
-
-    test_pils = [await _decode_pil(uf) for uf in test_images]
-    test_names = [uf.filename or f"test_{i}.jpg" for i, uf in enumerate(test_images)]
-    ref_pils = [await _decode_pil(uf) for uf in ref_images]
-
-    # ── Stack per-label reference embeddings and derive per-class LOO
-    # thresholds — the SAME setup the workspace's label_charlie job uses
-    # for specific-mode projects. This deliberately does NOT apply Fisher
-    # reweighting: the charlie job dropped Fisher because it overfits
-    # small reference sets and biased toward one class (the demo's
-    # hare->rabbit symptom), so the demo must not re-add it. Raw refs +
-    # per-class LOO thresholds keep the demo byte-for-byte with the job.
-    loop = asyncio.get_running_loop()
-    label_to_idx = {name: i for i, name in enumerate(label_names)}
-
-    # Detection front-end uses the same SAM3 (charlie) pipeline the
-    # workspace uses for the broad detection stage. Centroid scoring +
-    # LOO thresholds then sit on top of it. Checked early so we can
-    # also use Charlie for ref image auto-cropping below.
-    charlie = state.get("charlie")
-    if charlie is None:
-        raise HTTPException(503, "labelling model not loaded; try again in a few seconds")
-
-    # ── Build reference embeddings EXACTLY as the app's labelling job
-    #    (label_charlie) does ──────────────────────────────────────────
-    # The app's references come from v2_upload_reference: each reference
-    # image is run through SAM3 (_charlie_reference_detections), and every
-    # detection is cropped (inpaint_bbox_crop + center_square_crop) and
-    # embedded with DINOv2 (+ SigLIP) via _charlie_embed_detections. The
-    # job then loads those raw per-detection embeddings grouped by label.
-    # We reproduce that here so the demo's reference vectors live in the
-    # IDENTICAL space — same detector, same crop, same encoders, all
-    # detections per reference (not just the best one).
-    def _build_refs():
-        by_label: dict[str, list] = {}
-        by_label_siglip: dict[str, list] = {}
-        per_ref: list[dict] = []  # parallel to ref_images, for quality scoring
-        for ri, (ref_pil, ref_idx) in enumerate(zip(ref_pils, ref_indices)):
-            label_hint = label_names[ref_idx]
-            # Client-refined boxes win when supplied: the editor only sets
-            # geometry, the label is ALWAYS the reference's section
-            # (label_hint), never reclassified.
-            client = ref_dets_parsed[ri] if ri < len(ref_dets_parsed) else None
-            dets = None
-            if isinstance(client, list) and client:
-                picked: list[dict] = []
-                for cd in client:
-                    if not isinstance(cd, dict):
-                        continue
-                    bx = cd.get("box") or cd.get("box_xyxy")
-                    if not (isinstance(bx, list) and len(bx) >= 4):
-                        continue
-                    mk = cd.get("mask")
-                    picked.append({
-                        "box": [float(c) for c in bx[:4]],
-                        "mask": mk if isinstance(mk, dict) else None,
-                    })
-                if picked:
-                    dets = picked
-            if dets is None:
-                try:
-                    dets = _charlie_reference_detections(ref_pil, [label_hint]) or []
-                except Exception as exc:
-                    print(f"[demo/run_specific] ref detect failed for {label_hint!r}: {exc}")
-                    dets = []
-                if not dets:
-                    # No SAM3 hit — fall back to the whole image so this
-                    # class STILL gets a reference vector. The app's upload
-                    # path has a GD+SAM2 fallback for the same reason;
-                    # without it a hard-to-detect class can end up with ZERO
-                    # references and then every query resolves to the other.
-                    print(f"[demo/run_specific] ref detect empty for {label_hint!r}; using whole-image fallback")
-                    dets = [{"box": [0, 0, ref_pil.width, ref_pil.height], "mask": None}]
-            try:
-                _charlie_embed_detections(ref_pil, dets)
-            except Exception as exc:
-                print(f"[demo/run_specific] ref embed failed for {label_hint!r}: {exc}")
-                per_ref.append({"idx": ri, "label": label_hint, "embeddings": []})
-                continue
-            ref_embs: list = []
-            for d in dets:
-                emb = d.get("embedding")
-                if emb:
-                    by_label.setdefault(label_hint, []).append(emb)
-                    ref_embs.append(emb)
-                sig = d.get("siglip_embedding")
-                if sig:
-                    by_label_siglip.setdefault(label_hint, []).append(sig)
-            per_ref.append({"idx": ri, "label": label_hint, "embeddings": ref_embs})
-        return by_label, by_label_siglip, per_ref
-
-    async with state["gpu_lock"].interactive():
-        by_label, by_label_siglip, per_ref = await loop.run_in_executor(None, _build_refs)
-    if not by_label:
-        raise HTTPException(422, "could not build reference embeddings from the supplied images")
-
-    # Cache the reference embeddings under this visitor's run_token so the
-    # interactive click-to-detect / add-box endpoints can classify against
-    # the SAME references (embedding-driven), not GD/VLM over label text.
-    run_token_out = _make_run_token(ip)
-    _demo_ref_emb_put(run_token_out, by_label, by_label_siglip, label_names)
-
-    # Raw stacked refs + LOO class thresholds — NO Fisher, NO patch
-    # tokens — to mirror label_charlie's resolve setup byte-for-byte.
-    # The job deliberately dropped Fisher ("overfits small reference sets
-    # and was causing systematic bias toward one class") — that bias is
-    # exactly the demo's hare→rabbit symptom, so we must not re-add it.
-    refs_by_label_arr = _v2_stack_refs(by_label)
-    refs_by_label_siglip_arr = _v2_stack_refs(by_label_siglip)
-    class_thresholds = _v2_compute_class_thresholds(refs_by_label_arr) or None
-    label_display = {t.lower(): t for t in label_names}
-
-    # Per-reference quality (outlier / "looks like other class") via the
-    # SAME leave-one-out cross-validation the app surfaces on the project
-    # page (_v2_compute_reference_quality). Best-effort: any failure just
-    # yields no badges, never blocks the run. Parallel to ref_images order.
-    ref_quality_out: list = [None] * len(per_ref)
-    try:
-        _q_refs = [
-            {
-                "id": str(p["idx"]),
-                "detections": [
-                    {"label": p["label"], "embedding": e} for e in p["embeddings"]
-                ],
-            }
-            for p in per_ref
-        ]
-        _qmap = _v2_compute_reference_quality(_q_refs, refs_by_label_arr)
-        _rank = {"outlier": 3, "looks like other class": 2, "only ref for class": 1}
-        for p in per_ref:
-            entry = _qmap.get(str(p["idx"])) or {}
-            worst = None
-            for dq in entry.values():
-                w = dq.get("warning")
-                if not w:
-                    continue
-                if worst is None or _rank.get(w, 0) > _rank.get(worst.get("warning"), 0):
-                    worst = dq
-            ref_quality_out[p["idx"]] = worst
-    except Exception as exc:
-        print(f"[demo/run_specific] ref quality failed: {exc}")
-        ref_quality_out = [None] * len(per_ref)
-
-    def _process_one(image_pil: PILImage.Image):
-        W, H = image_pil.size
-        try:
-            # Generic-fallback detector (same as the app's specific job):
-            # labels SAM3 can't localise by name fall back to broad concept
-            # prompts so a candidate box surfaces, then the references below
-            # assign the real label.
-            charlie_dets, _t = _charlie_segment_specific_with_fallback(
-                charlie, image_pil, label_names, include_crops=False,
-            )
-        except Exception as exc:
-            print(f"[demo/run_specific] charlie failed: {exc}")
-            return W, H, []
-        if not charlie_dets:
-            return W, H, []
-
-        # Embed every detection crop EXACTLY as label_charlie does
-        # (inpaint + square crop, DINOv2 + SigLIP), then resolve each with
-        # the IDENTICAL call the labelling job makes: raw refs,
-        # score_mode="knn", NO Fisher, NO patch tokens, gd_label passed
-        # through. This is a byte-for-byte mirror of label_charlie's
-        # per-detection resolve.
-        try:
-            _charlie_embed_detections(image_pil, charlie_dets)
-        except Exception as exc:
-            print(f"[demo/run_specific] embed failed: {exc}")
-
-        out: list[dict] = []
-        for d in charlie_dets:
-            box = d.get("box") or []
-            if len(box) < 4:
-                continue
-            emb = d.get("embedding")
-            if not emb:
-                continue
-            try:
-                verdict = _v2_resolve_label_specific(
-                    emb,
-                    d.get("gd_label"),
-                    refs_by_label_arr,
-                    label_display,
-                    score_mode="knn",
-                    gd_score=None,
-                    embedding_siglip=d.get("siglip_embedding") or None,
-                    refs_by_label_siglip=refs_by_label_siglip_arr or None,
-                    class_thresholds=class_thresholds or None,
-                    ambiguous_margin=_CHARLIE_AMBIGUOUS_MARGIN,
-                )
-            except Exception as exc:
-                print(f"[demo/run_specific] resolve failed: {exc}")
-                continue
-            if not verdict:
-                continue
-
-            # VLM tiebreak — IDENTICAL to label_charlie. Fine-grained
-            # pairs (hare vs rabbit) land within the ambiguous margin on
-            # raw embeddings, so the app lets the VLM pick between the
-            # top-2 and fuses that with the embed sims. Skipping this is
-            # the main reason the demo disagreed with the app. vlm_classify
-            # is sync and we're already inside the GPU lock + a worker
-            # thread, so we can call it directly here.
-            if verdict.get("ambiguous") and not verdict.get("rejected"):
-                sims_dict = verdict.get("sims") or {}
-                if len(sims_dict) >= 2:
-                    top2_labels = [lab for lab, _ in sorted(
-                        sims_dict.items(), key=lambda kv: -kv[1])[:2]]
-                    polys_q = (d.get("mask") or {}).get("polygons") or None
-                    v_label, v_score = None, None
-                    try:
-                        from vlm_validate import vlm_classify as _vlm_classify
-                        v_label, v_score = _vlm_classify(
-                            image_pil, box[:4], top2_labels, polys_q,
-                        )
-                    except Exception as exc:
-                        print(f"[demo/run_specific] VLM tiebreak failed: {exc}")
-                    winner, _fm, _fs = _charlie_fuse_embed_vlm(sims_dict, v_label, v_score)
-                    if winner is not None:
-                        verdict["pred_label"] = winner
-                        wl = winner.strip().lower()
-                        for kk, vv in sims_dict.items():
-                            if kk.strip().lower() == wl:
-                                verdict["embed_sim_for_label"] = round(float(vv), 4)
-                                break
-
-            # Specific datasets in the app surface low-similarity
-            # detections as "unsure" rather than dropping them; the demo
-            # UI has no unsure chip, so we drop rejected ones and show
-            # only confident boxes. The label decision itself is identical
-            # to the app for everything that survives.
-            if verdict.get("rejected"):
-                continue
-            label = verdict.get("pred_label") or d.get("gd_label")
-            if not label:
-                continue
-            polys = (d.get("mask") or {}).get("polygons") or []
-            sim = verdict.get("embed_sim_for_label")
-            if sim is None:
-                sim = verdict.get("embed_nearest_sim")
-            entry: dict = {
-                "label": label,
-                "score": (round(float(sim), 3) if sim is not None else None),
-                "box_xyxy": [round(float(c), 1) for c in box[:4]],
-                "nearest_sim": (round(float(sim), 3) if sim is not None else None),
-            }
-            if polys:
-                entry["mask"] = {"polygons": polys}
-            out.append(entry)
-
-        # Cross-label NMS at the SAME IoU threshold as the app's specific
-        # path (_charlie_nms_post_resolve uses _CHARLIE_NMS_IOU): keep the
-        # detection with higher nearest_sim and drop the other. Prevents
-        # Charlie double-counting the same physical object under two
-        # different label prompts.
-        if len(out) > 1:
-            def _iou(a: list, b: list) -> float:
-                ix0 = max(a[0], b[0]); iy0 = max(a[1], b[1])
-                ix1 = min(a[2], b[2]); iy1 = min(a[3], b[3])
-                inter = max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
-                if inter == 0.0:
-                    return 0.0
-                aa = (a[2] - a[0]) * (a[3] - a[1])
-                ab = (b[2] - b[0]) * (b[3] - b[1])
-                return inter / (aa + ab - inter + 1e-6)
-
-            out.sort(key=lambda d: d.get("nearest_sim") or 0.0, reverse=True)
-            kept: list[dict] = []
-            for det in out:
-                if all(_iou(det["box_xyxy"], k["box_xyxy"]) < _CHARLIE_NMS_IOU for k in kept):
-                    kept.append(det)
-            out = kept
-
-        return W, H, out
-
-    results = []
-    for pil, name in zip(test_pils, test_names):
-        async with state["gpu_lock"].interactive():
-            W, H, dets = await loop.run_in_executor(None, _process_one, pil)
-        results.append({
-            "filename": name,
-            "size": {"width": W, "height": H},
-            "detections": dets,
-        })
-
-    # Always log to the Terminal (including reruns); reruns carry
-    # rerun=True so they show as activity but don't count against quota.
-    add_event(
-        "demo",
-        ip=ip, country=country, status="ok",
-        mode="specific",
-        n_labels=len(label_names),
-        n_test=len(test_pils),
-        n_refs=len(ref_pils),
-        n_detections=sum(len(r["detections"]) for r in results),
-        rerun=is_rerun,
-    )
-    used_after = used if is_rerun else used + 1
-
-    return {
-        "labels": label_names,
-        "results": results,
-        "ref_quality": ref_quality_out,
-        "used": used_after,
-        "quota": DEMO_SPECIFIC_QUOTA if DEMO_QUOTA_ENABLED else None,
-        "remaining": max(0, DEMO_SPECIFIC_QUOTA - used_after) if DEMO_QUOTA_ENABLED else None,
-        "unlimited": not DEMO_QUOTA_ENABLED,
-        "run_token": run_token_out,
-    }
-
-
 # ───────────────────────────────────────────────────────────────────────
 # Pipeline Charlie endpoints — drop-in shape compatible with the V2
 # /api/v2/imports/* routes so the FE can target the new pipeline by
@@ -23580,7 +17096,6 @@ async def charlie_imports_process(
     image: UploadFile = File(...),
     labels: str = Form(...),
     project_id: str = Form(""),
-    _credits: "plans.CreditState" = Depends(enforce_credits),
 ):
     """SAM3 promptable concept segmentation on an uploaded image.
 
@@ -23698,7 +17213,7 @@ async def _charlie_load_image_pil(
         fn = imp.get("filename")
         if not fn:
             raise HTTPException(404, "import has no stored filename")
-        src_path = proj / "imports" / fn
+        src_path = proj / "images" / fn
         if not src_path.exists():
             raise HTTPException(404, "source image missing on disk")
         try:
@@ -23762,8 +17277,10 @@ async def _detect_point_unified(
 
     Returns the charlie-shaped envelope.
     """
-    if state.get("segmenter") is None:
-        raise HTTPException(503, "SAM2 not loaded")
+    # Portable build: SAM2 is gone — SAM3 is both the concept detector and
+    # the interactive floor. 503 only when nothing is loaded at all.
+    if state.get("charlie") is None and state.get("segmenter") is None:
+        raise HTTPException(503, "segmentation model not loaded")
     loop = asyncio.get_running_loop()
     W, H = image_pil.size
     px = min(max(float(point_xy[0]), 0.0), float(W - 1))
@@ -23802,7 +17319,12 @@ async def _detect_point_unified(
                 "rejected": False, "reject_reason": None,
             }
 
-    # STAGE 2 — SAM2 floor (the universal segmenter).
+    # STAGE 2 — SAM2 floor removed in the portable build. When SAM3 found
+    # nothing above, there is no universal-segmenter fallback: report a
+    # clean miss instead of NameError'ing into a 500.
+    if state.get("segmenter") is None:
+        raise HTTPException(422, "no mask found at that point")
+
     def _run_sam2():
         return segment_point(state, image_pil, [px, py])
 
@@ -23945,7 +17467,6 @@ async def charlie_imports_detect_point(
     project_id: str = Form(""),
     import_id: str = Form(""),
     labels: str = Form(""),
-    _credits: "plans.CreditState" = Depends(enforce_credits),
 ):
     """Click-to-detect with dual pipeline routing.
 
@@ -24150,7 +17671,12 @@ async def charlie_imports_detect_point(
             }
 
     # SAM3 path: unlabelled tiles, or labelled tiles where SAM2 was
-    # unavailable.
+    # unavailable. (`charlie` was never bound in this handler in the SaaS
+    # build — a latent NameError on this route, fixed here.)
+    charlie = state.get("charlie")
+    if charlie is None:
+        raise HTTPException(503, "SAM3 not loaded")
+
     def _run_sam3():
         return charlie.segment_point(image_pil, [px, py], candidate_labels)
 
@@ -24207,20 +17733,18 @@ async def charlie_imports_segment_box(
     labels: str = Form(""),
     project_id: str = Form(""),
     import_id: str = Form(""),
-    _credits: "plans.CreditState" = Depends(enforce_credits),
 ):
-    """Box-prompted segmentation via SAM2 (NOT SAM3).
+    """Box-prompted segmentation via SAM3 (portable build; SAM2 removed).
 
-    SAM2 takes one forward pass with the user's drawn box and returns
-    a mask in ~50 ms. Source image is loaded from disk via import_id
-    whenever possible (no FE-side fetch / CORS dependency); falls
-    back to an `image` upload for unsaved imports.
-
-    Segmentation only — labels / project_id are accepted for shape
-    compatibility but the resolver runs in classify_box separately.
+    SAM3's input_boxes channel isn't a true "segment inside this box"
+    prompt, so pipeline_charlie.segment_box runs text-prompted SAM3 per
+    candidate label and picks the detection whose bbox best matches the
+    user's box. Source image is loaded from disk via import_id whenever
+    possible; falls back to an `image` upload for unsaved imports.
     """
-    if state.get("segmenter") is None:
-        raise HTTPException(503, "SAM2 not loaded — segment_box unavailable")
+    charlie = state.get("charlie")
+    if charlie is None:
+        raise HTTPException(503, "SAM3 not loaded — segment_box unavailable")
     try:
         coords = json.loads(box)
         if not (isinstance(coords, list) and len(coords) == 4):
@@ -24232,32 +17756,49 @@ async def charlie_imports_segment_box(
         image, project_id, import_id, endpoint_tag="charlie/segment_box",
     )
 
-    _ = labels
+    candidate_labels: list[str] = []
+    try:
+        if labels:
+            parsed = json.loads(labels)
+            if isinstance(parsed, list):
+                candidate_labels = [str(t).strip() for t in parsed if str(t).strip()]
+    except Exception:
+        candidate_labels = []
+    if not candidate_labels and project_id:
+        try:
+            candidate_labels = list(
+                (load_manifest(project_id, copy=False) or {}).get("tags") or []
+            )
+        except Exception:
+            candidate_labels = []
 
     loop = asyncio.get_running_loop()
 
     def _infer():
         t0 = time.perf_counter()
-        results = segment_boxes(state, image_pil, [[float(c) for c in coords]])
+        detection, _timings = charlie.segment_box(
+            image_pil, [float(c) for c in coords], candidate_labels or None,
+        )
         ms = (time.perf_counter() - t0) * 1000.0
-        return (results[0] if results else None), ms
+        return detection, ms
 
     try:
         # Interactive — Charlie pipeline's add-box / drag-box. User
         # is in the BoxEditor waiting on the mask render.
         async with state["gpu_lock"].interactive():
-            mask_payload, sam2_ms = await loop.run_in_executor(None, _infer)
+            detection, sam3_ms = await loop.run_in_executor(None, _infer)
     except Exception as exc:
         import traceback
         traceback.print_exc()
         raise HTTPException(500, f"charlie segment_box error: {exc}")
 
+    mask_payload = (detection or {}).get("mask")
     if not mask_payload:
         raise HTTPException(422, "no mask found in box")
 
     return {
         "pipeline": "charlie",
-        "timings": {"sam2_predict_ms": round(sam2_ms, 1), "total_ms": round(sam2_ms, 1)},
+        "timings": {"sam3_predict_ms": round(sam3_ms, 1), "total_ms": round(sam3_ms, 1)},
         "box_xyxy": [float(c) for c in coords],
         "mask": mask_payload,
         "mask_score": None,
@@ -24271,13 +17812,14 @@ async def charlie_imports_classify_box(
     labels: str = Form(...),
     project_id: str = Form(""),
     import_id: str = Form(""),
-    _credits: "plans.CreditState" = Depends(enforce_credits),
 ):
     """Embedding-based classification of a user-drawn bbox.
 
-    SAM2 box-prompt → DINOv2 + SigLIP → reference-centroid resolver
-    → optional VLM tiebreak (specific only) via the same confidence-
-    weighted fusion the labelling job uses.
+    SAM3 box-match mask (best effort) → DINOv2 → reference-centroid
+    resolver → optional VLM tiebreak (specific only) via the same
+    confidence-weighted fusion the labelling job uses. SAM2 removed in
+    the portable build; classification degrades gracefully to a plain
+    box crop when no mask is available.
 
     Source image is loaded from disk via import_id when available
     (skips the FE-side fetch entirely); falls back to an `image`
@@ -24286,8 +17828,6 @@ async def charlie_imports_classify_box(
     Returns {label, score, verdict} — same shape as detect_point
     so the FE pipeline popup renders the same way.
     """
-    if state.get("segmenter") is None:
-        raise HTTPException(503, "SAM2 not loaded — classify_box unavailable")
     import v2_dinov2 as _v2d
     if not _v2d.is_loaded():
         raise HTTPException(503, "DINOv2 not loaded yet")
@@ -24320,12 +17860,19 @@ async def charlie_imports_classify_box(
     loop = asyncio.get_running_loop()
     timings: dict[str, float] = {}
 
-    # SAM2 box prompt → mask polygons for the inpaint crop.
+    # Best-effort mask for the inpaint crop via SAM3's box matcher.
+    # No mask (SAM3 unloaded / no match) → plain box crop downstream.
     def _segment():
         t0 = time.perf_counter()
-        results = segment_boxes(state, image_pil, [coords_f])
+        charlie = state.get("charlie")
+        detection = None
+        if charlie is not None:
+            try:
+                detection, _t = charlie.segment_box(image_pil, coords_f, candidate_list or None)
+            except Exception as e:
+                print(f"[charlie/classify_box] sam3 mask failed: {e}")
         ms = (time.perf_counter() - t0) * 1000.0
-        return (results[0] if results else None), ms
+        return ((detection or {}).get("mask") or None), ms
 
     try:
         # Interactive — Charlie pipeline's classify_box (called from
@@ -24336,7 +17883,7 @@ async def charlie_imports_classify_box(
         import traceback
         traceback.print_exc()
         raise HTTPException(500, f"classify_box segment failed: {exc}")
-    timings["sam2_predict_ms"] = round(sam2_ms, 1)
+    timings["sam3_mask_ms"] = round(sam2_ms, 1)
 
     mask_polys = (
         mask_payload.get("polygons")
@@ -24409,7 +17956,6 @@ async def charlie_imports_segment_and_classify_box(
     labels: str = Form(...),
     project_id: str = Form(""),
     import_id: str = Form(""),
-    _credits: "plans.CreditState" = Depends(enforce_credits),
 ):
     """One-shot add-box — pure SAM3.
 
@@ -24527,5 +18073,139 @@ async def charlie_imports_segment_and_classify_box(
     }
 
 
+
+
+# ── Reference-editor interactive tools (portable build: SAM3-backed) ─────────
+# The SaaS build served these with SAM2 (segment) + GroundingDINO (classify).
+# Rewritten as thin wrappers over pipeline_charlie + _detect_point_unified so
+# the reference editor keeps its click/box tools on the SAM3-only stack.
+
+async def _reference_image_pil(
+    image: UploadFile | None, project_id: str, filename: str, endpoint: str
+) -> "PILImage.Image":
+    if image is not None:
+        raw = await image.read()
+        if raw:
+            img = PILImage.open(io.BytesIO(raw))
+            return ImageOps.exif_transpose(img).convert("RGB")
+    if project_id and filename and "/" not in filename and ".." not in filename:
+        p = project_dir(project_id) / "references" / filename
+        if p.is_file():
+            img = PILImage.open(p)
+            return ImageOps.exif_transpose(img).convert("RGB")
+    raise HTTPException(400, f"{endpoint}: no image supplied")
+
+
+def _parse_labels_json(labels: str) -> list[str]:
+    try:
+        parsed = json.loads(labels) if labels else []
+    except Exception:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(t).strip() for t in parsed if str(t).strip()]
+
+
+@app.post("/api/v2/references/segment_box")
+async def v2_reference_segment_box(
+    image: UploadFile | None = File(None),
+    box: str = Form(...),
+    labels: str = Form(""),
+    project_id: str = Form(""),
+    filename: str = Form(""),
+):
+    charlie = state.get("charlie")
+    if charlie is None:
+        raise HTTPException(503, "SAM3 not loaded")
+    try:
+        coords = [float(c) for c in json.loads(box)]
+        assert len(coords) == 4
+    except Exception:
+        raise HTTPException(400, "box must be [x0, y0, x1, y1]")
+    image_pil = await _reference_image_pil(image, project_id, filename, "references/segment_box")
+    candidate = _parse_labels_json(labels)
+    if not candidate and project_id:
+        candidate = list((load_manifest(project_id, copy=False) or {}).get("tags") or [])
+    loop = asyncio.get_running_loop()
+
+    def _run():
+        detection, _t = charlie.segment_box(image_pil, coords, candidate or None)
+        return detection
+
+    try:
+        async with state["gpu_lock"].interactive():
+            detection = await loop.run_in_executor(None, _run)
+    except Exception as exc:
+        raise HTTPException(500, f"reference segment_box failed: {exc}")
+    mask = (detection or {}).get("mask")
+    if not mask:
+        raise HTTPException(422, "no mask found in box")
+    return {"mask": mask, "box_xyxy": coords}
+
+
+@app.post("/api/v2/references/classify_box")
+async def v2_reference_classify_box(
+    image: UploadFile | None = File(None),
+    box: str = Form(...),
+    labels: str = Form("[]"),
+    project_id: str = Form(""),
+    filename: str = Form(""),
+):
+    charlie = state.get("charlie")
+    if charlie is None:
+        raise HTTPException(503, "SAM3 not loaded")
+    try:
+        coords = [float(c) for c in json.loads(box)]
+        assert len(coords) == 4
+    except Exception:
+        raise HTTPException(400, "box must be [x0, y0, x1, y1]")
+    candidate = _parse_labels_json(labels)
+    if not candidate:
+        raise HTTPException(400, "labels must be a non-empty JSON array")
+    image_pil = await _reference_image_pil(image, project_id, filename, "references/classify_box")
+    loop = asyncio.get_running_loop()
+
+    def _run():
+        return charlie.classify_box(image_pil, coords, candidate)
+
+    try:
+        async with state["gpu_lock"].interactive():
+            label, score, _t = await loop.run_in_executor(None, _run)
+    except Exception as exc:
+        raise HTTPException(500, f"reference classify_box failed: {exc}")
+    return {"label": label, "score": score}
+
+
+@app.post("/api/v2/references/detect_point")
+async def v2_reference_detect_point(
+    image: UploadFile | None = File(None),
+    point: str = Form(...),
+    labels: str = Form(""),
+    force_label: str = Form(""),
+    project_id: str = Form(""),
+    filename: str = Form(""),
+):
+    try:
+        pt = [float(c) for c in json.loads(point)]
+        assert len(pt) == 2
+    except Exception:
+        raise HTTPException(400, "point must be [x, y]")
+    image_pil = await _reference_image_pil(image, project_id, filename, "references/detect_point")
+    candidate = _parse_labels_json(labels)
+    if not candidate and project_id:
+        candidate = list((load_manifest(project_id, copy=False) or {}).get("tags") or [])
+    result = await _detect_point_unified(
+        image_pil,
+        pt,
+        candidate_labels=candidate,
+        project_id=project_id or "",
+        allow_sam3=True,
+    )
+    fl = (force_label or "").strip()
+    if fl and isinstance(result, dict):
+        result["label"] = fl
+    return result
+
+
 if __name__ == "__main__":
-    uvicorn.run("server:app", host="0.0.0.0", port=8001, reload=False)
+    uvicorn.run("server:app", host="127.0.0.1", port=8001, reload=False)

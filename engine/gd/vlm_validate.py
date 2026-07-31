@@ -20,7 +20,10 @@ from pathlib import Path
 
 from PIL import Image
 
-VLM_MODEL = os.environ.get("VLM_MODEL", "cyankiwi/Qwen3-VL-8B-Instruct-AWQ-4bit")
+# Portable build default: the 2B Instruct model in fp16 — fits the 12 GB
+# budget alongside SAM3 and needs no CUDA-only quant libraries (works on
+# MPS once the device phase lands). Override with VLM_MODEL / VLM_QUANT.
+VLM_MODEL = os.environ.get("VLM_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
 
 # Where downloaded weights are cached on disk so we don't re-fetch ~4 GB
 # every backend restart. Defaults to a `models_cache` folder next to the
@@ -115,7 +118,7 @@ def load_vlm(device: str = "cuda"):
     if not (dev == "cuda" or dev.startswith("cuda")):
         raise RuntimeError(f"VLM requires CUDA, got device={device!r}")
 
-    raw_quant_mode = os.environ.get("VLM_QUANT", "auto").lower()
+    raw_quant_mode = os.environ.get("VLM_QUANT", "fp16").lower()
     model_id_lower = VLM_MODEL.lower()
     is_prequant = "-awq" in model_id_lower or "-gptq" in model_id_lower or "-int4" in model_id_lower
     if raw_quant_mode == "auto":

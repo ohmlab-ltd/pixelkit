@@ -36,7 +36,7 @@ def _det_key(filename: str, label: str, xyxy) -> str:
 def enumerate_crops(parent_manifest: dict, labels) -> list[dict]:
     """The parent detections to crop: label in `labels` (empty = all), not
     VLM-rejected, with a real box. Returns [{key, filename, label, xyxy}]."""
-    from training import _image_index, _box_xyxy, _box_label, _vlm_rejected
+    from boxes import _image_index, _box_xyxy, _box_label, _vlm_rejected
     wanted = {str(l).strip().lower() for l in (labels or []) if str(l).strip()}
     out: list[dict] = []
     for fname, info in _image_index(parent_manifest).items():

@@ -30,7 +30,7 @@ from typing import Any, Awaitable, Callable
 # power-draw × kWh estimate. The terminal still receives the value
 # through the legacy `costPence` JSON field (its name is wire-shape
 # compatible) but the units are now USD cents: 100 cents = $1.
-COST_USD_PER_HOUR = 0.207
+COST_USD_PER_HOUR = 0.0  # portable build: no cloud spend; wire field stays 0
 # Legacy fields kept on the /stats response for backwards-compat
 # with any old client; the terminal stopped reading them in the
 # accompanying frontend commit.

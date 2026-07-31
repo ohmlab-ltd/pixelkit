@@ -65,13 +65,10 @@ import { DatasetTypePill, type DatasetTypeValue } from "./DatasetTypePill";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
-// Pipeline router for the imports flow. NEXT_PUBLIC_PIPELINE switches
-// between v2 and charlie pipelines
-// (SAM3 only). Defaults to v2 so prod stays on the validated pipeline;
-// set NEXT_PUBLIC_PIPELINE=charlie (or in Vercel project env) to point
-// uploads at the new backend route. Reference flows always stay on v2
-// (Charlie's resolver pipeline isn't built yet).
-const PIPELINE = (process.env.NEXT_PUBLIC_PIPELINE ?? "v2").toLowerCase();
+// Pipeline router for the imports flow. The portable engine is SAM3-only
+// (the GroundingDINO "v2" import endpoints no longer exist), so charlie is
+// the default; NEXT_PUBLIC_PIPELINE stays as an escape hatch.
+const PIPELINE = (process.env.NEXT_PUBLIC_PIPELINE ?? "charlie").toLowerCase();
 const IMPORTS_BASE = PIPELINE === "charlie" ? "/api/charlie/imports" : "/api/v2/imports";
 
 // Feature flag: when on, skip the per-import synthetic ImportDetection[]
