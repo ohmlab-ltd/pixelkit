@@ -33,7 +33,8 @@
         "dmg"
       ],
       "category": "public.app-category.graphics-design",
-      "icon": "build/icon.png"
+      "icon": "build/icon.png",
+      "identity": null
     },
     "win": {
       "target": [
