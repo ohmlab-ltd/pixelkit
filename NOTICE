@@ -1,0 +1,14 @@
+PixelKit
+Copyright 2026 Ohm Lab Ltd
+
+This product includes software developed at Ohm Lab Ltd
+(https://ohmlab.co.uk), licensed under the Apache License, Version 2.0.
+
+PixelKit downloads machine-learning model weights from Hugging Face at
+runtime. Those weights are NOT covered by this repository's license and
+are licensed by their respective owners — in particular:
+
+  - facebook/sam3 (SAM 3): Meta's SAM License, accepted by each user on
+    Hugging Face before download.
+  - facebook/dinov2-large: Apache License 2.0.
+  - Qwen/Qwen3-VL-2B-Instruct (optional): Apache License 2.0.

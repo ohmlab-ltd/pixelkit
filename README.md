@@ -1,0 +1,61 @@
+# PixelKit (portable)
+
+Open-source, local-first dataset auto-labelling for computer vision.
+Text-prompted detection and segmentation with **SAM 3**, an interactive
+annotation editor (boxes, polygon masks, click-to-segment), GPU-accelerated
+augmentations, and YOLO / COCO / Pascal VOC export — all running on your own
+machine, with every image and annotation stored in a workspace folder you
+choose.
+
+> **Status: pre-release, under active development.** This repo is being ported
+> from the PixelKit SaaS codebase. The port plan and current progress are in
+> [`docs/PLAN.md`](docs/PLAN.md).
+
+## Targets
+
+- **macOS** (Apple Silicon, Metal/MPS), **Linux** and **Windows** (NVIDIA CUDA)
+- **12 GB VRAM** budget (VLM assist optional)
+- Single-command install; no accounts, no cloud, no telemetry
+
+## Layout
+
+| Path | What it is |
+|---|---|
+| `engine/` | Python FastAPI engine: SAM 3 labelling pipeline, jobs + SSE progress, augmentations, export. Serves the UI in the packaged app. |
+| `ui/` | Next.js workspace UI: annotation editor, review mode, augmentation designer, dataset stats. |
+| `installers/` | Install scripts and packaging (later phase). |
+| `docs/` | [`PLAN.md`](docs/PLAN.md) — full architecture + phase plan. |
+
+## Port progress
+
+- [x] **Phase 0 — bootstrap:** fresh-history monorepo; training stack, cloud
+      deploy, billing/auth/telemetry SaaS surface and dead code removed;
+      UI builds with a static local session.
+- [ ] Phase 1 — local filesystem storage, no-auth engine, workspace folder
+- [ ] Phase 2 — per-project folders; images separated from annotations
+- [ ] Phase 3 — Metal (MPS) + CPU fallback
+- [ ] Phase 4 — model manager + Hugging Face token flow (SAM 3 is gated)
+- [ ] Phase 5 — UI slimming, first-run wizard, static export
+- [ ] Phase 6 — packaging & one-line installers
+- [ ] Phase 7 — QA on real hardware, docs, v0.1.0
+
+## Models
+
+All weights download from Hugging Face into `<workspace>/weights` on first
+run. `facebook/sam3` is license-gated: you accept Meta's SAM license on
+Hugging Face and provide your own access token in the app's setup screen.
+
+## Development (current state)
+
+```bash
+# engine — full run needs CUDA until Phase 3 lands
+cd engine && pip install -r requirements.txt && python gd/server.py
+
+# ui
+cd ui && npm install && npm run dev
+```
+
+## License
+
+Code: [Apache-2.0](LICENSE). Model weights are downloaded separately and
+carry their own licenses — see [NOTICE](NOTICE).

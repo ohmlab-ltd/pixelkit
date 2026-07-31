@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Test / coverage artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Self-hosted GitHub Actions runner (installed in-tree by bootstrap script)
+.gh-runner/
+
+# Model weights (large binary files — download separately)
+weights/*.pt
+weights/*.pth
+weights/*.bin
+weights/*.safetensors
+models_cache/
+
+# Project data (user uploads / outputs)
+projects/*/
+!projects/.gitkeep
+
+# Project containers (Projects = teams holding datasets). User data, exactly
+# like projects/ above — must never be committed, or the deploy's
+# `rsync -a --delete` would wipe the live server's containers/ on every push.
+containers/*/
+!containers/.gitkeep
+
+# HuggingFace cache
+.cache/
+
+# Local runtime audit log (SQLite). Lives next to the projects/
+# folder; pushing it just produces noise diffs on every restart.
+audit.db
+audit.db-shm
+audit.db-wal
+
+# Environment — block every variant. Scanners explicitly probe
+# .env.prod, .env.staging, .env.bak etc., so any of those hitting
+# a public deploy is a leak even if `.env` itself is ignored.
+.env
+.env.*
+!.env.example
+*.env
+secrets.json
+secrets.yaml
+secrets.yml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Vendored ST model artifacts — pulled into R2 via scripts/fetch_st_yoloxn.py
+# (and kept locally for dev). Binaries, not source — never commit them.
+weights/st_yoloxn/

@@ -1,0 +1,15 @@
+# Test-only dependencies. CPU-only — the heavy ML/GPU stack from
+# requirements.txt (torch, sam2, transformers, nudenet, …) is STUBBED in
+# tests/conftest.py, so CI installs only this lean set and runs without a
+# GPU, model weights, or network.
+pytest
+pytest-cov
+pytest-mock
+responses          # HTTP stubbing for requests-based code
+freezegun          # deterministic time
+
+# Lightweight real deps that gd/server.py imports at module load. These
+# are pure-Python / CPU and pip-install fast; everything heavy is stubbed.
+fastapi
+httpx              # required by starlette TestClient
+python-multipart   # FastAPI form/multipart parsing
