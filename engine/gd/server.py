@@ -170,6 +170,7 @@ from storage import LocalStorage, from_env as _storage_from_env
 from storage import R2Storage  # alias of LocalStorage; legacy name at ~20 call sites
 import audit
 import store
+import models as models_mgr
 from auth import (
     current_user,
     resolve_terminal_token,
@@ -553,6 +554,49 @@ class PriorityGPUGate:
             self._release()
 
 
+# ── Shared model-load tasks ──────────────────────────────────────────────────
+# Used by both lifespan auto-load and the /api/models/{name}/load endpoints.
+# Serialized through state["model_load_lock"]: (a) transformers' lazy module
+# init is not thread-safe — two concurrent executor imports race into
+# spurious "cannot import name" failures; (b) concurrent loads spike VRAM.
+
+async def _bg_load_dino() -> None:
+    try:
+        import v2_dinov2
+        async with state["model_load_lock"]:
+            if v2_dinov2.is_loaded():
+                return
+            await asyncio.get_event_loop().run_in_executor(
+                None, lambda: v2_dinov2.load(state["device"]),
+            )
+            await asyncio.get_event_loop().run_in_executor(None, v2_dinov2.warmup)
+    except Exception as e:
+        print(f"[server] v2 DINOv2 load failed: {e}")
+
+
+async def _bg_load_charlie() -> None:
+    try:
+        import pipeline_charlie
+        async with state["model_load_lock"]:
+            if not pipeline_charlie.is_loaded():
+                await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: pipeline_charlie.load_sam3(state["device"]),
+                )
+        state["charlie"] = pipeline_charlie
+        print("[server] pipeline_charlie ready (SAM3).")
+    except Exception as e:
+        print(f"[server] pipeline_charlie load failed: {e} — /api/charlie/* will return 503.")
+        state["charlie"] = None
+
+
+async def _bg_load_vlm() -> None:
+    try:
+        async with state["model_load_lock"]:
+            await asyncio.get_event_loop().run_in_executor(None, _load_vlm_into_state)
+    except Exception as e:
+        print(f"[server] VLM load failed: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     device = _resolve_device()
@@ -609,48 +653,36 @@ async def lifespan(app: FastAPI):
     if not models_disabled and os.environ.get("VLM_ENABLED", "").lower() in ("1", "true", "yes", "on"):
         await asyncio.get_event_loop().run_in_executor(None, _load_vlm_into_state)
 
-    # Model loads run in background tasks so a slow first download doesn't
-    # block startup — but SERIALIZED through one lock: (a) transformers'
-    # lazy module init is not thread-safe, and two concurrent executor
-    # threads importing Sam3Model/AutoModel race into spurious
-    # "cannot import name" failures; (b) concurrent loads spike VRAM,
-    # which a 12 GB card can't afford.
-    _model_load_lock = asyncio.Lock()
+    # Model loading policy (portable): the model manager (gd/models.py)
+    # owns downloads; boot only auto-loads models whose weights are already
+    # in the cache, so startup never blocks on (or fails over) a multi-GB
+    # download. The setup UI drives /api/models/* for the rest.
+    state["model_load_lock"] = asyncio.Lock()
+    models_mgr.apply_token_env()
 
-    # DINOv2 for reference-crop embeddings (specific-dataset resolver +
-    # near-duplicate scan).
-    async def _load_v2_dino() -> None:
-        try:
-            import v2_dinov2
-            async with _model_load_lock:
-                await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: v2_dinov2.load(state["device"]),
-                )
-                await asyncio.get_event_loop().run_in_executor(None, v2_dinov2.warmup)
-        except Exception as e:
-            print(f"[server] v2 DINOv2 load failed: {e}")
     if not models_disabled:
-        asyncio.create_task(_load_v2_dino())
-
-    # Pipeline Charlie — SAM3 (gated on HF; needs HF_TOKEN).
-    async def _load_charlie() -> None:
+        cfg = workspace.load_config()
+        vlm_on = (
+            os.environ.get("VLM_ENABLED", "").lower() in ("1", "true", "yes", "on")
+            or bool(cfg.get("vlm_enabled"))
+        )
+        if models_mgr.is_downloaded("dinov2"):
+            asyncio.create_task(_bg_load_dino())
+        else:
+            print("[server] DINOv2 weights not downloaded yet — POST /api/models/dinov2/download")
         if os.environ.get("CHARLIE_DISABLED", "").lower() in ("1", "true", "yes", "on"):
             print("[server] CHARLIE_DISABLED set — pipeline_charlie endpoints will return 503.")
             state["charlie"] = None
-            return
-        try:
-            import pipeline_charlie
-            async with _model_load_lock:
-                await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: pipeline_charlie.load_sam3(state["device"]),
-                )
-            state["charlie"] = pipeline_charlie
-            print("[server] pipeline_charlie ready (SAM3).")
-        except Exception as e:
-            print(f"[server] pipeline_charlie load failed: {e} — /api/charlie/* will return 503.")
+        elif models_mgr.is_downloaded("sam3"):
+            asyncio.create_task(_bg_load_charlie())
+        else:
             state["charlie"] = None
-    if not models_disabled:
-        asyncio.create_task(_load_charlie())
+            print(
+                "[server] SAM3 weights not downloaded yet — set the HF token "
+                "(POST /api/settings/hf-token) then POST /api/models/sam3/download"
+            )
+        if vlm_on and models_mgr.is_downloaded("vlm"):
+            asyncio.create_task(_bg_load_vlm())
     else:
         state["charlie"] = None
 
@@ -18112,6 +18144,129 @@ async def charlie_imports_segment_and_classify_box(
         "score": score,
     }
 
+
+
+
+
+# ── Model manager + settings (portable build) ────────────────────────────────
+# Drives the first-run setup: HF token in, weights down, models up.
+
+
+@app.get("/api/models/status")
+async def models_status():
+    return await asyncio.to_thread(models_mgr.status)
+
+
+@app.post("/api/models/{name}/download")
+async def models_download(name: str):
+    if name not in models_mgr.REGISTRY:
+        raise HTTPException(404, f"unknown model: {name}")
+    if name == "sam3" and not models_mgr.hf_token():
+        raise HTTPException(
+            400,
+            "facebook/sam3 is license-gated — set a Hugging Face token first "
+            "(POST /api/settings/hf-token)",
+        )
+    rec = await asyncio.to_thread(models_mgr.start_download, name)
+    return {"model": name, "download": rec}
+
+
+@app.post("/api/models/{name}/load")
+async def models_load(name: str):
+    if name not in models_mgr.REGISTRY:
+        raise HTTPException(404, f"unknown model: {name}")
+    if not models_mgr.is_downloaded(name):
+        raise HTTPException(409, f"{name} weights not downloaded yet")
+    if state.get("device") == "cpu" and (os.environ.get("PK_DEVICE") or "").lower() != "cpu":
+        raise HTTPException(409, "no GPU on this machine (set PK_DEVICE=cpu to force CPU)")
+    task = {"sam3": _bg_load_charlie, "dinov2": _bg_load_dino, "vlm": _bg_load_vlm}[name]
+    asyncio.create_task(task())
+    if name == "vlm":
+        cfg = workspace.load_config()
+        cfg["vlm_enabled"] = True
+        workspace.save_config(cfg)
+    return {"ok": True, "loading": name}
+
+
+@app.post("/api/models/{name}/unload")
+async def models_unload(name: str):
+    if name == "vlm":
+        from vlm_validate import clear_vlm
+        clear_vlm()
+        cfg = workspace.load_config()
+        cfg["vlm_enabled"] = False
+        workspace.save_config(cfg)
+    elif name == "sam3":
+        import pipeline_charlie
+        pipeline_charlie.clear_sam3()
+        state["charlie"] = None
+    else:
+        raise HTTPException(400, f"unload not supported for: {name}")
+    import gc as _gc
+    _gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+    return {"ok": True, "unloaded": name}
+
+
+class HfTokenIn(BaseModel):
+    token: str
+
+
+@app.get("/api/settings/hf-token")
+async def hf_token_status():
+    """Live validation of the stored token (network call to the hub)."""
+    return await asyncio.to_thread(models_mgr.validate_token)
+
+
+@app.post("/api/settings/hf-token")
+async def hf_token_set(payload: HfTokenIn):
+    tok = (payload.token or "").strip()
+    if not tok:
+        raise HTTPException(400, "empty token")
+    result = await asyncio.to_thread(models_mgr.validate_token, tok)
+    if not result.get("valid"):
+        raise HTTPException(400, result.get("detail") or "token rejected by Hugging Face")
+    models_mgr.set_hf_token(tok)
+    result["configured"] = True
+    return result
+
+
+@app.delete("/api/settings/hf-token")
+async def hf_token_clear():
+    models_mgr.clear_hf_token()
+    return {"ok": True}
+
+
+@app.get("/api/settings")
+async def get_settings():
+    import workspace as _ws
+    cfg = _ws.load_config()
+    return {
+        "workspace": str(_ws.dir()),
+        "device": state.get("device"),
+        "vlmEnabled": bool(cfg.get("vlm_enabled")),
+        "hfTokenConfigured": bool(models_mgr.hf_token()),
+        "sam3Repo": models_mgr.SAM3_REPO,
+    }
+
+
+class WorkspaceIn(BaseModel):
+    path: str
+
+
+@app.post("/api/settings/workspace")
+async def set_workspace_path(payload: WorkspaceIn):
+    """Persist a new workspace location. Takes effect on next start —
+    re-pointing a live process would orphan open jobs and caches."""
+    p = (payload.path or "").strip()
+    if not p:
+        raise HTTPException(400, "empty path")
+    import workspace as _ws
+    new = _ws.set_workspace(p)
+    return {"ok": True, "workspace": str(new), "restartRequired": True}
 
 
 

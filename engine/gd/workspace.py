@@ -27,6 +27,9 @@ _SCHEMA_VERSION = 1
 
 
 def config_dir() -> Path:
+    env = (os.environ.get("PIXELKIT_CONFIG_DIR") or "").strip()
+    if env:
+        return Path(env).expanduser()
     if sys.platform == "darwin":
         base = Path.home() / "Library" / "Application Support" / "PixelKit"
     elif os.name == "nt":

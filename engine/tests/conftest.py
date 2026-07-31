@@ -15,7 +15,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "gd"))
 
 _WS = tempfile.mkdtemp(prefix="pixelkit-test-ws-")
 os.environ["PIXELKIT_WORKSPACE"] = _WS
+# Never let tests read or write the user's real app config (HF token!).
+os.environ["PIXELKIT_CONFIG_DIR"] = tempfile.mkdtemp(prefix="pixelkit-test-cfg-")
 os.environ["PK_DISABLE_MODELS"] = "1"
+os.environ.pop("HF_TOKEN", None)
 
 
 @pytest.fixture(scope="session")

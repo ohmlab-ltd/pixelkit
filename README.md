@@ -47,7 +47,14 @@ choose.
       transformers lazy-import thread race and boot VRAM spikes). Verified
       on Apple Silicon: DINOv2-large runs real inference on MPS; SAM3
       reaches its loader on MPS and awaits only the HF token (Phase 4).
-- [ ] Phase 4 — model manager + Hugging Face token flow (SAM 3 is gated)
+- [x] **Phase 4 — model manager + HF token flow:** `/api/models/*` +
+      `/api/settings/*` — per-model downloaded/loaded status, background
+      downloads with byte-level progress + disk preflight into
+      `<workspace>/weights`, token validation that distinguishes
+      invalid-token from license-not-accepted (`facebook/sam3` is gated),
+      token stored owner-only in the app config (never the workspace),
+      boot auto-loads only already-cached models, VLM load/unload toggle.
+      Setup UI screens land in Phase 5.
 - [ ] Phase 5 — UI slimming: strip remaining SaaS chrome (pricing/community/
       terminal tabs, plan gates), first-run wizard. **Guarantee: no login or
       auth surface anywhere** — the logged-out views and /login–/signup
