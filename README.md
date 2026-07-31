@@ -63,8 +63,12 @@ choose.
       static export the engine serves itself at 127.0.0.1:8001 with SPA
       deep-link fallback — one process runs the whole product. (Interim
       shape; the shipped product is the Phase 8 application.)
-- [ ] Phase 6 — packaging: pinned engine env + weights/bundling groundwork
-      the Phase 8 app builds on
+- [x] **Phase 6 — packaging groundwork:** engine is an installable package
+      (`pip install -e engine` → `pixelkit` launcher + `pixelkit doctor`
+      environment checks), `requirements.lock` pins the verified env the
+      Phase 8 app will bundle, `installers/install.sh|.ps1` dev installs
+      with CUDA-vs-default torch detection, GitHub Actions CI (engine
+      pytest + UI build/test).
 - [ ] Phase 7 — QA on real hardware, docs, v0.1.0
 - [ ] Phase 8 — **standalone desktop application:** the whole UI converted
       off Next.js into a self-contained JavaScript application (Vite SPA
