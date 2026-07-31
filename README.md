@@ -69,8 +69,13 @@ choose.
       Phase 8 app will bundle, `installers/install.sh|.ps1` dev installs
       with CUDA-vs-default torch detection, GitHub Actions CI (engine
       pytest + UI build/test).
-- [ ] Phase 7 — QA on real hardware, docs, v0.1.0
-- [ ] Phase 8 — **standalone desktop application:** the whole UI converted
+- [ ] Phase 7 — QA on real hardware (PARKED: needs a 12 GB CUDA box; Metal-
+      only right now), docs, v0.1.0
+- [~] Phase 8 — **standalone desktop application** (in progress — `desktop/`
+      Electron shell landed: engine auto-spawn/health/shutdown, reuse of a
+      running engine, splash, window-state, external links to system
+      browser, native menu; next: bundled Python env + icon + packaged
+      executables, then Vite/`app://` migration): the whole UI converted
       off Next.js into a self-contained JavaScript application (Vite SPA
       bundle loaded from disk inside an Electron shell — the VS Code /
       LM Studio architecture) that owns the engine as a child process.

@@ -1,0 +1,46 @@
+{
+  "name": "pixelkit-desktop",
+  "productName": "PixelKit",
+  "version": "0.1.0",
+  "description": "PixelKit desktop shell (Electron wrapper around the local PixelKit engine)",
+  "private": true,
+  "main": "main.js",
+  "author": "Ohm Lab <team@ohmlab.co.uk>",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "co.ohmlab.pixelkit",
+    "productName": "PixelKit",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.graphics-design"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Graphics"
+    }
+  }
+}
