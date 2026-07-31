@@ -49,17 +49,22 @@ choose.
       reaches its loader on MPS and awaits only the HF token (Phase 4).
 - [ ] Phase 4 — model manager + Hugging Face token flow (SAM 3 is gated)
 - [ ] Phase 5 — UI slimming: strip remaining SaaS chrome (pricing/community/
-      terminal tabs, plan gates), first-run wizard, static export served by
-      the engine. **Guarantee: no login or auth surface anywhere** — the
-      logged-out views and /login–/signup links are already gone.
-- [ ] Phase 6 — packaging & one-line installers
+      terminal tabs, plan gates), first-run wizard. **Guarantee: no login or
+      auth surface anywhere** — the logged-out views and /login–/signup
+      links are already gone. (Engine-served UI here is an interim dev
+      shape; the shipped product is the Phase 8 application.)
+- [ ] Phase 6 — packaging: pinned engine env + weights/bundling groundwork
+      the Phase 8 app builds on
 - [ ] Phase 7 — QA on real hardware, docs, v0.1.0
-- [ ] Phase 8 — **desktop application:** ship PixelKit as an installable
-      app, not a website — an Electron shell that owns the engine as a
-      managed sidecar (spawn/health/shutdown), its own window/dock/taskbar
-      presence, and signed installers (macOS .dmg, Windows .msi/.exe,
-      Linux AppImage) with auto-update. The browser mode stays as a dev
-      convenience only.
+- [ ] Phase 8 — **standalone desktop application:** the whole UI converted
+      off Next.js into a self-contained JavaScript application (Vite SPA
+      bundle loaded from disk inside an Electron shell — the VS Code /
+      LM Studio architecture) that owns the engine as a child process.
+      Nothing browser-based: no URL, no localhost page, no tabs — a native
+      window, real menu bar, native file dialogs, drag-and-drop, and signed
+      installers (.dmg / .msi / AppImage) with auto-update. A Flutter
+      rewrite is documented in the plan as the fallback if the JS app
+      doesn't feel native enough (cost: full editor rewrite, +8–12 weeks).
 
 ## Models
 
