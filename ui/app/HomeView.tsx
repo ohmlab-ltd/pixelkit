@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
 import { Footer } from "./Footer";
 import { ProjectTagsRow } from "./components/ProjectTagsRow";
 import { containsProfanity } from "./profanity";
@@ -1836,38 +1835,7 @@ export function HomeView({
     );
   }
 
-  if (!loggedIn) {
-    return (
-      <main className="min-h-screen bg-[var(--background)]">
-        <section className="mx-auto max-w-6xl px-6 pt-16 pb-10">
-          <h1 className="text-5xl md:text-6xl font-medium tracking-tight">Workspace</h1>
-          <p className="mt-4 max-w-xl text-foreground/50 text-lg">
-            Label data. Train models. Deploy and optimise - everything in one place.
-          </p>
-        </section>
-        <section className="mx-auto max-w-6xl px-6 pb-24">
-          <div className="rounded-3xl border border-foreground/10 bg-foreground/[0.02] py-20 text-center">
-            <p className="text-lg text-foreground/80">Create an account to add projects.</p>
-            <div className="mt-6 flex items-center justify-center gap-3">
-              <Link
-                href="/signup"
-                className="rounded-full bg-foreground text-background px-5 py-2.5 text-sm font-medium hover:bg-zinc-200"
-              >
-                Sign up
-              </Link>
-              <Link
-                href="/login"
-                className="rounded-full border border-[var(--border)] hover:border-zinc-500 px-5 py-2.5 text-sm"
-              >
-                Login
-              </Link>
-            </div>
-          </div>
-        </section>
-        <Footer />
-      </main>
-    );
-  }
+  // (Logged-out marketing view removed — the portable build has no accounts.)
 
   return (
     <main className="min-h-screen bg-[var(--background)] overflow-x-hidden">

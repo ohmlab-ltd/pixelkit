@@ -272,26 +272,47 @@ _MODEL = None
 _PROCESSOR = None
 
 
+def _device_sync() -> None:
+    """Barrier for accurate timings on whichever backend is active."""
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        torch.mps.synchronize()
+
+
+def _device_empty_cache() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+
+
 def is_loaded() -> bool:
     return _MODEL is not None and _PROCESSOR is not None
 
 
 def load_sam3(device: str = "cuda"):
     """Load SAM3 onto the given device. Populates module-level handles
-    and returns (model, processor). Strict GPU-only — refuses CPU
-    fallback (the SAM3 vision transformer is too slow on CPU to be
-    useful)."""
+    and returns (model, processor).
+
+    Devices: cuda and mps (Apple Metal) load fp16; cpu loads fp32 and is
+    explicitly opt-in upstream (the SAM3 vision transformer runs minutes
+    per image on CPU — the server only requests it when the user forced
+    PK_DEVICE=cpu)."""
     global _MODEL, _PROCESSOR
 
     dev = str(device)
-    if not (dev == "cuda" or dev.startswith("cuda")):
-        raise RuntimeError(f"SAM3 requires CUDA, got device={device!r}")
+    if not (dev in ("mps", "cpu") or dev == "cuda" or dev.startswith("cuda")):
+        raise RuntimeError(f"SAM3: unsupported device {device!r} (cuda | mps | cpu)")
 
     from transformers import Sam3Model, Sam3Processor
 
-    print(f"[charlie] loading {SAM3_MODEL_ID} on {device}...")
+    dtype = torch.float32 if dev == "cpu" else torch.float16
+    print(f"[charlie] loading {SAM3_MODEL_ID} on {device} ({dtype})...")
+    if dev == "cpu":
+        print("[charlie] WARNING: CPU inference is extremely slow — expect minutes per image.")
     proc = Sam3Processor.from_pretrained(SAM3_MODEL_ID)
-    mdl = Sam3Model.from_pretrained(SAM3_MODEL_ID, torch_dtype=torch.float16)
+    mdl = Sam3Model.from_pretrained(SAM3_MODEL_ID, torch_dtype=dtype)
     mdl = mdl.to(device).eval()
 
     _MODEL = mdl
@@ -1323,8 +1344,7 @@ def _segment_one_label(
         t_predict = time.perf_counter()
         with torch.inference_mode():
             outputs = _MODEL(**inputs)
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        _device_sync()
         predict_ms = (time.perf_counter() - t_predict) * 1000.0
 
         t_post = time.perf_counter()
@@ -1399,8 +1419,7 @@ def _segment_one_label(
             raw.append((box_list, mask, score))
     finally:
         del inputs, outputs
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        _device_empty_cache()
 
     return raw, predict_ms, post_ms, dropped_tiny
 
@@ -1828,8 +1847,7 @@ def _segment_one_label_with_cached_vision(
             with torch.inference_mode():
                 outputs = _MODEL(**inputs)
             text_inputs = inputs
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        _device_sync()
         predict_ms = (time.perf_counter() - t_predict) * 1000.0
 
         t_post = time.perf_counter()
@@ -1880,8 +1898,7 @@ def _segment_one_label_with_cached_vision(
             raw.append((box_list, mask, score))
     finally:
         del outputs, text_inputs
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        _device_empty_cache()
 
     return raw, predict_ms, post_ms, dropped_tiny
 

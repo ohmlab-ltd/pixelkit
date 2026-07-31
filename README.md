@@ -41,11 +41,25 @@ choose.
       per image, originals alone in `images/`, weights under
       `<workspace>/weights`; `import_legacy.py` migrates SaaS-era data.
       Golden-path test green (create → upload → annotate → export → delete).
-- [ ] Phase 3 — Metal (MPS) + CPU fallback
+- [x] **Phase 3 — device layer:** cuda → mps → cpu auto-detection with a
+      `PK_DEVICE` override; SAM3/VLM CUDA-only gates relaxed (fp16 on Metal,
+      fp32 + explicit opt-in on CPU); model loads serialized (fixes a
+      transformers lazy-import thread race and boot VRAM spikes). Verified
+      on Apple Silicon: DINOv2-large runs real inference on MPS; SAM3
+      reaches its loader on MPS and awaits only the HF token (Phase 4).
 - [ ] Phase 4 — model manager + Hugging Face token flow (SAM 3 is gated)
-- [ ] Phase 5 — UI slimming, first-run wizard, static export
+- [ ] Phase 5 — UI slimming: strip remaining SaaS chrome (pricing/community/
+      terminal tabs, plan gates), first-run wizard, static export served by
+      the engine. **Guarantee: no login or auth surface anywhere** — the
+      logged-out views and /login–/signup links are already gone.
 - [ ] Phase 6 — packaging & one-line installers
 - [ ] Phase 7 — QA on real hardware, docs, v0.1.0
+- [ ] Phase 8 — **desktop application:** ship PixelKit as an installable
+      app, not a website — an Electron shell that owns the engine as a
+      managed sidecar (spawn/health/shutdown), its own window/dock/taskbar
+      presence, and signed installers (macOS .dmg, Windows .msi/.exe,
+      Linux AppImage) with auto-update. The browser mode stays as a dev
+      convenience only.
 
 ## Models
 

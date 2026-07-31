@@ -1,7 +1,6 @@
 "use client";
 
 import Image from "next/image";
-import Link from "next/link";
 import { useState } from "react";
 import { useSession } from "next-auth/react";
 
@@ -201,22 +200,7 @@ export function TopNav({ current, onNavigate, onProfile, onHome, user, loggedIn 
                   )}
                 </span>
               </button>
-            ) : (
-              <div className="flex items-center gap-2">
-                <Link
-                  href="/login"
-                  className="text-sm px-3 py-1.5 rounded-full text-[var(--muted)] hover:text-foreground hover:bg-foreground/[0.04] transition-colors"
-                >
-                  Login
-                </Link>
-                <Link
-                  href="/signup"
-                  className="text-sm px-3 py-1.5 rounded-full bg-foreground text-background hover:opacity-90 transition-opacity"
-                >
-                  Sign up
-                </Link>
-              </div>
-            )}
+            ) : null /* portable build: no accounts, no login */}
           </div>
         </div>
       </div>

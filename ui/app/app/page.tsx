@@ -173,7 +173,10 @@ export default function Page() {
 
   // Compute these BEFORE any early returns so the hook order below stays
   // stable across renders (loading -> authenticated transitions).
-  const loggedIn = status === "authenticated" && !!session?.user?.username;
+  // Portable build: no accounts. Everything renders as the local user —
+  // never show a logged-out state (the /login route doesn't exist).
+  const loggedIn = true;
+  void status;
   const username = (session?.user?.username ?? "") as string;
 
   // OAuth users with no username yet, finish onboarding before they can do

@@ -120,7 +120,7 @@ def load(device: str = "cpu"):
             ip.do_center_crop = False
         if hasattr(ip, "resample"):
             ip.resample = PILImageResampling.BICUBIC
-        dtype = torch.float16 if device == "cuda" else torch.float32
+        dtype = torch.float16 if device in ("cuda", "mps") else torch.float32
         try:
             model = AutoModel.from_pretrained(SIGLIP_MODEL_ID, torch_dtype=dtype).to(device).eval()
         except Exception as e:

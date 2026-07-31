@@ -115,10 +115,15 @@ def load_vlm(device: str = "cuda"):
     from transformers import AutoProcessor
 
     dev = str(device)
-    if not (dev == "cuda" or dev.startswith("cuda")):
-        raise RuntimeError(f"VLM requires CUDA, got device={device!r}")
+    if not (dev in ("mps", "cpu") or dev == "cuda" or dev.startswith("cuda")):
+        raise RuntimeError(f"VLM: unsupported device {device!r} (cuda | mps | cpu)")
 
     raw_quant_mode = os.environ.get("VLM_QUANT", "fp16").lower()
+    # bitsandbytes/AWQ kernels are CUDA-only; on mps/cpu force plain fp16
+    # (fp32 on cpu is handled by torch's autocast-free eager path fine).
+    if dev in ("mps", "cpu") and raw_quant_mode not in ("fp16",):
+        print(f"[vlm] quant mode {raw_quant_mode!r} unsupported on {dev}; using fp16.")
+        raw_quant_mode = "fp16"
     model_id_lower = VLM_MODEL.lower()
     is_prequant = "-awq" in model_id_lower or "-gptq" in model_id_lower or "-int4" in model_id_lower
     if raw_quant_mode == "auto":

@@ -61,9 +61,37 @@ load_dotenv(_Path(__file__).resolve().parent.parent / ".env", override=True)
 # images without periodic empty_cache thrashing.
 # https://docs.pytorch.org/docs/stable/notes/cuda.html#environment-variables
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+# Apple Metal: a handful of ops in the SAM3/DINOv2 graphs may lack MPS
+# kernels depending on the torch release; per-op CPU fallback keeps them
+# working (slower for that op only) instead of hard-erroring. Must be set
+# before torch initialises, same as the CUDA allocator config above.
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import re
 import secrets
+
+
+def _resolve_device() -> str:
+    """cuda > mps > cpu, with PK_DEVICE as an explicit override.
+
+    An unavailable override falls back down the chain with a warning
+    rather than failing boot — a saved config from another machine
+    shouldn't brick the app."""
+    env = (os.environ.get("PK_DEVICE") or "").strip().lower()
+    has_mps = getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
+    if env:
+        if env.startswith("cuda") and torch.cuda.is_available():
+            return env
+        if env == "mps" and has_mps:
+            return "mps"
+        if env == "cpu":
+            return "cpu"
+        print(f"[server] PK_DEVICE={env!r} not available on this machine — auto-detecting.")
+    if torch.cuda.is_available():
+        return "cuda"
+    if has_mps:
+        return "mps"
+    return "cpu"
 import shutil
 import tempfile
 import time
@@ -527,7 +555,7 @@ class PriorityGPUGate:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = _resolve_device()
 
     # GPU serialization lock for V2 pipelines. Multiple concurrent
     # /api/v2/references/process or /api/v2/imports/process requests
@@ -558,14 +586,16 @@ async def lifespan(app: FastAPI):
     state["segmenter"] = None   # SAM2 removed — SAM3 covers interactive segmentation
     state["nsfw"] = None        # NSFW gate removed
 
-    # Model loading policy for the portable build: SAM3 + DINOv2, with the
-    # small VLM tiebreak opt-in (VLM_ENABLED=1). Until the Metal/MPS device
-    # phase lands, model loads only happen on CUDA; on other devices the
-    # engine boots fully for dataset/annotation work and the ML endpoints
-    # return 503. PK_DISABLE_MODELS=1 forces that mode anywhere.
+    # Model loading policy: SAM3 + DINOv2, with the small VLM tiebreak
+    # opt-in (VLM_ENABLED=1). Models load on cuda and mps. Plain CPU is
+    # too slow to be useful, so it loads models only when the user
+    # explicitly forced PK_DEVICE=cpu; otherwise a CPU-only machine
+    # boots with the ML endpoints on 503 and every dataset/annotation
+    # API fully live. PK_DISABLE_MODELS=1 forces that mode anywhere.
+    cpu_forced = (os.environ.get("PK_DEVICE") or "").strip().lower() == "cpu"
     models_disabled = (
         os.environ.get("PK_DISABLE_MODELS", "").lower() in ("1", "true", "yes", "on")
-        or device != "cuda"
+        or (device == "cpu" and not cpu_forced)
     )
     if models_disabled:
         print(
@@ -573,28 +603,36 @@ async def lifespan(app: FastAPI):
             + (", PK_DISABLE_MODELS set" if os.environ.get("PK_DISABLE_MODELS") else "")
             + ") — labelling endpoints 503; dataset/annotation APIs fully live."
         )
+    elif device == "cpu":
+        print("[server] PK_DEVICE=cpu — models will load on CPU. Labelling will be very slow.")
 
     if not models_disabled and os.environ.get("VLM_ENABLED", "").lower() in ("1", "true", "yes", "on"):
         await asyncio.get_event_loop().run_in_executor(None, _load_vlm_into_state)
 
+    # Model loads run in background tasks so a slow first download doesn't
+    # block startup — but SERIALIZED through one lock: (a) transformers'
+    # lazy module init is not thread-safe, and two concurrent executor
+    # threads importing Sam3Model/AutoModel race into spurious
+    # "cannot import name" failures; (b) concurrent loads spike VRAM,
+    # which a 12 GB card can't afford.
+    _model_load_lock = asyncio.Lock()
+
     # DINOv2 for reference-crop embeddings (specific-dataset resolver +
-    # near-duplicate scan). Loaded async so a slow first download doesn't
-    # block startup.
+    # near-duplicate scan).
     async def _load_v2_dino() -> None:
         try:
             import v2_dinov2
-            await asyncio.get_event_loop().run_in_executor(
-                None, lambda: v2_dinov2.load(state["device"]),
-            )
-            await asyncio.get_event_loop().run_in_executor(None, v2_dinov2.warmup)
+            async with _model_load_lock:
+                await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: v2_dinov2.load(state["device"]),
+                )
+                await asyncio.get_event_loop().run_in_executor(None, v2_dinov2.warmup)
         except Exception as e:
             print(f"[server] v2 DINOv2 load failed: {e}")
     if not models_disabled:
         asyncio.create_task(_load_v2_dino())
 
-    # Pipeline Charlie — SAM3 (gated on HF; needs HF_TOKEN). Loads in a
-    # background task so a slow first download or transient HF outage
-    # doesn't block server startup.
+    # Pipeline Charlie — SAM3 (gated on HF; needs HF_TOKEN).
     async def _load_charlie() -> None:
         if os.environ.get("CHARLIE_DISABLED", "").lower() in ("1", "true", "yes", "on"):
             print("[server] CHARLIE_DISABLED set — pipeline_charlie endpoints will return 503.")
@@ -602,9 +640,10 @@ async def lifespan(app: FastAPI):
             return
         try:
             import pipeline_charlie
-            await asyncio.get_event_loop().run_in_executor(
-                None, lambda: pipeline_charlie.load_sam3(state["device"]),
-            )
+            async with _model_load_lock:
+                await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: pipeline_charlie.load_sam3(state["device"]),
+                )
             state["charlie"] = pipeline_charlie
             print("[server] pipeline_charlie ready (SAM3).")
         except Exception as e:
@@ -6214,11 +6253,12 @@ _BG_IMAGE_EXECUTOR = _concurrent_futures.ThreadPoolExecutor(
 
 def _aug_device() -> "torch.device":
     """Lazy-pick a device the first time the augment endpoint runs.
-    GPU when available; CPU fallback so dev environments without
-    CUDA still serve previews (just slower)."""
+    cuda > mps > cpu; augmentations are plain tensor ops, so unlike the
+    models they run acceptably on CPU (just slower)."""
     global _AUG_DEVICE
     if _AUG_DEVICE is None:
-        _AUG_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # state["device"] is set by lifespan before any request runs.
+        _AUG_DEVICE = torch.device(state.get("device") or _resolve_device())
     return _AUG_DEVICE
 
 
@@ -8172,13 +8212,11 @@ async def _run_augment_generate_job(job, emit, cancel_event):
             if device.type == "cuda":
                 torch.cuda.init()
                 torch.cuda.synchronize()
-            print(
-                f"[augment_generate] runner starting on device={device.type}"
-                f" cuda_available={torch.cuda.is_available()}"
-                f" cuda_device_count={torch.cuda.device_count() if torch.cuda.is_available() else 0}"
-            )
+            elif device.type == "mps":
+                torch.mps.synchronize()
+            print(f"[augment_generate] runner starting on device={device.type}")
         except Exception as e:
-            print(f"[augment_generate] CUDA warmup failed: {e}")
+            print(f"[augment_generate] device warmup failed: {e}")
     try:
         loop_for_warm = asyncio.get_event_loop()
         await loop_for_warm.run_in_executor(_AUG_EXECUTOR, _warm_cuda_in_thread)
@@ -17160,6 +17198,8 @@ async def charlie_imports_process(
         _gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
 
     print(
         f"[charlie] /imports/process W={W} H={H} prompts={tags} "
