@@ -1,29 +1,19 @@
 "use client";
 
 // Project (container) settings pop-out: rename, cover, privacy (with an
-// are-you-sure confirm because it cascades to every dataset), and members
-// (add by username + role, remove). Owner-only actions; the modal is only
-// opened for owners. Calls the container backend via lib/containers + emails
-// new members via notifyMemberAdded.
-import { useEffect, useRef, useState } from "react";
+// are-you-sure confirm because it cascades to every dataset), image quality,
+// and delete. Owner-only actions; the modal is only opened for owners. The
+// portable build is single-user, so there is no members section (accounts /
+// identity are invisible everywhere).
+import { useRef, useState } from "react";
 
 import { GlassDialog } from "./v2/GlassDialog";
-import { Avatar } from "./components/Avatar";
 import {
-  addMember,
   deleteContainer,
-  fetchAvatars,
-  notifyMemberAdded,
   patchContainer,
-  removeMember,
-  searchUsers,
   uploadCover,
   type ContainerDetail,
-  type Role,
-  type UserHit,
 } from "@/lib/containers";
-
-const ROLES: Role[] = ["editor", "viewer"];
 
 export function ProjectSettingsModal({
   container,
@@ -51,34 +41,6 @@ export function ProjectSettingsModal({
 
   // Max input image size (px longest edge for uploads). Datasets inherit it.
   const [inputSize, setInputSize] = useState<number>(container.max_input_size ?? 1500);
-
-  // Add-member form + username typeahead.
-  const [newMember, setNewMember] = useState("");
-  const [newRole, setNewRole] = useState<Role>("editor");
-  const [suggestions, setSuggestions] = useState<UserHit[]>([]);
-  const [showSug, setShowSug] = useState(false);
-  const [avatars, setAvatars] = useState<Record<string, string>>({});
-
-  // Real profile pictures for the member list.
-  useEffect(() => {
-    fetchAvatars((container.members || []).map((m) => m.username)).then(setAvatars);
-  }, [container.members]);
-
-  // Debounced username search for the typeahead. Excludes existing members.
-  useEffect(() => {
-    const q = newMember.trim();
-    if (q.length < 1) {
-      setSuggestions([]);
-      return;
-    }
-    const t = setTimeout(() => {
-      searchUsers(q).then((hits) => {
-        const taken = new Set((container.members || []).map((m) => m.username.toLowerCase()));
-        setSuggestions(hits.filter((h) => !taken.has(h.username.toLowerCase())));
-      });
-    }, 200);
-    return () => clearTimeout(t);
-  }, [newMember, container.members]);
 
   async function saveName() {
     const nm = name.trim();
@@ -114,40 +76,6 @@ export function ProjectSettingsModal({
     setError(null);
     if (await patchContainer(container.id, { max_input_size: v })) onChanged();
     else setError("Could not change the image quality.");
-    setBusy(false);
-  }
-
-  async function add() {
-    const u = newMember.trim().toLowerCase();
-    if (!u) return;
-    setBusy(true);
-    setError(null);
-    const updated = await addMember(container.id, u, newRole);
-    if (updated) {
-      void notifyMemberAdded(container.id, container.name, u, newRole);
-      setNewMember("");
-      onChanged();
-    } else {
-      setError("Could not add that member.");
-    }
-    setBusy(false);
-  }
-
-  async function remove(username: string) {
-    setBusy(true);
-    setError(null);
-    if (await removeMember(container.id, username)) onChanged();
-    else setError("Could not remove that member.");
-    setBusy(false);
-  }
-
-  // Change an existing member's role. addMember upserts, so re-adding with a new
-  // role updates it.
-  async function changeRole(username: string, role: Role) {
-    setBusy(true);
-    setError(null);
-    if (await addMember(container.id, username, role)) onChanged();
-    else setError("Could not change the role.");
     setBusy(false);
   }
 
@@ -276,119 +204,13 @@ export function ProjectSettingsModal({
           </select>
         </div>
 
-        {/* Members */}
-        <div className="flex flex-col gap-2">
-          <span className="text-sm font-medium text-foreground/80">Members</span>
-          <ul className="flex flex-col gap-1">
-            {(container.members || []).map((m) => (
-              <li
-                key={m.username}
-                className="flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 hover:bg-foreground/[0.04]"
-              >
-                <span className="flex min-w-0 items-center gap-2">
-                  <Avatar name={m.username} src={avatars[m.username.toLowerCase()]} className="h-6 w-6 shrink-0 rounded-full text-[10px] font-bold" />
-                  <span className="truncate text-sm">{m.username}</span>
-                </span>
-                {m.role === "owner" ? (
-                  <span className="shrink-0 rounded-full bg-foreground/[0.06] px-2 py-0.5 text-[11px] font-semibold text-[var(--muted)]">owner</span>
-                ) : (
-                  <span className="flex shrink-0 items-center gap-2">
-                    <select
-                      value={m.role}
-                      onChange={(e) => changeRole(m.username, e.target.value as Role)}
-                      disabled={busy}
-                      className="rounded-lg border border-foreground/10 bg-foreground/[0.03] px-2 py-1 text-xs"
-                    >
-                      {ROLES.map((r) => (
-                        <option key={r} value={r}>
-                          {r}
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      type="button"
-                      onClick={() => remove(m.username)}
-                      disabled={busy}
-                      className="text-xs font-medium text-rose-500 hover:text-rose-400 disabled:opacity-50"
-                    >
-                      Remove
-                    </button>
-                  </span>
-                )}
-              </li>
-            ))}
-          </ul>
-          <div className="mt-1 flex gap-2">
-            <div className="relative flex-1">
-              <input
-                value={newMember}
-                onChange={(e) => {
-                  setNewMember(e.target.value);
-                  setShowSug(true);
-                }}
-                onFocus={() => setShowSug(true)}
-                onBlur={() => setTimeout(() => setShowSug(false), 150)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") add();
-                  if (e.key === "Escape") setShowSug(false);
-                }}
-                placeholder="username"
-                autoComplete="off"
-                className="w-full rounded-xl border border-foreground/10 bg-foreground/[0.03] px-3.5 py-2 text-sm outline-none focus:border-orange-400 focus:ring-2 focus:ring-orange-400/30"
-              />
-              {showSug && suggestions.length > 0 && (
-                <ul className="absolute z-20 mt-1 max-h-60 w-full overflow-auto rounded-xl border border-foreground/10 bg-[var(--surface)] py-1 shadow-[var(--shadow-strong)]">
-                  {suggestions.map((u) => (
-                    <li key={u.username}>
-                      <button
-                        type="button"
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => {
-                          setNewMember(u.username);
-                          setShowSug(false);
-                        }}
-                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-foreground/[0.05]"
-                      >
-                        <Avatar name={u.username} src={u.image} className="h-6 w-6 shrink-0 rounded-full text-[10px] font-bold" />
-                        <span className="truncate">
-                          @{u.username}
-                          {u.name ? <span className="text-[var(--muted)]"> · {u.name}</span> : null}
-                        </span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-            <select
-              value={newRole}
-              onChange={(e) => setNewRole(e.target.value as Role)}
-              className="rounded-xl border border-foreground/10 bg-foreground/[0.03] px-2 py-2 text-sm"
-            >
-              {ROLES.map((r) => (
-                <option key={r} value={r}>
-                  {r}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              onClick={add}
-              disabled={busy || !newMember.trim()}
-              className="rounded-xl bg-orange-500 px-4 text-sm font-semibold text-white transition hover:bg-orange-400 disabled:opacity-40"
-            >
-              Add
-            </button>
-          </div>
-        </div>
-
         {/* Danger zone */}
         <div className="rounded-xl border border-rose-500/30 bg-rose-500/[0.04] p-3.5">
           <div className="flex items-center justify-between gap-3">
             <div className="flex flex-col">
               <span className="text-sm font-medium text-foreground/85">Delete project</span>
               <span className="text-xs text-[var(--muted)]">
-                The datasets are kept (they become standalone). Members + activity are removed.
+                The datasets are kept (they become standalone).
               </span>
             </div>
             {!confirmDelete && (

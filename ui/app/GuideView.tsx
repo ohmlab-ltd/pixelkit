@@ -6,7 +6,6 @@
 // as the other tabs in the SPA.
 
 import { useEffect, useState, type ReactNode } from "react";
-import { Footer } from "./Footer";
 
 export type GuideSectionKey =
   | "overview"
@@ -97,7 +96,6 @@ export function GuideView() {
         {section === "derived" && <DerivedSection go={go} />}
         {section === "reference" && <ReferenceSection />}
       </div>
-      <Footer />
     </main>
   );
 }

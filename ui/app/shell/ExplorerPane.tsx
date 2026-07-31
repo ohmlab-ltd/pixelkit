@@ -19,6 +19,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { apiFetch } from "@/lib/apiFetch";
+import { onExplorerRefresh } from "@/lib/appNav";
 import { listContainers, type ContainerCard } from "@/lib/containers";
 
 export type ExplorerDataset = {
@@ -83,6 +84,56 @@ const STROKE = {
   strokeLinecap: "round" as const,
   strokeLinejoin: "round" as const,
 };
+
+// Per-section line icons for the third-level tree rows. Shapes come
+// from the old in-view SidebarNav (grid / image / layers / sparkle),
+// compacted to 14px and muted via opacity so they track each row's
+// own text colour (idle / active / disabled) while staying quieter
+// than the 13px label beside them.
+function SectionIcon({ section }: { section: DatasetSection }) {
+  const common = {
+    viewBox: "0 0 24 24",
+    width: 14,
+    height: 14,
+    ...STROKE,
+    className: "shrink-0 opacity-60",
+    "aria-hidden": true,
+  };
+  switch (section) {
+    case "overview":
+      return (
+        <svg {...common}>
+          <rect x="3" y="3" width="7" height="7" rx="1.5" />
+          <rect x="14" y="3" width="7" height="7" rx="1.5" />
+          <rect x="3" y="14" width="7" height="7" rx="1.5" />
+          <rect x="14" y="14" width="7" height="7" rx="1.5" />
+        </svg>
+      );
+    case "references":
+      return (
+        <svg {...common}>
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <path d="M3 16l5-5 4 4 3-3 6 6" />
+          <circle cx="9" cy="9" r="1.4" />
+        </svg>
+      );
+    case "dataset":
+      return (
+        <svg {...common}>
+          <path d="M4 7l8-4 8 4-8 4-8-4z" />
+          <path d="M4 12l8 4 8-4" />
+          <path d="M4 17l8 4 8-4" />
+        </svg>
+      );
+    case "augmentations":
+      return (
+        <svg {...common}>
+          <path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5L18 18M18 6l-2.5 2.5M8.5 15.5L6 18" />
+          <circle cx="12" cy="12" r="2.5" />
+        </svg>
+      );
+  }
+}
 
 function Chevron({ open }: { open: boolean }) {
   return (
@@ -168,6 +219,12 @@ export function ExplorerPane({
     return () => window.clearInterval(id);
   }, [refresh]);
 
+  // Immediate refresh on the appNav bus signal. Mutation paths
+  // (dataset create / delete / duplicate / rename, add-to-Project)
+  // fire it the moment their API call resolves, so the tree reflects
+  // the change right away instead of waiting out the 10 s poll.
+  useEffect(() => onExplorerRefresh(() => { void refresh(); }), [refresh]);
+
   // Opening a dataset (from anywhere — tree, workspace cards, deep
   // link) reveals its section rows: expand the dataset node and the
   // Project that contains it, so the selection is always visible.
@@ -187,9 +244,16 @@ export function ExplorerPane({
       prev.has(selectedDatasetId) ? prev : new Set(prev).add(selectedDatasetId),
     );
     if (datasets === null) return; // container unknown — retry once loaded
+    // A just-created dataset can be selected BEFORE the listing has
+    // caught up (the create path fires an explorer-refresh, but this
+    // effect may run against the stale array first). Don't mark it
+    // handled until the dataset actually appears — the refreshed
+    // `datasets` re-runs this effect and the container then expands.
+    const ds = datasets.find((d) => d.id === selectedDatasetId);
+    if (!ds) return;
     expandHandledRef.current = selectedDatasetId;
-    const container = datasets.find((d) => d.id === selectedDatasetId)?.containerId;
-    if (container) {
+    if (ds.containerId) {
+      const container = ds.containerId;
       setExpanded((prev) => (prev.has(container) ? prev : new Set(prev).add(container)));
     }
   }, [selectedDatasetId, datasets]);
@@ -438,6 +502,7 @@ function DatasetNode({
                     : "text-foreground/70 hover:bg-foreground/[0.05] hover:text-foreground/95",
               ].join(" ")}
             >
+              <SectionIcon section={s.key} />
               <span className="min-w-0 flex-1 truncate">{s.label}</span>
               {typeof s.count === "number" && !s.disabled && (
                 <span className="shrink-0 font-mono text-[11px] tabular-nums text-foreground/35">

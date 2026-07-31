@@ -14,7 +14,7 @@ import { ProjectsSection } from "./ProjectsSection";
 import { ProjectPage } from "./ProjectPage";
 import { CreateDatasetModal } from "./CreateDatasetModal";
 import { apiFetch } from "@/lib/apiFetch";
-import { onNewDatasetRequest } from "@/lib/appNav";
+import { onNewDatasetRequest, requestExplorerRefresh } from "@/lib/appNav";
 import { addDataset } from "@/lib/containers";
 import { isProPlan } from "@/lib/plans";
 import { readProjectMetaCache, writeProjectMetaCache, type ProjectMetaCache } from "@/lib/projectMetaCache";
@@ -174,12 +174,6 @@ export function DerivedBadge({ parentName }: { parentName?: string | null }) {
   );
 }
 
-function hueFor(name: string): number {
-  let h = 0;
-  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
-  return Math.abs(h) % 360;
-}
-
 // Workspace sort modes for the toolbar dropdown. Sorting is purely
 // client-side over the already-loaded list (the server only handles
 // the search `q`), so adding a mode here never needs a backend change.
@@ -328,7 +322,6 @@ export function HomeView({
   onOpen,
   onV2Begin,
   username,
-  userImage = null,
   loggedIn = true,
 }: {
   onOpen: (name: string, owner?: string, displayName?: string, v2?: boolean, fromProjectId?: string) => void;
@@ -351,10 +344,6 @@ export function HomeView({
     firstLoad?: "onboarding" | null,
   ) => void;
   username: string;
-  /** Avatar URL for the signed-in user. Shown beside the username
-      under the project title during V2 onboarding so the metadata
-      line matches how project cards display owners. */
-  userImage?: string | null;
   loggedIn?: boolean;
 }) {
   // Hydrate from localStorage on mount so coming back from a
@@ -720,6 +709,9 @@ export function HomeView({
       const pid = data.project_id;
       setV2ProjectId(pid);
       v2ProjectIdRef.current = pid;
+      // The Explorer tree polls its listing on a 10 s cycle — nudge it
+      // now so the fresh dataset appears immediately.
+      requestExplorerRefresh();
       capture("project_create", { labels: labels.length });
       // eslint-disable-next-line no-console
       console.log("[v2 ensure-project] created:", pid);
@@ -851,6 +843,9 @@ export function HomeView({
     if (projectId && pendingContainerRef.current) {
       try {
         await addDataset(pendingContainerRef.current, projectId);
+        // Re-fetch the tree again: the dataset now lives under its
+        // Project node, not at the root where the create landed it.
+        requestExplorerRefresh();
       } catch (e) {
         console.error("[v2 handoff] add-to-container failed:", e);
       }
@@ -1346,6 +1341,7 @@ export function HomeView({
       });
       if (!r.ok) throw new Error(`http ${r.status}`);
       const data = await r.json();
+      requestExplorerRefresh();
       onOpen(data.id, username, newName);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -1402,6 +1398,7 @@ export function HomeView({
       // 404 = already gone (e.g. another tab deleted it). Treat as
       // success so a double-click doesn't surface a scary error.
       if (!r.ok && r.status !== 404) throw new Error(`http ${r.status}`);
+      requestExplorerRefresh();
       // Resync, server is the source of truth once the delete has
       // landed, and the optimistic strip might have raced an unrelated
       // upload or rename in another tab.
@@ -1425,6 +1422,7 @@ export function HomeView({
     try {
       const r = await apiFetch(`/api/projects/${p.id}/duplicate`, { method: "POST" });
       if (!r.ok) throw new Error(`http ${r.status}`);
+      requestExplorerRefresh();
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -1513,8 +1511,8 @@ export function HomeView({
           </div>
           {/* Subtitle stack, same sequencing rule. While V2 is active
               the workspace tagline is replaced by the project's
-              creator + creation date so the user can read off the
-              metadata for the project they just named. */}
+              creation date so the user can read off the metadata for
+              the project they just named. */}
           <div className="relative mt-2 max-w-2xl">
             <p
               className={[
@@ -1535,31 +1533,9 @@ export function HomeView({
                   : "opacity-0 translate-y-3 pointer-events-none select-none",
               ].join(" ")}
             >
-              {/* Avatar, same h-5 w-5 as the public project cards so
-                  this line reads consistently with how owners appear
-                  in the rest of the app. Falls back to a hue-based
-                  monogram when the user has no profile picture. */}
-              {userImage ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={userImage}
-                  alt=""
-                  className="h-5 w-5 rounded-full object-cover shrink-0"
-                  referrerPolicy="no-referrer"
-                />
-              ) : (
-                <span
-                  className="h-5 w-5 rounded-full grid place-items-center text-[9px] font-semibold text-[var(--foreground)] shrink-0"
-                  style={{
-                    backgroundImage: `linear-gradient(135deg, hsl(${hueFor(username || "user")},70%,55%), hsl(${(hueFor(username || "user") + 60) % 360},70%,55%))`,
-                  }}
-                >
-                  {(username || "?").charAt(0).toUpperCase()}
-                </span>
-              )}
-              <span className="text-foreground/80">@{username || "you"}</span>
-              <span aria-hidden className="text-foreground/25">·</span>
-              <span className="tabular-nums">{v2DateLabel}</span>
+              {/* No identity in this build — just the creation-date
+                  stamp. */}
+              <span className="tabular-nums">Created {v2DateLabel}</span>
             </div>
           </div>
         </div>
@@ -2021,8 +1997,7 @@ export function HomeView({
 
       {/* V1 inline create form + projects grid. Hidden when V2 is
           fully active, the V2 stages take over the centre while the
-          projects collapse out. Footer stays mounted (below) so the
-          page still feels grounded. */}
+          projects collapse out. */}
       {!v2Active && (
         <section className="mx-auto max-w-[1400px] px-6 pb-24 grid gap-8">
           {creating && (
@@ -2551,9 +2526,6 @@ function ProjectCard({
                 <span className="truncate">{project.name}</span>
                 {project.private && <PrivateLockIcon />}
                 {project.derived && <DerivedBadge parentName={project.derived.parentName} />}
-              </div>
-              <div className="mt-0.5 text-xs text-foreground/40">
-                by <span className="text-foreground/65">@{project.createdBy || "you"}</span>
               </div>
             </div>
             {statusBadges.length > 0 && (

@@ -485,7 +485,6 @@ export default function Page() {
                   });
                 }}
                 username={user.username}
-                userImage={user.image}
                 loggedIn={loggedIn}
               />
               {/* Back-to-top inside the workspace too — it finds the
@@ -497,7 +496,7 @@ export default function Page() {
           {activity === "guide" && <GuideView />}
         </div>
       </div>
-      <StatusBar onOpenSettings={() => setProfileOpen(true)} />
+      <StatusBar />
 
       {notFoundProjectId ? (
         // Deep-link to a project the backend doesn't know about.
@@ -527,7 +526,6 @@ export default function Page() {
             references={openV2Project.references}
             projectId={openV2Project.projectId}
             username={user.username}
-            userImage={user.image}
             ownerUsername={openV2Project.owner ?? null}
             // Read-only is the SAFE default: until the manifest fetch
             // confirms this viewer owns the project, render the public

@@ -1,11 +1,11 @@
 "use client";
 
-// One-page Project (container) view: a cinematic hero (cover/name/owner/privacy)
-// + a stat strip, the datasets in the project, models trained from them, members,
-// and the activity timeline across all datasets. Opened from a Project card on
-// the workspace. Read access is enforced by the backend; non-members get
-// notfound. (Named ProjectPage, not ProjectView, since app/ProjectView.tsx is
-// the legacy single-DATASET view.)
+// One-page Project (container) view: a cinematic hero (cover/name/privacy)
+// + a stat strip, the datasets in the project, models trained from them, and
+// the activity timeline across all datasets. Opened from a Project card on
+// the workspace. No user identity is rendered anywhere in this build.
+// (Named ProjectPage, not ProjectView, since app/ProjectView.tsx is the
+// legacy single-DATASET view.)
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 
 import { ProjectSettingsModal } from "./ProjectSettingsModal";
@@ -13,12 +13,10 @@ import { AddDatasetModal } from "./AddDatasetModal";
 import { CreateDatasetModal } from "./CreateDatasetModal";
 import { GlassDialog } from "./v2/GlassDialog";
 import { DerivedIcon } from "./v2/DerivedDatasets";
-import { Avatar } from "./components/Avatar";
 import {
   containerCoverUrl,
   datasetCoverUrl,
   deleteDataset,
-  fetchAvatars,
   getActivity,
   getContainer,
   removeDataset,
@@ -48,9 +46,9 @@ function activityText(a: ActivityItem): string {
     case "container_max_input":
       return "changed the image quality";
     case "member_add":
-      return `added ${a.member} as ${a.role}`;
+      return "added a member";
     case "member_remove":
-      return `removed ${a.member}`;
+      return "removed a member";
     case "dataset_add":
       return "added a dataset";
     case "dataset_remove":
@@ -227,7 +225,6 @@ export function ProjectPage({
   const [showSettings, setShowSettings] = useState(false);
   const [showAddDataset, setShowAddDataset] = useState(false);
   const [showCreateDataset, setShowCreateDataset] = useState(false);
-  const [avatars, setAvatars] = useState<Record<string, string>>({});
   const [copied, setCopied] = useState(false);
   // The dataset whose delete dialog (remove-from-project vs delete-entirely) is
   // open, plus an in-flight guard.
@@ -241,11 +238,6 @@ export function ProjectPage({
   useEffect(() => {
     reload();
   }, [reload]);
-  // Resolve real profile pictures for the owner + members (backend only has usernames).
-  useEffect(() => {
-    if (!detail || detail === "notfound") return;
-    fetchAvatars([detail.owner, ...detail.members.map((m) => m.username)]).then(setAvatars);
-  }, [detail]);
 
   if (detail === null) {
     return <div className="mx-auto max-w-6xl px-6 py-16 text-sm text-[var(--muted)]">Loading…</div>;
@@ -343,14 +335,6 @@ export function ProjectPage({
             <h1 className={`pk-page-title text-4xl drop-shadow-sm sm:text-5xl ${lightCover ? "text-zinc-900" : "text-white"}`}>
               {detail.name}
             </h1>
-            <p className={`mt-2 flex items-center gap-2 text-sm font-medium ${lightCover ? "text-zinc-800/90" : "text-white/85"}`}>
-              <Avatar
-                name={detail.owner}
-                src={avatars[(detail.owner || "").toLowerCase()]}
-                className="h-6 w-6 rounded-full text-[10px] font-bold shadow"
-              />
-              by {detail.owner}
-            </p>
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <HeroPill light={lightCover}>
                 {detail.private ? <IconLock /> : <IconGlobe />}
@@ -358,9 +342,6 @@ export function ProjectPage({
               </HeroPill>
               <HeroPill light={lightCover}>
                 {detail.datasets.length} dataset{detail.datasets.length === 1 ? "" : "s"}
-              </HeroPill>
-              <HeroPill light={lightCover}>
-                {detail.members.length} member{detail.members.length === 1 ? "" : "s"}
               </HeroPill>
               {detail.updated && (
                 <span className="hidden sm:inline-flex">
@@ -373,10 +354,9 @@ export function ProjectPage({
       </header>
 
       {/* Stat strip */}
-      <div className="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <div className="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-3">
         <StatCard label="Datasets" value={detail.datasets.length} />
         <StatCard label="Models" value={models.length} />
-        <StatCard label="Members" value={detail.members.length} />
         <StatCard label="Images" value={totalImages} />
       </div>
 
@@ -481,29 +461,8 @@ export function ProjectPage({
           )}
         </div>
 
-        {/* Side: members + activity */}
+        {/* Side: activity */}
         <aside className="flex flex-col gap-6">
-          <section className="pk-card rounded-2xl p-5">
-            <h2 className="pk-eyebrow mb-3">Members</h2>
-            <ul className="flex flex-col gap-1">
-              {detail.members.map((m) => (
-                <li key={m.username} className="flex items-center justify-between rounded-lg py-1.5">
-                  <span className="flex min-w-0 items-center gap-2.5">
-                    <Avatar
-                      name={m.username}
-                      src={avatars[(m.username || "").toLowerCase()]}
-                      className="h-7 w-7 shrink-0 rounded-full text-[11px] font-bold"
-                    />
-                    <span className="truncate text-sm font-medium text-foreground/90">{m.username}</span>
-                  </span>
-                  <span className="shrink-0 rounded-full bg-foreground/[0.06] px-2 py-0.5 text-[11px] font-semibold text-[var(--muted)]">
-                    {m.role}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </section>
-
           <section className="pk-card rounded-2xl p-5">
             <h2 className="pk-eyebrow mb-4">Activity</h2>
             {activity.length === 0 ? (
@@ -516,8 +475,7 @@ export function ProjectPage({
                       className="absolute -left-5 top-1 h-2 w-2 rounded-full bg-[var(--accent-orange)] ring-2 ring-[var(--surface)]"
                       aria-hidden
                     />
-                    <span className="font-semibold text-foreground/90">{a.actor || "someone"}</span>{" "}
-                    {activityText(a)}
+                    <span className="capitalize">{activityText(a)}</span>
                     <span className="ml-1 text-xs text-foreground/40">{timeAgo(a.ts)}</span>
                   </li>
                 ))}
@@ -572,7 +530,7 @@ export function ProjectPage({
                 </button>
               ) : (
                 <p className="rounded-xl border border-foreground/10 bg-foreground/[0.02] px-3.5 py-2.5 text-xs text-[var(--muted)]">
-                  Only {deleteTarget.owner ? <span className="font-medium text-foreground/70">@{deleteTarget.owner}</span> : "the creator"} can permanently delete this dataset.
+                  Only the dataset&apos;s creator can permanently delete this dataset.
                 </p>
               )}
               <button

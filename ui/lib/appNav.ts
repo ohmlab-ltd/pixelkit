@@ -45,6 +45,26 @@ export function onNewDatasetRequest(handler: () => void): () => void {
   return () => window.removeEventListener(NEW_DATASET_EVENT, listener);
 }
 
+// Explorer-refresh bus. The Explorer tree polls its listing every
+// 10 s, which makes a freshly-created dataset invisible for up to a
+// poll cycle. Mutation paths (create, delete, duplicate, rename,
+// container add) fire this right after their API call resolves and
+// the tree re-fetches immediately. Fire-and-forget: no payload, the
+// listing endpoint is the source of truth.
+const EXPLORER_REFRESH_EVENT = "pixelkit:explorer-refresh";
+
+export function requestExplorerRefresh() {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(EXPLORER_REFRESH_EVENT));
+}
+
+export function onExplorerRefresh(handler: () => void): () => void {
+  if (typeof window === "undefined") return () => {};
+  const listener = () => handler();
+  window.addEventListener(EXPLORER_REFRESH_EVENT, listener);
+  return () => window.removeEventListener(EXPLORER_REFRESH_EVENT, listener);
+}
+
 // Broadcast the resolved current tab from /app/page.tsx. Components
 // outside the page (e.g. ScrollToTop in the root layout) can listen
 // to gate themselves on a specific tab without having to read the

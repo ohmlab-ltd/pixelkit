@@ -4,12 +4,12 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { createPortal } from "react-dom";
 import { BlurhashCanvas } from "react-blurhash";
 
-import { Footer } from "../Footer";
 import { LABEL_COLOURS, buildProjectLabelColourMap, colourForLabelStable, readableTextForBg } from "./OnboardLabelsV2";
 import type { ReferenceImage } from "./OnboardReferencesV2";
 import { BoxEditor, detectionsToBoxes, stripTransientBoxFlags, type EditableBox, type MaskShape, type Validation } from "../BoxEditor";
 import { ReferenceImageEditor } from "./ReferenceImageEditor";
 import { LabelJobCard, type LabelJobState } from "./LabelJobCard";
+import { requestExplorerRefresh } from "../../lib/appNav";
 import { AugmentationsCard } from "./AugmentationsCard";
 import { DerivedDatasetsBar } from "./DerivedDatasets";
 import { OverviewPanel } from "./OverviewPanel";
@@ -53,7 +53,6 @@ import { patchProjectMeta, readProjectMeta } from "../../lib/projectMetaCache";
 import { containsProfanity } from "../profanity";
 import { PixelKitLoader } from "./PixelKitLoader";
 import { resizeForUpload, isImageFile } from "../../lib/resize";
-import { lookupUsers } from "../../lib/userCache";
 import { ScrollToTop } from "../components/ScrollToTop";
 import { useIdle } from "../../lib/useIdle";
 
@@ -246,19 +245,12 @@ function compareImportedMediaDesc(a: { id: string; createdAt?: number | string |
   return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
 }
 
-function hueFor(name: string): number {
-  let h = 0;
-  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
-  return Math.abs(h) % 360;
-}
-
 export function ProjectViewV2Stub({
   projectName,
   labels,
   references,
   projectId,
   username,
-  userImage = null,
   ownerUsername = null,
   readOnly = false,
   originTab = "workspaces",
@@ -277,10 +269,9 @@ export function ProjectViewV2Stub({
       from the in-memory references in that case. */
   projectId?: string | null;
   username: string;
-  userImage?: string | null;
-  /** Project owner's username pulled from the manifest. Drives the
-      curator's @handle in the chrome, falls back to `username` (the
-      viewer) when null. */
+  /** Project owner's username pulled from the manifest. Never
+      rendered — only compared against `username` to gate the
+      owner-only settings affordances. */
   ownerUsername?: string | null;
   /** True when the viewer is NOT the owner and the project is being
       viewed from the public feed. Disables rename / label edits /
@@ -312,33 +303,14 @@ export function ProjectViewV2Stub({
   onClose: () => void;
   onReferencesChange?: (next: ReferenceImage[]) => void;
 }) {
-  // The chrome's @handle uses the owner when present, otherwise the
-  // viewer's handle (the historical default for own-project view).
-  const displayHandle = (ownerUsername || username || "you").trim();
   // Whether the viewer CREATED this dataset. Editors viewing a teammate's
-  // dataset can edit its content (not read-only) but are NOT the owner: the
-  // chrome must show the OWNER's avatar (not the viewer's), and dataset Settings
-  // (rename / cover / delete) stay owner-only. No owner on record → treat as
-  // own (the common "open your own dataset" case).
+  // dataset can edit its content (not read-only) but are NOT the owner:
+  // dataset Settings (rename / cover / delete) stay owner-only. No owner
+  // on record → treat as own (the common "open your own dataset" case).
+  // No identity is ever RENDERED in this build — this only gates the
+  // settings affordances.
   const isOwnDataset =
     !ownerUsername || ownerUsername.trim().toLowerCase() === (username || "").trim().toLowerCase();
-  // Owner's avatar, fetched via lookupUsers (cached client-side for 24h)
-  // whenever the viewer isn't the owner — so a teammate's dataset shows their
-  // real avatar next to their handle, not a gradient initial or the viewer's.
-  const [ownerImage, setOwnerImage] = useState<string | null>(null);
-  useEffect(() => {
-    if (!ownerUsername || isOwnDataset) {
-      setOwnerImage(null);
-      return;
-    }
-    let cancelled = false;
-    void lookupUsers([ownerUsername]).then((map) => {
-      if (cancelled) return;
-      const info = map[ownerUsername.toLowerCase()];
-      setOwnerImage(info?.image ?? null);
-    });
-    return () => { cancelled = true; };
-  }, [ownerUsername, isOwnDataset]);
   // After 90s of no mouse/keyboard/touch/scroll/focus, the augment
   // poll suspends (see the deps on its useEffect below). Activity
   // flips back immediately. Cuts ~30 background API calls/min on
@@ -4748,6 +4720,15 @@ export function ProjectViewV2Stub({
     if (scroller) scroller.scrollTo({ top: 0 });
     else window.scrollTo({ top: 0 });
   }, [tab]);
+  // Tree clicks must always LAND on the chosen section: whenever the
+  // active section changes, force-close the review overlay (the
+  // gallery's portalled DatasetViewer + augmentations viewer close via
+  // the activeSection prop threaded into DatasetGallery below).
+  // Without this the full-screen overlays keep covering the content
+  // while the section swaps underneath them.
+  useEffect(() => {
+    setReviewing(false);
+  }, [tab]);
 
   // Whenever the user lands on the dataset tab, force a one-shot
   // overview refresh so any augmentations generated while they were
@@ -5183,38 +5164,20 @@ export function ProjectViewV2Stub({
             </div>
           )}
 
-          {/* Owner + meta chips, project-page style + content-aware over the cover. */}
+          {/* Meta chips, project-page style + content-aware over the
+              cover. No owner identity in this build — just the
+              project-id stamp. */}
           <div className="mt-3 flex flex-col gap-2.5" style={fade()}>
-            <div className={`flex items-center gap-2 text-sm ${bannerLight ? "text-zinc-800/85" : "text-white/85"}`}>
-              {(() => {
-                // Show the OWNER's avatar (mine only when it's my dataset), so
-                // a teammate's dataset never shows my picture beside their name.
-                const avatar = isOwnDataset ? userImage : ownerImage;
-                return avatar ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={avatar} alt="" className="h-5 w-5 rounded-full object-cover shrink-0" referrerPolicy="no-referrer" />
-                ) : (
-                  <span
-                    className="h-5 w-5 rounded-full grid place-items-center text-[9px] font-semibold text-white shrink-0"
-                    style={{ backgroundImage: `linear-gradient(135deg, hsl(${hueFor(displayHandle)},70%,55%), hsl(${(hueFor(displayHandle) + 60) % 360},70%,55%))` }}
-                  >
-                    {(displayHandle || "?").charAt(0).toUpperCase()}
-                  </span>
-                );
-              })()}
-              <span className={bannerLight ? "font-medium text-zinc-900" : "font-medium text-white"}>@{displayHandle}</span>
-              {projectId && (
-                <>
-                  <span aria-hidden className={bannerLight ? "text-zinc-500/60" : "text-white/40"}>·</span>
-                  <span
-                    className={`font-mono text-[10px] uppercase tracking-wider ${bannerLight ? "text-zinc-700/70" : "text-white/55"}`}
-                    title={`Project ID: ${projectId}`}
-                  >
-                    {projectId.slice(0, 8)}
-                  </span>
-                </>
-              )}
-            </div>
+            {projectId && (
+              <div className={`flex items-center gap-2 text-sm ${bannerLight ? "text-zinc-800/85" : "text-white/85"}`}>
+                <span
+                  className={`font-mono text-[10px] uppercase tracking-wider ${bannerLight ? "text-zinc-700/70" : "text-white/55"}`}
+                  title={`Project ID: ${projectId}`}
+                >
+                  {projectId.slice(0, 8)}
+                </span>
+              </div>
+            )}
             <div className="flex flex-wrap items-center gap-2">
               <span
                 className={[
@@ -6299,6 +6262,7 @@ export function ProjectViewV2Stub({
           manifestUpdatedAt={manifestUpdatedAt}
           onViewerOpenIdChange={(id) => { viewerOpenIdRef.current = id; }}
           refViewerOpen={refViewerOpen}
+          activeSection={tab}
         />
       </section>
 
@@ -6362,8 +6326,8 @@ export function ProjectViewV2Stub({
         />
       )}
 
-      {/* Bottom padding to leave room above the Footer once the
-          action panels were removed. */}
+      {/* Bottom padding at the end of the dataset tab (the old
+          action panels were removed). */}
       <div className="pb-24" />
       </div>
 
@@ -6404,7 +6368,6 @@ export function ProjectViewV2Stub({
         <div className="pb-24" />
       </div>
 
-      <Footer />
       </div>
 
       {exportOpen && projectId && (
@@ -6434,6 +6397,9 @@ export function ProjectViewV2Stub({
           onRenamed={(next) => {
             setProjectTitle(next);
             if (projectId) patchProjectMeta(projectId, { name: next });
+            // The rename POST has resolved inside the settings modal —
+            // update the Explorer tree's label right away.
+            requestExplorerRefresh();
           }}
           onLabelColoursChange={(next) => {
             setLabelColours(next);
@@ -6451,6 +6417,7 @@ export function ProjectViewV2Stub({
             setCoverBust(Date.now());
           }}
           onDeleted={() => {
+            requestExplorerRefresh();
             setSettingsOpen(false);
             onClose();
           }}
@@ -8026,8 +7993,14 @@ function DatasetGallery({
   manifestUpdatedAt = null,
   onViewerOpenIdChange,
   refViewerOpen = false,
+  activeSection = "dataset",
 }: {
   items: ImportedMedia[];
+  /** The dataset view's active section. The gallery stays mounted
+      (hidden) while other sections show, but its viewer modals are
+      portalled to <body> — so when the section changes they must be
+      force-closed or they'd keep covering the newly-chosen section. */
+  activeSection?: ProjectTab;
   /** Fired with the currently-open import id whenever the viewer
       modal mounts, navigates, or closes (null on close). The
       outer uses it to skip the open tile when the memory-pressure
@@ -8183,6 +8156,15 @@ function DatasetGallery({
   // source preview URL the modal renders at the top. Lives in the
   // gallery so the modal mounts once instead of per-tile.
   const [augViewer, setAugViewer] = useState<{ importId: string; sourceUrl: string; filename: string } | null>(null);
+  // Explorer-tree navigation: the moment the active section changes,
+  // close both portalled overlays (image viewer + augmentations
+  // viewer) so the tree click lands on the chosen section instead of
+  // leaving a full-screen modal covering it. No-op when already
+  // closed (React bails on same-value state sets).
+  useEffect(() => {
+    setViewIdx(null);
+    setAugViewer(null);
+  }, [activeSection]);
   const [displayLimit, setDisplayLimit] = useState(DATASET_PAGE_SIZE);
   // Free-text filter on the image name. Matches the original upload
   // filename (carried on m.file.name when imports hydrate from the

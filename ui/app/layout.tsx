@@ -111,26 +111,16 @@ const SOFTWARE_LD = {
   },
 };
 
-// Inline pre-hydration script: applies the persisted theme class on
-// <html> before React mounts so the first paint matches the user's
-// stored preference. Without this, users see a brief wrong-theme
-// flash on every full page load.
-//
-// First-visit default is DARK (the brand look), t === null when no
-// preference is stored yet, so the only way the page renders light on
-// first paint is if the user explicitly toggled into light on a
-// previous visit (in which case t === 'light').
+// Inline pre-hydration script: the app is permanently dark, so apply
+// the `.dark` class unconditionally before React mounts — any stored
+// 'pixelkit-theme' preference from older builds is ignored. The
+// class-based mechanism itself stays (globals.css keys everything off
+// `.dark`), only the choice is pinned.
 const themeInitScript = `
 (function() {
-  try {
-    var t = window.localStorage.getItem('pixelkit-theme');
-    var dark = t !== 'light';
-    var root = document.documentElement;
-    if (dark) root.classList.add('dark'); else root.classList.remove('dark');
-    root.style.colorScheme = dark ? 'dark' : 'light';
-  } catch (e) {
-    /* localStorage blocked; the SSR class below already renders dark */
-  }
+  var root = document.documentElement;
+  root.classList.add('dark');
+  root.style.colorScheme = 'dark';
 })();
 `;
 

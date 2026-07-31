@@ -1,14 +1,14 @@
 "use client";
 
-// Workspace "Projects" row: a New-Project tile + cards for each Project the
-// user belongs to. A Project (container) holds many Datasets; this sits above
-// the Datasets grid on the workspace. Cover/owner/last-updated/#datasets per
-// the spec. Clicking a card opens the Project page (onOpenProject).
+// Workspace "Projects" row: a New-Project tile + cards for each Project.
+// A Project (container) holds many Datasets; this sits above the Datasets
+// grid on the workspace. Cover/last-updated/#datasets per card (no owner
+// identity in this build). Clicking a card opens the Project page
+// (onOpenProject).
 import { useCallback, useEffect, useState } from "react";
 
 import { CreateProjectModal } from "./CreateProjectModal";
-import { Avatar } from "./components/Avatar";
-import { containerCoverUrl, fetchAvatars, listContainers, type ContainerCard } from "@/lib/containers";
+import { containerCoverUrl, listContainers, type ContainerCard } from "@/lib/containers";
 
 function timeAgo(iso?: string): string {
   if (!iso) return "";
@@ -86,7 +86,7 @@ function ContainerCover({ id, name }: { id: string; name: string }) {
   );
 }
 
-function ProjectCard({ card, onClick, avatarUrl }: { card: ContainerCard; onClick: () => void; avatarUrl?: string }) {
+function ProjectCard({ card, onClick }: { card: ContainerCard; onClick: () => void }) {
   return (
     <button
       type="button"
@@ -100,10 +100,6 @@ function ProjectCard({ card, onClick, avatarUrl }: { card: ContainerCard; onClic
         <span className="flex items-center gap-2 truncate font-semibold text-foreground/90">
           <span className="truncate">{card.name}</span>
           {card.private && <Lock />}
-        </span>
-        <span className="flex items-center gap-1.5 truncate text-xs text-[var(--muted)]">
-          <Avatar name={card.owner} src={avatarUrl} className="h-4 w-4 shrink-0 rounded-full text-[8px] font-bold" />
-          {card.owner}
         </span>
         <span className="mt-auto flex items-center gap-2 pt-1 text-xs font-medium text-[var(--muted)]">
           <span className="inline-flex items-center gap-1">
@@ -147,12 +143,10 @@ function NewProjectTile({ onClick }: { onClick: () => void }) {
 // empty for the ~0.5s the listContainers fetch takes. Mirrors how the dataset
 // list is cached.
 let _containersCache: ContainerCard[] | null = null;
-let _avatarsCache: Record<string, string> = {};
 
 export function ProjectsSection({ onOpenProject }: { onOpenProject?: (id: string) => void }) {
   const [cards, setCards] = useState<ContainerCard[] | null>(() => _containersCache);
   const [showCreate, setShowCreate] = useState(false);
-  const [avatars, setAvatars] = useState<Record<string, string>>(() => _avatarsCache);
 
   const reload = useCallback(() => {
     listContainers().then((c) => {
@@ -169,14 +163,6 @@ export function ProjectsSection({ onOpenProject }: { onOpenProject?: (id: string
   useEffect(() => {
     reload();
   }, [reload]);
-  // Resolve the owners' real profile pictures (the backend only knows usernames).
-  useEffect(() => {
-    if (!cards || cards.length === 0) return;
-    fetchAvatars(cards.map((c) => c.owner)).then((a) => {
-      _avatarsCache = a;
-      setAvatars(a);
-    });
-  }, [cards]);
 
   return (
     <section className="mb-8">
@@ -195,7 +181,6 @@ export function ProjectsSection({ onOpenProject }: { onOpenProject?: (id: string
           <ProjectCard
             key={c.id}
             card={c}
-            avatarUrl={avatars[(c.owner || "").toLowerCase()]}
             onClick={() => onOpenProject?.(c.id)}
           />
         ))}

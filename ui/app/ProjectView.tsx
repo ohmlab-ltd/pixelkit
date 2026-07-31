@@ -12,8 +12,6 @@ import { DeployView } from "./DeployView";
 import { OptimiseView } from "./OptimiseView";
 import { ProjectSettings } from "./ProjectSettings";
 import { ExportModal } from "./ExportModal";
-import { Footer } from "./Footer";
-import { lookupUsers } from "@/lib/userCache";
 import { apiFetch } from "@/lib/apiFetch";
 import { isProPlan } from "@/lib/plans";
 import { containsProfanity } from "./profanity";
@@ -145,13 +143,11 @@ export function ProjectView({
   // list shows them greyed + non-clickable. Lets the user focus on viable
   // labels without losing track of which ones won't survive the resize.
   const [hideSmall, setHideSmall] = useState<boolean>(false);
-  const [owner, setOwner] = useState<string>("");
   const [createdAt, setCreatedAt] = useState<string | null>(null);
   // Manifest's `updatedAt`, appended as ?v= to the annotated
   // thumbnail URL so a backend re-bake (lite refresh, manual edit)
   // is reflected in the grid without a hard reload.
   const [manifestUpdatedAt, setManifestUpdatedAt] = useState<string | null>(null);
-  const [ownerInfo, setOwnerInfo] = useState<{ name: string | null; image: string | null } | null>(null);
   const [tags, setTags] = useState<string[]>([]);
   const [draftTag, setDraftTag] = useState("");
   const [boxThr, setBoxThr] = useState<number>(LABEL_MODES.normal.box);
@@ -648,7 +644,6 @@ export function ProjectView({
           setCustomThresholds({ box: loadedBox, text: loadedText, nms: loadedNms });
         }
         setDisplayName(m.name ?? name);
-        setOwner(m.owner ?? "");
         setCreatedAt(m.createdAt ?? null);
         setManifestUpdatedAt((m as { updatedAt?: string | null }).updatedAt ?? null);
         setVlmAction(m.vlm_action === "auto_reject" ? "auto_reject" : "manual");
@@ -694,24 +689,6 @@ export function ProjectView({
       cancelled = true;
     };
   }, [name]);
-
-  // Look up the creator's display name + avatar once we know the username
-  // from the manifest. lookupUsers is cached locally for 24h so revisits to
-  // the same project cost nothing.
-  useEffect(() => {
-    if (!owner) {
-      setOwnerInfo(null);
-      return;
-    }
-    let cancelled = false;
-    (async () => {
-      const map = await lookupUsers([owner]);
-      if (!cancelled) setOwnerInfo(map[owner.toLowerCase()] ?? null);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [owner]);
 
   // ---- project tags == union of labels actually present on any box ----
   // Adding a label in the editor / Review auto-promotes it to a project
@@ -1719,8 +1696,6 @@ export function ProjectView({
         </div>
 
         <ProjectMeta
-          owner={owner}
-          ownerInfo={ownerInfo}
           createdAt={createdAt}
           tags={tags}
           paletteSeed={displayName}
@@ -2893,7 +2868,6 @@ export function ProjectView({
         </BetaLocked>
       )}
 
-      <Footer />
 
       {/* Label Cascade modal disabled, see _EMBEDDINGS_ENABLED on
           the backend. Component import + state are kept so flipping
@@ -4858,14 +4832,10 @@ function BoxSizeTip({ warn, fail }: { warn: number; fail: number }) {
 }
 
 function ProjectMeta({
-  owner,
-  ownerInfo,
   createdAt,
   tags,
   paletteSeed,
 }: {
-  owner: string;
-  ownerInfo: { name: string | null; image: string | null } | null;
   createdAt: string | null;
   tags: string[];
   paletteSeed: string;
@@ -4875,36 +4845,12 @@ function ProjectMeta({
     const hues = [hue, (hue + 40) % 360, (hue + 80) % 360];
     return `hsla(${hues[i % hues.length]}, 70%, 55%, 0.95)`;
   };
-  const handle = owner || "";
-  const display = ownerInfo?.name || handle;
-  const initial = (display[0] ?? "?").toUpperCase();
   const created = formatCreated(createdAt);
 
-  if (!owner && tags.length === 0) return null;
+  if (!created && tags.length === 0) return null;
 
   return (
     <div className="mt-4 flex items-center gap-x-4 gap-y-2 flex-wrap text-xs text-foreground/55">
-      {owner && (
-        <div className="flex items-center gap-2 min-w-0">
-          {ownerInfo?.image ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={ownerInfo.image}
-              alt=""
-              className="h-5 w-5 rounded-full object-cover shrink-0"
-              referrerPolicy="no-referrer"
-            />
-          ) : (
-            <span
-              className="h-5 w-5 rounded-full grid place-items-center text-[9px] font-semibold text-[var(--foreground)] shrink-0"
-              style={{ backgroundImage: `linear-gradient(135deg, hsl(${hue},70%,55%), hsl(${(hue + 60) % 360},70%,55%))` }}
-            >
-              {initial}
-            </span>
-          )}
-          <span className="truncate text-foreground/75">@{handle}</span>
-        </div>
-      )}
       {created && (
         <span className="text-foreground/45">created {created}</span>
       )}
