@@ -1,10 +1,9 @@
 // Tiny in-process event bus for switching tabs inside /app from
-// arbitrary nested components (PlanPill, BillingWarning, UsagePanel,
-// the VLM upgrade link in ProjectView, etc.) without prop-drilling
-// or URL navigation. /app/page.tsx subscribes and updates its tab
-// state in response.
+// arbitrary nested components without prop-drilling or URL
+// navigation. /app/page.tsx subscribes and updates its tab state in
+// response.
 
-export type AppTab = "workspaces" | "projects" | "guide" | "pricing" | "terminal";
+export type AppTab = "workspaces" | "projects" | "guide";
 
 const EVENT_NAME = "pixelkit:navigate";
 const CURRENT_EVENT = "pixelkit:current-tab";

@@ -176,6 +176,25 @@ body {
   outline-offset: 2px;
 }
 
+/* Text controls opt OUT of the outline ring above: their focus voice
+   is the hairline border (var(--line)) stepping up to the accent —
+   ring + accent border together read as two concentric orange lines.
+   Buttons, links and every other focusable keep the ring.
+   Tick/slider/file inputs are excluded (their border isn't a visible
+   focus cue, so they keep the ring for accessibility). The :is()
+   wrapper adopts the specificity of its most specific argument
+   (the :not() chain), so `border-color` here also beats Tailwind
+   border utilities — including hover:/focus: variants — without
+   needing !important. */
+:is(
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+  textarea,
+  select
+):focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
 /* Theme-swap synchronisation.
    The ThemeProvider stamps `.theme-changing` on <html> for ~260 ms
    around every toggle. We use it to drive a single coordinated fade

@@ -11,8 +11,47 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { apiFetch } from "@/lib/apiFetch";
 import { type EngineSettings, fetchEngineSettings } from "@/lib/models";
+import { readProjectMeta } from "@/lib/projectMetaCache";
 
 const VERSION = "v0.1.0-dev";
+
+// Queued/running engine jobs, from GET /api/jobs/active (see gd/jobs.py
+// Job.to_public — progress is {index, total, image, phase}).
+type ActiveJob = {
+  id: string;
+  kind: string;
+  project: string;
+  status: "queued" | "running";
+  progress?: { index?: number; total?: number; image?: string; phase?: string } | null;
+  n_images?: number;
+};
+
+function jobVerb(kind: string): string {
+  if (kind === "label_charlie") return "Labelling";
+  if (kind === "purge_label") return "Removing label";
+  if (kind === "augment_generate") return "Augmenting";
+  const words = kind.replace(/[_-]+/g, " ").trim();
+  return words ? words[0].toUpperCase() + words.slice(1) : "Working";
+}
+
+// Percent complete, when derivable: progress.index / progress.total wins,
+// falling back to n_images as the denominator. Null → indeterminate.
+function jobPct(j: ActiveJob): number | null {
+  const p = j.progress;
+  const total =
+    typeof p?.total === "number" && p.total > 0
+      ? p.total
+      : typeof j.n_images === "number" && j.n_images > 0
+        ? j.n_images
+        : null;
+  const index = typeof p?.index === "number" ? p.index : null;
+  if (total == null || index == null) return null;
+  return Math.max(0, Math.min(100, Math.round((index / total) * 100)));
+}
+
+function jobProjectName(projectId: string): string {
+  return readProjectMeta(projectId)?.name ?? projectId.slice(0, 8);
+}
 
 function deviceLabel(device: EngineSettings["device"] | null): string | null {
   if (device === "mps") return "Metal";
@@ -60,6 +99,35 @@ export function StatusBar() {
   // after the engine has been down, in case it restarted with a new
   // device/workspace.
   const settingsFresh = useRef(false);
+
+  // Active-jobs poll for the persistent progress segment: 2 s while
+  // anything is queued/running, 6 s when idle. A setTimeout chain (not
+  // setInterval) so the cadence can flip per-response.
+  const [jobs, setJobs] = useState<ActiveJob[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | null = null;
+    const tick = async () => {
+      let next: ActiveJob[] = [];
+      try {
+        const r = await apiFetch("/api/jobs/active", { cache: "no-store" });
+        if (r.ok) {
+          const d = (await r.json()) as { jobs?: ActiveJob[] };
+          next = Array.isArray(d.jobs) ? d.jobs : [];
+        }
+      } catch {
+        next = []; // engine down — the health dot already says so
+      }
+      if (cancelled) return;
+      setJobs(next);
+      timer = window.setTimeout(tick, next.length > 0 ? 2000 : 6000);
+    };
+    tick();
+    return () => {
+      cancelled = true;
+      if (timer != null) window.clearTimeout(timer);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -115,6 +183,39 @@ export function StatusBar() {
           />
           <span>{engineUp === false ? "Engine down" : device ?? "Engine"}</span>
         </Segment>
+        {jobs.length > 0 && (() => {
+          const primary = jobs.find((j) => j.status === "running") ?? jobs[0];
+          const pct = primary.status === "running" ? jobPct(primary) : null;
+          const extra = jobs.length - 1;
+          const tail =
+            primary.status === "queued" ? " · queued" : pct != null ? ` · ${pct}%` : "…";
+          return (
+            <Segment
+              title={jobs
+                .map((j) => `${jobVerb(j.kind)} ${jobProjectName(j.project)} — ${j.status}`)
+                .join("\n")}
+            >
+              <span
+                className="relative h-[3px] w-16 shrink-0 overflow-hidden rounded-full bg-foreground/15"
+                aria-hidden
+              >
+                {pct != null ? (
+                  <span
+                    className="absolute inset-y-0 left-0 rounded-full bg-[var(--accent)] transition-[width] duration-500 ease-out"
+                    style={{ width: `${pct}%` }}
+                  />
+                ) : (
+                  <span className="indeterminate-bar absolute inset-y-0 w-1/3 rounded-full bg-[var(--accent)]" />
+                )}
+              </span>
+              <span className="max-w-[18rem] truncate normal-case tracking-normal">
+                {jobVerb(primary.kind)} {jobProjectName(primary.project)}
+                {tail}
+              </span>
+              {extra > 0 && <span className="shrink-0 normal-case tracking-normal">+{extra} more</span>}
+            </Segment>
+          );
+        })()}
         {workspace && (
           <Segment title={settings?.workspace}>
             <span className="max-w-[16rem] truncate">{workspace}</span>

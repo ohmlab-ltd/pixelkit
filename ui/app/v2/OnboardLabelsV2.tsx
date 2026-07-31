@@ -274,7 +274,7 @@ export function OnboardLabelsV2({
             onChange={(e) => setName(e.target.value)}
             placeholder="Project name"
             autoFocus
-            className="mt-10 w-full bg-transparent border-b border-foreground/15 focus:border-foreground/50 outline-none py-3 text-xl text-[var(--foreground)] placeholder:text-foreground/25 transition-colors"
+            className="mt-10 w-full bg-transparent border-b border-[var(--line)] py-3 text-xl text-[var(--foreground)] placeholder:text-foreground/25 transition-colors"
           />
 
           <div className="mt-8">
@@ -282,7 +282,7 @@ export function OnboardLabelsV2({
               Labels
             </span>
             <div
-              className="mt-2 min-h-[44px] flex flex-wrap items-center gap-2 border-b border-foreground/10 focus-within:border-foreground/40 transition-colors py-2"
+              className="mt-2 min-h-[44px] flex flex-wrap items-center gap-2 border-b border-[var(--line)] focus-within:border-[var(--accent)] transition-colors py-2"
               onClick={(e) => {
                 // Click anywhere in the chip strip focuses the input ,
                 // a pattern lifted from Gmail / Notion tag fields.
@@ -295,9 +295,15 @@ export function OnboardLabelsV2({
                 return (
                   <span
                     key={lab}
-                    className="group inline-flex items-center rounded-full pl-3 pr-3 group-hover:pr-1.5 h-7 text-sm font-medium animate-[fadeIn_180ms_ease-out] transition-[padding] duration-150 ease-out motion-reduce:transition-none"
-                    style={{ backgroundColor: bg, color: readableTextForBg(bg) }}
+                    // Neutral chip: hairline border, transparent surface,
+                    // the label's colour carried by the swatch dot only.
+                    className="inline-flex h-6 items-center gap-1.5 rounded-md border border-[var(--line)] bg-transparent px-2 font-mono text-[12px] text-[var(--fg-soft)] animate-[fadeIn_180ms_ease-out]"
                   >
+                    <span
+                      aria-hidden
+                      className="h-2 w-2 shrink-0 rounded-full"
+                      style={{ backgroundColor: bg }}
+                    />
                     {lab}
                     <button
                       type="button"
@@ -306,7 +312,7 @@ export function OnboardLabelsV2({
                         removeLabel(lab);
                       }}
                       aria-label={`Remove ${lab}`}
-                      className="inline-flex h-5 w-0 shrink-0 items-center justify-center overflow-hidden rounded-full opacity-0 transition-all duration-150 ease-out group-hover:ml-1 group-hover:w-5 group-hover:opacity-100 hover:bg-black/20 motion-reduce:transition-none"
+                      className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-[var(--fg-dim)] transition-colors hover:text-[var(--bad)]"
                     >
                       <svg width="8" height="8" viewBox="0 0 8 8" fill="none" aria-hidden>
                         <path d="M1.5 1.5l5 5M6.5 1.5l-5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
@@ -323,7 +329,7 @@ export function OnboardLabelsV2({
                 placeholder={
                   allLabels.length === 0 ? "Type a label, press Enter" : "Add another…"
                 }
-                className="flex-1 min-w-[10rem] bg-transparent outline-none py-1 text-base text-[var(--foreground)] placeholder:text-foreground/30"
+                className="flex-1 min-w-[10rem] bg-transparent py-1 text-base text-[var(--foreground)] placeholder:text-foreground/30"
               />
             </div>
             {labelError && (
@@ -352,7 +358,7 @@ export function OnboardLabelsV2({
               type="button"
               onClick={() => canSubmit && onDone(name.trim(), allLabels, labelColours)}
               disabled={!canSubmit || allLabels.length === 0}
-              className="rounded-full bg-orange-500 px-6 py-2.5 text-sm font-semibold text-white transition hover:bg-orange-400 disabled:cursor-not-allowed disabled:opacity-40"
+              className="pk-btn pk-btn-primary"
             >
               Done
             </button>

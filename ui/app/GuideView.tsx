@@ -487,19 +487,10 @@ Global:
   Esc - close any modal or panel
 
 ==============================================================
-PLAN LIMITS
+LIMITS
 ==============================================================
-Free: small per-project image cap, fixed monthly Openverse quota,
-public projects only.
-
-Pro: three credit tiers. Larger caps, private projects, priority
-labelling queue.
-
-Beta: Pro-level limits for 30 days from the day a beta code is
-redeemed.
-
-Hitting a cap mid-upload shows an inline note explaining which
-limit was reached. The Pricing page is canonical.
+None. PixelKit runs entirely on this machine — the only ceilings
+are your disk space and compute.
 
 ==============================================================
 CONTENT SAFETY AND LICENSING
@@ -998,8 +989,7 @@ function ProjectsSection({ go }: { go: (k: GuideSectionKey) => void }) {
 
       <GuideSection n={1} title="Creating a dataset">
         <p>
-          Datasets are private by default on the Pro plan. On the Free plan
-          they live in the Community feed where anyone can see them. From the
+          Datasets live on this machine and are only visible to you. From the
           Workspace tab:
         </p>
         <Steps
@@ -2090,27 +2080,12 @@ function ReferenceSection() {
         />
       </GuideSection>
 
-      <GuideSection n={4} title="Plan limits">
+      <GuideSection n={4} title="Limits">
         <p>
-          The Free tier exists so you can try PixelKit end-to-end without a
-          card. Pro removes the caps and unlocks private projects. Beta gives
-          a 30-day Pro-equivalent window once a redeem code is applied. The
-          exact numbers can shift (the Pricing page is canonical), but at
-          the time of writing:
+          There are no plans, quotas or caps — PixelKit runs entirely on
+          this machine. Dataset size is bounded only by your disk space,
+          and labelling speed by your hardware.
         </p>
-        <Bullets
-          items={[
-            "<strong>Free</strong>. Small per-project image cap, fixed monthly Openverse import quota, public projects only.",
-            "<strong>Pro</strong>. Three credit tiers. Large per-project image cap, large monthly import quota, private projects allowed, priority labelling queue.",
-            "<strong>Beta</strong>. Pro-level limits for 30 days from the day a beta code is redeemed. Same private-project access as Pro.",
-          ]}
-        />
-        <Callout tone="info">
-          Hit the cap mid-upload and the gallery shows an inline note
-          explaining which limit was reached. Free-tier users can upgrade
-          from the Pricing tab. Pro users can contact us for bespoke
-          ceilings.
-        </Callout>
       </GuideSection>
 
       <GuideSection n={5} title="Content safety">

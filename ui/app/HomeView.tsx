@@ -20,7 +20,6 @@ import {
   collectInput,
   parseDataset,
   uploadDataset,
-  IMPORT_MAX_SIZE_OPTIONS,
   ZIP_SOFT_LIMIT_BYTES,
   type ParsedDataset,
 } from "@/lib/datasetImport";
@@ -447,7 +446,6 @@ export function HomeView({
   const [v2ImportParsing, setV2ImportParsing] = useState(false);
   const [v2ImportParseProgress, setV2ImportParseProgress] = useState<{ done: number; total: number } | null>(null);
   const [v2ImportParsed, setV2ImportParsed] = useState<ParsedDataset | null>(null);
-  const [v2ImportMaxSide, setV2ImportMaxSide] = useState<number | null>(null);
   const [v2ImportBusy, setV2ImportBusy] = useState(false);
   const [v2ImportProgress, setV2ImportProgress] = useState<{ done: number; total: number } | null>(null);
   // Mirrors v2ImportBusy for the v2Reset/ESC closures (which capture a stale
@@ -581,7 +579,6 @@ export function HomeView({
     setV2ImportParsing(false);
     setV2ImportParseProgress(null);
     setV2ImportProgress(null);
-    setV2ImportMaxSide(null);
     if (cancelledProjectId) {
       // Fire-and-forget. The user's already on the next screen by
       // the time the DELETE round-trip lands; surfacing an error
@@ -737,7 +734,8 @@ export function HomeView({
       if (!projectId) throw new Error("Couldn't create the project.");
       const result = await uploadDataset(
         parsed.items,
-        { maxSide: v2ImportMaxSide },
+        // Full resolution always — no client-side downscale on import.
+        { maxSide: null },
         (form) =>
           apiFetch(`/api/v2/projects/${projectId}/imports/raw_batch`, { method: "POST", body: form }),
         (p) => setV2ImportProgress({ done: p.done, total: p.total }),
@@ -767,8 +765,7 @@ export function HomeView({
       v2ProjectIdRef.current = null;
       setV2ImportParsed(null);
       setV2ImportProgress(null);
-      setV2ImportMaxSide(null);
-    } catch (e) {
+      } catch (e) {
       setError(e instanceof Error ? e.message : "Import failed.");
       // Clean up the eagerly-created project so a failed import never leaves an
       // orphan, and clear the project ref so a retry creates a FRESH project
@@ -1575,7 +1572,7 @@ export function HomeView({
                 <span className="font-medium text-[var(--foreground)]">Import it →</span>
               </button>
 
-              <div className="mt-8 rounded-md border border-[var(--line)] bg-[var(--panel)] focus-within:border-[var(--line-strong)] transition-colors px-4 py-3.5 flex flex-wrap items-center gap-2">
+              <div className="mt-8 rounded-md border border-[var(--line)] bg-[var(--panel)] focus-within:border-[var(--accent)] transition-colors px-4 py-3.5 flex flex-wrap items-center gap-2">
                 {v2Labels.map((lab, i) => {
                   const bg = v2LabelColours[lab.toLowerCase()] ?? LABEL_COLOURS[i % LABEL_COLOURS.length];
                   return (
@@ -1617,7 +1614,7 @@ export function HomeView({
                     if (v2Input.trim()) v2AddLabel(v2Input);
                   }}
                   placeholder={v2Labels.length === 0 ? "e.g. pothole, crack, manhole" : ""}
-                  className="flex-1 min-w-[8rem] bg-transparent outline-none py-1 text-base text-[var(--foreground)] placeholder:text-foreground/35"
+                  className="flex-1 min-w-[8rem] bg-transparent py-1 text-base text-[var(--foreground)] placeholder:text-foreground/35"
                 />
               </div>
 
@@ -1653,8 +1650,7 @@ export function HomeView({
                     type="button"
                     onClick={v2DoneLabels}
                     disabled={v2Labels.length === 0 || v2Stage === "creating"}
-                    className="inline-flex items-center justify-center rounded-md px-5 py-2.5 text-[13px] font-semibold leading-none text-[var(--accent-contrast)] transition-all hover:brightness-105 disabled:opacity-40 disabled:cursor-not-allowed"
-                    style={{ backgroundColor: "var(--accent)" }}
+                    className="pk-btn pk-btn-primary"
                   >
                     Done
                   </button>
@@ -1711,7 +1707,7 @@ export function HomeView({
               {/* Picker — folder or zip. Hidden once a dataset is parsed. */}
               {!v2ImportParsed && (
                 <div className="mt-8 flex flex-wrap items-center gap-3">
-                  <label className="cursor-pointer inline-flex items-center gap-2 rounded-md border border-[var(--line)] bg-[var(--panel)] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] px-4 py-2.5 text-[13px] transition-colors">
+                  <label className="pk-btn cursor-pointer">
                     Choose folder
                     <input
                       type="file"
@@ -1726,7 +1722,7 @@ export function HomeView({
                       onChange={(e) => v2PickDataset(e.target.files)}
                     />
                   </label>
-                  <label className="cursor-pointer inline-flex items-center gap-2 rounded-md border border-[var(--line)] bg-[var(--panel)] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] px-4 py-2.5 text-[13px] transition-colors">
+                  <label className="pk-btn cursor-pointer">
                     Choose .zip
                     <input
                       type="file"
@@ -1791,32 +1787,6 @@ export function HomeView({
                     )}
                   </div>
 
-                  {/* Max image size — mirrors the project size dropdown; default
-                      preserves full resolution (right for small-object data). */}
-                  <div className="mt-5 flex flex-wrap items-center gap-3">
-                    <label className="text-sm text-foreground/60" htmlFor="v2-import-size">
-                      Image size
-                    </label>
-                    <select
-                      id="v2-import-size"
-                      value={v2ImportMaxSide ?? ""}
-                      onChange={(e) =>
-                        setV2ImportMaxSide(e.target.value === "" ? null : Number(e.target.value))
-                      }
-                      disabled={v2ImportBusy}
-                      className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-sm text-[var(--foreground)] outline-none focus:border-[var(--line-strong)] disabled:opacity-50"
-                    >
-                      {IMPORT_MAX_SIZE_OPTIONS.map((o) => (
-                        <option key={o.label} value={o.value ?? ""}>
-                          {o.label}
-                        </option>
-                      ))}
-                    </select>
-                    <span className="text-[11px] text-foreground/40">
-                      Full resolution preserves small objects; boxes are rescaled if you downsize.
-                    </span>
-                  </div>
-
                   <div className="mt-6 flex items-center gap-3">
                     <button
                       type="button"
@@ -1838,8 +1808,7 @@ export function HomeView({
                       type="button"
                       onClick={v2RunImport}
                       disabled={v2ImportBusy || v2ImportParsed.items.length === 0}
-                      className="inline-flex items-center justify-center gap-2 rounded-md px-5 py-2.5 text-[13px] font-semibold leading-none text-[var(--accent-contrast)] transition-all hover:brightness-105 disabled:opacity-40 disabled:cursor-not-allowed"
-                      style={{ backgroundColor: "var(--accent)" }}
+                      className="pk-btn pk-btn-primary tabular-nums"
                     >
                       {v2ImportBusy && (
                         <span className="inline-block h-3 w-3 rounded-full border-2 border-current border-t-transparent opacity-60 animate-spin" />
@@ -1874,12 +1843,12 @@ export function HomeView({
                     if (e.key === "Escape") setCreating(false);
                   }}
                   placeholder="Project name (e.g. potholes)"
-                  className="flex-1 min-w-[12rem] rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-base outline-none focus:border-[var(--accent)] transition-colors"
+                  className="flex-1 min-w-[12rem] rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-base transition-colors"
                 />
                 <button
                   onClick={create}
                   disabled={!newName.trim()}
-                  className="rounded-md bg-[var(--accent)] text-[var(--accent-contrast)] px-4 py-2 text-[13px] font-medium hover:brightness-105 disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="pk-btn pk-btn-primary"
                 >
                   Create
                 </button>

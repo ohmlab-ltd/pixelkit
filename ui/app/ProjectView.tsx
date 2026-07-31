@@ -1,11 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { navigateAppTo } from "@/lib/appNav";
 import { BoxEditor, EditableBox, detectionsToBoxes } from "./BoxEditor";
 import { SimilarLabelsModal, type SimilarMatch } from "./SimilarLabelsModal";
 import { LabelCascadeReviewModal, type CascadeGroup } from "./LabelCascadeReviewModal";
-import { isImageFile, resizeForUpload } from "@/lib/resize";
+import { isImageFile } from "@/lib/resize";
 import { ReviewMode, type ReviewScope } from "./ReviewMode";
 import { TrainView } from "./TrainView";
 import { DeployView } from "./DeployView";
@@ -13,9 +12,7 @@ import { OptimiseView } from "./OptimiseView";
 import { ProjectSettings } from "./ProjectSettings";
 import { ExportModal } from "./ExportModal";
 import { apiFetch } from "@/lib/apiFetch";
-import { isProPlan } from "@/lib/plans";
 import { containsProfanity } from "./profanity";
-import { usePlan } from "./PlanPill";
 
 const API =
   process.env.NEXT_PUBLIC_API_URL ??
@@ -168,13 +165,8 @@ export function ProjectView({
   const [vlmAction, setVlmAction] = useState<"off" | "manual" | "auto_reject">("manual");
   const [synonymsEnabled, setSynonymsEnabled] = useState<boolean>(true);
 
-  // AI Review is a Pro-only feature, Free users see the segmented
-  // control greyed out with an upgrade hint. Whenever they aren't Pro
-  // we coerce the value sent to the backend to "off" too, so a stale
-  // localStorage / pre-downgrade value can't leak through.
-  const planData = usePlan();
-  const isProTier = planData?.plan ? isProPlan(planData.plan) : false;
-  const effectiveVlmAction: "off" | "manual" | "auto_reject" = isProTier ? vlmAction : "off";
+  // Local build: no plan tiers — AI Review is always available.
+  const effectiveVlmAction: "off" | "manual" | "auto_reject" = vlmAction;
 
   const [phase, setPhase] = useState<Phase>("idle");
   // Hover state for the Target Input Shape pill / picker swap. Uses
@@ -939,13 +931,9 @@ export function ProjectView({
     const nsfwRejected: string[] = [];
     const dupeRejected: { file: string; duplicate_of?: string }[] = [];
     try {
-      // Resize every file client-side first so the upload is the only
-      // network round-trip. Sequential, Promise.all'ing big canvas
-      // resizes can stutter the main thread.
-      const resized: File[] = [];
-      for (const raw of files) {
-        resized.push(await resizeForUpload(raw));
-      }
+      // Full-resolution uploads: the original file bytes go up as-is —
+      // no client-side downscale/re-encode.
+      const resized: File[] = files;
 
       // Single multipart POST containing every file. Backend stages
       // them in a temp area, then runs the per-image NSFW + R2 + manifest
@@ -2641,28 +2629,14 @@ export function ProjectView({
                   <VlmReviewHelpPopover />
                 </div>
                 <SegmentedControl
-                  value={isProTier ? vlmAction : "off"}
+                  value={vlmAction}
                   onChange={setVlmAction}
-                  disabled={!isProTier}
-                  disabledTitle="AI Review is a Pro feature"
                   options={[
                     { value: "off", label: "Off", title: "Skip the AI review entirely. Faster runs." },
                     { value: "manual", label: "Manual", title: "Keep flagged boxes; you decide whether to delete or verify." },
                     { value: "auto_reject", label: "Auto-reject", title: "Drop any detection flagged as a mismatch before saving." },
                   ]}
                 />
-                {!isProTier && (
-                  <p className="mt-2 text-[11px] text-foreground/40">
-                    <button
-                      type="button"
-                      onClick={() => navigateAppTo("pricing")}
-                      className="text-foreground/60 hover:text-foreground underline underline-offset-2"
-                    >
-                      Upgrade to Pro
-                    </button>{" "}
-                    to use AI Review.
-                  </p>
-                )}
               </div>
               <div>
                 <div className="flex items-center gap-2 mb-3">
@@ -5090,15 +5064,8 @@ function EditModal({
     matches: SimilarMatch[];
   } | null>(null);
 
-  // Plan quota gate. When the user has burned through this period's
-  // auto-labelling allowance we strip the AI handlers off BoxEditor:
-  //   - onPointDetect undefined  -> "Click to detect" button hides
-  //   - onBoxDrawn undefined     -> manual draws skip the segmentation round-trip
-  //   - onClassifyBox undefined  -> manual draws skip the label guess
-  // Result: the user can still draw boxes manually, paint masks via
-  // the Edit-mask tool, and type labels, pure manual labelling.
-  const planData = usePlan();
-  const aiAllowed = !planData?.over.anyLabelLimit;
+  // Local build: no usage quotas — the AI handlers are always wired.
+  const aiAllowed = true;
 
   // Kept for re-enabling when _EMBEDDINGS_ENABLED flips back on.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -5350,18 +5317,6 @@ function EditModal({
               <span className="text-foreground/45"> · </span>
               Edits are locked while the labelling job runs, once it&rsquo;s
               finished you can review boxes, masks, and labels.
-            </div>
-          </div>
-        )}
-        {!labelling && !aiAllowed && (
-          <div className="mb-3 rounded-xl border border-amber-300/25 bg-amber-300/[0.04] px-4 py-2.5 flex items-start gap-3">
-            <span aria-hidden className="mt-1.5 h-1.5 w-1.5 rounded-full bg-amber-300/80 shrink-0" />
-            <div className="min-w-0 text-[12px] text-foreground/75 leading-relaxed">
-              <span className="text-amber-200/90 font-mono uppercase tracking-wider text-[10px]">Manual mode</span>
-              <span className="text-foreground/45"> · </span>
-              You&rsquo;ve used your auto-labelling allowance for this period. Draw boxes,
-              paint masks with the <span className="text-foreground/85">Edit mask</span> tool,
-              and type labels manually until your quota resets.
             </div>
           </div>
         )}

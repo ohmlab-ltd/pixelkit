@@ -50,14 +50,14 @@ export function CreateDatasetModal({
             }}
             maxLength={120}
             placeholder="e.g. Rooftop panels"
-            className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-sm outline-none transition-colors focus:border-[var(--accent)]"
+            className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-sm transition-colors"
           />
         </label>
         <div className="flex justify-end gap-2">
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md border border-[var(--line)] px-4 py-2 text-[13px] font-medium text-foreground/75 transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)]"
+            className="pk-btn"
           >
             Cancel
           </button>
@@ -65,7 +65,7 @@ export function CreateDatasetModal({
             type="button"
             onClick={submit}
             disabled={!name.trim()}
-            className="rounded-md bg-[var(--accent)] px-4 py-2 text-[13px] font-medium text-[var(--accent-contrast)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-40"
+            className="pk-btn pk-btn-primary"
           >
             Continue
           </button>

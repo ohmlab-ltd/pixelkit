@@ -90,9 +90,9 @@ export function ActivityBar({
   settingsActive = false,
 }: {
   activity: ActivityKey;
-  /** Fired for the three view icons. The page decides whether this
-   *  switches views or collapses the side bar (clicking the active
-   *  icon again toggles the side bar). */
+  /** Fired for the view icons. Explorer always navigates back to the
+   *  workspace (and re-expands a collapsed side bar — collapsing lives
+   *  on the Explorer pane header); Guide switches to the guide view. */
   onSelect: (key: ActivityKey) => void;
   onSettings: () => void;
   settingsActive?: boolean;

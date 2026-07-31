@@ -59,19 +59,6 @@ export type ParsedDataset = {
 
 export type CollectedFile = { path: string; file: File };
 
-// Max-size dropdown options for the import screen. `null` = preserve the
-// original resolution (the right default for training data — downscaling a
-// 4K aerial frame would erase small objects). Mirrors the project
-// input-size dropdown's "choose a size" pattern.
-export const IMPORT_MAX_SIZE_OPTIONS: { label: string; value: number | null }[] = [
-  { label: "Preserve full resolution", value: null },
-  { label: "Max 2560 px", value: 2560 },
-  { label: "Max 1920 px", value: 1920 },
-  { label: "Max 1280 px", value: 1280 },
-  { label: "Max 1024 px", value: 1024 },
-  { label: "Max 640 px", value: 640 },
-];
-
 // Soft ceiling above which a single in-browser .zip expand risks OOMing the
 // tab (fflate decompresses into memory). The folder picker streams Files
 // lazily and has no such limit, so we steer large datasets there.

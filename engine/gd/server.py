@@ -18128,6 +18128,20 @@ async def charlie_imports_segment_and_classify_box(
 # Drives the first-run setup: HF token in, weights down, models up.
 
 
+@app.get("/api/jobs/active")
+async def jobs_active():
+    """Lightweight global list of queued/running jobs for the status-bar
+    progress segment — survives page navigation, not process restarts
+    (the queue is in-memory)."""
+    jm = state["jobs"]
+    out = [
+        j.to_public()
+        for j in jm.list(limit=100)
+        if j.status in ("queued", "running")
+    ]
+    return {"jobs": out}
+
+
 @app.get("/api/models/status")
 async def models_status():
     return await asyncio.to_thread(models_mgr.status)

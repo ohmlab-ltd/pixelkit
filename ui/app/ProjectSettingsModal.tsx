@@ -1,7 +1,6 @@
 "use client";
 
-// Project (container) settings pop-out: rename, cover, image quality,
-// and delete. Owner-only actions; the modal is only opened for owners. The
+// Project (container) settings pop-out: rename, cover, and delete. Owner-only actions; the modal is only opened for owners. The
 // portable build is single-user, so there is no members section (accounts /
 // identity are invisible everywhere).
 import { useRef, useState } from "react";
@@ -36,8 +35,6 @@ export function ProjectSettingsModal({
   // Delete confirm flow.
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  // Max input image size (px longest edge for uploads). Datasets inherit it.
-  const [inputSize, setInputSize] = useState<number>(container.max_input_size ?? 1500);
 
   async function saveName() {
     const nm = name.trim();
@@ -58,14 +55,6 @@ export function ProjectSettingsModal({
     setBusy(false);
   }
 
-  async function applyInputSize(v: number) {
-    setInputSize(v);
-    setBusy(true);
-    setError(null);
-    if (await patchContainer(container.id, { max_input_size: v })) onChanged();
-    else setError("Could not change the image quality.");
-    setBusy(false);
-  }
 
   async function doDelete() {
     setBusy(true);
@@ -122,27 +111,6 @@ export function ProjectSettingsModal({
           />
         </div>
 
-
-        {/* Max input image size */}
-        <div className="flex items-center justify-between gap-3 rounded-xl border border-foreground/10 p-3.5">
-          <div className="flex flex-col">
-            <span className="text-sm font-medium text-foreground/85">Image quality</span>
-            <span className="text-xs text-[var(--muted)]">
-              Longest edge new uploads are resized to. Higher keeps more detail and uses more storage.
-            </span>
-          </div>
-          <select
-            value={inputSize}
-            onChange={(e) => applyInputSize(Number(e.target.value))}
-            disabled={busy}
-            className="shrink-0 rounded-xl border border-foreground/10 bg-foreground/[0.03] px-2.5 py-2 text-sm"
-          >
-            <option value={1024}>Compact (1024px)</option>
-            <option value={1500}>Standard (1500px)</option>
-            <option value={2048}>High (2048px)</option>
-            <option value={4096}>4K (4096px)</option>
-          </select>
-        </div>
 
         {/* Danger zone */}
         <div className="rounded-xl border border-rose-500/30 bg-rose-500/[0.04] p-3.5">

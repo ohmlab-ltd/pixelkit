@@ -48,11 +48,10 @@ import { ProjectSettingsV2 } from "./ProjectSettingsV2";
 import { ExportModal } from "../ExportModal";
 import { Tooltip } from "../Tooltip";
 import { apiFetch } from "../../lib/apiFetch";
-import { usePlan } from "../PlanPill";
 import { patchProjectMeta, readProjectMeta } from "../../lib/projectMetaCache";
 import { containsProfanity } from "../profanity";
 import { PixelKitLoader } from "./PixelKitLoader";
-import { resizeForUpload, isImageFile } from "../../lib/resize";
+import { isImageFile } from "../../lib/resize";
 import { ScrollToTop } from "../components/ScrollToTop";
 import { useIdle } from "../../lib/useIdle";
 
@@ -90,24 +89,6 @@ const NO_SYNTH_DETS = process.env.NEXT_PUBLIC_NO_SYNTH_DETS === "1";
 
 // Annotation target per label (shown in the UI; enforced by the backend).
 const ANNOTS_PER_LABEL = 5;
-
-// Map a Project's max input size (px longest edge) to a JPEG byte budget for
-// the client-side upload resize. The 1500 default keeps the historical 50KB
-// budget EXACTLY, so any project that never touches the setting uploads
-// byte-identically to before. Larger ceilings get a proportionally larger
-// budget so the extra pixels aren't crushed straight back out by the byte cap
-// (more storage is the opt-in cost of a higher-quality Project).
-function uploadBytesForMaxSize(maxSide: number): number {
-  // Byte budget per upload, scaled to the chosen resolution. Larger ceilings
-  // get a generous budget so a full-resolution image (e.g. 4K) keeps good JPEG
-  // quality instead of being squeezed — the resize never drops below maxSide,
-  // so a too-tight budget would only hurt quality, but a 4K Project opted into
-  // crisp originals, so give it the room.
-  if (maxSide <= 1500) return 50 * 1024;
-  if (maxSide <= 2048) return 400 * 1024;
-  if (maxSide <= 3072) return 1024 * 1024;
-  return Math.round(2.5 * 1024 * 1024);
-}
 
 // Whimsy strings used by the image-processing progress card. Same
 // purpose as LABEL_PHRASES inside LabelJobCard, gives the user a
@@ -282,7 +263,7 @@ export function ProjectViewV2Stub({
       Drives the "Back to …" button copy on the loader + header so a
       public-feed origin reads "Back to projects" even when the
       project happens to be the viewer's own. */
-  originTab?: "workspaces" | "projects" | "guide" | "pricing" | "terminal";
+  originTab?: "workspaces" | "projects" | "guide";
   /** When set, this dataset was opened from inside a Project (container): the
       back button reads "Back to project" and onClose returns to that Project. */
   backToProjectId?: string | null;
@@ -503,10 +484,6 @@ export function ProjectViewV2Stub({
           };
           setDatasetType(next);
           patchProjectMeta(pid, { datasetType: next });
-        }
-        if (typeof (j as { max_input_size?: number }).max_input_size === "number") {
-          maxInputSizeRef.current = (j as { max_input_size: number }).max_input_size;
-          setMaxInputSize((j as { max_input_size: number }).max_input_size);
         }
         if (Array.isArray(j.labelsLastRun)) {
           setLabelsLastRun(j.labelsLastRun);
@@ -1369,11 +1346,6 @@ export function ProjectViewV2Stub({
   // in the gallery.
   const [labelJob, setLabelJob] = useState<LabelJobState | null>(null);
   const [labelJobStarting, setLabelJobStarting] = useState(false);
-  // Plan / usage snapshot. Drives the credit cutoff so AI labelling
-  // refuses once the user's credits are exhausted, instead of
-  // silently consuming more.
-  const planUsage = usePlan();
-  const overCreditLimit = !!planUsage?.over.anyLabelLimit;
   // Label-purge job state (background strip launched from the
   // DeleteLabelModal). Declared alongside labelJob so the polling
   // effect a thousand lines down can see it. labelPendingDelete is
@@ -1441,14 +1413,6 @@ export function ProjectViewV2Stub({
   // whole drop finishes.
   const [importProgress, setImportProgress] = useState<{ total: number; done: number } | null>(null);
 
-  // Upload size ceiling (px longest edge) inherited from the dataset's Project,
-  // default 1500 = the historical client default. A ref so the upload path
-  // reads the latest value without re-rendering; populated from manifest fetches.
-  const maxInputSizeRef = useRef<number>(1500);
-  // Reactive mirror of the ceiling so the hero can show the image size limit
-  // chip (the ref alone can't drive a re-render). Kept in step wherever the ref
-  // is set from a manifest fetch.
-  const [maxInputSize, setMaxInputSize] = useState<number>(1500);
   // Hidden file input behind the header's "Add images" action — same
   // handler as the drop zone, so both paths share gating + upload flow.
   const headerFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -1765,15 +1729,6 @@ export function ProjectViewV2Stub({
       console.log("[v2 import] reference uploads in progress, ignoring drop");
       return;
     }
-    // Credit cutoff. Uploads themselves consume credits at
-    // 1/800 each, so once the user's monthly allowance is gone
-    // we stop here rather than burn through what's left. Same
-    // toast hook as labelling so the user gets a clear reason.
-    if (overCreditLimit) {
-      setVideoError("Out of credits this period. Upgrade to keep uploading.");
-      window.setTimeout(() => setVideoError(null), 5000);
-      return;
-    }
     const dropped = Array.from(files);
     // Split by MIME type up front WITHOUT reading any bytes. The old
     // path read EVERY dropped file's ArrayBuffer here (to dodge a
@@ -1823,11 +1778,9 @@ export function ProjectViewV2Stub({
     if (candidates.length === 0) return;
 
     // Phase 1: spawn placeholder tiles IMMEDIATELY, one per
-    // candidate file. No await, no resize, no preview yet. The user
-    // sees the count instantly + a shimmer grid that fills in as
-    // each file's downsized preview arrives. Without this, dropping
-    // ~50 phone-camera images blocked the UI for several seconds
-    // while resizeForUpload chewed through them.
+    // candidate file. No await, no preview yet. The user sees the
+    // count instantly + a shimmer grid that fills in as each file's
+    // upload confirms.
     // Pre-assign timestamps in REVERSE drop order so under the
     // gallery's DESC sort, the FIRST-dropped tile lands at the top-
     // left of this batch and the WHOLE batch sits above any
@@ -1860,46 +1813,15 @@ export function ProjectViewV2Stub({
     setImportsTotal((n) => (n != null ? n + placeholders.length : n));
     scrollToDataset();
 
-    // Phase 2: resize (capped at 6 concurrent canvas.toBlob calls so
-    // they don't serialise internally and stall), then ship images in
-    // BATCHES to /imports/raw_batch. One manifest write per batch
-    // instead of one per image is the dominant win when importing
-    // thousands of images (the old per-image path was O(n^2) on the
-    // manifest write + n HTTP round-trips). Gallery order comes from
-    // the pre-assigned createdAt timestamps, not upload arrival order.
-    const RESIZE_CONCURRENCY = 6;
-    let _slots = RESIZE_CONCURRENCY;
-    const _waiters: Array<() => void> = [];
-    const _acquire = () =>
-      new Promise<void>((res) => {
-        if (_slots > 0) { _slots--; res(); }
-        else { _waiters.push(res); }
-      });
-    const _release = () => {
-      const next = _waiters.shift();
-      if (next) { next(); } else { _slots++; }
-    };
-    const resizeOne = async (i: number): Promise<File> => {
-      await _acquire();
-      try {
-        // No per-tile state write here. The placeholder stays a white
-        // tile until its upload confirms, then loads the server
-        // thumbnail via backendId (DatasetThumb prefers the server URL
-        // whenever backendId is set). Writing a blob preview per image
-        // was an O(n^2) setImports storm plus thousands of object URLs
-        // held in memory on a big drop, a major freeze source.
-        return await resizeForUpload(
-          candidates[i],
-          maxInputSizeRef.current,
-          uploadBytesForMaxSize(maxInputSizeRef.current),
-        ).catch(() => candidates[i]);
-      } finally {
-        _release();
-      }
-    };
+    // Phase 2: ship the ORIGINAL file bytes in BATCHES to
+    // /imports/raw_batch — no client-side downscaling or re-encoding;
+    // the engine stores full-resolution originals. One manifest write
+    // per batch instead of one per image is the dominant win when
+    // importing thousands of images. Gallery order comes from the
+    // pre-assigned createdAt timestamps, not upload arrival order.
 
     if (!projectId) {
-      // Onboarding: no project yet. Resize + mark ready locally; the
+      // Onboarding: no project yet. Mark ready locally; the
       // hand-off effect re-uploads everything (via the per-image path)
       // once the project is actually created. Kept on the single path
       // since these batches are tiny (a few reference-stage images).
@@ -1907,13 +1829,13 @@ export function ProjectViewV2Stub({
         const placeholder = placeholders[i];
         void (async () => {
           try {
-            const resized = await resizeOne(i);
+            const original = candidates[i];
             // Onboarding tiles have no backendId yet (project not created),
             // so they render from this local blob preview until the
             // hand-off effect re-uploads them. Cheap here: these batches
             // are tiny (a few reference-stage images), unlike a bulk drop.
-            updateImport(placeholder.id, { file: resized, preview: URL.createObjectURL(resized) });
-            await processImport({ ...placeholder, file: resized, preview: "" });
+            updateImport(placeholder.id, { file: original, preview: URL.createObjectURL(original) });
+            await processImport({ ...placeholder, file: original, preview: "" });
           } catch (e) {
             console.error("[v2 import-queue] swallowed error:", e);
           }
@@ -1947,9 +1869,7 @@ export function ProjectViewV2Stub({
       };
 
       const uploadBatch = async (idxs: number[]) => {
-        const items = await Promise.all(
-          idxs.map(async (i) => ({ ph: placeholders[i], file: await resizeOne(i) })),
-        );
+        const items = idxs.map((i) => ({ ph: placeholders[i], file: candidates[i] }));
         const fd = new FormData();
         for (const { ph, file } of items) {
           const fresh = await rereadFileBytes(file);
@@ -2126,7 +2046,7 @@ export function ProjectViewV2Stub({
     };
 
     // Safari's File/Blob can lose its backing memory between the
-    // time `resizeForUpload` returns the File and the time FormData
+    // time the drop hands us the File and the time FormData
     // tries to read it (canvas-toBlob detach, drag-source GC, etc.),
     // so we always copy bytes into a fresh ArrayBuffer-backed File
     // immediately before the POST. Chrome doesn't need this but it's
@@ -2303,15 +2223,6 @@ export function ProjectViewV2Stub({
   const startLabellingJob = async () => {
     if (!projectId) return;
     if (labelJob && labelJob.status === "running") return;
-    // Credit cutoff. Hits as soon as the user's monthly credit
-    // allowance is exhausted (labels + uploads + storage weighted).
-    // Surface a transient toast so the click isn't silent and the
-    // user understands why nothing happened.
-    if (overCreditLimit) {
-      setVideoError("Out of credits this period. Upgrade to keep labelling.");
-      window.setTimeout(() => setVideoError(null), 5000);
-      return;
-    }
     // A fresh label OR changed detection settings warrants a full
     // re-pass even when every image already has detections (the new
     // label hasn't been searched for, or the user moved the confidence
@@ -4087,10 +3998,6 @@ export function ProjectViewV2Stub({
               setDatasetType(next);
               patchProjectMeta(projectId, { datasetType: next });
             }
-            if (typeof (m as { max_input_size?: number } | null)?.max_input_size === "number") {
-              maxInputSizeRef.current = (m as { max_input_size: number }).max_input_size;
-              setMaxInputSize((m as { max_input_size: number }).max_input_size);
-            }
             // Mirror into the meta cache so the next mount paints
             // instantly without waiting for this fetch again. Owner
             // is cached too, drives the readOnly decision in
@@ -5148,10 +5055,6 @@ export function ProjectViewV2Stub({
             </>
           )}
           <span>Updated {dateLabel}</span>
-          <span aria-hidden className="text-[var(--fg-faint)]">·</span>
-          <span title={`Image size limit — uploads are kept up to ${maxInputSize}px on the longest edge (set by the Project).`}>
-            ≤{maxInputSize.toLocaleString()}px
-          </span>
         </div>
       </section>
 
@@ -6368,8 +6271,7 @@ function RefImageGrid({
     // on a single tick.
     candidates.forEach((f, i) => {
       const placeholder = placeholders[i];
-      resizeForUpload(f)
-        .catch(() => f)
+      Promise.resolve(f)
         .then((resized) => {
           onChange(
             refsRef.current.map((it) =>
@@ -8596,6 +8498,42 @@ function AugmentationsViewer({
     window.addEventListener("pixelkit-augmentations-generated", onChanged);
     return () => window.removeEventListener("pixelkit-augmentations-generated", onChanged);
   }, [projectId]);
+  // Augmentation JPEGs whose GET 404'd — an interrupted generation
+  // left the manifest listing copies whose bytes never landed. Those
+  // tiles render a quiet "Not generated" placeholder instead of a
+  // broken image, and the header offers a Resume affordance.
+  const [missing, setMissing] = useState<Set<string>>(new Set());
+  useEffect(() => { setMissing(new Set()); }, [importId, cacheBuster]);
+  const [resuming, setResuming] = useState(false);
+  // Re-run generation with the last-saved config (the same payload the
+  // Augmentations tab's Update button sends — GET /augment/config feeds
+  // POST /augment/generate).
+  const resumeGeneration = async () => {
+    if (resuming) return;
+    setResuming(true);
+    try {
+      const cr = await apiFetch(`/api/v2/projects/${projectId}/augment/config`);
+      if (!cr.ok) throw new Error(`http ${cr.status}`);
+      const cfg = await cr.json() as { perImageMode?: string; config?: Record<string, unknown> };
+      if (!cfg?.config || (cfg.perImageMode ?? "off") === "off") {
+        throw new Error("no saved augmentation config");
+      }
+      const r = await apiFetch(`/api/v2/projects/${projectId}/augment/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ perImageMode: cfg.perImageMode, config: cfg.config }),
+      });
+      if (!r.ok) throw new Error(`http ${r.status}`);
+      try {
+        window.dispatchEvent(new CustomEvent("pixelkit-augmentations-generated", { detail: { projectId } }));
+      } catch { /* ignore */ }
+    } catch (e) {
+      console.warn("[augmentations] resume failed:", e);
+    } finally {
+      setResuming(false);
+    }
+  };
+
   // Per-copy annotations keyed by filename ("00.jpg" → list of
   // {label, polys, box}). Polygons are already in the augmented
   // image's coordinate system, the runner warps them through the
@@ -8713,65 +8651,41 @@ function AugmentationsViewer({
   if (typeof window === "undefined") return null;
 
   return createPortal(
-    // Same containment as the image editor: the viewer fills the
-    // shell's content area only (title bar / status bar / Explorer
-    // side bar stay visible and interactive).
-    <div
-      className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] z-[700] overflow-auto"
-      role="dialog"
-      aria-modal="true"
-      onClick={onClose}
-      style={{
-        // Outer modal stays transparent; the backdrop lives in its
-        // own sibling layer below so hover/state churn inside the
-        // content can't cause the browser to re-rasterise the blur
-        // (which read as a black flicker on some tiles).
-        animation: "augViewerFadeIn 240ms ease-out both",
-      }}
-    >
-      {/* Dedicated backdrop layer. `fixed inset-0` so it sits behind
-          the content but on top of the page. `pointer-events-none`
-          so clicks still fall through to the outer modal's
-          click-to-close. Putting the blur on this isolated layer
-          (rather than the modal container itself) stops the
-          browser re-rasterising it whenever the content above
-          re-renders, that was reading as a black flicker on
-          hover / delete. */}
-      <div
-        aria-hidden
-        className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] pointer-events-none"
-        style={{
-          background: "rgb(var(--background-rgb) / 0.78)",
-          backdropFilter: "blur(10px)",
-          WebkitBackdropFilter: "blur(10px)",
-          isolation: "isolate",
-          willChange: "backdrop-filter",
-        }}
-      />
-      <div
-        className="px-6 lg:px-10 py-10 relative"
-        onClick={(e) => e.stopPropagation()}
-        style={{ animation: "augViewerRiseIn 280ms cubic-bezier(0.2, 0.7, 0.2, 1) both" }}
-      >
+    // In-content PAGE, not an overlay: fills the shell's content area
+    // (title bar / status bar / Explorer side bar stay visible and
+    // interactive) with an opaque ground and its own scroll. No
+    // backdrop, no click-outside dismissal — the back button (or the
+    // section changing underneath) is the way out.
+    <div className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] z-[700] overflow-auto bg-[var(--background)]">
+      <div className="px-6 lg:px-10 py-6 relative">
         <div className="mb-6 min-w-0">
-          {/* Eyebrow + close X share one row so the X sits next to the
-              "Augmentations" label, not floating down beside the
-              filename below. Stronger border-foreground in light mode
-              so the chip stays visible on the near-white surface. */}
+          <button
+            type="button"
+            onClick={onClose}
+            className="pk-btn mb-4"
+          >
+            <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M19 12H5" /><path d="m12 19-7-7 7-7" />
+            </svg>
+            Back
+          </button>
           <div className="flex items-center justify-between gap-3">
-            <div className="pk-micro">Augmentations</div>
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label="Close"
-              className="h-7 w-7 grid place-items-center rounded-md border border-[var(--line)] text-foreground/70 hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] hover:text-foreground transition-colors shrink-0"
-            >
-              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M18 6 6 18" /><path d="m6 6 12 12" />
-              </svg>
-            </button>
+            <div className="min-w-0">
+              <div className="pk-micro">Augmentations</div>
+              <h2 className="text-[16px] font-medium tracking-tight text-[var(--foreground)] truncate">{filename}</h2>
+            </div>
+            {missing.size > 0 && (
+              <button
+                type="button"
+                onClick={() => void resumeGeneration()}
+                disabled={resuming}
+                className="pk-btn shrink-0"
+                title="Some copies were never written (generation was interrupted). Re-run generation with the saved settings."
+              >
+                {resuming ? "Resuming…" : "Resume generation"}
+              </button>
+            )}
           </div>
-          <h2 className="text-xl font-medium tracking-tight text-[var(--foreground)] truncate">{filename}</h2>
         </div>
 
         {/* Original at the top, small, centred. The augmentation
@@ -8818,6 +8732,12 @@ function AugmentationsViewer({
                 canvasH={augAnnos?.height ?? 0}
                 inputShape={inputShape}
                 onDelete={() => removeAug(name)}
+                onLoadError={() => setMissing((cur) => {
+                  if (cur.has(name)) return cur;
+                  const next = new Set(cur);
+                  next.add(name);
+                  return next;
+                })}
               />
             ))}
           </div>
@@ -8825,16 +8745,6 @@ function AugmentationsViewer({
 
         <div className="pb-8" />
       </div>
-      <style>{`
-        @keyframes augViewerFadeIn {
-          from { opacity: 0; }
-          to   { opacity: 1; }
-        }
-        @keyframes augViewerRiseIn {
-          from { opacity: 0; transform: translateY(12px); }
-          to   { opacity: 1; transform: translateY(0); }
-        }
-      `}</style>
     </div>,
     document.body,
   );
@@ -8854,6 +8764,7 @@ function AugmentationTile({
   canvasH,
   inputShape,
   onDelete,
+  onLoadError,
 }: {
   src: string;
   name: string;
@@ -8872,9 +8783,14 @@ function AugmentationTile({
       in the top-right corner of the tile so the user can drop
       augmentations they don't want. */
   onDelete?: () => void;
+  /** Fired when the JPEG request fails (404 from an interrupted
+      generation) — the tile flips to a "Not generated" placeholder
+      and the parent can offer a resume affordance. */
+  onLoadError?: () => void;
 }) {
   const [hovered, setHovered] = useState(false);
-  const hasOverlay = canvasW > 0 && canvasH > 0 && annotations.length > 0;
+  const [failed, setFailed] = useState(false);
+  const hasOverlay = !failed && canvasW > 0 && canvasH > 0 && annotations.length > 0;
   return (
     <div
       // Same frame chrome as the original-image card up top ,
@@ -8889,16 +8805,26 @@ function AugmentationTile({
           border offsets the SVG vs. the img and polygons drift
           ~1 px down-and-right at high scales. */}
       <div className="relative">
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src={src}
-        alt={name}
-        className="block w-full h-auto"
-        loading="lazy"
-        decoding="async"
-        draggable={false}
-      />
-      {onDelete && (
+      {failed ? (
+        // Quiet placeholder for a copy whose bytes never landed
+        // (interrupted generation): manifest lists it, GET 404s.
+        <div className="flex aspect-[4/3] w-full flex-col items-center justify-center gap-1.5 bg-[var(--panel)]">
+          <span className="pk-micro">Not generated</span>
+          <span className="text-[11px] text-foreground/35">Generation was interrupted before this copy was written.</span>
+        </div>
+      ) : (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={src}
+          alt={name}
+          className="block w-full h-auto"
+          loading="lazy"
+          decoding="async"
+          draggable={false}
+          onError={() => { setFailed(true); onLoadError?.(); }}
+        />
+      )}
+      {!failed && onDelete && (
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onDelete(); }}

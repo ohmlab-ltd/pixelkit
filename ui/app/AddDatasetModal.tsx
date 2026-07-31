@@ -108,7 +108,7 @@ export function AddDatasetModal({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md border border-[var(--line)] px-4 py-2 text-[13px] font-medium text-foreground/75 transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)]"
+            className="pk-btn"
           >
             Cancel
           </button>
@@ -116,7 +116,7 @@ export function AddDatasetModal({
             type="button"
             onClick={submit}
             disabled={busy || selected.size === 0}
-            className="rounded-md bg-[var(--accent)] px-4 py-2 text-[13px] font-medium tabular-nums text-[var(--accent-contrast)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-40"
+            className="pk-btn pk-btn-primary tabular-nums"
           >
             {busy ? "Adding…" : selected.size ? `Add ${selected.size}` : "Add"}
           </button>

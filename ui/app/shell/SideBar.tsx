@@ -15,7 +15,9 @@ export function SideBar({
   activeSection,
   onOpenDataset,
   onOpenSection,
+  onOpenProject,
   onNewDataset,
+  onCollapse,
 }: {
   username: string;
   selectedDatasetId: string | null;
@@ -25,7 +27,11 @@ export function SideBar({
   onOpenDataset: (ds: ExplorerDataset) => void;
   /** Open `ds` (if it isn't already open) and jump to `section`. */
   onOpenSection: (ds: ExplorerDataset, section: DatasetSection) => void;
+  /** Open the Project (container) page for a top-level tree row. */
+  onOpenProject: (containerId: string) => void;
   onNewDataset: () => void;
+  /** Collapse the side bar (Explorer pane-header chevron). */
+  onCollapse: () => void;
 }) {
   return (
     <aside
@@ -38,7 +44,9 @@ export function SideBar({
         activeSection={activeSection}
         onOpenDataset={onOpenDataset}
         onOpenSection={onOpenSection}
+        onOpenProject={onOpenProject}
         onNewDataset={onNewDataset}
+        onCollapse={onCollapse}
       />
     </aside>
   );

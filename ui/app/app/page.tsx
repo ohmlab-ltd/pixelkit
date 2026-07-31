@@ -54,8 +54,9 @@ type OriginTab = "workspaces" | "guide";
 
 export default function Page() {
   // Desktop-shell state: which activity-bar item is active, and
-  // whether the 260px side bar is expanded. Clicking the active
-  // activity icon again collapses/expands the side bar.
+  // whether the 260px side bar is expanded. The Explorer pane header's
+  // chevron button collapses the side bar; the activity bar's Explorer
+  // icon re-expands it (and always returns to the workspace).
   const [activity, setActivity] = useState<ActivityKey>("explorer");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [openProject, setOpenProject] = useState<string | null>(null);
@@ -90,6 +91,19 @@ export default function Page() {
     const target = id ? `/app/${id}` : "/app";
     if (window.location.pathname === target) return;
     window.history.pushState(null, "", target);
+  };
+
+  // Push an in-app URL and fire a synthetic popstate so BOTH popstate
+  // consumers settle the view from it: this page's handler opens or
+  // closes the dataset overlay from the path, and HomeView's listener
+  // reads the `?project` param for the Project (container) page. Same
+  // trick the dataset view's "Back to project" close path uses below.
+  const navigateSpa = (target: string) => {
+    if (typeof window === "undefined") return;
+    if (window.location.pathname + window.location.search !== target) {
+      window.history.pushState(null, "", target);
+    }
+    window.dispatchEvent(new PopStateEvent("popstate"));
   };
 
   const openProj = (
@@ -312,8 +326,8 @@ export default function Page() {
   }, []);
 
   // Listen for in-app navigation events. Lets any nested component ask to
-  // switch views without prop-drilling. Legacy tabs (pricing / projects /
-  // terminal) no longer exist in the portable build, ignore those events.
+  // switch views without prop-drilling. The legacy "projects" tab no
+  // longer exists in the portable build, ignore those events.
   useEffect(() => {
     return onAppNavigate((next) => {
       if (next !== "workspaces" && next !== "guide") return;
@@ -333,25 +347,40 @@ export default function Page() {
     image: null,
   };
 
-  // Activity-bar click: switch views, or collapse/expand the side bar
-  // when the active icon is clicked again. Guide has no side-bar pane.
+  // Activity-bar click. The Explorer icon ALWAYS navigates to the
+  // workspace: it closes any open dataset or Project view, and expands
+  // the side bar if it was collapsed — it never collapses it (that
+  // moved to the Explorer pane header's chevron button). Guide keeps
+  // its old behaviour: switch views, no side-bar involvement.
   const handleActivitySelect = (key: ActivityKey) => {
-    if (key === activity) {
-      if (key !== "guide") setSidebarOpen((v) => !v);
-      return;
-    }
-    setActivity(key);
-    setProfileOpen(false);
     if (key === "guide") {
+      if (activity === "guide") return;
+      setActivity("guide");
+      setProfileOpen(false);
       // Guide replaces the content pane — close any dataset overlay so
       // the user actually sees it (mirrors the old tab-switch flow).
       setOpenProject(null);
       setOpenV2Project(null);
       setNotFoundProjectId(null);
       syncUrl(null);
-    } else {
-      setSidebarOpen(true);
+      return;
     }
+    setActivity("explorer");
+    setSidebarOpen(true);
+    setProfileOpen(false);
+    // Land on the bare workspace: the popstate machinery closes the
+    // dataset overlay here AND clears HomeView's ?project Project page.
+    navigateSpa("/app");
+  };
+
+  // Explorer tree: clicking a Project (container) ROW opens its
+  // Project page — the same ProjectPage that HomeView's workspace
+  // cards open, via the ?project deep-link HomeView already owns.
+  // The synthetic popstate closes any open dataset view first.
+  const handleOpenProjectPage = (containerId: string) => {
+    setProfileOpen(false);
+    setNotFoundProjectId(null);
+    navigateSpa(`/app?project=${encodeURIComponent(containerId)}`);
   };
 
   // Side-bar "+": make the workspace visible again, then hand off to
@@ -378,8 +407,8 @@ export default function Page() {
   // ONE tree, ALWAYS visible: the Explorer side bar stays up while a
   // dataset is open (the dataset view has no internal nav column any
   // more — the tree's third-level section rows are the navigation).
-  // Only the Guide view and an explicit collapse (clicking the active
-  // activity icon) hide it.
+  // Only the Guide view and an explicit collapse (the Explorer pane
+  // header's chevron button) hide it.
   const sidebarVisible = sidebarOpen && activity !== "guide";
   // Dataset views (and the not-found message) render as fixed overlays
   // above the content pane: below the title bar, above the status bar,
@@ -441,7 +470,9 @@ export default function Page() {
               }
               setDatasetSection(section);
             }}
+            onOpenProject={handleOpenProjectPage}
             onNewDataset={handleNewDataset}
+            onCollapse={() => setSidebarOpen(false)}
           />
         )}
         {/* Content pane: the ONLY scroll container for the embedded

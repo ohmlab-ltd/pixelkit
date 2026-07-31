@@ -178,16 +178,25 @@ export function OnboardReferencesV2({
             return (
               <span
                 key={lab}
+                // Neutral chip: hairline border + swatch dot carrying the
+                // label colour; the current label speaks with the accent
+                // border instead of a ring/fill.
                 className={[
-                  "inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-sm font-medium text-black transition-all duration-300",
-                  isCurrent ? "ring-2 ring-white ring-offset-2 ring-offset-black scale-105" : "",
+                  "inline-flex h-6 items-center gap-1.5 rounded-md border bg-transparent px-2 font-mono text-[12px] transition-all duration-300",
+                  isCurrent
+                    ? "border-[var(--accent)] text-[var(--foreground)]"
+                    : "border-[var(--line)] text-[var(--fg-soft)]",
                   !isCurrent && !isDone ? "opacity-45" : "",
                 ].join(" ")}
-                style={{ backgroundColor: LABEL_COLOURS[i % LABEL_COLOURS.length] }}
               >
+                <span
+                  aria-hidden
+                  className="h-2 w-2 shrink-0 rounded-full"
+                  style={{ backgroundColor: LABEL_COLOURS[i % LABEL_COLOURS.length] }}
+                />
                 {lab}
                 {isDone && (
-                  <span aria-hidden className="text-[10px] opacity-70">✓</span>
+                  <span aria-hidden className="text-[10px] text-[var(--ok)]">✓</span>
                 )}
               </span>
             );
@@ -319,7 +328,7 @@ export function OnboardReferencesV2({
               type="button"
               onClick={advance}
               disabled={!meetsMinimum}
-              className="rounded-full bg-orange-500 px-6 py-2.5 text-sm font-semibold text-white transition hover:bg-orange-400 disabled:cursor-not-allowed disabled:opacity-40"
+              className="pk-btn pk-btn-primary"
             >
               {isLast ? "Open project" : "Next label"}
             </button>

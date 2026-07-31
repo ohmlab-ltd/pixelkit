@@ -156,14 +156,22 @@ export function ExplorerPane({
   activeSection,
   onOpenDataset,
   onOpenSection,
+  onOpenProject,
   onNewDataset,
+  onCollapse,
 }: {
   username: string;
   selectedDatasetId: string | null;
   activeSection: DatasetSection | null;
   onOpenDataset: (ds: ExplorerDataset) => void;
   onOpenSection: (ds: ExplorerDataset, section: DatasetSection) => void;
+  /** Open the Project (container) page for a top-level tree row.
+   *  Fired by the row's NAME area only — the chevron just expands. */
+  onOpenProject: (containerId: string) => void;
   onNewDataset: () => void;
+  /** Collapse the side bar (pane-header chevron button). The
+   *  activity bar's Explorer icon re-expands it. */
+  onCollapse: () => void;
 }) {
   const [containers, setContainers] = useState<ContainerCard[] | null>(null);
   const [datasets, setDatasets] = useState<ExplorerDataset[] | null>(null);
@@ -296,6 +304,12 @@ export function ExplorerPane({
       return next;
     });
 
+  // Expand-only variant for the project NAME rows: navigation is the
+  // primary action there, so a click may reveal the children but must
+  // never collapse them (collapsing is the chevron's job).
+  const expand = (id: string) =>
+    setExpanded((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+
   const toggleDs = (id: string) =>
     setDsExpanded((prev) => {
       const next = new Set(prev);
@@ -322,7 +336,7 @@ export function ExplorerPane({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {/* Pane header: title + New dataset + Refresh. */}
+      {/* Pane header: title + New dataset + Refresh + Collapse. */}
       <div className="flex h-8 shrink-0 items-center justify-between pl-4 pr-2">
         <span className="pk-micro select-none">
           Explorer
@@ -351,6 +365,17 @@ export function ExplorerPane({
               <path d="M21 3v6h-6" />
             </svg>
           </button>
+          <button
+            type="button"
+            title="Collapse Explorer"
+            aria-label="Collapse Explorer"
+            onClick={onCollapse}
+            className="grid h-6 w-6 place-items-center rounded text-foreground/55 hover:bg-foreground/[0.08] hover:text-foreground/90 transition-colors"
+          >
+            <svg viewBox="0 0 24 24" width={14} height={14} {...STROKE} aria-hidden>
+              <path d="m15 6-6 6 6 6" />
+            </svg>
+          </button>
         </span>
       </div>
 
@@ -371,18 +396,34 @@ export function ExplorerPane({
               const open = expanded.has(node.id);
               return (
                 <div key={node.id}>
-                  <button
-                    type="button"
-                    onClick={() => toggle(node.id)}
-                    aria-expanded={open}
-                    className="flex h-6 w-full items-center gap-1 px-2 text-left text-[13px] text-foreground/80 hover:bg-foreground/[0.05] transition-colors"
-                  >
-                    <Chevron open={open} />
-                    <span className="min-w-0 flex-1 truncate">{node.name}</span>
-                    <span className="pr-1 font-mono text-[11px] tabular-nums text-foreground/35">
-                      {node.datasets.length}
-                    </span>
-                  </button>
+                  {/* Two sibling buttons, same pattern as DatasetNode:
+                      the chevron ONLY toggles expansion, the name row
+                      opens the Project page (and reveals the children
+                      as a side effect — expand, never collapse). */}
+                  <div className="flex w-full items-stretch pl-2">
+                    <button
+                      type="button"
+                      onClick={() => toggle(node.id)}
+                      aria-expanded={open}
+                      aria-label={`${open ? "Collapse" : "Expand"} ${node.name}`}
+                      className="grid w-[18px] shrink-0 place-items-center text-foreground/55 hover:text-foreground/90 transition-colors"
+                    >
+                      <Chevron open={open} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        expand(node.id);
+                        onOpenProject(node.id);
+                      }}
+                      className="flex h-6 min-w-0 flex-1 items-center gap-1 pr-2 text-left text-[13px] text-foreground/80 hover:bg-foreground/[0.05] transition-colors"
+                    >
+                      <span className="min-w-0 flex-1 truncate">{node.name}</span>
+                      <span className="pr-1 font-mono text-[11px] tabular-nums text-foreground/35">
+                        {node.datasets.length}
+                      </span>
+                    </button>
+                  </div>
                   {open &&
                     (node.datasets.length === 0 ? (
                       <p className="h-6 pl-8 pr-3 text-[12px] leading-6 text-foreground/35">

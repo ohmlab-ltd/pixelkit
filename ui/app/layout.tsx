@@ -20,7 +20,7 @@ const SITE_URL = (
 ).replace(/\/+$/, "");
 
 const SITE_DESCRIPTION =
-  "Pixel Kit auto-labels images, generates augmentations, and exports training-ready datasets for computer vision AI. Free tier, no credit card required.";
+  "Pixel Kit auto-labels images, generates augmentations, and exports training-ready datasets for computer vision AI — entirely on your own machine.";
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
