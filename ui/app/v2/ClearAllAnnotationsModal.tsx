@@ -53,8 +53,8 @@ export function ClearAllAnnotationsModal({
         if (e.target === e.currentTarget && !busy) onCancel();
       }}
     >
-      <div className="pk-glass pk-pop w-full max-w-md rounded-2xl p-6">
-        <h2 className="text-2xl font-medium tracking-tight text-[var(--foreground)]">
+      <div className="pk-glass pk-pop w-full max-w-md rounded-md p-5">
+        <h2 className="text-[15px] font-medium tracking-tight text-[var(--foreground)]">
           Clear all annotations?
         </h2>
         <p className="mt-3 text-sm text-foreground/65 leading-relaxed">
@@ -79,14 +79,14 @@ export function ClearAllAnnotationsModal({
           }}
           placeholder={CONFIRM_PHRASE}
           disabled={busy}
-          className="mt-2 w-full rounded-xl border border-foreground/15 bg-foreground/[0.02] px-3 py-2 text-sm text-[var(--foreground)] placeholder:text-foreground/30 focus:outline-none focus:border-foreground/35 disabled:opacity-60"
+          className="mt-2 w-full rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] placeholder:text-foreground/30 focus:outline-none focus:border-[var(--line-strong)] disabled:opacity-60"
         />
         <div className="mt-5 flex items-center justify-end gap-2">
           <button
             type="button"
             onClick={onCancel}
             disabled={busy}
-            className="rounded-full border border-foreground/15 px-4 py-2 text-sm text-foreground/75 hover:bg-foreground/[0.04] hover:text-foreground transition-colors disabled:opacity-50"
+            className="rounded-md border border-[var(--line)] px-4 py-2 text-sm text-[var(--fg-soft)] hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] hover:text-foreground transition-colors disabled:opacity-50"
           >
             Cancel
           </button>
@@ -94,7 +94,7 @@ export function ClearAllAnnotationsModal({
             type="button"
             onClick={() => void submit()}
             disabled={!matches || busy}
-            className="rounded-full border border-rose-500/45 bg-rose-500/[0.10] px-4 py-2 text-sm font-medium text-rose-700 dark:text-rose-200 hover:bg-rose-500/[0.18] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            className="rounded-md bg-[var(--bad)] px-4 py-2 text-sm font-medium text-[var(--background)] hover:brightness-105 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {busy ? "Clearing…" : "Clear all annotations"}
           </button>

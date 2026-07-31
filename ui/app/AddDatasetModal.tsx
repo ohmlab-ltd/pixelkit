@@ -1,8 +1,7 @@
 "use client";
 
-// Pick datasets you own and move them into a Project (container). Datasets
-// inherit the Project's privacy on the way in. Owner-only (the backend requires
-// container-manage + dataset ownership).
+// Pick datasets you own and move them into a Project (container). Owner-only
+// (the backend requires container-manage + dataset ownership).
 import { useEffect, useRef, useState } from "react";
 
 import { GlassDialog } from "./v2/GlassDialog";
@@ -80,23 +79,23 @@ export function AddDatasetModal({
     <GlassDialog open={open} onClose={onClose} title="Add datasets to project" maxWidth="max-w-md">
       <div className="flex flex-col gap-4">
         <p className="-mt-1 text-sm text-[var(--muted)]">
-          Pick datasets you own to move into this project. They inherit the project&apos;s privacy.
+          Pick datasets to move into this project.
         </p>
-        <div className="max-h-72 overflow-y-auto rounded-xl border border-foreground/10">
+        <div className="max-h-72 overflow-y-auto rounded-md border border-[var(--line)] bg-[var(--panel)]">
           {datasets === null ? (
             <div className="p-4 text-sm text-foreground/40">Loading…</div>
           ) : datasets.length === 0 ? (
             <div className="p-4 text-sm text-foreground/40">No datasets available to add.</div>
           ) : (
-            <ul className="divide-y divide-foreground/5">
+            <ul className="divide-y divide-[var(--line-soft)]">
               {datasets.map((d) => (
                 <li key={d.id}>
-                  <label className="flex cursor-pointer items-center gap-3 px-3 py-2.5 hover:bg-foreground/[0.04]">
+                  <label className="flex cursor-pointer items-center gap-3 px-3 py-2.5 hover:bg-[var(--surface-hover)]">
                     <input
                       type="checkbox"
                       checked={selected.has(d.id)}
                       onChange={() => toggle(d.id)}
-                      className="h-4 w-4 accent-orange-500"
+                      className="h-4 w-4 accent-[var(--accent)]"
                     />
                     <span className="truncate text-sm">{d.name}</span>
                   </label>
@@ -109,7 +108,7 @@ export function AddDatasetModal({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-xl px-4 py-2 text-sm font-medium text-[var(--muted)] hover:bg-foreground/5"
+            className="rounded-md border border-[var(--line)] px-4 py-2 text-[13px] font-medium text-foreground/75 transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)]"
           >
             Cancel
           </button>
@@ -117,7 +116,7 @@ export function AddDatasetModal({
             type="button"
             onClick={submit}
             disabled={busy || selected.size === 0}
-            className="rounded-xl bg-orange-500 px-5 py-2 text-sm font-semibold text-white transition hover:bg-orange-400 disabled:opacity-40"
+            className="rounded-md bg-[var(--accent)] px-4 py-2 text-[13px] font-medium tabular-nums text-[var(--accent-contrast)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {busy ? "Adding…" : selected.size ? `Add ${selected.size}` : "Add"}
           </button>

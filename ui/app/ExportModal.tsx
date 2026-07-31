@@ -239,12 +239,12 @@ export function ExportModal({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="pk-glass pk-pop w-full max-w-2xl mt-8 mb-8 rounded-lg overflow-hidden"
+        className="pk-glass pk-pop w-full max-w-2xl mt-8 mb-8 rounded-md overflow-hidden"
       >
         <header className="flex items-center justify-between px-6 py-4 border-b border-[var(--line-soft)]">
           <div>
             <div className="pk-micro">Export</div>
-            <h2 className="mt-0.5 text-lg font-semibold tracking-tight">{projectName}</h2>
+            <h2 className="mt-0.5 text-[15px] font-medium tracking-tight">{projectName}</h2>
           </div>
           <button
             onClick={() => { if (!busy) onClose(); }}
@@ -407,11 +407,11 @@ export function ExportModal({
             to close the window, the build is happening on the server
             and the request is what carries the zip back. */}
         {busy && (
-          <div className="mx-6 mb-4 rounded-md border border-[var(--line-soft)] bg-[var(--panel)] px-4 py-3.5">
+          <div className="mx-6 mb-4 rounded-md border border-[var(--line)] bg-[var(--panel)] px-4 py-3.5">
             <div className="flex items-center justify-between gap-3 mb-2">
               <div className="flex items-center gap-2.5 min-w-0">
-                <span className="inline-block h-3 w-3 rounded-full border-2 border-foreground/60 border-t-transparent animate-spin shrink-0" />
-                <span className="text-[13px] font-medium text-[var(--foreground)]">
+                <span className="inline-block h-3 w-3 rounded-full border-2 border-foreground/20 border-t-[var(--accent)] animate-spin shrink-0" />
+                <span className="text-[13px] font-medium text-[var(--foreground)] tabular-nums">
                   {phase === "downloading"
                     ? downloadPct !== null
                       ? `Downloading… ${downloadPct}%`
@@ -430,11 +430,11 @@ export function ExportModal({
             <div className="h-1.5 w-full bg-foreground/[0.06] rounded-full overflow-hidden relative">
               {phase === "downloading" && downloadPct !== null ? (
                 <div
-                  className="h-full bg-foreground/70 rounded-full transition-[width] duration-300 ease-out"
+                  className="h-full bg-[var(--accent)] rounded-full transition-[width] duration-300 ease-out"
                   style={{ width: `${downloadPct}%` }}
                 />
               ) : (
-                <div className="indeterminate-bar absolute inset-y-0 w-1/3 bg-foreground/55 rounded-full" />
+                <div className="indeterminate-bar absolute inset-y-0 w-1/3 bg-[var(--accent)] rounded-full" />
               )}
             </div>
             <p className="mt-2.5 text-[11px] text-foreground/55 leading-relaxed">

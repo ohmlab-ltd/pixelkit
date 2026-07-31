@@ -1,7 +1,6 @@
 "use client";
 
-// Project (container) settings pop-out: rename, cover, privacy (with an
-// are-you-sure confirm because it cascades to every dataset), image quality,
+// Project (container) settings pop-out: rename, cover, image quality,
 // and delete. Owner-only actions; the modal is only opened for owners. The
 // portable build is single-user, so there is no members section (accounts /
 // identity are invisible everywhere).
@@ -34,8 +33,6 @@ export function ProjectSettingsModal({
   const [error, setError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  // Privacy confirm flow.
-  const [confirmPrivacy, setConfirmPrivacy] = useState(false);
   // Delete confirm flow.
   const [confirmDelete, setConfirmDelete] = useState(false);
 
@@ -58,15 +55,6 @@ export function ProjectSettingsModal({
     setError(null);
     if (await uploadCover(container.id, file)) onChanged();
     else setError("Could not update the cover.");
-    setBusy(false);
-  }
-
-  async function applyPrivacy() {
-    setBusy(true);
-    setError(null);
-    setConfirmPrivacy(false);
-    if (await patchContainer(container.id, { private: !container.private })) onChanged();
-    else setError("Could not change privacy.");
     setBusy(false);
   }
 
@@ -134,54 +122,6 @@ export function ProjectSettingsModal({
           />
         </div>
 
-        {/* Privacy with confirm */}
-        <div className="rounded-xl border border-foreground/10 p-3.5">
-          <div className="flex items-center justify-between">
-            <div className="flex flex-col">
-              <span className="text-sm font-medium text-foreground/85">
-                {container.private ? "Private" : "Public"}
-              </span>
-              <span className="text-xs text-[var(--muted)]">
-                Changing this also changes every dataset in the project.
-              </span>
-            </div>
-            {!confirmPrivacy ? (
-              <button
-                type="button"
-                onClick={() => setConfirmPrivacy(true)}
-                disabled={busy}
-                className="rounded-xl border border-foreground/10 px-4 py-2 text-sm font-medium hover:bg-foreground/5 disabled:opacity-50"
-              >
-                Make {container.private ? "public" : "private"}
-              </button>
-            ) : null}
-          </div>
-          {confirmPrivacy && (
-            <div className="mt-3 flex items-center justify-between gap-2 rounded-lg bg-amber-500/10 px-3 py-2">
-              <span className="text-xs text-amber-700 dark:text-amber-300">
-                Are you sure? This makes the project and all its datasets{" "}
-                {container.private ? "public" : "private"}.
-              </span>
-              <div className="flex shrink-0 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setConfirmPrivacy(false)}
-                  className="rounded-lg px-3 py-1 text-xs font-medium text-[var(--muted)]"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={applyPrivacy}
-                  disabled={busy}
-                  className="rounded-lg bg-amber-500 px-3 py-1 text-xs font-semibold text-white disabled:opacity-50"
-                >
-                  Yes, change it
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
 
         {/* Max input image size */}
         <div className="flex items-center justify-between gap-3 rounded-xl border border-foreground/10 p-3.5">

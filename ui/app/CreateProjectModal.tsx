@@ -1,8 +1,8 @@
 "use client";
 
-// Create-a-Project (container) modal: name + cover photo + privacy. Calls the
-// container backend via lib/containers. A Project holds many Datasets and has
-// members; this is distinct from creating a Dataset (the CreateFlowV2 path).
+// Create-a-Project (container) modal: name + cover photo. Calls the
+// container backend via lib/containers. A Project holds many Datasets;
+// this is distinct from creating a Dataset (the CreateFlowV2 path).
 import { useEffect, useRef, useState } from "react";
 
 import { GlassDialog } from "./v2/GlassDialog";
@@ -18,7 +18,6 @@ export function CreateProjectModal({
   onCreated: (c: Container) => void;
 }) {
   const [name, setName] = useState("");
-  const [isPrivate, setIsPrivate] = useState(true);
   const [coverFile, setCoverFile] = useState<File | null>(null);
   const [coverPreview, setCoverPreview] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -44,7 +43,6 @@ export function CreateProjectModal({
 
   function reset() {
     setName("");
-    setIsPrivate(true);
     pickCover(null);
     setError(null);
     setBusy(false);
@@ -65,7 +63,7 @@ export function CreateProjectModal({
     setBusy(true);
     setError(null);
     try {
-      const c = await createContainer(nm, isPrivate);
+      const c = await createContainer(nm);
       if (!c) {
         setError("Could not create the project. Please try again.");
         setBusy(false);
@@ -86,15 +84,14 @@ export function CreateProjectModal({
     <GlassDialog open={open} onClose={handleClose} title="New project" maxWidth="max-w-md">
       <div className="flex flex-col gap-5">
         <p className="text-sm text-[var(--muted)] -mt-1">
-          A project groups datasets and lets your team collaborate. You can add datasets and members
-          once it&apos;s created.
+          A project groups related datasets. You can add datasets once it&apos;s created.
         </p>
 
         {/* Cover photo */}
         <button
           type="button"
           onClick={() => fileRef.current?.click()}
-          className="group relative aspect-[16/9] w-full overflow-hidden rounded-2xl border border-foreground/10 bg-foreground/[0.03] transition hover:border-orange-400/60"
+          className="group relative aspect-[16/9] w-full overflow-hidden rounded-md border border-[var(--line)] bg-[var(--panel)] transition-colors hover:border-[var(--line-strong)]"
         >
           {coverPreview ? (
             // eslint-disable-next-line @next/next/no-img-element
@@ -107,11 +104,16 @@ export function CreateProjectModal({
                 <path d="M21 15l-5-5L5 21" />
               </svg>
               <span className="text-sm font-medium">Upload a cover photo</span>
+              <span className="text-xs text-foreground/35">Recommended: a wide image</span>
             </div>
           )}
-          <span className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/40 to-transparent px-3 py-2 text-xs font-medium text-white opacity-0 transition group-hover:opacity-100">
-            {coverPreview ? "Change cover" : "Recommended: a wide image"}
-          </span>
+          {coverPreview && (
+            // Legibility scrim over the photo only — never over the flat
+            // panel placeholder.
+            <span className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/40 to-transparent px-3 py-2 text-xs font-medium text-white opacity-0 transition group-hover:opacity-100">
+              Change cover
+            </span>
+          )}
         </button>
         <input
           ref={fileRef}
@@ -123,7 +125,7 @@ export function CreateProjectModal({
 
         {/* Name */}
         <label className="flex flex-col gap-1.5">
-          <span className="text-sm font-medium text-foreground/80">Project name</span>
+          <span className="pk-micro">Project name</span>
           <input
             ref={nameRef}
             value={name}
@@ -133,49 +135,18 @@ export function CreateProjectModal({
             }}
             maxLength={120}
             placeholder="e.g. Retail shelf detection"
-            className="rounded-xl border border-foreground/10 bg-foreground/[0.03] px-3.5 py-2.5 text-sm outline-none focus:border-orange-400 focus:ring-2 focus:ring-orange-400/30"
+            className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-sm outline-none transition-colors focus:border-[var(--accent)]"
           />
         </label>
 
-        {/* Privacy */}
-        <div className="flex items-center justify-between rounded-xl border border-foreground/10 px-3.5 py-3">
-          <div className="flex flex-col">
-            <span className="text-sm font-medium text-foreground/85">
-              {isPrivate ? "Private" : "Public"}
-            </span>
-            <span className="text-xs text-[var(--muted)]">
-              {isPrivate
-                ? "Only you and members can see it and its datasets."
-                : "Anyone can view it and its datasets."}
-            </span>
-          </div>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={isPrivate}
-            onClick={() => setIsPrivate((p) => !p)}
-            // The switch represents "Private": ON (orange, knob right) = private,
-            // OFF = public. Defaults to ON since new projects start private.
-            className={`relative h-6 w-11 shrink-0 rounded-full transition ${
-              isPrivate ? "bg-orange-500" : "bg-foreground/20"
-            }`}
-          >
-            <span
-              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${
-                isPrivate ? "left-[22px]" : "left-0.5"
-              }`}
-            />
-          </button>
-        </div>
-
-        {error && <p className="text-sm text-rose-500">{error}</p>}
+        {error && <p className="text-sm text-[var(--bad)]">{error}</p>}
 
         <div className="flex justify-end gap-2 pt-1">
           <button
             type="button"
             onClick={handleClose}
             disabled={busy}
-            className="rounded-xl px-4 py-2 text-sm font-medium text-[var(--muted)] hover:bg-foreground/5 disabled:opacity-50"
+            className="rounded-md border border-[var(--line)] px-4 py-2 text-[13px] font-medium text-foreground/75 transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] disabled:opacity-50"
           >
             Cancel
           </button>
@@ -183,7 +154,7 @@ export function CreateProjectModal({
             type="button"
             onClick={submit}
             disabled={busy || !name.trim()}
-            className="rounded-xl bg-orange-500 px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-orange-400 disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-md bg-[var(--accent)] px-4 py-2 text-[13px] font-medium text-[var(--accent-contrast)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {busy ? "Creating…" : "Create project"}
           </button>

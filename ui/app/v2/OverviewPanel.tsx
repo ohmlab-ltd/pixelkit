@@ -71,7 +71,7 @@ function Donut({ slices }: { slices: { label: string; count: number; colour: str
 
 function Card({ title, action, children }: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
   return (
-    <div className="pk-card flex min-h-[120px] flex-col rounded-lg p-5">
+    <div className="pk-card flex min-h-[120px] flex-col rounded-md p-4">
       <div className="mb-3 flex items-center justify-between gap-2">
         <h3 className="pk-eyebrow">{title}</h3>
         {action}
@@ -81,24 +81,18 @@ function Card({ title, action, children }: { title: string; action?: React.React
   );
 }
 
-// Bold section header (orange accent bar + confident title), mirroring the
-// Project page's section headings so the overview reads as grouped sections
-// with a clear hierarchy rather than a flat stack of equal cards.
-function SectionHeader({ children, sub, count, action }: { children: React.ReactNode; sub?: string; count?: number; action?: React.ReactNode }) {
+// Quiet tool-style section header: 11px uppercase mono, optional count,
+// optional right-aligned action. No accent decoration — the accent is
+// reserved for the primary action / active states.
+function SectionHeader({ children, count, action }: { children: React.ReactNode; count?: number; action?: React.ReactNode }) {
   return (
-    <div className="mb-4 flex items-end justify-between gap-3">
-      <div className="min-w-0">
-        <h2 className="flex items-center gap-2.5 pk-section-title text-lg">
-          <span className="pk-accent-bar" aria-hidden />
-          {children}
-          {typeof count === "number" && (
-            <span className="rounded-md border border-[var(--line)] px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-[var(--fg-dim)]">
-              {count}
-            </span>
-          )}
-        </h2>
-        {sub && <p className="mt-1 pl-[0.9rem] text-[12.5px] text-foreground/45">{sub}</p>}
-      </div>
+    <div className="mb-3 flex items-baseline justify-between gap-3">
+      <h2 className="pk-micro flex items-baseline gap-2 text-[var(--fg-soft)]">
+        {children}
+        {typeof count === "number" && (
+          <span className="tabular-nums text-[var(--fg-dim)]">{count}</span>
+        )}
+      </h2>
       {action && <div className="shrink-0">{action}</div>}
     </div>
   );
@@ -109,7 +103,7 @@ function HeaderLink({ onClick, children }: { onClick?: () => void; children: Rea
     <button
       type="button"
       onClick={onClick}
-      className="text-[13px] font-medium text-[var(--accent)] outline-none transition-opacity hover:opacity-80 focus-visible:underline"
+      className="font-mono text-[11px] uppercase tracking-wider text-foreground/55 outline-none transition-colors hover:text-foreground focus-visible:underline"
     >
       {children}
     </button>
@@ -134,7 +128,7 @@ function InsightCard({ tone, title, desc, onClick }: { tone: "warn" | "good" | "
     ) : (
       <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 8h.01M11 12h1v4h1" /></svg>
     );
-  const base = "flex w-full items-start gap-3 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-3.5 text-left";
+  const base = "flex w-full items-start gap-3 rounded-md border border-[var(--line)] bg-[var(--panel)] p-3.5 text-left";
   const inner = (
     <>
       <span className={`mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-md ${palette.chip} ${palette.text}`}>{icon}</span>
@@ -266,10 +260,10 @@ export function OverviewPanel({
   })();
 
   return (
-    <section className="space-y-9 px-6 pt-6 pb-12 lg:px-10">
+    <section className="space-y-7 px-6 pt-5 pb-12 lg:px-10">
       {/* Insights — fast rule-based signals. */}
       <div>
-        <SectionHeader sub="What to improve next">Insights</SectionHeader>
+        <SectionHeader>Insights</SectionHeader>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
           {statsLoading || nearDups == null ? (
             <InsightCard tone="info" title="Duplicates" desc="Checking your images for near-duplicates." />
@@ -297,11 +291,11 @@ export function OverviewPanel({
 
       {/* Dataset health — the focal panel: big score + radar + factor bars. */}
       <div>
-        <SectionHeader sub="Coverage, balance and visual variety" action={<HeaderLink onClick={onOpenHealth}>Open health →</HeaderLink>}>Dataset health</SectionHeader>
+        <SectionHeader action={<HeaderLink onClick={onOpenHealth}>Open health →</HeaderLink>}>Dataset health</SectionHeader>
         <button
           type="button"
           onClick={onOpenHealth}
-          className="pk-card pk-card-hover w-full rounded-lg p-5 text-left outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] sm:p-6"
+          className="pk-card pk-card-hover w-full rounded-md p-4 text-left outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] sm:p-5"
         >
           {typeof score !== "number" ? (
             <div className="flex items-center justify-center gap-2.5 py-12 text-sm text-foreground/50">
@@ -342,8 +336,8 @@ export function OverviewPanel({
           datasets, which don't manage their own). */}
       {showReferences && (
         <div>
-          <SectionHeader count={refs.length} sub="Optional — add examples to improve label matching" action={onOpenReferences ? <HeaderLink onClick={onOpenReferences}>View all →</HeaderLink> : undefined}>References</SectionHeader>
-          <div className="pk-card rounded-lg p-5">
+          <SectionHeader count={refs.length} action={onOpenReferences ? <HeaderLink onClick={onOpenReferences}>View all →</HeaderLink> : undefined}>References</SectionHeader>
+          <div className="pk-card rounded-md p-4">
             {refs.length === 0 ? (
               <p className="text-[13px] text-foreground/55">No reference images yet — optional, but a few clear examples per label improve label matching.</p>
             ) : (
@@ -353,7 +347,7 @@ export function OverviewPanel({
                     key={r.referenceId ?? r.filename ?? `ref-${i}`}
                     type="button"
                     onClick={onOpenReferences}
-                    className="group relative aspect-[4/3] overflow-hidden rounded-lg bg-foreground/[0.06] outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
+                    className="group relative aspect-[4/3] overflow-hidden rounded-md bg-foreground/[0.06] outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
                     title={r.filename ?? undefined}
                   >
                     {r.blurhash && <BlurhashCanvas hash={r.blurhash} width={48} height={36} className="absolute inset-0 h-full w-full" />}
@@ -369,7 +363,7 @@ export function OverviewPanel({
 
       {/* Composition — how the dataset breaks down across labels + visual variety. */}
       <div>
-        <SectionHeader sub="How your labels and images break down">Composition</SectionHeader>
+        <SectionHeader>Composition</SectionHeader>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           <Card title="Label distribution">
             {dist.length === 0 ? (
@@ -410,7 +404,7 @@ export function OverviewPanel({
 
       {/* Recent — newest images + the activity feed. */}
       <div>
-        <SectionHeader sub="Latest images and activity" action={onOpenDataset ? <HeaderLink onClick={onOpenDataset}>View all →</HeaderLink> : undefined}>Recent</SectionHeader>
+        <SectionHeader action={onOpenDataset ? <HeaderLink onClick={onOpenDataset}>View all →</HeaderLink> : undefined}>Recent</SectionHeader>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
           <div className="lg:col-span-2">
             <Card title="Images">
@@ -420,7 +414,7 @@ export function OverviewPanel({
                 <div className="grid grid-cols-3 gap-3 sm:grid-cols-5">
                   {recent.map((im) => (
                     <button key={im.id} type="button" onClick={() => onJumpToImport?.(im.id)} className="group block text-left outline-none" title={im.filename ?? undefined}>
-                      <span className="relative block aspect-[4/3] overflow-hidden rounded-xl bg-foreground/[0.06] ring-offset-2 ring-offset-[var(--background)] group-focus-visible:ring-2 group-focus-visible:ring-[var(--focus-ring)]">
+                      <span className="relative block aspect-[4/3] overflow-hidden rounded-md bg-foreground/[0.06] ring-offset-2 ring-offset-[var(--background)] group-focus-visible:ring-2 group-focus-visible:ring-[var(--focus-ring)]">
                         {im.blurhash && <BlurhashCanvas hash={im.blurhash} width={48} height={36} className="absolute inset-0 h-full w-full" />}
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img src={im.preview} alt={im.filename ?? "image"} loading="lazy" className="absolute inset-0 h-full w-full object-cover opacity-0 transition-[opacity,transform] duration-300 group-hover:scale-[1.04]" onLoad={(e) => { (e.currentTarget as HTMLImageElement).style.opacity = "1"; }} />
@@ -441,7 +435,7 @@ export function OverviewPanel({
                   {activity.map((a) => (
                     <li key={a.id} className="relative text-[12.5px] leading-snug text-foreground/70">
                       <span
-                        className="absolute -left-5 top-1 h-2 w-2 rounded-full bg-[var(--accent)] ring-2 ring-[var(--surface)]"
+                        className="absolute -left-5 top-1 h-2 w-2 rounded-full bg-[var(--fg-faint)] ring-2 ring-[var(--surface)]"
                         aria-hidden
                       />
                       <button

@@ -1719,18 +1719,16 @@ function SettingsSection({ go }: { go: (k: GuideSectionKey) => void }) {
         </p>
       </GuideSection>
 
-      <GuideSection n={3} title="Visibility">
+      <GuideSection n={3} title="Your data stays local">
         <Bullets
           items={[
-            "<strong>Free plan</strong>. Projects are public. Anyone on the platform can see the images, labels and exports. Don&rsquo;t upload anything sensitive.",
-            "<strong>Pro plan</strong>. Toggle a project to private. Private projects don&rsquo;t appear in the community feed and are only visible to you.",
-            "<strong>Beta tier</strong>. Same surface area as Pro for the duration of the access window, including the private toggle.",
+            "Everything — images, labels, annotations and exports — lives on this machine. Nothing is uploaded to a cloud service.",
+            "Deleting a project removes its files from disk permanently; there is no remote copy to restore from.",
           ]}
         />
         <p>
-          The visibility toggle in Settings takes effect immediately. The
-          padlock icon at the top of the project page repaints in the same
-          tick across every place the project is shown.
+          Back up the PixelKit data folder if you want an extra copy of your
+          datasets.
         </p>
       </GuideSection>
 

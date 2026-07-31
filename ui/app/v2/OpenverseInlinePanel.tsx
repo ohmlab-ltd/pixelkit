@@ -18,10 +18,10 @@ const API =
 
 // Ported 1:1 from V1's ProjectView Openverse panel, same UX,
 // adapted to V2's manifest shape (imports + /from_urls endpoint).
-// Sits inline inside the "Don't have images?" card on the project
-// page; expands to a search input + 5-image preview, prompts for
-// "Yes, this is what I'm looking for", then a settings stage with
-// a count slider, then a Pull/review stage.
+// Renders as a flat "Import from web" button inside the upload
+// panel's action cluster; the dialog holds a search input + 5-image
+// preview, prompts for "Yes, this is what I'm looking for", then a
+// settings stage with a count slider, then a Pull/review stage.
 
 type ImportImage = {
   url?: string | null;
@@ -319,27 +319,25 @@ export function OpenverseInlinePanel({
   const hasNext = safePage < totalPages - 1;
 
   return (
-    <div className="h-full overflow-hidden rounded-2xl border-2 border-[rgb(var(--accent-orange-rgb)/0.35)] bg-[rgb(var(--accent-orange-rgb)/0.06)] transition-colors hover:border-[rgb(var(--accent-orange-rgb)/0.55)] hover:bg-[rgb(var(--accent-orange-rgb)/0.10)]">
+    <>
       <button
         type="button"
         onClick={() => setImportOpen(true)}
-        className="group flex h-full w-full flex-col items-center justify-center gap-2 px-4 py-5 text-center"
+        className="pk-btn"
+        title="Search and pull free Creative-Commons images from the web"
       >
-        <span className="grid h-11 w-11 place-items-center rounded-full bg-[rgb(var(--accent-orange-rgb)/0.16)] text-[var(--accent-orange)]">
-          <svg viewBox="0 0 24 24" className="h-[22px] w-[22px]" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M4 14.9A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.24" />
-            <path d="M12 12v9" />
-            <path d="m8 17 4 4 4-4" />
-          </svg>
-        </span>
-        <span className="text-[15px] font-semibold leading-tight text-[var(--foreground)]">Don&rsquo;t have images?</span>
-        <span className="text-[12px] leading-snug text-foreground/60">Import free images from online sources</span>
+        <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M4 14.9A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.24" />
+          <path d="M12 12v9" />
+          <path d="m8 17 4 4 4-4" />
+        </svg>
+        Import from web
       </button>
 
-      <GlassDialog open={importOpen} onClose={closeImport} title="Import images from Openverse" maxWidth="max-w-3xl">
+      <GlassDialog open={importOpen} onClose={closeImport} title="Import images from the web" maxWidth="max-w-3xl">
           <div className="flex flex-col">
             <div className="grid gap-2 pt-4">
-              <label className="text-xs uppercase tracking-wider text-foreground/45" htmlFor="v2-import-desc">
+              <label className="pk-micro" htmlFor="v2-import-desc">
                 What images are you looking for?
               </label>
               <div className="flex items-stretch gap-2">
@@ -355,29 +353,23 @@ export function OpenverseInlinePanel({
                     }
                   }}
                   placeholder="e.g. potholes, hard hats, ripe strawberries"
-                  className="flex-1 rounded-xl border border-foreground/10 bg-foreground/[0.03] px-4 py-2.5 text-sm text-[var(--foreground)] placeholder:text-foreground/35 outline-none transition-colors hover:border-foreground/20 focus:border-foreground/30"
+                  className="flex-1 rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] placeholder:text-foreground/35 outline-none transition-colors focus:border-[var(--line-strong)]"
                 />
                 <button
                   type="button"
                   onClick={() => void searchImportImages()}
                   disabled={!importDesc.trim() || importLoading}
-                  className="rounded-xl border border-foreground/10 bg-foreground/[0.03] px-5 text-sm font-medium text-foreground/80 transition-all hover:bg-foreground/[0.06] hover:border-foreground/20 hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="pk-btn px-4"
                 >
                   {importLoading ? "Searching…" : "Search"}
                 </button>
               </div>
               <p className="flex items-center flex-wrap gap-x-3 gap-y-1 text-xs text-foreground/40 mt-1">
                 <span className="inline-flex items-center gap-1.5">
-                  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="text-emerald-300/70">
+                  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="text-[var(--ok)]">
                     <path d="M5 13l4 4L19 7" />
                   </svg>
-                  Creative Commons licensed, free for commercial use.
-                </span>
-                <span className="text-[11px] text-foreground/30">
-                  By using this you agree to the{" "}
-                  <a href="/openverse" target="_blank" rel="noopener noreferrer" className="text-foreground/45 hover:text-foreground underline underline-offset-2">
-                    Openverse policy
-                  </a>.
+                  Sourced from Openverse — Creative Commons licensed, free for commercial use.
                 </span>
                 {rejectedUrls.size > 0 && (
                   <button
@@ -398,7 +390,7 @@ export function OpenverseInlinePanel({
               style={{ gridTemplateRows: importError ? "1fr" : "0fr" }}
             >
               <div className="min-h-0 overflow-hidden">
-                <div className="mt-3 rounded-xl border border-red-400/25 bg-red-500/[0.08] px-4 py-2 text-xs text-red-200">
+                <div className="mt-3 rounded-md border border-[var(--line)] bg-[var(--panel)] px-4 py-2 text-xs text-[var(--bad)]">
                   {importError}
                 </div>
               </div>
@@ -430,12 +422,12 @@ export function OpenverseInlinePanel({
                         <ul className="grid gap-2 grid-cols-2 sm:grid-cols-5">
                           {importLoading
                             ? Array.from({ length: 5 }).map((_, i) => (
-                                <li key={`skel-${i}`} className="aspect-square rounded-lg border border-foreground/[0.06] bg-foreground/[0.03] animate-pulse" style={{ animationDelay: `${i * 80}ms` }} />
+                                <li key={`skel-${i}`} className="aspect-square rounded-md border border-[var(--line)] bg-[var(--panel)] animate-pulse" style={{ animationDelay: `${i * 80}ms` }} />
                               ))
                             : previewSlots.map((img, i) => img == null ? (
-                                <li key={`pad-${i}`} className="aspect-square rounded-lg border border-foreground/[0.04] bg-foreground/[0.01]" />
+                                <li key={`pad-${i}`} className="aspect-square rounded-md border border-[var(--line-soft)] bg-[var(--panel)]" />
                               ) : (
-                                <li key={img.url || i} className="group relative aspect-square rounded-lg overflow-hidden border border-foreground/[0.06]">
+                                <li key={img.url || i} className="group relative aspect-square rounded-md overflow-hidden border border-[var(--line)]">
                                   {/* eslint-disable-next-line @next/next/no-img-element */}
                                   <img
                                     src={img.thumbnail || img.url || ""}
@@ -459,14 +451,14 @@ export function OpenverseInlinePanel({
                         {!importLoading && totalPages > 1 && (
                           <>
                             {hasPrev && (
-                              <button type="button" onClick={() => setImportPreviewPage((p) => Math.max(0, p - 1))} aria-label="Previous" className="absolute left-0 top-1/2 -translate-y-1/2 grid h-8 w-8 place-items-center rounded-full border border-foreground/15 bg-foreground/[0.08] text-[var(--foreground)] transition-all hover:bg-foreground/[0.14] hover:border-foreground/25">
+                              <button type="button" onClick={() => setImportPreviewPage((p) => Math.max(0, p - 1))} aria-label="Previous" className="absolute left-0 top-1/2 -translate-y-1/2 grid h-8 w-8 place-items-center rounded-md border border-[var(--line)] bg-[var(--surface)] text-[var(--foreground)] transition-colors hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)]">
                                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                                   <path d="m15 18-6-6 6-6" />
                                 </svg>
                               </button>
                             )}
                             {hasNext && (
-                              <button type="button" onClick={() => setImportPreviewPage((p) => Math.min(totalPages - 1, p + 1))} aria-label="Next" className="absolute right-0 top-1/2 -translate-y-1/2 grid h-8 w-8 place-items-center rounded-full border border-foreground/15 bg-foreground/[0.08] text-[var(--foreground)] transition-all hover:bg-foreground/[0.14] hover:border-foreground/25">
+                              <button type="button" onClick={() => setImportPreviewPage((p) => Math.min(totalPages - 1, p + 1))} aria-label="Next" className="absolute right-0 top-1/2 -translate-y-1/2 grid h-8 w-8 place-items-center rounded-md border border-[var(--line)] bg-[var(--surface)] text-[var(--foreground)] transition-colors hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)]">
                                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                                   <path d="m9 6 6 6-6 6" />
                                 </svg>
@@ -492,10 +484,10 @@ export function OpenverseInlinePanel({
                       <div className="flex items-center justify-between gap-3 pt-1">
                         <span className="text-sm text-foreground/60">Happy with these?</span>
                         <div className="flex items-center gap-2">
-                          <button type="button" onClick={() => { setImportStage("search"); setImportResults([]); setImportSearched(false); setImportDesc(""); }} className="rounded-full border border-foreground/10 px-3.5 py-1.5 text-xs font-medium text-foreground/60 transition-all hover:border-foreground/20 hover:text-foreground">
+                          <button type="button" onClick={() => { setImportStage("search"); setImportResults([]); setImportSearched(false); setImportDesc(""); }} className="pk-btn">
                             Try again
                           </button>
-                          <button type="button" onClick={() => setImportStage("settings")} className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/50 bg-emerald-500/15 px-3.5 py-1.5 text-xs font-medium text-emerald-800 dark:text-emerald-200 transition-all hover:bg-emerald-500/25 hover:border-emerald-500/70">
+                          <button type="button" onClick={() => setImportStage("settings")} className="pk-btn pk-btn-primary">
                             <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                               <path d="M5 13l4 4L19 7" />
                             </svg>
@@ -515,15 +507,15 @@ export function OpenverseInlinePanel({
                       <div className="grid gap-4 pt-3 mt-1 border-t border-foreground/[0.06]">
                         <div className="grid gap-2">
                           <div className="flex items-center justify-between gap-3">
-                            <label className="text-xs uppercase tracking-wider text-foreground/45" htmlFor="v2-import-count">Number of images to pull</label>
+                            <label className="pk-micro" htmlFor="v2-import-count">Number of images to pull</label>
                             <span className="font-mono tabular-nums text-sm text-foreground/80">{importCount}</span>
                           </div>
-                          <input id="v2-import-count" type="range" min={10} max={250} step={10} value={importCount} onChange={(e) => setImportCount(parseInt(e.target.value, 10))} className="w-full accent-white" />
+                          <input id="v2-import-count" type="range" min={10} max={250} step={10} value={importCount} onChange={(e) => setImportCount(parseInt(e.target.value, 10))} className="w-full accent-[var(--accent)]" />
                           <div className="flex items-center justify-between text-[10px] text-foreground/35 font-mono"><span>10</span><span>250</span></div>
                         </div>
                         <div className="flex items-center justify-end gap-2">
-                          <button type="button" onClick={() => setImportStage("search")} className="rounded-full border border-foreground/10 px-3.5 py-1.5 text-xs font-medium text-foreground/60 transition-all hover:border-foreground/20 hover:text-foreground">Back</button>
-                          <button type="button" onClick={() => void pullImportImages()} className="rounded-full px-5 py-2 text-sm font-semibold text-black transition-all" style={{ backgroundColor: "#fb923c" }}>
+                          <button type="button" onClick={() => setImportStage("search")} className="pk-btn">Back</button>
+                          <button type="button" onClick={() => void pullImportImages()} className="pk-btn pk-btn-primary tabular-nums">
                             Pull {importCount} images
                           </button>
                         </div>
@@ -541,15 +533,14 @@ export function OpenverseInlinePanel({
                             : `${importPulled.length - importBadUrls.size} of ${importPulled.length} selected · click any image to remove it`}
                         </span>
                         <div className="flex items-center gap-2">
-                          <button type="button" onClick={() => { setImportStage("settings"); setImportPulled([]); setImportBadUrls(new Set()); }} className="rounded-full border border-foreground/10 px-3.5 py-1.5 text-xs font-medium text-foreground/60 transition-all hover:border-foreground/20 hover:text-foreground">
+                          <button type="button" onClick={() => { setImportStage("settings"); setImportPulled([]); setImportBadUrls(new Set()); }} className="pk-btn">
                             Back
                           </button>
                           <button
                             type="button"
                             onClick={() => void addPulledToDataset()}
                             disabled={importAdding || importPulled.length - importBadUrls.size === 0}
-                            className="rounded-full px-5 py-2 text-sm font-semibold text-black transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-                            style={{ backgroundColor: "#fb923c" }}
+                            className="pk-btn pk-btn-primary tabular-nums"
                           >
                             {importAdding ? "Adding…" : `Add ${importPulled.length - importBadUrls.size} to dataset`}
                           </button>
@@ -558,7 +549,7 @@ export function OpenverseInlinePanel({
                       {importPulling ? (
                         <div className="grid gap-2 grid-cols-3 sm:grid-cols-5 md:grid-cols-6">
                           {Array.from({ length: 12 }).map((_, i) => (
-                            <div key={`r-skel-${i}`} className="aspect-square rounded-lg border border-foreground/[0.06] bg-foreground/[0.03] animate-pulse" style={{ animationDelay: `${i * 60}ms` }} />
+                            <div key={`r-skel-${i}`} className="aspect-square rounded-md border border-[var(--line)] bg-[var(--panel)] animate-pulse" style={{ animationDelay: `${i * 60}ms` }} />
                           ))}
                         </div>
                       ) : (
@@ -568,14 +559,14 @@ export function OpenverseInlinePanel({
                             const bad = !!url && importBadUrls.has(url);
                             return (
                               <li key={url || i} className={[
-                                "relative aspect-square rounded-lg overflow-hidden border-2 transition-all cursor-pointer",
-                                bad ? "border-rose-500/70 opacity-35" : "border-foreground/[0.06] hover:border-foreground/30",
+                                "relative aspect-square rounded-md overflow-hidden border-2 transition-all cursor-pointer",
+                                bad ? "border-[var(--bad)] opacity-35" : "border-transparent hover:border-[var(--line-strong)]",
                               ].join(" ")} onClick={() => url && togglePulledBad(url)}>
                                 {/* eslint-disable-next-line @next/next/no-img-element */}
                                 <img src={img.thumbnail || img.url || ""} alt="" className="absolute inset-0 w-full h-full object-cover" loading="lazy" decoding="async" />
                                 {bad && (
                                   <div className="absolute inset-0 grid place-items-center">
-                                    <span className="rounded-full bg-rose-500/85 text-[var(--foreground)] text-[10px] uppercase tracking-wider font-semibold px-2 py-0.5">Skip</span>
+                                    <span className="rounded-md bg-black/70 font-mono text-[10px] uppercase tracking-wider font-medium text-white px-2 py-0.5">Skip</span>
                                   </div>
                                 )}
                               </li>
@@ -590,6 +581,6 @@ export function OpenverseInlinePanel({
             </div>
           </div>
       </GlassDialog>
-    </div>
+    </>
   );
 }

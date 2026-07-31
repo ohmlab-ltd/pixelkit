@@ -12,21 +12,14 @@ const API =
 
 type ResultLite = { image: string; pending?: boolean };
 
-// Allow-list of users who get the "Private project" toggle. Hidden from
-// everyone else so the option doesn't clutter the settings panel, the
-// backend doesn't care who toggles it, this is a UX gate only.
-const PRIVATE_TOGGLE_USERS = ["hamish", "mukund", "faizan"];
-
 type Props = {
   name: string;            // project UUID, used for the API path
   displayName: string;     // human-readable name shown in the input
   cover: string | null;
   results: ResultLite[];
-  username: string;        // current viewer; gates the private toggle
-  initialPrivate?: boolean;
+  username: string;        // accepted for call-site compatibility (unused locally)
   onRenamed: (newName: string) => void;
   onCoverChange: (cover: string | null) => void;
-  onPrivateChange?: (next: boolean) => void;
   onClose: () => void;
 };
 
@@ -35,26 +28,13 @@ export function ProjectSettings({
   displayName,
   cover,
   results,
-  username,
-  initialPrivate = false,
   onRenamed,
   onCoverChange,
-  onPrivateChange,
   onClose,
 }: Props) {
   const [newName, setNewName] = useState(displayName);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [isPrivate, setIsPrivate] = useState<boolean>(initialPrivate);
-  const [savingPrivacy, setSavingPrivacy] = useState(false);
-  // Privacy-toggle errors render INSIDE the Visibility section so the
-  // user sees them next to the toggle they just touched. The shared
-  // `error` state is used by the Rename section and was too far away
-  // to associate with a failed toggle, the user reported "the toggle
-  // doesn't toggle" because they never saw the rollback message.
-  const [privacyError, setPrivacyError] = useState<string | null>(null);
-  const canTogglePrivate = PRIVATE_TOGGLE_USERS.includes(username.toLowerCase());
-
   // Progressive cover-picker rendering, start small so the dialog
   // opens instantly on big projects, then load another batch as the
   // user scrolls the picker grid down. Same IntersectionObserver
@@ -81,43 +61,6 @@ export function ProjectSettings({
     obs.observe(node);
     return () => obs.disconnect();
   }, [coverLimit, results.length]);
-
-  const togglePrivate = async (next: boolean) => {
-    if (savingPrivacy) return;
-    const prev = isPrivate;
-    setIsPrivate(next);
-    setSavingPrivacy(true);
-    setPrivacyError(null);
-    try {
-      const r = await apiFetch(`/api/projects/${name}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ private: next }),
-      });
-      if (!r.ok) {
-        const body = await r.text().catch(() => "");
-        // Map the common owner-gate failure to copy a user can actually
-        // act on. Anything else surfaces verbatim so we can diagnose
-        // from a screenshot.
-        let message = body || `http ${r.status}`;
-        if (r.status === 403) {
-          message =
-            "Only the project owner can change visibility. If you're signed in with the right account and still see this, the project may pre-date the ownership-required era; contact support to claim it.";
-        }
-        throw new Error(message);
-      }
-      onPrivateChange?.(next);
-    } catch (e) {
-      // Console-log the raw error so support can read it off a
-      // screenshot, then revert the optimistic update and surface
-      // the friendly message inline next to the toggle.
-      console.warn("[settings/private] toggle failed:", e);
-      setIsPrivate(prev);
-      setPrivacyError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSavingPrivacy(false);
-    }
-  };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -225,42 +168,6 @@ export function ProjectSettings({
           <p className="text-xs text-[var(--muted)]">Display name only, any characters allowed.</p>
           {error && <div className="text-xs text-red-400">{error}</div>}
         </section>
-
-        {canTogglePrivate && (
-          <section className="px-6 py-5 border-b border-[var(--border)] grid gap-3">
-            <label className="text-xs text-[var(--muted)] uppercase tracking-wider">Visibility</label>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={isPrivate}
-              disabled={savingPrivacy}
-              onClick={() => togglePrivate(!isPrivate)}
-              className={[
-                "inline-flex items-center gap-3 self-start rounded-full border px-3 py-1.5 text-sm transition-colors",
-                isPrivate
-                  ? "border-amber-300/40 bg-amber-300/[0.08] text-amber-100 hover:bg-amber-300/[0.12]"
-                  : "border-foreground/15 bg-foreground/5 text-foreground/80 hover:bg-foreground/10 hover:text-foreground",
-                savingPrivacy ? "opacity-60 cursor-wait" : "",
-              ].join(" ")}
-            >
-              <span
-                aria-hidden
-                className={[
-                  "h-4 w-7 rounded-full p-0.5 transition-colors flex",
-                  isPrivate ? "bg-amber-300/70 justify-end" : "bg-foreground/15",
-                ].join(" ")}
-              >
-                <span className="h-3 w-3 rounded-full bg-[#141416]" />
-              </span>
-              {isPrivate ? "Private, only you can see this project" : "Public, visible in the community feed"}
-            </button>
-            {privacyError && (
-              <div className="text-[12px] text-red-500 dark:text-red-300 max-w-md leading-relaxed">
-                {privacyError}
-              </div>
-            )}
-          </section>
-        )}
 
         <section className="px-6 py-5">
           <div className="flex items-center justify-between mb-3">

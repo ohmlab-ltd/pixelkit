@@ -4,9 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { apiFetch } from "@/lib/apiFetch";
-import { isProPlan } from "@/lib/plans";
 import { patchProjectMeta } from "../../lib/projectMetaCache";
-import { usePlan } from "../PlanPill";
 import { containsProfanity } from "../profanity";
 import { buildProjectLabelColourMap, LABEL_COLOURS, colourForLabelStable } from "./OnboardLabelsV2";
 
@@ -17,11 +15,11 @@ const API =
     : "");
 
 // V2-native settings popup. Five sections:
-//   1. Rename           , POST /api/projects/{id}/rename
-//   2. Visibility       , PUT /api/projects/{id} {private}; gated on usePlan().plan
-//   3. Cover            , PUT /api/projects/{id} {cover}; picks from refs OR imports
-//   4. Label colours    , PUT /api/projects/{id} {labelColours}; live-broadcasts
-//   5. Delete           , DELETE /api/projects/{id} {confirm: <name>}
+//   1. Rename             , POST /api/projects/{id}/rename
+//   2. Target input shape , local view state, feeds export size warnings
+//   3. Cover              , PUT /api/projects/{id} {cover}; picks from refs OR imports
+//   4. Label colours      , PUT /api/projects/{id} {labelColours}; live-broadcasts
+//   5. Delete             , DELETE /api/projects/{id} {confirm: <name>}
 //
 // Live propagation: on every successful save we mirror state through
 // the existing window-event channel so the workspace + public cards
@@ -32,54 +30,42 @@ type Source = { kind: "reference" | "import"; filename: string; preview: string 
 export function ProjectSettingsV2({
   projectId,
   projectName,
-  initialPrivate,
   labels,
   labelAliases,
   labelColours,
   references,
   imports,
+  inputShape,
+  inputShapeOptions,
+  onInputShapeChange,
   onClose,
   onRenamed,
   onLabelColoursChange,
   onCoverChange,
-  onPrivateChange,
   onDeleted,
 }: {
   projectId: string;
   projectName: string;
-  initialPrivate?: boolean;
   labels: string[];
   labelAliases: Record<string, string>;
   labelColours: Record<string, string>;
   references: { filename: string; preview: string }[];
   imports: { filename: string; preview: string }[];
+  /** Target input shape (e.g. "256x256") — the square tensor size the
+      export flow warns against. Lives in the dataset view's state; the
+      section only renders when the trio of props is provided. */
+  inputShape?: string;
+  inputShapeOptions?: readonly string[];
+  onInputShapeChange?: (next: string) => void;
   onClose: () => void;
   onRenamed: (next: string) => void;
   onLabelColoursChange: (next: Record<string, string>) => void;
   onCoverChange?: (cover: string | null) => void;
-  onPrivateChange?: (next: boolean) => void;
   onDeleted: () => void;
 }) {
-  const plan = usePlan();
-  const planTier = plan?.plan ?? "free";
-  // Beta accounts get the same surface area as Pro for the duration
-  // of their access window, including private projects, so the
-  // toggle is gated on any non-free plan.
-  const canPrivate =
-    isProPlan(planTier) || planTier === "mega" || planTier === "beta" || planTier === "enterprise";
-
   const [newName, setNewName] = useState(projectName);
   const [renaming, setRenaming] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
-
-  const [isPrivate, setIsPrivate] = useState<boolean>(initialPrivate ?? false);
-  const [privacyBusy, setPrivacyBusy] = useState(false);
-  const [privacyError, setPrivacyError] = useState<string | null>(null);
-  // Tracks whether the user has already clicked the toggle this session.
-  // If so, we skip the useEffect hydration write to avoid clobbering an
-  // in-flight or completed optimistic update.
-  const privacyInteractedRef = useRef(false);
-  const toggleAbortRef = useRef<AbortController | null>(null);
 
   const [cover, setCover] = useState<string | null>(null);
   // True when the dataset is using a user-uploaded cover (vs one picked from an
@@ -101,7 +87,7 @@ export function ProjectSettingsV2({
 
   // Hydrate fields the stub doesn't already hold in state. The parent
   // already owns labelColours / labels / aliases; we just need
-  // private + cover (manifest-only fields the V2 view doesn't track).
+  // cover (a manifest-only field the V2 view doesn't track).
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -109,12 +95,10 @@ export function ProjectSettingsV2({
         const r = await apiFetch(`/api/projects/${projectId}`);
         if (!r.ok) return;
         const m = await r.json() as {
-          private?: boolean;
           cover?: string | null;
           cover_uploaded?: boolean;
         };
         if (!alive) return;
-        if (!privacyInteractedRef.current) setIsPrivate(!!m.private);
         setCover(m.cover ?? null);
         setCoverUploaded(!!m.cover_uploaded);
       } catch {
@@ -203,61 +187,6 @@ export function ProjectSettingsV2({
       setRenameError(e instanceof Error ? e.message : String(e));
     } finally {
       setRenaming(false);
-    }
-  };
-
-  const togglePrivate = async (next: boolean) => {
-    if (!canPrivate) return;
-    // Cancel any in-flight toggle so rapid clicks don't race.
-    toggleAbortRef.current?.abort();
-    const ctl = new AbortController();
-    toggleAbortRef.current = ctl;
-
-    privacyInteractedRef.current = true;
-    const prev = isPrivate;
-
-    // Optimistic update — apply immediately so the padlock and any other
-    // listeners reflect the new state before the PUT even fires. The
-    // modal closing mid-flight is fine because the parent already holds
-    // the new value; we only roll back if the server rejects it.
-    setIsPrivate(next);
-    setPrivacyBusy(true);
-    setPrivacyError(null);
-    onPrivateChange?.(next);
-    window.dispatchEvent(new CustomEvent("pixelkit-project-meta-changed", {
-      detail: { projectId, private: next },
-    }));
-
-    try {
-      const r = await apiFetch(`/api/projects/${projectId}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ private: next }),
-        signal: ctl.signal,
-      });
-      if (ctl.signal.aborted) return;
-      if (!r.ok) {
-        const body = await r.text().catch(() => "");
-        let message = body || `http ${r.status}`;
-        if (r.status === 403) {
-          message =
-            "Only the project owner can change visibility. If you're signed in with the right account and still see this, the project may pre-date the ownership-required era; contact support to claim it.";
-        }
-        throw new Error(message);
-      }
-    } catch (e) {
-      if ((e as { name?: string })?.name === "AbortError") return;
-      if (ctl.signal.aborted) return;
-      console.warn("[settings/private] toggle failed:", e);
-      // Roll back local state, parent state, and any other listeners.
-      setIsPrivate(prev);
-      onPrivateChange?.(prev);
-      window.dispatchEvent(new CustomEvent("pixelkit-project-meta-changed", {
-        detail: { projectId, private: prev },
-      }));
-      setPrivacyError(e instanceof Error ? e.message : String(e));
-    } finally {
-      if (!ctl.signal.aborted) setPrivacyBusy(false);
     }
   };
 
@@ -429,11 +358,11 @@ export function ProjectSettingsV2({
       onClick={onClose}
     >
       <div
-        className="bg-[var(--background)] rounded-2xl border border-foreground/10 max-w-3xl w-full mt-8 mb-8"
+        className="bg-[var(--background)] rounded-md border border-[var(--modal-border)] max-w-3xl w-full mt-8 mb-8"
         onClick={(e) => e.stopPropagation()}
       >
         <header className="flex items-center justify-between px-6 py-4 border-b border-foreground/10">
-          <h2 className="text-lg font-semibold text-[var(--foreground)]">Project settings</h2>
+          <h2 className="text-[15px] font-medium text-[var(--foreground)]">Project settings</h2>
           <button
             type="button"
             onClick={onClose}
@@ -446,83 +375,65 @@ export function ProjectSettingsV2({
 
         {/* Name */}
         <section className="px-6 py-5 border-b border-foreground/10 grid gap-3">
-          <label className="text-xs text-foreground/45 uppercase tracking-wider">Name</label>
+          <label className="pk-micro">Name</label>
           <div className="flex gap-3 items-center">
             <input
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") void rename(); }}
-              className="flex-1 rounded-lg border border-foreground/10 bg-transparent px-3 py-2 text-base text-[var(--foreground)] focus:outline-none focus:border-foreground/30"
+              className="flex-1 rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] focus:outline-none focus:border-[var(--line-strong)]"
             />
             <button
               type="button"
               onClick={() => void rename()}
               disabled={renaming || !newName.trim() || newName.trim() === projectName}
-              className="rounded-full bg-foreground text-background px-5 py-2 text-sm font-medium hover:bg-zinc-200 disabled:opacity-40 disabled:cursor-not-allowed"
+              className="pk-btn"
             >
               {renaming ? "Renaming…" : "Rename"}
             </button>
           </div>
-          {renameError && <div className="text-xs text-red-400">{renameError}</div>}
+          {renameError && <div className="text-xs text-[var(--bad)]">{renameError}</div>}
         </section>
 
-        {/* Visibility */}
-        <section className="px-6 py-5 border-b border-foreground/10 grid gap-3">
-          <label className="text-xs text-foreground/45 uppercase tracking-wider">Visibility</label>
-          {canPrivate ? (
-            <button
-              type="button"
-              role="switch"
-              aria-checked={!!isPrivate}
-              onClick={() => togglePrivate(!isPrivate)}
-              className={[
-                "inline-flex items-center gap-3 self-start rounded-full border px-3 py-1.5 text-sm transition-colors",
-                isPrivate
-                  ? "border-amber-500/50 bg-amber-300/[0.12] text-amber-800 dark:text-amber-100 hover:bg-amber-300/[0.18]"
-                  : "border-foreground/20 bg-foreground/5 text-[var(--foreground)] hover:bg-foreground/10",
-                privacyBusy ? "opacity-75" : "",
-              ].join(" ")}
-            >
-              <span
-                aria-hidden
-                className={[
-                  "h-4 w-7 rounded-full p-0.5 transition-colors flex",
-                  isPrivate ? "bg-amber-500/80 justify-end" : "bg-foreground/25",
-                ].join(" ")}
-              >
-                <span className="h-3 w-3 rounded-full bg-background" />
-              </span>
-              {isPrivate
-                ? "Private, only you can see this project"
-                : "Public, visible in the community feed"}
-            </button>
-          ) : null}
-          {privacyError && (
-            <div className="text-[12px] text-red-500 dark:text-red-300 max-w-md leading-relaxed">
-              {privacyError}
+        {/* Target input shape — feeds the export flow's box-size warnings.
+            Session-scoped view state owned by the dataset view. */}
+        {inputShape != null && inputShapeOptions && onInputShapeChange && (
+          <section className="px-6 py-5 border-b border-foreground/10 grid gap-3">
+            <label className="pk-micro">Target input shape</label>
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="inline-flex rounded-md border border-[var(--line)] p-0.5">
+                {inputShapeOptions.map((opt) => (
+                  <button
+                    key={opt}
+                    type="button"
+                    onClick={() => onInputShapeChange(opt)}
+                    className={[
+                      "rounded px-3 py-1 font-mono text-xs tabular-nums transition-colors",
+                      inputShape === opt
+                        ? "bg-[var(--surface-hover)] text-[var(--foreground)]"
+                        : "text-foreground/60 hover:text-foreground",
+                    ].join(" ")}
+                  >
+                    {opt}
+                  </button>
+                ))}
+              </div>
             </div>
-          )}
-          {canPrivate ? null : (
-            <div className="flex flex-col gap-2 self-start rounded-xl border border-foreground/10 bg-foreground/[0.02] px-4 py-3 text-sm text-foreground/65 max-w-md">
-              <span>
-                Private projects are a Pro feature. Free projects stay public in the community feed.
-              </span>
-              <a
-                href="/app?tab=pricing"
-                className="self-start text-[11px] uppercase tracking-wider font-mono text-orange-700 hover:text-orange-800 dark:text-orange-200 dark:hover:text-orange-100"
-              >
-                Upgrade to Pro →
-              </a>
-            </div>
-          )}
-        </section>
+            <p className="max-w-lg text-[11px] leading-relaxed text-foreground/45">
+              The square tensor size your detector will resize images to before
+              running. Pick the shape that matches the runtime you&rsquo;re
+              targeting — the editor and export flow use it to flag boxes that
+              would shrink below the model&rsquo;s detection floor.
+            </p>
+          </section>
+        )}
 
         {/* Label colours */}
         {labels.length > 0 && (
           <section className="px-6 py-5 border-b border-foreground/10 grid gap-3">
-            <label className="text-xs text-foreground/45 uppercase tracking-wider">Label colours</label>
+            <label className="pk-micro">Label colours</label>
             {coloursError && (
-              <div className="text-xs text-red-400">{coloursError}</div>
+              <div className="text-xs text-[var(--bad)]">{coloursError}</div>
             )}
             <ul className="grid gap-2">
               {labels.map((lab) => {
@@ -551,13 +462,13 @@ export function ProjectSettingsV2({
         {/* Cover */}
         <section className="px-6 py-5 border-b border-foreground/10 grid gap-3">
           <div className="flex items-center justify-between">
-            <label className="text-xs text-foreground/45 uppercase tracking-wider">Cover image</label>
+            <label className="pk-micro">Cover image</label>
             <div className="flex items-center gap-3">
               <button
                 type="button"
                 onClick={() => coverFileRef.current?.click()}
                 disabled={coverBusy}
-                className="text-[10px] uppercase tracking-wider text-[var(--accent-orange)] hover:opacity-80 disabled:opacity-40"
+                className="text-[10px] uppercase tracking-wider font-mono text-foreground/55 hover:text-foreground transition-colors disabled:opacity-40"
               >
                 Upload image
               </button>
@@ -582,7 +493,7 @@ export function ProjectSettingsV2({
           {/* Current uploaded cover preview — sits above the pick-from-images
               grid so the user can see (and replace) it. */}
           {coverUploaded && (
-            <div className="flex items-center gap-3 rounded-lg border border-[rgb(var(--accent-orange-rgb)/0.4)] bg-[rgb(var(--accent-orange-rgb)/0.06)] p-2.5">
+            <div className="flex items-center gap-3 rounded-md border border-[var(--line)] bg-[var(--panel)] p-2.5">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={`${API}/api/projects/${projectId}/cover_thumb?v=${coverBust}`}
@@ -611,7 +522,7 @@ export function ProjectSettingsV2({
                       disabled={coverBusy}
                       onClick={() => setProjectCover(s.filename)}
                       className={[
-                        "relative aspect-square rounded-lg overflow-hidden border-2 transition-colors",
+                        "relative aspect-square rounded-md overflow-hidden border-2 transition-colors",
                         active ? "border-[var(--foreground)]" : "border-transparent hover:border-foreground/40",
                         // No cursor-wait: the cursor only repaints on
                         // the next pointer event, so it'd appear to
@@ -652,41 +563,39 @@ export function ProjectSettingsV2({
 
         {/* Delete */}
         <section className="px-6 py-5 grid gap-3">
-          <label className="text-xs text-foreground/45 uppercase tracking-wider">Delete project</label>
+          <label className="pk-micro">Delete project</label>
           {!showDelete ? (
             <button
               type="button"
               onClick={() => setShowDelete(true)}
-              // Deeper red in light mode so the destructive warning
-              // text doesn't wash out against the near-white card.
-              className="self-start rounded-xl border border-red-500/40 bg-red-500/[0.08] px-4 py-2 text-sm text-red-700 dark:text-red-200 hover:bg-red-500/[0.14] transition-colors"
+              className="self-start rounded-md border border-[var(--bad)] px-4 py-2 text-sm text-[var(--bad)] transition-colors hover:bg-[var(--bad)] hover:text-[var(--background)]"
             >
               Delete this project
             </button>
           ) : (
-            <div className="rounded-xl border border-red-500/40 bg-red-500/[0.06] p-4 grid gap-3">
-              <p className="text-sm text-red-800 dark:text-red-100/90">
+            <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] p-4 grid gap-3">
+              <p className="text-sm text-[var(--bad)]">
                 This permanently deletes the project, every reference, every imported image, and every annotation. You can&rsquo;t undo this.
               </p>
               {/* "Type X to confirm", strong red so it stays
                   legible against the pink delete-card background
                   in light mode (foreground/55 was washing out on
                   the tinted bg). */}
-              <p className="text-xs text-red-800 dark:text-red-100/80">
-                Type <span className="font-mono font-semibold text-red-900 dark:text-red-50">{projectName}</span> to confirm.
+              <p className="text-xs text-foreground/65">
+                Type <span className="font-mono font-medium text-[var(--foreground)]">{projectName}</span> to confirm.
               </p>
               <input
                 value={deleteConfirm}
                 onChange={(e) => setDeleteConfirm(e.target.value)}
                 placeholder={projectName}
-                className="rounded-lg border border-red-500/30 bg-transparent px-3 py-2 text-sm text-[var(--foreground)] placeholder:text-foreground/30 focus:outline-none focus:border-red-500/70"
+                className="rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] placeholder:text-foreground/30 focus:outline-none focus:border-[var(--bad)]"
               />
-              {deleteError && <div className="text-xs text-red-700 dark:text-red-300">{deleteError}</div>}
+              {deleteError && <div className="text-xs text-[var(--bad)]">{deleteError}</div>}
               <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => { setShowDelete(false); setDeleteConfirm(""); setDeleteError(null); }}
-                  className="rounded-full border border-foreground/15 px-3.5 py-1.5 text-xs font-medium text-foreground/65 hover:border-foreground/30 hover:text-foreground"
+                  className="pk-btn"
                 >
                   Cancel
                 </button>
@@ -694,9 +603,7 @@ export function ProjectSettingsV2({
                   type="button"
                   disabled={deleteBusy || deleteConfirm.trim() !== projectName}
                   onClick={() => void deleteProject()}
-                  // Solid destructive button with always-white text so
-                  // it doesn't theme to dark-on-red in light mode.
-                  className="rounded-full bg-red-600 text-white px-5 py-1.5 text-sm font-semibold hover:bg-red-500 disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="rounded-md bg-[var(--bad)] px-4 py-1.5 text-sm font-medium text-[var(--background)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {deleteBusy ? "Deleting…" : "Delete project"}
                 </button>
@@ -735,7 +642,7 @@ function LabelColourRow({
   // open while the cursor sits anywhere over the expanded rail.
   const [hover, setHover] = useState(false);
   return (
-    <li className="flex items-center gap-3 rounded-xl border border-foreground/[0.07] bg-foreground/[0.02] px-3 py-2">
+    <li className="flex items-center gap-3 rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-2">
       <span className="text-sm text-foreground/85 truncate min-w-[5rem]">{displayName}</span>
       <div
         className="ml-auto flex items-center"

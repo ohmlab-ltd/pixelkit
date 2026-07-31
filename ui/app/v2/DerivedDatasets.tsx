@@ -91,9 +91,9 @@ export function DerivedDatasetsBar({ projectId, labels }: { projectId: string; l
   if (derived) {
     return (
       <section className="mt-3 px-6 lg:px-10">
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-2xl border border-amber-500/20 bg-amber-500/[0.05] px-4 py-3">
-          <span className="inline-flex items-center gap-1.5 text-[13px] font-semibold text-amber-600 dark:text-amber-400">
-            <DerivedIcon className="h-4 w-4" /> Derived dataset
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-[var(--line)] bg-[var(--panel)] px-4 py-3">
+          <span className="pk-micro inline-flex items-center gap-1.5">
+            <DerivedIcon className="h-3.5 w-3.5" /> Derived dataset
           </span>
           <span className="text-[12px] text-foreground/60">
             Cropped from <span className="font-medium text-foreground/80">{derived.parentName || "a parent project"}</span> · one label per image · auto-synced
@@ -101,12 +101,12 @@ export function DerivedDatasetsBar({ projectId, labels }: { projectId: string; l
           <div className="ml-auto flex items-center gap-2">
             {derived.parentProjectId && (
               <a href={`/app/${derived.parentProjectId}`}
-                className="inline-flex h-8 items-center gap-1.5 rounded-full bg-foreground/[0.06] px-3.5 text-xs font-medium text-foreground/75 transition-colors hover:bg-foreground/[0.12]">
+                className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--line)] bg-transparent px-3 text-xs font-medium text-[var(--fg-soft)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)]">
                 Open parent →
               </a>
             )}
             <button type="button" onClick={sync} disabled={syncing}
-              className="h-8 rounded-full bg-foreground/[0.06] px-3.5 text-xs font-medium text-foreground/70 transition-colors hover:bg-foreground/[0.12] disabled:opacity-50">
+              className="h-8 rounded-md border border-[var(--line)] bg-transparent px-3 text-xs font-medium text-[var(--fg-soft)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] disabled:opacity-50">
               {syncing ? "Syncing…" : "Sync now"}
             </button>
           </div>
@@ -122,7 +122,7 @@ export function DerivedDatasetsBar({ projectId, labels }: { projectId: string; l
   const loading = children === null;
   return (
     <section className="mt-5 px-6 lg:px-10">
-      <div className="pk-card rounded-2xl p-5">
+      <div className="pk-card rounded-md p-5">
         <div className="mb-3 flex items-end justify-between gap-3">
           <div className="min-w-0">
             <h2 className="pk-eyebrow">Derived datasets</h2>
@@ -137,18 +137,18 @@ export function DerivedDatasetsBar({ projectId, labels }: { projectId: string; l
               child shows the banner above rather than this create UI.) */}
           {!loading && (
             <button type="button" onClick={() => setOpen(true)}
-              className="h-9 shrink-0 rounded-full bg-foreground px-4 text-[13px] font-semibold text-background transition-all hover:opacity-90 active:scale-95">
+              className="h-9 shrink-0 rounded-md bg-[var(--accent)] px-4 text-[13px] font-medium text-[var(--accent-contrast)] transition-colors hover:brightness-105">
               + Create cropped dataset
             </button>
           )}
         </div>
         {loading ? (
-          <div className="flex items-center justify-center gap-2 rounded-xl border border-foreground/[0.08] bg-foreground/[0.015] px-4 py-6 text-[13px] text-foreground/55">
-            <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-foreground/20 border-t-foreground/60" />
+          <div className="flex items-center justify-center gap-2 rounded-md border border-[var(--line)] bg-[var(--panel)] px-4 py-5 text-[13px] text-foreground/55">
+            <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-foreground/20 border-t-[var(--accent)]" />
             Loading derived datasets…
           </div>
         ) : count === 0 ? (
-          <div className="rounded-xl border border-dashed border-foreground/15 bg-foreground/[0.015] px-4 py-7 text-center">
+          <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-4 py-6 text-center">
             <p className="text-[13px] font-medium text-foreground/70">No derived datasets yet</p>
             <p className="mt-1 text-[12px] text-foreground/55">
               Create a cropped child dataset to train on individual detections.
@@ -158,13 +158,13 @@ export function DerivedDatasetsBar({ projectId, labels }: { projectId: string; l
           <div className="space-y-2">
             {children!.map((c) => (
               <a key={c.project_id} href={`/app/${c.project_id}`}
-                className="group flex items-center gap-3 rounded-xl border border-foreground/[0.08] bg-foreground/[0.02] px-4 py-3 transition-colors hover:bg-foreground/[0.05]">
-                <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-foreground/[0.06] text-foreground/70">
+                className="group flex items-center gap-3 rounded-md border border-[var(--line)] bg-[var(--panel)] px-4 py-3 transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)]">
+                <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-foreground/[0.06] text-foreground/70">
                   <DerivedIcon className="h-4 w-4" />
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-[13px] font-medium text-foreground">{c.name}</span>
-                  <span className="block truncate text-[12px] text-foreground/60">
+                  <span className="block truncate text-[12px] text-foreground/60 tabular-nums">
                     {c.labels.length} label{c.labels.length === 1 ? "" : "s"} · {c.n_images} image{c.n_images === 1 ? "" : "s"}
                   </span>
                 </span>
@@ -236,8 +236,8 @@ function DeriveModal({ projectId, labels, parentName, onClose }: { projectId: st
   // animation) can't break `position: fixed` and push the modal off-screen.
   return createPortal(
     <div className="pk-backdrop fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 pt-[8vh]" onClick={onClose}>
-      <div className="pk-glass pk-pop w-full max-w-md rounded-2xl p-5" onClick={(e) => e.stopPropagation()}>
-        <h3 className="text-[17px] font-semibold tracking-tight">Create cropped dataset</h3>
+      <div className="pk-glass pk-pop w-full max-w-md rounded-md p-5" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-[15px] font-medium tracking-tight">Create cropped dataset</h3>
         <p className="mt-1 text-[13px] leading-relaxed text-foreground/55">
           A new project of <span className="font-medium text-foreground/75">one image per detection</span>, each cropped to its
           box with a single label. It auto-syncs from this project (one-way: edits here flow down, never back up).
@@ -246,7 +246,7 @@ function DeriveModal({ projectId, labels, parentName, onClose }: { projectId: st
         <label className="mt-4 block">
           <span className="text-[12px] font-medium text-foreground/70">Name</span>
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. PPE crops"
-            className="mt-1 w-full rounded-lg border border-foreground/15 bg-foreground/[0.04] px-3 py-2 text-sm outline-none focus:border-foreground/35" />
+            className="mt-1 w-full rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-sm outline-none focus:border-[var(--line-strong)]" />
         </label>
 
         <div className="mt-4">
@@ -262,9 +262,9 @@ function DeriveModal({ projectId, labels, parentName, onClose }: { projectId: st
                   key={opt.key}
                   type="button"
                   onClick={() => setLabelMode(opt.key)}
-                  className={`rounded-lg border p-2.5 text-left transition-colors ${on ? "border-amber-500/50 bg-amber-500/[0.08]" : "border-foreground/10 hover:border-foreground/25 hover:bg-foreground/[0.03]"}`}
+                  className={`rounded-md border p-2.5 text-left transition-colors ${on ? "border-[var(--accent)] bg-[var(--accent-dim)]" : "border-[var(--line)] hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)]"}`}
                 >
-                  <span className={`block text-[12.5px] font-semibold ${on ? "text-amber-600 dark:text-amber-400" : "text-foreground/85"}`}>{opt.title}</span>
+                  <span className={`block text-[12.5px] font-medium ${on ? "text-[var(--foreground)]" : "text-foreground/85"}`}>{opt.title}</span>
                   <span className="mt-0.5 block text-[11px] leading-snug text-foreground/50">{opt.desc}</span>
                 </button>
               );
@@ -282,7 +282,7 @@ function DeriveModal({ projectId, labels, parentName, onClose }: { projectId: st
               const on = sel.includes(l);
               return (
                 <button key={l} type="button" onClick={() => toggle(l)}
-                  className={`rounded-full px-2.5 py-1 text-[12px] font-medium ring-1 ring-inset transition-colors ${on ? "bg-amber-500/15 text-amber-600 ring-amber-500/30 dark:text-amber-400" : "bg-foreground/[0.04] text-foreground/45 ring-foreground/10"}`}>
+                  className={`inline-flex h-6 items-center rounded-md border px-2 font-mono text-[12px] transition-colors ${on ? "border-[var(--accent)] bg-[var(--accent-dim)] text-[var(--foreground)]" : "border-[var(--line)] bg-transparent text-[var(--fg-soft)] hover:border-[var(--line-strong)]"}`}>
                   {l}
                 </button>
               );
@@ -300,7 +300,7 @@ function DeriveModal({ projectId, labels, parentName, onClose }: { projectId: st
             role="switch"
             aria-checked={square}
             onClick={() => setSquare((s) => !s)}
-            className={`relative flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition-colors ${square ? "justify-end bg-amber-500/80" : "justify-start bg-foreground/20"}`}
+            className={`relative flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition-colors ${square ? "justify-end bg-[var(--accent)]" : "justify-start bg-foreground/20"}`}
             title={square ? "Square (1:1) crops" : "Crop tight to each box"}
           >
             <span className="h-4 w-4 rounded-full bg-white shadow-sm" />
@@ -317,7 +317,7 @@ function DeriveModal({ projectId, labels, parentName, onClose }: { projectId: st
             role="switch"
             aria-checked={createProject}
             onClick={() => setCreateProject((s) => !s)}
-            className={`relative flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition-colors ${createProject ? "justify-end bg-amber-500/80" : "justify-start bg-foreground/20"}`}
+            className={`relative flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition-colors ${createProject ? "justify-end bg-[var(--accent)]" : "justify-start bg-foreground/20"}`}
             title={createProject ? "Grouped in a Project" : "Standalone dataset"}
           >
             <span className="h-4 w-4 rounded-full bg-white shadow-sm" />
@@ -329,7 +329,7 @@ function DeriveModal({ projectId, labels, parentName, onClose }: { projectId: st
             <span>Context padding</span><span className="tabular-nums text-foreground/50">{padding}%</span>
           </span>
           <input type="range" min={0} max={50} step={5} value={padding} onChange={(e) => setPadding(Number(e.target.value))}
-            className="mt-1.5 w-full accent-amber-500" />
+            className="mt-1.5 w-full accent-[var(--accent)]" />
           <span className="text-[11px] text-foreground/40">0% = tight to the box; higher keeps surrounding context.</span>
         </label>
 
@@ -338,7 +338,7 @@ function DeriveModal({ projectId, labels, parentName, onClose }: { projectId: st
             <span>Minimum image size</span><span className="tabular-nums text-foreground/50">{minSize}px</span>
           </span>
           <input type="range" min={64} max={512} step={32} value={minSize} onChange={(e) => setMinSize(Number(e.target.value))}
-            className="mt-1.5 w-full accent-amber-500" />
+            className="mt-1.5 w-full accent-[var(--accent)]" />
           <span className="text-[11px] text-foreground/40">Crops smaller than this are scaled up so every image is at least {minSize}x{minSize}.</span>
         </label>
 
@@ -353,7 +353,7 @@ function DeriveModal({ projectId, labels, parentName, onClose }: { projectId: st
               role="switch"
               aria-checked={fixedSizeOn}
               onClick={() => setFixedSizeOn((s) => !s)}
-              className={`relative flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition-colors ${fixedSizeOn ? "justify-end bg-amber-500/80" : "justify-start bg-foreground/20"}`}
+              className={`relative flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition-colors ${fixedSizeOn ? "justify-end bg-[var(--accent)]" : "justify-start bg-foreground/20"}`}
               title={fixedSizeOn ? "All crops the same fixed size" : "Crops keep their natural per-detection size"}
             >
               <span className="h-4 w-4 rounded-full bg-white shadow-sm" />
@@ -365,17 +365,17 @@ function DeriveModal({ projectId, labels, parentName, onClose }: { projectId: st
                 <span>Size</span><span className="tabular-nums text-foreground/50">{fixedSizeVal}px</span>
               </span>
               <input type="range" min={64} max={512} step={32} value={fixedSizeVal} onChange={(e) => setFixedSizeVal(Number(e.target.value))}
-                className="mt-1.5 w-full accent-amber-500" />
+                className="mt-1.5 w-full accent-[var(--accent)]" />
               <span className="text-[11px] text-foreground/40">Every crop becomes exactly {fixedSizeVal}x{fixedSizeVal}.</span>
             </label>
           )}
         </div>
 
-        {err && <div className="mt-3 rounded-lg bg-red-500/10 px-3 py-2 text-[13px] text-red-500 ring-1 ring-inset ring-red-500/20">{err}</div>}
+        {err && <div className="mt-3 rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-[13px] text-[var(--bad)]">{err}</div>}
 
         <div className="mt-5 flex justify-end gap-2">
-          <button type="button" onClick={onClose} className="h-9 rounded-full bg-foreground/[0.06] px-4 text-sm font-medium text-foreground/70 transition-colors hover:bg-foreground/[0.12]">Cancel</button>
-          <button type="button" disabled={busy} onClick={create} className="h-9 rounded-full bg-foreground px-4 text-sm font-semibold text-background transition-all hover:opacity-90 active:scale-95 disabled:opacity-40">
+          <button type="button" onClick={onClose} className="h-9 rounded-md border border-[var(--line)] px-4 text-sm font-medium text-[var(--fg-soft)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] hover:text-foreground">Cancel</button>
+          <button type="button" disabled={busy} onClick={create} className="h-9 rounded-md bg-[var(--accent)] px-4 text-sm font-medium text-[var(--accent-contrast)] transition-colors hover:brightness-105 disabled:opacity-40">
             {busy ? "Creating…" : "Create"}
           </button>
         </div>

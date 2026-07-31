@@ -134,7 +134,6 @@ export function ProjectView({
   const [tab, setTab] = useState<Tab>("label");
   const [cover, setCover] = useState<string | null>(null);
   const [hasModel, setHasModel] = useState(false);
-  const [isPrivate, setIsPrivate] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [inputSize, setInputSize] = useState<string>("256x256");
@@ -661,7 +660,6 @@ export function ProjectView({
         setVerdicts(m.verdicts ?? {});
         setCover(m.cover ?? null);
         setHasModel(!!m.hasModel);
-        setIsPrivate(!!(m as { private?: boolean }).private);
         // editedBoxes is the BoxEditor's source of truth. The SSE
         // `result` events keep it in sync during a live run, but if we
         // missed any (page wasn't focused, browser dropped the
@@ -1644,25 +1642,6 @@ export function ProjectView({
             <div className="text-xs text-foreground/40">Project</div>
             <h1 className="text-4xl md:text-5xl font-light tracking-tight mt-1 leading-snug pb-0.5 flex items-center gap-3">
               <span>{displayName}</span>
-              {isPrivate && (
-                <svg
-                  viewBox="0 0 24 24"
-                  width="22"
-                  height="22"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  className="text-amber-300/80 shrink-0"
-                  aria-label="Private project"
-                  role="img"
-                >
-                  <title>Private project</title>
-                  <rect x="4" y="11" width="16" height="10" rx="2" />
-                  <path d="M8 11V7a4 4 0 0 1 8 0v4" />
-                </svg>
-              )}
             </h1>
           </div>
           {readOnly ? (
@@ -1933,18 +1912,6 @@ export function ProjectView({
                             <path d="M5 13l4 4L19 7" />
                           </svg>
                           All results are Creative Commons licensed and free for commercial use.
-                        </span>
-                        <span className="text-[11px] text-foreground/40">
-                          By using this you agree to the{" "}
-                          <a
-                            href="/openverse"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-foreground/55 hover:text-foreground underline underline-offset-2"
-                          >
-                            Openverse policy
-                          </a>
-                          .
                         </span>
                       </p>
                     </div>
@@ -2410,27 +2377,6 @@ export function ProjectView({
                 mp4 · mov · webm · m4v · avi · mkv
               </div>
             </div>
-            <p className="mt-3 text-[11px] text-foreground/40 leading-relaxed">
-              By uploading media you agree to our{" "}
-              <a
-                href="/acceptable-use"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-foreground/55 hover:text-foreground underline underline-offset-2"
-              >
-                Acceptable Use Policy
-              </a>
-              {" "}and{" "}
-              <a
-                href="/privacy"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-foreground/55 hover:text-foreground underline underline-offset-2"
-              >
-                Privacy Policy
-              </a>
-              .
-            </p>
             </div>
           </div>
 
@@ -2950,14 +2896,12 @@ export function ProjectView({
           cover={cover}
           results={results.map((r) => ({ image: r.image, pending: r.pending }))}
           username={username}
-          initialPrivate={isPrivate}
           onRenamed={(newName) => {
             setSettingsOpen(false);
             setDisplayName(newName);
             onRename(newName);
           }}
           onCoverChange={(c) => setCover(c)}
-          onPrivateChange={(next) => setIsPrivate(next)}
           onClose={() => setSettingsOpen(false)}
         />
       )}

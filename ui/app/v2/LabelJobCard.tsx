@@ -202,7 +202,7 @@ export function LabelJobCard({
       // Themable surface + soft shadow so the card matches the
       // other rounded cards on the page. The previous heavy black
       // shadow read as a sharp grey rectangle in light mode.
-      className="relative rounded-2xl border border-foreground/10 bg-[var(--surface)]/95 backdrop-blur-md shadow-[var(--shadow-strong)] overflow-hidden animate-[fadeIn_320ms_ease-out]"
+      className="relative rounded-md border border-[var(--line)] bg-[var(--surface)]/95 backdrop-blur-md shadow-[var(--shadow-strong)] overflow-hidden animate-[fadeIn_320ms_ease-out]"
       style={{ animation: "labelJobIn 360ms cubic-bezier(0.2,0.7,0.2,1) both" }}
     >
       <style>{`
@@ -276,10 +276,10 @@ export function LabelJobCard({
           animated indeterminate sweep when total isn't known yet. */}
       <div className="h-[3px] w-full bg-foreground/[0.06] relative overflow-hidden">
         {state.status === "running" && pct === null ? (
-          <div className="indeterminate-bar absolute inset-y-0 w-1/3 bg-foreground/55 rounded-full" />
+          <div className="indeterminate-bar absolute inset-y-0 w-1/3 bg-[var(--accent)] rounded-full" />
         ) : (
           <div
-            className="h-full bg-gradient-to-r from-orange-400 to-orange-500 transition-[width] duration-400 ease-out"
+            className="h-full bg-[var(--accent)] transition-[width] duration-400 ease-out"
             style={{ width: `${pct ?? 0}%` }}
           />
         )}

@@ -648,12 +648,11 @@ export function AugmentationsCard({
           References / Annotations title rows on the Dataset tab. */}
       <div className="flex items-center justify-between gap-4 mb-2">
         <div className="flex items-center gap-3 flex-wrap">
-          <h2 className="flex items-center gap-3 text-xl font-semibold tracking-tight text-[var(--foreground)]">
-            <span className="pk-accent-bar" aria-hidden />
+          <h2 className="text-xl font-medium tracking-tight text-[var(--foreground)]">
             Augmentations
           </h2>
           {enabledCount > 0 && (
-            <span className="inline-flex items-center gap-1 rounded-md border border-[var(--line)] px-2 py-0.5 font-mono text-[10px] font-medium uppercase tracking-wider text-[var(--fg-muted)]">
+            <span className="inline-flex items-center gap-1 rounded-md border border-[var(--line)] px-2 py-0.5 font-mono text-[10px] font-medium uppercase tracking-wider tabular-nums text-[var(--fg-muted)]">
               <span className="h-1 w-1 rounded-full bg-[var(--accent)]" aria-hidden />
               {enabledCount} on
             </span>
@@ -776,7 +775,7 @@ export function AugmentationsCard({
         </div>
       </div>
       {updateError && (
-        <div className="mb-6 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-4 py-2 text-[11px] text-[var(--bad)]">
+        <div className="mb-6 rounded-md border border-[var(--line)] bg-[var(--panel)] px-4 py-2 text-[11px] text-[var(--bad)]">
           {updateError}
         </div>
       )}
@@ -1455,7 +1454,7 @@ function CameraSensorBlock({
           centered against the dial stack so a short image + its
           controls sit halfway down the card. */}
       <div className="space-y-3">
-        <div className="rounded-lg border border-[var(--line)] bg-black/40 overflow-hidden relative">
+        <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] overflow-hidden relative">
           {previewUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
@@ -1514,7 +1513,7 @@ function CameraSensorBlock({
           </div>
         </div>
         {previewError && (
-          <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
+          <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
             {previewError}
           </div>
         )}
@@ -1644,7 +1643,7 @@ function RandomBlockOcclusionBlock({
   return (
     <div className="grid gap-4 md:grid-cols-2 md:items-center w-full">
       <div className="space-y-3">
-        <div className="rounded-lg border border-[var(--line)] bg-black/40 overflow-hidden relative">
+        <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] overflow-hidden relative">
           {previewUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
@@ -1691,7 +1690,7 @@ function RandomBlockOcclusionBlock({
           </span>
         </div>
         {previewError && (
-          <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
+          <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
             {previewError}
           </div>
         )}
@@ -1817,7 +1816,7 @@ function SimpleStrengthBlock({
   return (
     <div className="grid gap-4 md:grid-cols-2 md:items-center w-full">
       <div className="space-y-3">
-        <div className="rounded-lg border border-[var(--line)] bg-black/40 overflow-hidden relative">
+        <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] overflow-hidden relative">
           {previewUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img src={previewUrl} alt={`${dialLabel} preview`} className="block w-full h-auto" draggable={false} />
@@ -1856,7 +1855,7 @@ function SimpleStrengthBlock({
           </span>
         </div>
         {previewError && (
-          <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
+          <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
             {previewError}
           </div>
         )}
@@ -1956,7 +1955,7 @@ function PerspectiveWarpBlock({
   return (
     <div className="grid gap-4 md:grid-cols-2 md:items-center w-full">
       <div className="space-y-3">
-        <div className="rounded-lg border border-[var(--line)] bg-black/40 overflow-hidden relative">
+        <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] overflow-hidden relative">
           {previewUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img src={previewUrl} alt="Perspective warp preview" className="block w-full h-auto" draggable={false} />
@@ -1995,7 +1994,7 @@ function PerspectiveWarpBlock({
           </span>
         </div>
         {previewError && (
-          <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
+          <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
             {previewError}
           </div>
         )}
@@ -2112,7 +2111,7 @@ function ScaleRotationBlock({
   return (
     <div className="grid gap-4 md:grid-cols-2 md:items-center w-full">
       <div className="space-y-3">
-        <div className="rounded-lg border border-[var(--line)] bg-black/40 overflow-hidden relative">
+        <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] overflow-hidden relative">
           {previewUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img src={previewUrl} alt="Scale & rotation preview" className="block w-full h-auto" draggable={false} />
@@ -2151,7 +2150,7 @@ function ScaleRotationBlock({
           </span>
         </div>
         {previewError && (
-          <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
+          <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
             {previewError}
           </div>
         )}
@@ -2427,7 +2426,7 @@ function BackgroundRandomisationBlock({
       />
 
       <div className="space-y-3">
-        <div className="rounded-lg border border-[var(--line)] bg-black/40 overflow-hidden relative">
+        <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] overflow-hidden relative">
           {backgrounds.length === 0 ? (
             <div className="grid place-items-center py-16 px-4 text-center">
               <span className="text-xs uppercase tracking-wider text-foreground/35">
@@ -2472,7 +2471,7 @@ function BackgroundRandomisationBlock({
           </span>
         </div>
         {previewError && (
-          <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
+          <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
             {previewError}
           </div>
         )}
@@ -2484,7 +2483,7 @@ function BackgroundRandomisationBlock({
             {backgrounds.map((entry, idx) => (
               <div
                 key={entry.id}
-                className="relative aspect-square rounded-lg overflow-hidden border border-foreground/10 bg-black/40"
+                className="relative aspect-square rounded-md overflow-hidden border border-[var(--line)] bg-[var(--panel)]"
               >
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
@@ -2516,7 +2515,7 @@ function BackgroundRandomisationBlock({
             onDragLeave={() => setDragOver(false)}
             onDrop={onDrop}
             className={[
-              "rounded-lg border border-dashed bg-[var(--panel)] px-4 text-center text-sm transition-colors cursor-pointer outline-none",
+              "rounded-md border bg-[var(--panel)] px-4 text-center text-sm transition-colors cursor-pointer outline-none",
               // Empty state: stretch tall so the drop zone matches
               // the height of the "Upload a background to start"
               // preview placeholder on the left. Once at least one
@@ -2527,7 +2526,7 @@ function BackgroundRandomisationBlock({
                 : "py-6",
               dragOver
                 ? "border-[var(--accent)] bg-[var(--surface-hover)] text-[var(--foreground)]"
-                : "border-[var(--line-strong)] text-[var(--fg-muted)] hover:border-foreground/35 hover:text-foreground",
+                : "border-[var(--line)] text-[var(--fg-muted)] hover:border-[var(--line-strong)] hover:text-foreground",
               uploading ? "opacity-60 cursor-wait" : "",
             ].join(" ")}
           >
@@ -2544,7 +2543,7 @@ function BackgroundRandomisationBlock({
           </div>
         )}
         {uploadError && (
-          <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
+          <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
             {uploadError}
           </div>
         )}
@@ -2783,7 +2782,7 @@ function ObjectOverlayBlock({
 
       {/* Preview pane, composite of selected dataset image + overlays. */}
       <div className="space-y-3">
-        <div className="rounded-lg border border-[var(--line)] bg-black/40 overflow-hidden relative">
+        <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] overflow-hidden relative">
           {overlays.length === 0 ? (
             <div className="grid place-items-center py-16 px-4 text-center">
               <span className="text-xs uppercase tracking-wider text-foreground/35">
@@ -2835,7 +2834,7 @@ function ObjectOverlayBlock({
           </span>
         </div>
         {previewError && (
-          <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
+          <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
             {previewError}
           </div>
         )}
@@ -2846,13 +2845,13 @@ function ObjectOverlayBlock({
         {overlays.map((entry, idx) => (
           <div
             key={entry.id}
-            className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-2 flex items-center gap-3"
+            className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-2 flex items-center gap-3"
           >
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={entry.previewUrl}
               alt={entry.label}
-              className="h-10 w-10 rounded-md object-contain bg-black/40"
+              className="h-10 w-10 rounded-md object-contain bg-[var(--panel)]"
             />
             <div className="min-w-0 flex-1">
               <div className="pk-micro">
@@ -2887,10 +2886,10 @@ function ObjectOverlayBlock({
             onDragLeave={() => setDragOver(false)}
             onDrop={onDrop}
             className={[
-              "rounded-lg border border-dashed bg-[var(--panel)] px-4 py-6 text-center text-sm transition-colors cursor-pointer outline-none",
+              "rounded-md border bg-[var(--panel)] px-4 py-6 text-center text-sm transition-colors cursor-pointer outline-none",
               dragOver
                 ? "border-[var(--accent)] bg-[var(--surface-hover)] text-[var(--foreground)]"
-                : "border-[var(--line-strong)] text-[var(--fg-muted)] hover:border-foreground/35 hover:text-foreground",
+                : "border-[var(--line)] text-[var(--fg-muted)] hover:border-[var(--line-strong)] hover:text-foreground",
             ].join(" ")}
           >
             {overlays.length === 0 ? "+ Upload overlay image" : "+ Add another overlay"}
@@ -2922,12 +2921,12 @@ function ObjectOverlayBlock({
             aria-modal="true"
           >
             <div
-              className="w-full max-w-md rounded-lg pk-glass p-5 grid gap-4"
+              className="w-full max-w-md rounded-md pk-glass p-5 grid gap-4"
               onClick={(e) => e.stopPropagation()}
               style={{ animation: "objectOverlayPopIn 220ms cubic-bezier(0.2, 0.7, 0.2, 1) both" }}
             >
               <div className="flex items-baseline justify-between">
-                <h3 className="text-base font-medium text-[var(--foreground)]">Segment object</h3>
+                <h3 className="pk-micro" style={{ color: "var(--foreground)" }}>Segment object</h3>
                 <button
                   type="button"
                   onClick={() => setPendingFile(null)}
@@ -2936,7 +2935,7 @@ function ObjectOverlayBlock({
                   aria-label="Close"
                 >×</button>
               </div>
-              <div className="rounded-lg overflow-hidden bg-black/40 max-h-[50vh] grid place-items-center">
+              <div className="rounded-md overflow-hidden bg-[var(--panel)] max-h-[50vh] grid place-items-center">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={pendingPreview} alt="" className="block max-h-[50vh] w-auto h-auto" />
               </div>
@@ -2960,7 +2959,7 @@ function ObjectOverlayBlock({
                 />
               </div>
               {segError && (
-                <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
+                <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)]">
                   {segError}
                 </div>
               )}
@@ -3044,8 +3043,8 @@ function BigDial({
   const decimals = step < 1 ? Math.min(2, Math.ceil(-Math.log10(step))) : 0;
   return (
     <div className={[
-      "rounded-lg px-4 py-3 transition-colors",
-      active ? "bg-foreground/[0.04]" : "bg-foreground/[0.02]",
+      "rounded-md px-4 py-3 transition-colors",
+      active ? "bg-[var(--surface-hover)]" : "bg-[var(--panel)]",
     ].join(" ")}>
       <div className="flex items-center justify-between mb-1">
         <span className={[
@@ -3120,8 +3119,8 @@ function CategoryBlock({
   return (
     <div
       className={[
-        "rounded-lg border border-[var(--line)] transition-colors",
-        enabled ? "bg-foreground/[0.04]" : "bg-foreground/[0.02]",
+        "rounded-md border border-[var(--line)] transition-colors",
+        enabled ? "bg-[var(--surface-hover)]" : "bg-[var(--panel)]",
       ].join(" ")}
     >
       <div className="flex items-center gap-3 px-5 py-4">
@@ -3160,7 +3159,7 @@ function CategoryBlock({
         style={{ gridTemplateRows: open ? "1fr" : "0fr" }}
       >
         <div className="min-h-0 overflow-hidden">
-          <div className="px-5 pb-5 pt-5 border-t border-foreground/[0.04] space-y-3">
+          <div className="px-5 pb-5 pt-5 border-t border-[var(--line-soft)] space-y-3">
             {children}
           </div>
         </div>
@@ -3199,9 +3198,9 @@ function SubAugRow({
   const isComingSoon = !!rightBadge;
   return (
     <div className={[
-      // Borderless sub-row, uses background tint against the slightly
-      // darker parent CategoryBlock for hierarchy without chrome.
-      "rounded-lg bg-[var(--background)]/55 transition-colors",
+      // Standard flat sub-panel: hairline border + panel step, same
+      // surface recipe as every other in-flow card.
+      "rounded-md border border-[var(--line)] bg-[var(--panel)] transition-colors",
       isComingSoon ? "opacity-70" : "",
     ].join(" ")}>
       <div className="flex items-start gap-3 px-4 py-3">
@@ -3229,7 +3228,7 @@ function SubAugRow({
         )}
       </div>
       {enabled && !isComingSoon && (
-        <div className="px-4 pb-4 pt-3 border-t border-foreground/[0.04]">
+        <div className="px-4 pb-4 pt-3 border-t border-[var(--line-soft)]">
           {children}
         </div>
       )}
@@ -3258,7 +3257,7 @@ function NestedToggleRow({
   onFrequency: (f: Frequency) => void;
 }) {
   return (
-    <div className="flex items-center gap-3 px-3 py-2 rounded-lg border border-[var(--line)] bg-[var(--panel)]">
+    <div className="flex items-center gap-3 px-3 py-2 rounded-md border border-[var(--line)] bg-[var(--panel)]">
       <Checkbox checked={enabled} onChange={() => onToggle(!enabled)} ariaLabel={`${label} enabled`} />
       <span className="text-sm text-foreground/85 flex-1">{label}</span>
       {enabled && <FrequencyToggle value={frequency} onChange={onFrequency} compact />}
@@ -3295,7 +3294,7 @@ function FrequencyToggle({
             onClick={(e) => { e.stopPropagation(); onChange(it.value); }}
             className={[
               "rounded-[4px] px-2.5 py-0.5 text-[11px] font-medium uppercase tracking-wider transition-colors",
-              active ? "bg-foreground text-background" : "text-foreground/55 hover:text-foreground",
+              active ? "bg-[var(--surface-hover)] text-[var(--foreground)]" : "text-foreground/55 hover:text-foreground",
             ].join(" ")}
           >
             {it.label}
@@ -3328,7 +3327,7 @@ function SegmentedToggle<T extends string>({
             onClick={() => onChange(opt.value)}
             className={[
               "rounded-[4px] px-4 py-1 text-[12px] font-medium uppercase tracking-wider transition-colors",
-              active ? "bg-foreground text-background" : "text-foreground/55 hover:text-foreground",
+              active ? "bg-[var(--surface-hover)] text-[var(--foreground)]" : "text-foreground/55 hover:text-foreground",
             ].join(" ")}
           >
             {opt.label}
@@ -3551,10 +3550,10 @@ function ImageUploadGrid({
               type="button"
               onClick={() => fileRefs.current[i]?.click()}
               className={[
-                "absolute inset-0 rounded-lg border-2 grid place-items-center transition-colors overflow-hidden",
+                "absolute inset-0 rounded-md border grid place-items-center transition-colors overflow-hidden",
                 img
-                  ? "border-foreground/15 bg-black/40"
-                  : "border-dashed border-foreground/15 bg-foreground/[0.02] hover:border-foreground/30 hover:bg-foreground/[0.04]",
+                  ? "border-[var(--line)] bg-[var(--panel)]"
+                  : "border-[var(--line)] bg-[var(--panel)] hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)]",
               ].join(" ")}
               title={img ? `${img.name}, click to replace` : "Click to upload"}
             >

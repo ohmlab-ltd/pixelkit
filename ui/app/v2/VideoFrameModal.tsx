@@ -149,11 +149,11 @@ export function VideoFrameModal({
         if (e.target === e.currentTarget && !isExtracting) onCancel();
       }}
     >
-      <div className="pk-glass pk-pop max-w-2xl w-full rounded-2xl overflow-hidden">
-        <header className="px-6 pt-6 pb-3 flex items-start justify-between gap-4">
+      <div className="pk-glass pk-pop max-w-2xl w-full rounded-md overflow-hidden">
+        <header className="px-6 pt-5 pb-3 flex items-start justify-between gap-4">
           <div>
-            <div className="text-[10px] uppercase tracking-[0.2em] text-foreground/45">Video import</div>
-            <h2 className="mt-1 text-2xl font-medium tracking-tight truncate">
+            <div className="pk-micro">Video import</div>
+            <h2 className="mt-1 text-[15px] font-medium tracking-tight truncate">
               {file.name}
             </h2>
           </div>
@@ -161,14 +161,14 @@ export function VideoFrameModal({
             onClick={onCancel}
             disabled={isExtracting}
             aria-label="Close"
-            className="grid h-8 w-8 place-items-center rounded-full text-foreground/60 hover:text-foreground hover:bg-foreground/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            className="grid h-8 w-8 place-items-center rounded-md text-foreground/60 hover:text-foreground hover:bg-[var(--surface-hover)] transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
           >
             <span className="text-lg leading-none" aria-hidden="true">×</span>
           </button>
         </header>
 
         <div className="px-6 pb-2">
-          <div className="relative rounded-xl overflow-hidden bg-[var(--background)] border border-foreground/[0.06]">
+          <div className="relative rounded-md overflow-hidden bg-[var(--background)] border border-[var(--line)]">
             {src && (
             /* eslint-disable-next-line jsx-a11y/media-has-caption */
             <video
@@ -193,7 +193,7 @@ export function VideoFrameModal({
             />
             )}
             {!loaded && !loadError && (
-              <div className="absolute inset-0 grid place-items-center bg-black/70 backdrop-blur-sm">
+              <div className="absolute inset-0 grid place-items-center bg-[rgb(var(--background-rgb)/0.75)] backdrop-blur-sm">
                 <div className="flex items-center gap-3 text-sm text-foreground/85">
                   <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="animate-spin">
                     <path d="M21 12a9 9 0 1 1-6.2-8.55" />
@@ -203,8 +203,8 @@ export function VideoFrameModal({
               </div>
             )}
             {loadError && (
-              <div className="absolute inset-0 grid place-items-center bg-black/80 p-6 text-center">
-                <p className="text-sm text-rose-200">{loadError}</p>
+              <div className="absolute inset-0 grid place-items-center bg-[rgb(var(--background-rgb)/0.85)] p-6 text-center">
+                <p className="text-sm text-[var(--bad)]">{loadError}</p>
               </div>
             )}
           </div>
@@ -259,7 +259,7 @@ export function VideoFrameModal({
               value={fps}
               onChange={(e) => setFps(parseFloat(e.target.value))}
               disabled={isExtracting}
-              className="w-full accent-white disabled:opacity-50"
+              className="w-full accent-[var(--accent)] disabled:opacity-50"
             />
             <div className="flex items-center justify-between text-[10px] text-foreground/35 font-mono tabular-nums mt-1">
               <span>0.5</span>
@@ -273,8 +273,8 @@ export function VideoFrameModal({
             <div className="flex items-center justify-between gap-3">
               <span className="flex items-center gap-2 text-sm text-foreground/85">
                 <span className="relative flex h-2.5 w-2.5">
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-orange-400 opacity-70" />
-                  <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-orange-400" />
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--accent)] opacity-70" />
+                  <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-[var(--accent)]" />
                 </span>
                 Extracting frames
               </span>
@@ -285,11 +285,9 @@ export function VideoFrameModal({
             </div>
             <div className="h-1.5 w-full overflow-hidden rounded-full bg-foreground/[0.08]">
               <div
-                className="h-full rounded-full transition-all duration-150"
+                className="h-full rounded-full bg-[var(--accent)] transition-all duration-150"
                 style={{
                   width: `${Math.min(100, (extracting!.done / Math.max(1, extracting!.total)) * 100)}%`,
-                  background: "linear-gradient(90deg, #fb923c, #f97316)",
-                  boxShadow: "0 0 14px rgba(249,115,22,0.5)",
                 }}
               />
             </div>
@@ -305,14 +303,14 @@ export function VideoFrameModal({
             <div className="flex items-center gap-2">
               <button
                 onClick={onCancel}
-                className="rounded-full border border-[var(--border)] px-5 py-2 text-sm hover:border-zinc-500 transition-colors"
+                className="rounded-md border border-[var(--line)] px-4 py-2 text-sm text-[var(--fg-soft)] hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] hover:text-foreground transition-colors"
               >
                 Cancel
               </button>
               <button
                 onClick={() => onConfirm({ start, end, fps })}
                 disabled={!loaded || frameCount === 0 || !!loadError}
-                className="rounded-full bg-foreground text-background px-5 py-2 text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+                className="rounded-md bg-[var(--accent)] text-[var(--accent-contrast)] px-5 py-2 text-sm font-medium hover:brightness-105 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 Extract &amp; upload
               </button>
@@ -385,7 +383,7 @@ function TrimSlider({
     <div
       ref={trackRef}
       className={[
-        "relative h-20 select-none rounded-xl overflow-hidden border border-foreground/10 bg-[var(--background)]",
+        "relative h-20 select-none rounded-md overflow-hidden border border-[var(--line)] bg-[var(--background)]",
         disabled ? "opacity-50" : "",
       ].join(" ")}
       style={{ touchAction: "none" }}
@@ -417,11 +415,11 @@ function TrimSlider({
       />
 
       <div
-        className="absolute top-0 h-1 bg-orange-500 pointer-events-none"
+        className="absolute top-0 h-1 bg-[var(--accent)] pointer-events-none"
         style={{ left: `${startPct}%`, right: `${100 - endPct}%` }}
       />
       <div
-        className="absolute bottom-0 h-1 bg-orange-500 pointer-events-none"
+        className="absolute bottom-0 h-1 bg-[var(--accent)] pointer-events-none"
         style={{ left: `${startPct}%`, right: `${100 - endPct}%` }}
       />
 
@@ -434,8 +432,8 @@ function TrimSlider({
           left: `${startPct}%`,
           width: HANDLE_W,
           transform: "translateX(-50%)",
-          background: "#f97316",
-          boxShadow: "0 0 0 1px rgb(var(--shadow-rgb) / 0.25), 0 4px 14px rgba(249,115,22,0.45)",
+          background: "var(--accent)",
+          boxShadow: "0 0 0 1px rgb(var(--shadow-rgb) / 0.25)",
         }}
       >
         <span className="block h-6 w-[2px] rounded-full bg-foreground/80" />
@@ -450,8 +448,8 @@ function TrimSlider({
           left: `${endPct}%`,
           width: HANDLE_W,
           transform: "translateX(-50%)",
-          background: "#f97316",
-          boxShadow: "0 0 0 1px rgb(var(--shadow-rgb) / 0.25), 0 4px 14px rgba(249,115,22,0.45)",
+          background: "var(--accent)",
+          boxShadow: "0 0 0 1px rgb(var(--shadow-rgb) / 0.25)",
         }}
       >
         <span className="block h-6 w-[2px] rounded-full bg-foreground/80" />

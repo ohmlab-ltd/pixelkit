@@ -21,31 +21,6 @@ function timeAgo(iso?: string): string {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
-// Inline padlock shown to the right of a private Project's name — matches the
-// amber PrivateLockIcon the dataset cards use, so Projects and datasets read the
-// same way on the workspace.
-function Lock() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      width="16"
-      height="16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className="shrink-0 text-amber-600 dark:text-amber-300/80"
-      aria-label="Private project"
-      role="img"
-    >
-      <title>Private project</title>
-      <rect x="4" y="11" width="16" height="10" rx="2" />
-      <path d="M8 11V7a4 4 0 0 1 8 0v4" />
-    </svg>
-  );
-}
-
 // Always try to load the Project cover and fall back to the monogram only on a
 // real load error. We don't gate on `card.cover` because that field has been
 // arriving null even when a cover.jpg exists in R2; attempting the image
@@ -99,7 +74,6 @@ function ProjectCard({ card, onClick }: { card: ContainerCard; onClick: () => vo
       <div className="flex flex-1 flex-col gap-2 p-3.5">
         <span className="flex items-center gap-2 truncate font-semibold text-foreground/90">
           <span className="truncate">{card.name}</span>
-          {card.private && <Lock />}
         </span>
         <span className="mt-auto flex items-center gap-2 pt-1 text-xs font-medium text-[var(--muted)]">
           <span className="inline-flex items-center gap-1">

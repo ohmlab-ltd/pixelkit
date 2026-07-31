@@ -1,10 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { BlurhashCanvas } from "react-blurhash";
 
-import { LABEL_COLOURS, buildProjectLabelColourMap, colourForLabelStable, readableTextForBg } from "./OnboardLabelsV2";
+import { LABEL_COLOURS, buildProjectLabelColourMap, colourForLabelStable } from "./OnboardLabelsV2";
 import type { ReferenceImage } from "./OnboardReferencesV2";
 import { BoxEditor, detectionsToBoxes, stripTransientBoxFlags, type EditableBox, type MaskShape, type Validation } from "../BoxEditor";
 import { ReferenceImageEditor } from "./ReferenceImageEditor";
@@ -488,9 +488,6 @@ export function ProjectViewV2Stub({
         }
         if (Array.isArray(j.tags) && labels.length === 0) {
           setEditLabels(j.tags);
-        }
-        if (typeof j.private === "boolean") {
-          setIsPrivate(j.private);
         }
         // Seed the auto-derived dataset behaviour from the first-paint
         // payload (it used to arrive 100-1000 ms later via a standalone
@@ -1452,26 +1449,9 @@ export function ProjectViewV2Stub({
   // chip (the ref alone can't drive a re-render). Kept in step wherever the ref
   // is set from a manifest fetch.
   const [maxInputSize, setMaxInputSize] = useState<number>(1500);
-  // Cover hero banner at the top of the dataset overview (the same cover the
-  // workspace card shows); falls back to the brand wash on a load error.
-  // bannerLight is sampled from the cover's left region (where the info sits)
-  // so the title/meta text + scrim adapt to the image (content-aware), not the
-  // theme. CORS on the cover endpoint lets the canvas read pixels.
-  const [bannerCoverFailed, setBannerCoverFailed] = useState(false);
-  const [bannerLight, setBannerLight] = useState(false);
-  // Cache-buster for the hero cover. cover_thumb keeps the same URL across cover
-  // swaps/uploads, so we bump this on a cover change to force a re-fetch.
-  const [coverBust, setCoverBust] = useState(0);
-  // Retry counter for the hero cover. cover_thumb lazy-renders, so the first GET
-  // (especially the 1280 hero variant) can transiently fail while it bakes;
-  // without a retry the banner stayed blank until a remount — the "go on and off
-  // the project to make it load" bug. Reset on cover change so a swap re-tries.
-  const [bannerRetry, setBannerRetry] = useState(0);
-  // The hero starts on the fast Lanczos render and swaps to the GPU AI-upscaled
-  // variant once it's baked + loaded, so a warm-up render never leaves the
-  // banner blank. Reset on cover change so a swap re-runs from scratch.
-  const [aiCoverReady, setAiCoverReady] = useState(false);
-  useEffect(() => { setBannerCoverFailed(false); setBannerRetry(0); setAiCoverReady(false); }, [coverBust]);
+  // Hidden file input behind the header's "Add images" action — same
+  // handler as the drop zone, so both paths share gating + upload flow.
+  const headerFileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Smooth-scrolls the page to the dataset gallery the moment new
   // images land. Fires after both the drag-drop import path and the
@@ -3746,18 +3726,6 @@ export function ProjectViewV2Stub({
     const cached = readProjectMeta(projectId);
     return cached?.labelColours ?? {};
   });
-  // Whether the project is private. Drives the padlock badge next to
-  // the title (parity with the workspace + public cards) and stays
-  // in sync with the Settings popup via the broadcast effect below.
-  // Seed from the workspace meta cache so the padlock paints on the
-  // first frame when opening a known-private project. Without this
-  // we waited on /api/projects/{id} to resolve, which made the
-  // padlock pop in ~200 ms after the rest of the page.
-  const [isPrivate, setIsPrivate] = useState<boolean>(() => {
-    if (typeof window === "undefined" || !projectId) return false;
-    return !!readProjectMeta(projectId)?.private;
-  });
-
   // Derived ("child") link, from /overview - drives the derived badge next to
   // the title (mirrors the workspace card). null for normal projects.
   const [derivedInfo, setDerivedInfo] = useState<{ parentProjectId?: string; parentName?: string } | null>(null);
@@ -4105,8 +4073,6 @@ export function ProjectViewV2Stub({
                 tileNative: !!slr.tile_native,
               });
             }
-            const priv = !!m?.private;
-            setIsPrivate(priv);
             // Keep the auto-derived dataset behaviour in step with
             // /overview (covers refreshes after a Settings edit). Same
             // cached-only value the mount seeds from /initial; null is
@@ -4126,14 +4092,11 @@ export function ProjectViewV2Stub({
               setMaxInputSize((m as { max_input_size: number }).max_input_size);
             }
             // Mirror into the meta cache so the next mount paints
-            // the padlock without waiting for this fetch again. Owner
+            // instantly without waiting for this fetch again. Owner
             // is cached too, drives the readOnly decision in
             // /app/page.tsx on subsequent /app/<id> refreshes.
             const cacheOwner = m?.owner ?? m?.createdBy ?? undefined;
-            patchProjectMeta(projectId, {
-              private: priv,
-              ...(cacheOwner ? { owner: cacheOwner } : {}),
-            });
+            if (cacheOwner) patchProjectMeta(projectId, { owner: cacheOwner });
           })
           .catch(() => { setLabelAliases({}); setLabelColours({}); });
       }
@@ -4142,18 +4105,16 @@ export function ProjectViewV2Stub({
   }, [projectId, labels]);
 
   // Stay in sync with Settings: the popup broadcasts a meta-changed
-  // event on every save, so the padlock + chip colours repaint here
+  // event on every save, so the chip colours repaint here
   // immediately without waiting for the next manifest fetch.
   useEffect(() => {
     if (typeof window === "undefined" || !projectId) return;
     const handler = (e: Event) => {
       const d = (e as CustomEvent).detail as {
         projectId?: string;
-        private?: boolean;
         labelColours?: Record<string, string>;
       } | null | undefined;
       if (!d || d.projectId !== projectId) return;
-      if (typeof d.private === "boolean") setIsPrivate(d.private);
       if (d.labelColours) setLabelColours(d.labelColours);
     };
     window.addEventListener("pixelkit-project-meta-changed", handler);
@@ -4740,7 +4701,9 @@ export function ProjectViewV2Stub({
   }, [tab]);
 
   const [inputSize, setInputSize] = useState<string>("256x256");
-  const [shapeHovered, setShapeHovered] = useState(false);
+  // Detection settings live behind a default-collapsed disclosure —
+  // they're occasional knobs, not part of the drop → label → review flow.
+  const [detectionSettingsOpen, setDetectionSettingsOpen] = useState(false);
   // Always starts collapsed on project load. User explicitly
   // requested this, opening the drawer should be a deliberate
   // click, not the default. No auto-open effects either: refs
@@ -5018,319 +4981,177 @@ export function ProjectViewV2Stub({
           shell's Explorer tree, so the old fixed nav column (and its
           mobile drawer) are gone and the content reclaims the space. */}
       <div className="w-full min-w-0 max-w-[2000px]">
-      {/* Title section as a cover hero: content overlaid on the dataset cover
-          with a content-aware left gradient-blur (white scrim + dark text on a
-          light cover, dark scrim + white text on a dark one). */}
-      <section className="px-6 lg:px-10 pt-6 pb-2">
-        <div className="relative overflow-hidden rounded-xl border border-[var(--line)] pk-cover">
-          {projectId && !bannerCoverFailed && (
-            <>
-              {/* Visible cover — NO crossOrigin so a CORS hiccup never blanks it.
-                  Requests the 1280 px hero variant: the fast Lanczos render
-                  first, then swaps to the GPU AI-upscaled variant once the
-                  hidden preloader below confirms it's baked + loadable. */}
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={aiCoverReady
-                  ? `${API}/api/projects/${projectId}/cover_thumb?w=1280&ai=1&v=${coverBust}`
-                  : `${API}/api/projects/${projectId}/cover_thumb?w=1280&v=${coverBust}&r=${bannerRetry}`}
-                alt=""
-                onError={() => {
-                  // The AI variant is only shown once the preloader verified it
-                  // loads, so an error here is the Lanczos render: backed-off
-                  // retry before giving up to the brand wash, so a transient
-                  // lazy-render miss doesn't leave the banner blank.
-                  if (aiCoverReady) return;
-                  if (bannerRetry >= 3) { setBannerCoverFailed(true); return; }
-                  const n = bannerRetry;
-                  window.setTimeout(() => setBannerRetry(n + 1), 400 * Math.pow(2, n));
+      {/* Compact tool header: dataset name + right-aligned flat actions,
+          then one thin meta line. No cover hero, no visibility chrome —
+          this is a local tool, not a profile page. */}
+      <section className="px-6 lg:px-10 pt-5" style={fade()}>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <div className="flex min-w-0 flex-1 items-center gap-2.5">
+            {titleEditing && !readOnly ? (
+              <input
+                ref={titleInputRef}
+                value={titleDraft}
+                onChange={(e) => setTitleDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") { e.preventDefault(); commitTitleRename(); }
+                  if (e.key === "Escape") { setTitleEditing(false); }
                 }}
-                className="absolute inset-0 h-full w-full object-cover"
+                onBlur={() => setTitleEditing(false)}
+                aria-label="Rename project"
+                className="w-full max-w-md border-b border-[var(--line-strong)] bg-transparent pb-0.5 text-[16px] font-medium tracking-tight text-[var(--foreground)] outline-none"
               />
-              {/* Hidden preloader for the GPU AI-upscaled hero. When it lands we
-                  flip to it (already cached, so the swap is seamless). If the GPU
-                  / model is unavailable the server falls back to Lanczos for this
-                  URL too, so this still resolves — just to the same bytes. */}
-              {!aiCoverReady && (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={`${API}/api/projects/${projectId}/cover_thumb?w=1280&ai=1&v=${coverBust}`}
-                  alt=""
-                  aria-hidden
-                  className="hidden"
-                  onLoad={() => setAiCoverReady(true)}
-                  onError={() => { /* AI variant unavailable — stay on Lanczos */ }}
-                />
-              )}
-              {/* Hidden crossOrigin copy used only to sample the cover's left
-                  luminance for the content-aware text/scrim. Best-effort: if it
-                  can't be read, we keep the default dark-scrim + white text. */}
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={`${API}/api/projects/${projectId}/cover_thumb?v=${coverBust}`}
-                alt=""
-                aria-hidden
-                crossOrigin="anonymous"
-                onLoad={(e) => {
-                  try {
-                    const img = e.currentTarget;
-                    const cv = document.createElement("canvas");
-                    cv.width = 24;
-                    cv.height = 24;
-                    const ctx = cv.getContext("2d");
-                    if (!ctx) return;
-                    ctx.drawImage(img, 0, 0, Math.max(1, Math.round(img.naturalWidth * 0.5)), img.naturalHeight, 0, 0, 24, 24);
-                    const d = ctx.getImageData(0, 0, 24, 24).data;
-                    let s = 0;
-                    for (let i = 0; i < d.length; i += 4) s += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-                    setBannerLight(s / (d.length / 4) > 150);
-                  } catch {
-                    setBannerLight(false);
-                  }
-                }}
-                className="hidden"
-              />
-            </>
-          )}
-          {/* Gradient blur over the left, where the info sits. */}
-          <div
-            className="absolute inset-0 backdrop-blur-md"
-            style={{
-              maskImage: "linear-gradient(to right, black 28%, transparent 72%)",
-              WebkitMaskImage: "linear-gradient(to right, black 28%, transparent 72%)",
-            }}
-            aria-hidden
-          />
-          <div
-            className={`absolute inset-0 bg-gradient-to-r ${
-              bannerLight ? "from-white/85 via-white/45 to-transparent" : "from-black/80 via-black/45 to-transparent"
-            }`}
-            aria-hidden
-          />
-          {/* Content over the cover. Desktop-tool scale: compact hero. */}
-          <div className="relative flex min-h-[11rem] flex-wrap items-end justify-between gap-6 p-5 sm:p-6">
-            <div className="min-w-0 flex-1">
-          {titleEditing && !readOnly ? (
-            <input
-              ref={titleInputRef}
-              value={titleDraft}
-              onChange={(e) => setTitleDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") { e.preventDefault(); commitTitleRename(); }
-                if (e.key === "Escape") { setTitleEditing(false); }
-              }}
-              onBlur={() => setTitleEditing(false)}
-              aria-label="Rename project"
-              className="text-2xl md:text-3xl font-medium tracking-tight leading-[1.3] bg-transparent outline-none border-b border-foreground/30 focus:border-foreground/60 text-[var(--foreground)] pb-3 w-full"
-            />
-          ) : (
-            <div className="flex items-center gap-4 pb-3" style={fade()}>
+            ) : (
               <h1
-                // pb-2 keeps the descenders (g, y, j, p, q) inside the
-                // padding box so overflow-hidden (needed for the
-                // text-ellipsis trio) doesn't crop them on light or
-                // wide-descender weights. The rename + scale hover
-                // affordance only fires when the viewer owns the
-                // project; on public read-only view the title is a
-                // static label with no cursor / hover surface.
                 className={[
-                  "text-2xl md:text-3xl font-medium tracking-tight leading-[1.3] pb-2 max-w-full overflow-hidden text-ellipsis whitespace-nowrap w-fit drop-shadow-sm",
-                  bannerLight ? "text-zinc-900" : "text-white",
-                  readOnly
-                    ? "cursor-default"
-                    : "cursor-text origin-bottom-left transition-transform duration-200 ease-out hover:scale-[1.02] hover:underline underline-offset-8 decoration-[0.5px] decoration-white/35",
+                  "max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-[16px] font-medium tracking-tight text-[var(--foreground)]",
+                  readOnly ? "cursor-default" : "cursor-text hover:underline underline-offset-4 decoration-[0.5px] decoration-[var(--line-strong)]",
                 ].join(" ")}
                 onClick={readOnly ? undefined : () => setTitleEditing(true)}
                 title={readOnly ? undefined : "Click to rename"}
               >
                 {projectTitle}
               </h1>
-              {derivedInfo && (
-                <a
-                  href={derivedInfo.parentProjectId ? `/app/${derivedInfo.parentProjectId}` : undefined}
-                  className="shrink-0 text-sky-600 dark:text-sky-400/90 transition-opacity hover:opacity-70"
-                  title={derivedInfo.parentName ? `Derived from ${derivedInfo.parentName} - open parent` : "Derived project"}
-                  aria-label="Derived project"
-                >
-                  <svg viewBox="0 0 16 16" className="h-9 w-9" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" role="img">
-                    <title>{derivedInfo.parentName ? `Derived from ${derivedInfo.parentName}` : "Derived project"}</title>
-                    <circle cx="4" cy="3.2" r="1.7" />
-                    <circle cx="4" cy="12.8" r="1.7" />
-                    <circle cx="12" cy="12.8" r="1.7" />
-                    <path d="M4 4.9V11.1M5.7 12.8H10.3" />
-                  </svg>
-                </a>
-              )}
-            </div>
-          )}
-
-          {/* Meta chips, project-page style + content-aware over the
-              cover. No owner identity in this build — just the
-              project-id stamp. */}
-          <div className="mt-3 flex flex-col gap-2.5" style={fade()}>
-            {projectId && (
-              <div className={`flex items-center gap-2 text-sm ${bannerLight ? "text-zinc-800/85" : "text-white/85"}`}>
-                <span
-                  className={`font-mono text-[10px] uppercase tracking-wider ${bannerLight ? "text-zinc-700/70" : "text-white/55"}`}
-                  title={`Project ID: ${projectId}`}
-                >
-                  {projectId.slice(0, 8)}
-                </span>
-              </div>
             )}
-            <div className="flex flex-wrap items-center gap-2">
-              <span
-                className={[
-                  "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium backdrop-blur-md ring-1",
-                  isPrivate
-                    ? bannerLight
-                      ? "bg-orange-500/20 text-orange-900 ring-orange-500/50"
-                      : "bg-orange-500/25 text-orange-50 ring-orange-400/60"
-                    : bannerLight
-                      ? "bg-black/10 text-zinc-900 ring-black/10"
-                      : "bg-white/15 text-white ring-white/10",
-                ].join(" ")}
+            {derivedInfo && (
+              <a
+                href={derivedInfo.parentProjectId ? `/app/${derivedInfo.parentProjectId}` : undefined}
+                className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md border border-[var(--line)] px-2 font-mono text-[11px] uppercase tracking-wider text-[var(--fg-dim)] transition-colors hover:border-[var(--line-strong)] hover:text-[var(--fg-soft)]"
+                title={derivedInfo.parentName ? `Derived from ${derivedInfo.parentName} — open parent` : "A cropped child dataset derived from a parent project"}
               >
-                {isPrivate ? (
-                  <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden><rect x="5" y="11" width="14" height="9" rx="2" /><path d="M8 11V8a4 4 0 0 1 8 0v3" /></svg>
-                ) : (
-                  <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18" /></svg>
-                )}
-                {isPrivate ? "Private" : "Public"}
-              </span>
-              <span className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium backdrop-blur-md ring-1 ${bannerLight ? "bg-black/10 text-zinc-900 ring-black/10" : "bg-white/15 text-white ring-white/10"}`}>
-                Updated {dateLabel}
-              </span>
-              {/* Image size limit: the max upload resolution (longest edge),
-                  inherited from the Project. */}
-              <span
-                className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium backdrop-blur-md ring-1 ${bannerLight ? "bg-black/10 text-zinc-900 ring-black/10" : "bg-white/15 text-white ring-white/10"}`}
-                title={`Image size limit — uploads are kept up to ${maxInputSize}px on the longest edge (set by the Project).`}
-              >
-                <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                  <path d="M15 3h6v6M21 3l-7 7M9 21H3v-6M3 21l7-7" />
-                </svg>
-                {maxInputSize.toLocaleString()}px
-              </span>
-            </div>
+                <span className="h-1.5 w-1.5 rounded-full bg-current opacity-70" aria-hidden />
+                Derived
+              </a>
+            )}
           </div>
-
-          <div
-            className="mt-4 flex flex-wrap items-center gap-2"
-            style={{
-              ...fade(),
-              position: "relative",
-              zIndex: adding ? 60 : undefined,
-            }}
-          >
-            {editLabels.map((lab, i) => {
-              const bg = colourForLabel(editLabels, lab, labelColours);
-              return readOnly ? (
-                <span
-                  key={lab}
-                  className="inline-flex items-center rounded-full pl-3 pr-3 h-7 text-sm font-medium"
-                  style={{ backgroundColor: bg, color: readableTextForBg(bg) }}
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            {/* Primary action: label the dataset. Accent only while there is
+                actually something to run; otherwise it drops to the quiet
+                flat recipe (still present so the state stays legible). */}
+            {!readOnly && !derivedInfo && (() => {
+              const running = labelJob != null && labelJob.status === "running";
+              const processing = processingImportCount > 0;
+              const idleCopy = (() => {
+                if (editLabels.length === 0) return "Label images";
+                if (
+                  unlabelledImportCount === 0
+                  && freshLabels.length === 0
+                  && labelledImportCount > 0
+                ) {
+                  return settingsChanged ? "Relabel all" : "All images labelled";
+                }
+                if (freshLabels.length === 1) return `Label ${displayLabel(freshLabels[0])}`;
+                if (freshLabels.length > 1) return "Label new labels";
+                if (labelledImportCount === 0 && editLabels.length === 1) {
+                  return `Label ${displayLabel(editLabels[0])}`;
+                }
+                if (labelledImportCount === 0) return "Label images";
+                return "Label new images";
+              })();
+              const buttonText = labelJobStarting
+                ? "Starting…"
+                : running
+                ? "Labelling…"
+                : processing
+                ? "Processing…"
+                : idleCopy;
+              const inert =
+                labelJobStarting
+                || running
+                || processing
+                || editLabels.length === 0
+                || (unlabelledImportCount === 0 && freshLabels.length === 0 && !settingsChanged);
+              return (
+                <button
+                  type="button"
+                  onClick={startLabellingJob}
+                  disabled={inert}
+                  title={
+                    editLabels.length === 0
+                      ? "Add labels first, labelling needs at least one tag."
+                      : processing
+                      ? `Wait for ${processingImportCount} image${processingImportCount === 1 ? "" : "s"} to finish processing before labelling.`
+                      : freshLabels.length > 0 && unlabelledImportCount === 0
+                      ? `Re-label every image to find the new label${freshLabels.length === 1 ? "" : "s"}.`
+                      : settingsChanged && unlabelledImportCount === 0
+                      ? "Re-label every image with the new detection settings."
+                      : unlabelledImportCount === 0
+                      ? "No unlabelled images. Drop some onto the dataset."
+                      : running
+                      ? "A labelling job is already running."
+                      : `Start labelling ${unlabelledImportCount} unlabelled image${unlabelledImportCount === 1 ? "" : "s"}.`
+                  }
+                  className={inert ? "pk-btn" : "pk-btn pk-btn-primary"}
                 >
-                  {displayLabel(lab)}
-                </span>
-              ) : (
-                <EditableChip
-                  key={lab}
-                  label={displayLabel(lab)}
-                  colour={bg}
-                  onDelete={() => removeLabel(i)}
-                  onRename={(next) => renameLabel(i, next)}
-                />
+                  {buttonText}
+                </button>
               );
-            })}
-            {readOnly ? null : adding ? (
-              <input
-                ref={addInputRef}
-                value={addInput}
-                onChange={(e) => setAddInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") { e.preventDefault(); addLabel(addInput); setAdding(false); }
-                  else if (e.key === "Escape") { setAddInput(""); setAdding(false); }
-                }}
-                onBlur={() => { if (addInput.trim()) addLabel(addInput); setAdding(false); }}
-                placeholder="new label"
-                className="rounded-md bg-foreground/[0.04] border border-[var(--line)] focus:border-[var(--line-strong)] focus:bg-foreground/[0.06] outline-none px-3 py-1 text-sm text-[var(--foreground)] placeholder:text-foreground/35 transition-colors"
-                style={{ width: "9rem", position: "relative", zIndex: 70 }}
-              />
-            ) : (
+            })()}
+            {!readOnly && !derivedInfo && (
+              <>
+                <input
+                  ref={headerFileInputRef}
+                  type="file"
+                  accept="image/*,video/*"
+                  multiple
+                  className="hidden"
+                  disabled={!referencesSettled}
+                  onChange={(e) => {
+                    handleImportFiles(e.target.files);
+                    if (headerFileInputRef.current) headerFileInputRef.current.value = "";
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => { if (referencesSettled) headerFileInputRef.current?.click(); }}
+                  disabled={!referencesSettled}
+                  className="pk-btn"
+                  title={referencesSettled ? "Add images to this dataset" : "Wait for references to finish saving"}
+                >
+                  Add images
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              onClick={() => { if (projectId) setExportOpen(true); }}
+              className="pk-btn"
+              title="Export dataset"
+            >
+              Export
+            </button>
+            {!readOnly && (
               <button
                 type="button"
-                onClick={() => setAdding(true)}
-                aria-label="Add label"
-                title="Add label"
-                className={`inline-flex items-center justify-center h-6 w-6 rounded-full transition-colors ${bannerLight ? "border-zinc-900/20 text-zinc-700 hover:text-zinc-900 hover:border-zinc-900/40" : "border-white/30 text-white/70 hover:text-white hover:border-white/50"}`}
+                // Dataset Settings (rename / cover / label colours / delete) are
+                // owner-only. An editor on a teammate's dataset can edit content
+                // but the Settings button is greyed out + inert.
+                disabled={!isOwnDataset}
+                onClick={() => { if (projectId && isOwnDataset) setSettingsOpen(true); }}
+                className="pk-btn px-2"
+                aria-label="Dataset settings"
+                title={isOwnDataset ? "Dataset settings" : "Only the dataset's creator can change its settings"}
               >
-                <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
-                  <line x1="12" y1="5" x2="12" y2="19" />
-                  <line x1="5" y1="12" x2="19" y2="12" />
+                <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
                 </svg>
               </button>
             )}
           </div>
-
         </div>
-
-        {/* Right column stretches the hero's height so the derived badge
-            sits in the top-right corner and the action buttons hold the
-            bottom-right. */}
-        <div className="flex flex-col items-end justify-between gap-3 self-stretch shrink-0" style={fade()}>
-          <div className="flex items-center">
-            {derivedInfo && (
-              <span
-                className={`inline-flex h-6 items-center gap-1.5 rounded-md px-2.5 text-[11px] font-medium uppercase tracking-wider backdrop-blur-md ring-1 ${bannerLight ? "bg-black/10 text-zinc-900 ring-black/10" : "bg-white/15 text-white ring-white/10"}`}
-                title="A cropped child dataset derived from a parent project"
-              >
-                <span className="h-1.5 w-1.5 rounded-full bg-current opacity-70" aria-hidden />
-                Derived
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-          {!readOnly && (
-            <button
-              type="button"
-              // Dataset Settings (rename / cover / label colours / delete) are
-              // owner-only. An editor on a teammate's dataset can edit content
-              // but the Settings button is greyed out + inert.
-              disabled={!isOwnDataset}
-              onClick={() => { if (projectId && isOwnDataset) setSettingsOpen(true); }}
-              className={[
-                "inline-flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-[13px] font-medium backdrop-blur-md transition",
-                bannerLight ? "bg-black/80 text-white" : "bg-white/90 text-black",
-                isOwnDataset
-                  ? bannerLight ? "hover:bg-black/90" : "hover:bg-white"
-                  : "cursor-not-allowed opacity-40",
-              ].join(" ")}
-              title={isOwnDataset ? "Dataset settings" : "Only the dataset's creator can change its settings"}
-            >
-              <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <circle cx="12" cy="12" r="3" />
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-              </svg>
-              Settings
-            </button>
+        {/* One thin meta line: id · updated · upload size cap. */}
+        <div className="pk-micro mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1 tabular-nums">
+          {projectId && (
+            <>
+              <span title={`Project ID: ${projectId}`}>{projectId.slice(0, 8)}</span>
+              <span aria-hidden className="text-[var(--fg-faint)]">·</span>
+            </>
           )}
-          <button
-            type="button"
-            onClick={() => { if (projectId) setExportOpen(true); }}
-            className={`inline-flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-[13px] font-medium backdrop-blur-md transition ${bannerLight ? "bg-black/80 text-white hover:bg-black/90" : "bg-white/90 text-black hover:bg-white"}`}
-            title="Export dataset"
-          >
-            <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <polyline points="7 10 12 15 17 10" />
-              <line x1="12" y1="15" x2="12" y2="3" />
-            </svg>
-            Export
-          </button>
-          </div>
-          </div>
-          </div>
+          <span>Updated {dateLabel}</span>
+          <span aria-hidden className="text-[var(--fg-faint)]">·</span>
+          <span title={`Image size limit — uploads are kept up to ${maxInputSize}px on the longest edge (set by the Project).`}>
+            ≤{maxInputSize.toLocaleString()}px
+          </span>
         </div>
       </section>
 
@@ -5355,91 +5176,88 @@ export function ProjectViewV2Stub({
             { label: "Augmentations", value: augmentations },
           ];
           return (
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+            <div className="grid grid-cols-2 gap-px overflow-hidden rounded-md border border-[var(--line)] bg-[var(--line-soft)] sm:grid-cols-3 lg:grid-cols-5">
               {items.map((s) => (
-                <div key={s.label} className="pk-card rounded-lg px-4 py-4">
-                  <div className="text-[2rem] font-semibold leading-none tracking-tight tabular-nums text-[var(--foreground)]">
+                <div key={s.label} className="bg-[var(--panel-solid)] px-4 py-3">
+                  <div className="text-[20px] font-medium leading-none tracking-tight tabular-nums text-[var(--foreground)]">
                     {s.value.toLocaleString()}
                   </div>
-                  <div className="pk-eyebrow mt-2">{s.label}</div>
+                  <div className="pk-micro mt-1.5">{s.label}</div>
                 </div>
               ))}
               <button
                 type="button"
                 onClick={() => setHealthOpen(true)}
                 title="Open dataset health"
-                className="pk-card pk-card-hover rounded-lg px-4 py-4 text-left"
+                className="bg-[var(--panel-solid)] px-4 py-3 text-left outline-none transition-colors hover:bg-[var(--surface-2)] focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[var(--focus-ring)]"
               >
-                <div className="text-[2rem] font-semibold leading-none tracking-tight tabular-nums text-[var(--foreground)]">
+                <div className="text-[20px] font-medium leading-none tracking-tight tabular-nums text-[var(--foreground)]">
                   {typeof score === "number" ? Math.round(score) : "—"}
                 </div>
-                <div className="pk-eyebrow mt-2" style={{ color: "var(--accent)" }}>
-                  {healthTone ? `Health · ${healthTone}` : "Health"}
-                </div>
+                <div className="pk-micro mt-1.5">{healthTone ? `Health · ${healthTone}` : "Health"}</div>
               </button>
             </div>
           );
         })()}
       </section>
 
-      {/* Target input shape */}
-      <section className="px-6 lg:px-10 mt-1 pb-6" style={rise()}>
-        <div className="flex items-center gap-4 flex-wrap">
-          <div
-            className="flex items-center gap-3"
-            onMouseEnter={() => setShapeHovered(true)}
-            onMouseLeave={() => setShapeHovered(false)}
-          >
-            <span className="text-sm text-foreground/55 shrink-0">Target input shape</span>
-            <div
-              className="overflow-hidden grid items-center"
-              style={{
-                gridTemplateAreas: '"stack"',
-                maxWidth: shapeHovered ? "720px" : "92px",
-                transition: shapeHovered
-                  ? "max-width 360ms cubic-bezier(0.25, 0.46, 0.45, 0.94)"
-                  : "max-width 300ms cubic-bezier(0.25, 0.46, 0.45, 0.94)",
+      {/* Labels: uniform neutral chips (colour lives in the swatch dot)
+          + a quiet add affordance. Management stays inline; colours are
+          edited in Settings. */}
+      <section className="px-6 lg:px-10 pt-3 pb-4" style={rise()}>
+        <div
+          className="flex flex-wrap items-center gap-1.5"
+          style={{ position: "relative", zIndex: adding ? 60 : undefined }}
+        >
+          <span className="pk-micro mr-1.5">Labels</span>
+          {editLabels.map((lab, i) => {
+            const bg = colourForLabel(editLabels, lab, labelColours);
+            return readOnly ? (
+              <span
+                key={lab}
+                className="inline-flex h-6 items-center gap-1.5 rounded-md border border-[var(--line)] px-2 font-mono text-[12px] text-[var(--fg-soft)]"
+              >
+                <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: bg }} aria-hidden />
+                {displayLabel(lab)}
+              </span>
+            ) : (
+              <EditableChip
+                key={lab}
+                label={displayLabel(lab)}
+                colour={bg}
+                onDelete={() => removeLabel(i)}
+                onRename={(next) => renameLabel(i, next)}
+              />
+            );
+          })}
+          {readOnly ? null : adding ? (
+            <input
+              ref={addInputRef}
+              value={addInput}
+              onChange={(e) => setAddInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { e.preventDefault(); addLabel(addInput); setAdding(false); }
+                else if (e.key === "Escape") { setAddInput(""); setAdding(false); }
               }}
+              onBlur={() => { if (addInput.trim()) addLabel(addInput); setAdding(false); }}
+              placeholder="new label"
+              className="h-6 rounded-md border border-[var(--line)] bg-transparent px-2 font-mono text-[12px] text-[var(--foreground)] outline-none transition-colors placeholder:text-[var(--fg-faint)] focus:border-[var(--line-strong)]"
+              style={{ width: "9rem", position: "relative", zIndex: 70 }}
+            />
+          ) : (
+            <button
+              type="button"
+              onClick={() => setAdding(true)}
+              aria-label="Add label"
+              title="Add label"
+              className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-[var(--line)] text-[var(--fg-dim)] transition-colors hover:border-[var(--line-strong)] hover:text-[var(--foreground)]"
             >
-              <button
-                type="button"
-                onClick={() => setShapeHovered(true)}
-                style={{
-                  gridArea: "stack",
-                  opacity: shapeHovered ? 0 : 1,
-                  pointerEvents: shapeHovered ? "none" : "auto",
-                  transition: shapeHovered
-                    ? "opacity 160ms ease-out"
-                    : "opacity 260ms ease-out",
-                }}
-                className="appearance-none bg-transparent border-0 p-0 text-left cursor-pointer"
-                aria-label="Expand input-shape picker"
-              >
-                <span className="inline-flex items-center font-mono text-xs text-foreground/85 px-3 py-1 rounded-md border border-[var(--line)] bg-[var(--surface)] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] whitespace-nowrap transition-colors">
-                  {inputSize}
-                </span>
-              </button>
-              <div
-                style={{
-                  gridArea: "stack",
-                  opacity: shapeHovered ? 1 : 0,
-                  pointerEvents: shapeHovered ? "auto" : "none",
-                  transition: shapeHovered
-                    ? "opacity 220ms ease-out 120ms"
-                    : "opacity 200ms ease-out",
-                }}
-              >
-                <div className="whitespace-nowrap">
-                  <SegmentedControl
-                    value={inputSize}
-                    onChange={setInputSize}
-                    options={INPUT_SHAPES.map((s) => ({ value: s, label: s }))}
-                  />
-                </div>
-              </div>
-            </div>
-          </div>
-          <ShapeHelpPopover />
+              <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </button>
+          )}
         </div>
       </section>
 
@@ -5515,13 +5333,12 @@ export function ProjectViewV2Stub({
           the placeholder grid is up immediately and refs slot in
           as their bytes arrive. */}
       <section className="px-6 lg:px-10 pt-3 pb-3">
-          <div className="pk-card rounded-lg px-5 py-3">
+          <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-5 py-4">
           {/* Always-expanded heading (no dropdown): the references page shows
               all of its info directly. */}
-          <div className="inline-flex items-center gap-3 text-xl font-medium tracking-tight text-[var(--foreground)] min-h-[2.5rem]">
-            <span className="pk-accent-bar" style={{ height: "1.4rem" }} aria-hidden />
-            Reference images
-            <span className="ml-1 text-xs font-normal text-foreground/55">
+          <div className="flex items-baseline gap-2">
+            <h2 className="pk-micro text-[var(--fg-soft)]">Reference images</h2>
+            <span className="font-mono text-[11px] tabular-nums text-[var(--fg-dim)]">
               {refs.length}
               {expectedRefCount > refs.length ? ` / ${expectedRefCount}` : ""}
             </span>
@@ -5529,18 +5346,18 @@ export function ProjectViewV2Stub({
 
           <div>
             <div>
-              <p className="mt-1 text-sm text-foreground/65 leading-relaxed">
+              <p className="mt-2 text-[13px] text-foreground/65 leading-relaxed">
                 Reference images (optional) — add examples to improve label
                 matching, especially when classes look similar.
               </p>
-              <p className="mt-1 text-sm text-foreground/55">
+              <p className="mt-1 text-[13px] text-foreground/55">
                 Drop each photo into its label section below. The section is the label, so PixelKit knows exactly what each reference shows.
               </p>
 
               {/* Per-label annotation status chips (annotation count is
                   backend-driven, placeholder at 0/5 for now). */}
               {editLabels.length > 0 && (
-                <div className="mt-4 flex flex-wrap items-center gap-2">
+                <div className="mt-3.5 flex flex-wrap items-center gap-1.5">
                   {editLabels.map((lab) => {
                     // Case + whitespace insensitive compare. cleanLabel
                     // and the open-vocab detector can produce labels that drift
@@ -5560,16 +5377,16 @@ export function ProjectViewV2Stub({
                     return (
                       <span
                         key={lab}
-                        className="inline-flex items-center gap-1.5 rounded-full pl-3 pr-2.5 h-7 text-sm font-medium"
-                        style={{ backgroundColor: bg, color: readableTextForBg(bg) }}
+                        className="inline-flex h-6 items-center gap-1.5 rounded-md border border-[var(--line)] px-2 font-mono text-[12px] text-[var(--fg-soft)]"
                       >
+                        <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: bg }} aria-hidden />
                         {displayLabel(lab)}
                         {annotDone ? (
-                          <svg viewBox="0 0 24 24" className="h-3 w-3 opacity-50 shrink-0" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-label="Complete">
+                          <svg viewBox="0 0 24 24" className="h-3 w-3 shrink-0 text-[var(--ok)]" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-label="Complete">
                             <polyline points="5 12 10 17 19 7" />
                           </svg>
                         ) : (
-                          <span className="text-[10px] opacity-60 tabular-nums">{annotCount}/{ANNOTS_PER_LABEL}</span>
+                          <span className="text-[10px] tabular-nums text-[var(--fg-dim)]">{annotCount}/{ANNOTS_PER_LABEL}</span>
                         )}
                       </span>
                     );
@@ -5609,10 +5426,10 @@ export function ProjectViewV2Stub({
           every project open. */}
       {refUploadCounts.uploading > 0 && (
         <section className="px-6 lg:px-10 pt-0 pb-3" style={rise()}>
-          <div className="rounded-xl border border-amber-300/30 bg-amber-300/[0.05] px-4 py-3 flex items-center gap-3">
+          <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-4 py-3 flex items-center gap-3">
             <span className="relative flex h-2 w-2 shrink-0" aria-hidden>
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-300/60 opacity-75" />
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-300" />
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[var(--warn)] opacity-60" />
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-[var(--warn)]" />
             </span>
             <div className="flex-1 min-w-0">
               <div className="text-[12px] font-medium text-[var(--warn)]">
@@ -5722,7 +5539,7 @@ export function ProjectViewV2Stub({
           while the gallery fills in behind it). */}
       {!readOnly && importProgress && importProgress.total > 0 && (
         <section className="px-6 lg:px-10 pb-3">
-          <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-5 py-4">
+          <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-5 py-4">
             <div className="flex items-center justify-between gap-3 text-sm">
               <span className="font-medium text-[var(--foreground)]">
                 {importProgress.done >= importProgress.total ? "Finishing up…" : "Uploading images"}
@@ -5746,7 +5563,7 @@ export function ProjectViewV2Stub({
               You can keep working, images appear in the gallery as they finish uploading.
             </p>
             {importProgress.total >= 500 && (
-              <p className="mt-1 text-[11px] text-amber-500/90">
+              <p className="mt-1 text-[11px] text-[var(--warn)]">
                 Large import of {importProgress.total.toLocaleString()} images. Keep this tab open until it
                 finishes, closing it stops the remaining uploads (already-uploaded images are kept, and
                 re-dropping the same files later skips duplicates).
@@ -5762,129 +5579,37 @@ export function ProjectViewV2Stub({
       {!readOnly && !derivedInfo && (
       <>
       <section className="px-6 lg:px-10 pt-3 pb-3" style={rise()}>
-        <div className="rounded-lg bg-foreground/[0.025] px-5 py-3">
-          <div className="flex items-center justify-between gap-3 flex-wrap">
-            {/* Static heading (no dropdown): the annotation controls are
-                built into the page below. */}
-            <div className="flex min-h-[2.5rem] items-center gap-3 flex-wrap">
-              <h2 className="flex items-center gap-3 text-xl font-medium tracking-tight text-[var(--foreground)]">
-                <span className="pk-accent-bar" style={{ height: "1.4rem" }} aria-hidden />
-                Annotations
-              </h2>
-              <span className="text-xs text-foreground/55">
-                {`${editLabels.length} label${editLabels.length === 1 ? "" : "s"} · ${sam3IsDefault ? "default" : "custom"} detection settings`}
+        {/* Detection settings: occasional knobs, so they live behind a
+            default-collapsed disclosure row. The flow is drop → label →
+            review; the Start action itself sits in the page header. */}
+        <div className="rounded-md border border-[var(--line)] bg-[var(--panel)]">
+          <button
+            type="button"
+            onClick={() => setDetectionSettingsOpen((v) => !v)}
+            aria-expanded={detectionSettingsOpen}
+            className="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left outline-none transition-colors hover:bg-[var(--surface-hover)] focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[var(--focus-ring)]"
+          >
+            <span className="flex items-baseline gap-2.5">
+              <span className="pk-micro text-[var(--fg-soft)]">Detection settings</span>
+              <span className="font-mono text-[11px] text-[var(--fg-dim)]">
+                {sam3IsDefault ? "default" : "custom"}
               </span>
-            </div>
-            {(() => {
-              const running = labelJob != null && labelJob.status === "running";
-              const processing = processingImportCount > 0;
-              // Adaptive idle copy: one-label fresh dataset uses the
-              // label's own name; multi-label fresh dataset says "all
-              // images"; partial datasets (some already labelled) say
-              // "new images". Falls through to "Start labelling" when
-              // there are no labels yet (button stays disabled).
-              const idleCopy = (() => {
-                if (editLabels.length === 0) return "Start labelling";
-                // Nothing left to do: every persisted image is
-                // labelled and there are no fresh labels that would
-                // need a re-pass. Surface that state honestly instead
-                // of saying "Start labelling new images" - the button
-                // is already disabled here, but the text used to lie.
-                if (
-                  unlabelledImportCount === 0
-                  && freshLabels.length === 0
-                  && labelledImportCount > 0
-                ) {
-                  return settingsChanged
-                    ? "Relabel all with new settings"
-                    : "All images labelled";
-                }
-                // Fresh labels (just-added, never detected) take
-                // precedence over image-state copy, they describe
-                // the more specific action the user just queued up.
-                if (freshLabels.length === 1) {
-                  return `Start labelling ${displayLabel(freshLabels[0])}`;
-                }
-                if (freshLabels.length > 1) {
-                  return "Start labelling new labels";
-                }
-                if (labelledImportCount === 0 && editLabels.length === 1) {
-                  return `Start labelling ${displayLabel(editLabels[0])}`;
-                }
-                if (labelledImportCount === 0) return "Start labelling all images";
-                return "Start labelling new images";
-              })();
-              const buttonText = labelJobStarting
-                ? "Starting…"
-                : running
-                ? "Labelling in progress"
-                : processing
-                ? "Processing images…"
-                : idleCopy;
-              const buttonKey = labelJobStarting
-                ? "starting"
-                : running
-                ? "running"
-                : processing
-                ? "processing"
-                : `idle:${idleCopy}`;
-              return (
-                <AnimatedStartButton
-                  text={buttonText}
-                  buttonKey={buttonKey}
-                  running={running}
-                  onClick={startLabellingJob}
-                  disabled={
-                    labelJobStarting
-                    || running
-                    || processing
-                    || editLabels.length === 0
-                    // Button stays enabled when there's at least one
-                    // unlabelled image OR a freshly-added label that
-                    // needs an across-the-board pass. Without the
-                    // freshLabels branch a user who added a tag to a
-                    // fully-labelled project saw the button copy
-                    // change but the button stayed greyed out.
-                    || (unlabelledImportCount === 0 && freshLabels.length === 0 && !settingsChanged)
-                  }
-                  title={
-                    editLabels.length === 0
-                      ? "Add labels first, labelling needs at least one tag."
-                      : processing
-                      ? `Wait for ${processingImportCount} image${processingImportCount === 1 ? "" : "s"} to finish processing before labelling.`
-                      : freshLabels.length > 0 && unlabelledImportCount === 0
-                      ? `Re-label every image to find the new label${freshLabels.length === 1 ? "" : "s"}.`
-                      : settingsChanged && unlabelledImportCount === 0
-                      ? "Re-label every image with the new detection settings."
-                      : unlabelledImportCount === 0
-                      ? "No unlabelled images. Drop some onto the dataset."
-                      : running
-                      ? "A labelling job is already running."
-                      : `Start labelling ${unlabelledImportCount} unlabelled image${unlabelledImportCount === 1 ? "" : "s"}.`
-                  }
-                  fadeOpacity={
-                    labelJobStarting || running ? 0.95
-                      : (
-                        processing
-                        || editLabels.length === 0
-                        || (unlabelledImportCount === 0 && freshLabels.length === 0 && !settingsChanged)
-                        ? 0.4 : 1
-                      )
-                  }
-                />
-              );
-            })()}
-          </div>
-
-          <div>
-            <div>
-              {/* Labels are managed at the top of the project (the chip rail
-                  under the title), so the annotations section no longer repeats
-                  a Labels editor. */}
+            </span>
+            <svg
+              viewBox="0 0 24 24"
+              className="h-3.5 w-3.5 shrink-0 text-[var(--fg-dim)] transition-transform"
+              style={{ transform: detectionSettingsOpen ? "rotate(180deg)" : "none" }}
+              fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden
+            >
+              <path d="M6 9l6 6 6-6" />
+            </svg>
+          </button>
+          {detectionSettingsOpen && (
+            <div className="border-t border-[var(--line-soft)] px-4 pb-4">
               {/* Detection knobs. The defaults are tuned for general-purpose
                   datasets; the slider rails are clamped to the range
                   where each control still produces sane output. */}
-              <div className="mt-4 grid gap-4 border-t border-foreground/[0.06] pt-4 sm:grid-cols-3">
+              <div className="mt-4 grid gap-4 sm:grid-cols-3">
                 <Sam3Slider
                   label="Detection confidence"
                   description="How sure the model has to be before keeping a box. Lower picks up more candidates; higher trims false positives."
@@ -5920,7 +5645,7 @@ export function ProjectViewV2Stub({
                   frame to its fixed inference size, shrinking small objects
                   on big frames below detectability) vs native-resolution
                   tiling. One model pass per tile — explicit opt-in. */}
-              <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-foreground/[0.06] pt-4">
+              <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-[var(--line-soft)] pt-4">
                 <div className="min-w-0 flex-1">
                   <div className="text-[12px] font-medium text-[var(--foreground)]">Resolution</div>
                   <p className="mt-0.5 text-[11px] leading-relaxed text-foreground/45">
@@ -5938,11 +5663,11 @@ export function ProjectViewV2Stub({
                   ]}
                 />
               </div>
-              <div className="mt-3 flex items-center justify-between">
+              <div className="mt-4 flex items-center justify-between border-t border-[var(--line-soft)] pt-3">
                 <button
                   type="button"
                   onClick={() => setClearAllOpen(true)}
-                  className="text-[11px] uppercase tracking-wider font-mono text-rose-500/80 hover:text-rose-500 transition-colors"
+                  className="text-[11px] uppercase tracking-wider font-mono text-[var(--bad)] opacity-80 hover:opacity-100 transition-opacity"
                   title="Wipe every detection + edited box across the whole project"
                 >
                   Clear all annotations
@@ -5958,7 +5683,7 @@ export function ProjectViewV2Stub({
                 </button>
               </div>
             </div>
-          </div>
+          )}
         </div>
       </section>
 
@@ -6120,7 +5845,7 @@ export function ProjectViewV2Stub({
       {/* Transient video-error chip, shown when a video was
           rejected for being too large or failed mid-decode. */}
       {videoError && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[1250] rounded-md border border-rose-500/40 bg-rose-500/[0.12] px-4 py-2 text-[12px] text-rose-700 dark:text-rose-200 shadow-lg backdrop-blur-md">
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[1250] rounded-md border border-[var(--line-strong)] bg-[var(--surface)] px-4 py-2 text-[12px] text-[var(--bad)] shadow-lg backdrop-blur-md">
           {videoError}
         </div>
       )}
@@ -6383,8 +6108,10 @@ export function ProjectViewV2Stub({
         <ProjectSettingsV2
           projectId={projectId}
           projectName={projectTitle}
-          initialPrivate={isPrivate}
           labels={editLabels}
+          inputShape={inputSize}
+          inputShapeOptions={INPUT_SHAPES}
+          onInputShapeChange={setInputSize}
           labelAliases={labelAliases}
           labelColours={labelColours}
           references={refs
@@ -6405,16 +6132,10 @@ export function ProjectViewV2Stub({
             setLabelColours(next);
             if (projectId) patchProjectMeta(projectId, { labelColours: next });
           }}
-          onPrivateChange={(next) => {
-            setIsPrivate(next);
-            if (projectId) patchProjectMeta(projectId, { private: next });
-          }}
           onCoverChange={() => {
+            // The cover only surfaces on workspace cards now — poke the
+            // meta cache so they refresh their thumb.
             if (projectId) patchProjectMeta(projectId, {});
-            // A new cover may exist even if a prior load failed; clear the
-            // failure latch and bust the cache so the hero re-fetches.
-            setBannerCoverFailed(false);
-            setCoverBust(Date.now());
           }}
           onDeleted={() => {
             requestExplorerRefresh();
@@ -6760,10 +6481,10 @@ function RefImageGrid({
               className={[
                 "w-full px-1.5 py-0.5 rounded-md text-[9px] font-medium tabular-nums backdrop-blur-sm flex items-center gap-1",
                 worstWarning.warning === "outlier"
-                  ? "bg-rose-500/35 text-rose-50 border border-rose-300/40"
+                  ? "bg-black/60 text-rose-200 border border-white/10"
                   : worstWarning.warning === "looks like other class"
-                    ? "bg-amber-500/35 text-amber-50 border border-amber-300/40"
-                    : "bg-foreground/10 text-foreground/70 border border-foreground/15",
+                    ? "bg-black/60 text-amber-200 border border-white/10"
+                    : "bg-black/60 text-white/70 border border-white/10",
               ].join(" ")}
             >
               <svg className="h-2.5 w-2.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -6791,7 +6512,7 @@ function RefImageGrid({
           the reference with that label, and the quality badge then flags
           any photo that looks more like another section. */}
       {labels.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-foreground/10 px-4 py-6 text-center text-[12px] text-foreground/45">
+        <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-4 py-6 text-center text-[12px] text-foreground/45">
           Add at least one label above to start uploading references.
         </div>
       ) : (
@@ -6869,7 +6590,7 @@ function RefImageGrid({
               longer) a project label, e.g. uploaded before that label
               was renamed. Open one to re-label it in the editor. */}
           {unsortedRefs.length > 0 && (
-            <div className="rounded-lg border border-amber-300/20 bg-amber-300/[0.03] p-4">
+            <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] p-4">
               <div className="flex items-center gap-2 mb-3 flex-wrap">
                 <span className="text-sm font-medium">Unsorted</span>
                 <span className="text-[11px] text-foreground/35 font-mono">{unsortedRefs.length}</span>
@@ -6992,19 +6713,12 @@ function EditableChip({
     if (next && next !== label) onRename?.(next);
   };
 
-  // Chip text + sub-elements inherit from the chip's color so a
-  // dark background flips white text + a paler underline / × button.
-  // currentColor lets a single contrast pick drive every interior
-  // mark.
-  const fg = readableTextForBg(colour);
+  // Neutral chip: hairline border + transparent bg; the label colour
+  // lives ONLY in the small swatch dot. The remove (×) affordance
+  // expands in on hover so the resting row stays quiet.
   return (
-    <span
-      // Shrunk by default (just the label); on hover the chip grows and the
-      // remove (x) button expands in. The width + padding animate so the chip
-      // visibly increases in size under the cursor.
-      className="group inline-flex items-center rounded-full pl-3 pr-3 group-hover:pr-1.5 h-7 text-sm font-medium transition-[padding] duration-150 ease-out motion-reduce:transition-none"
-      style={{ backgroundColor: colour, color: fg }}
-    >
+    <span className="group inline-flex h-6 items-center gap-1.5 rounded-md border border-[var(--line)] bg-transparent px-2 font-mono text-[12px] text-[var(--fg-soft)] transition-colors hover:border-[var(--line-strong)] hover:text-[var(--foreground)]">
+      <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: colour }} aria-hidden />
       {editing ? (
         <input
           ref={inputRef}
@@ -7016,8 +6730,8 @@ function EditableChip({
           }}
           onBlur={cancel}
           aria-label={`Rename ${label}`}
-          className="bg-transparent outline-none placeholder:opacity-40"
-          style={{ width: `${Math.max(2, draft.length)}ch`, color: fg }}
+          className="bg-transparent font-mono text-[12px] text-[var(--foreground)] outline-none placeholder:opacity-40"
+          style={{ width: `${Math.max(2, draft.length)}ch` }}
         />
       ) : (
         <span
@@ -7026,7 +6740,6 @@ function EditableChip({
           onClick={() => onRename && setEditing(true)}
           onKeyDown={(e) => { if (onRename && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); setEditing(true); } }}
           className={["select-none", onRename ? "hover:underline underline-offset-2 cursor-text" : "cursor-default"].join(" ")}
-          style={onRename ? { textDecorationColor: "currentColor" } : undefined}
         >
           {label}
         </span>
@@ -7035,8 +6748,7 @@ function EditableChip({
         type="button"
         onClick={onDelete}
         aria-label={`Remove ${label}`}
-        className="inline-flex h-5 w-0 shrink-0 items-center justify-center overflow-hidden rounded-full opacity-0 transition-all duration-150 ease-out group-hover:ml-1 group-hover:w-5 group-hover:opacity-100 hover:bg-black/20 motion-reduce:transition-none"
-        style={{ color: fg }}
+        className="inline-flex h-4 w-0 shrink-0 items-center justify-center overflow-hidden rounded-sm text-[var(--fg-dim)] opacity-0 transition-all duration-150 ease-out group-hover:w-4 group-hover:opacity-100 hover:text-[var(--bad)] motion-reduce:transition-none"
       >
         <svg width="8" height="8" viewBox="0 0 8 8" fill="none" aria-hidden>
           <path d="M1.5 1.5l5 5M6.5 1.5l-5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
@@ -7091,20 +6803,20 @@ function VerdictPills({
     {
       key: "good",
       label: "Good",
-      active: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-200",
-      idle: "text-foreground/55 hover:text-emerald-700 dark:hover:text-emerald-200",
+      active: "bg-[var(--surface-hover)] text-[var(--ok)]",
+      idle: "text-foreground/55 hover:text-[var(--ok)]",
     },
     {
       key: "unsure",
       label: "Unsure",
-      active: "bg-amber-500/20 text-amber-800 dark:text-amber-200",
-      idle: "text-foreground/55 hover:text-amber-800 dark:hover:text-amber-200",
+      active: "bg-[var(--surface-hover)] text-[var(--warn)]",
+      idle: "text-foreground/55 hover:text-[var(--warn)]",
     },
     {
       key: "bad",
       label: "Bad",
-      active: "bg-rose-500/15 text-rose-700 dark:text-rose-200",
-      idle: "text-foreground/55 hover:text-rose-700 dark:hover:text-rose-200",
+      active: "bg-[var(--surface-hover)] text-[var(--bad)]",
+      idle: "text-foreground/55 hover:text-[var(--bad)]",
     },
   ];
   return (
@@ -7141,104 +6853,6 @@ function VerdictPills({
 // "Start labelling all images" and "Start labelling {labelname}".
 // Browsers don't transition `width: auto` so we measure the ghost
 // and set an explicit width that the CSS transition can pick up.
-
-function AnimatedStartButton({
-  text,
-  buttonKey,
-  running,
-  disabled,
-  onClick,
-  title,
-  fadeOpacity,
-}: {
-  text: string;
-  buttonKey: string;
-  running: boolean;
-  disabled: boolean;
-  onClick: () => void;
-  title: string;
-  fadeOpacity: number;
-}) {
-  const ghostRef = useRef<HTMLSpanElement | null>(null);
-  const [pixelWidth, setPixelWidth] = useState<number | null>(null);
-  // Measure the ghost any time the text changes. useLayoutEffect so
-  // the width lands before the browser paints, which avoids a
-  // single-frame "auto" → "measured" jump on the first render.
-  useLayoutEffect(() => {
-    if (!ghostRef.current) return;
-    const w = ghostRef.current.offsetWidth;
-    if (w > 0) setPixelWidth(w);
-  }, [text]);
-  return (
-    <div className="relative inline-flex items-center">
-      {/* Off-screen ghost mirrors the button's chrome (font, padding,
-          weight) so its offsetWidth is exactly what the button will
-          be once it settles. position:absolute keeps it out of the
-          layout flow. */}
-      <span
-        ref={ghostRef}
-        aria-hidden
-        className="rounded-md px-5 py-2 text-[13px] font-semibold inline-flex items-center justify-center whitespace-nowrap pointer-events-none"
-        style={{
-          position: "absolute",
-          visibility: "hidden",
-          left: 0,
-          top: 0,
-          height: 0,
-          whiteSpace: "nowrap",
-        }}
-      >
-        {text}
-      </span>
-      <button
-        type="button"
-        onClick={onClick}
-        disabled={disabled}
-        title={title}
-        className="relative rounded-md px-5 py-2 text-[13px] font-semibold text-[var(--accent-contrast)] hover:brightness-105 disabled:cursor-not-allowed overflow-hidden whitespace-nowrap inline-flex items-center justify-center"
-        style={{
-          backgroundColor: running ? "var(--accent-dim)" : "var(--accent)",
-          opacity: fadeOpacity,
-          // Pixel width from the ghost lets the browser interpolate
-          // between two concrete values. Falls back to "auto" on the
-          // very first render so we never paint a 0-px button.
-          width: pixelWidth != null ? `${pixelWidth}px` : "auto",
-          transition:
-            "width 320ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease, background-color 220ms ease",
-        }}
-      >
-        {running && (
-          <span
-            aria-hidden
-            className="pointer-events-none absolute inset-0"
-            style={{
-              background:
-                "linear-gradient(90deg, transparent 0%, rgb(var(--foreground-rgb) / 0.28) 50%, transparent 100%)",
-              animation: "labelBtnShimmer 2.4s linear infinite",
-            }}
-          />
-        )}
-        <span
-          key={buttonKey}
-          className="relative inline-block"
-          style={{ animation: "labelBtnTextIn 320ms cubic-bezier(0.2,0.7,0.2,1) both" }}
-        >
-          {text}
-        </span>
-        <style>{`
-          @keyframes labelBtnTextIn {
-            0%   { opacity: 0; transform: translateY(4px); }
-            100% { opacity: 1; transform: translateY(0); }
-          }
-          @keyframes labelBtnShimmer {
-            0%   { transform: translateX(-100%); }
-            100% { transform: translateX(100%); }
-          }
-        `}</style>
-      </button>
-    </div>
-  );
-}
 
 // Detection knobs. Renders title + live value on top, then the slider,
 // then a quiet help line under it. Same visual rhythm across the
@@ -7301,81 +6915,6 @@ function SegmentedControl<T extends string>({
         </button>
       ))}
     </div>
-  );
-}
-
-// ─── Shape help popover ───────────────────────────────────────────────────────
-
-function ShapeHelpPopover() {
-  const [open, setOpen] = useState(false);
-  const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null);
-  const triggerRef = useRef<HTMLSpanElement | null>(null);
-  const timerRef = useRef<number | null>(null);
-  const positionFromTrigger = () => {
-    const el = triggerRef.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    // Sit just under the trigger, left-aligned to its left edge.
-    setAnchor({ x: r.left, y: r.bottom + 8 });
-  };
-  const onEnter = () => {
-    if (timerRef.current) { window.clearTimeout(timerRef.current); timerRef.current = null; }
-    timerRef.current = window.setTimeout(() => {
-      positionFromTrigger();
-      setOpen(true);
-      timerRef.current = null;
-    }, 200);
-  };
-  const onLeave = () => {
-    if (timerRef.current) { window.clearTimeout(timerRef.current); timerRef.current = null; }
-    setOpen(false);
-  };
-  useEffect(() => () => { if (timerRef.current) window.clearTimeout(timerRef.current); }, []);
-  return (
-    <span className="relative inline-flex" onMouseEnter={onEnter} onMouseLeave={onLeave}>
-      <span ref={triggerRef} role="img" aria-label="Target input shape help" className="grid h-4 w-4 place-items-center rounded-full border border-foreground/20 text-[10px] font-semibold text-foreground/55 cursor-help select-none transition-colors hover:text-foreground hover:border-foreground/40">i</span>
-      {open && anchor && typeof window !== "undefined" && createPortal(
-        <>
-          <div
-            className="fixed inset-0 z-[1000] pointer-events-none"
-            style={{
-              background: "rgb(var(--background-rgb) / 0.55)",
-              animation: "shapeHelpDimIn 220ms ease-out both",
-            }}
-            aria-hidden="true"
-          />
-          <div
-            role="tooltip"
-            className="fixed z-[1002] w-80 rounded-lg border border-[var(--line)] p-4 pointer-events-none"
-            // Themable tooltip surface, light grey card in light
-            // mode, dark surface in dark. Previously pinned to a
-            // hard-coded #0c0c0e fallback so the box was always dark.
-            style={{
-              left: anchor.x,
-              top: anchor.y,
-              background: "rgb(var(--surface-rgb))",
-              boxShadow: "var(--shadow-strong)",
-              animation: "shapeHelpPopIn 220ms cubic-bezier(0.2,0.7,0.2,1) both",
-            }}
-          >
-            <h3 className="text-sm font-semibold text-[var(--foreground)] tracking-tight mb-2">Target input shape</h3>
-            <p className="text-xs text-foreground/70 leading-relaxed mb-3">The square tensor size your detector will resize images to before running. Smaller shapes are faster on-device but lose objects whose smallest side gets squeezed below the model&rsquo;s detection floor.</p>
-            <p className="text-xs text-foreground/70 leading-relaxed">Pick the shape that matches the runtime you&rsquo;re targeting, the editor uses it to flag boxes that would shrink below that floor at the chosen resolution.</p>
-          </div>
-          <style>{`
-            @keyframes shapeHelpDimIn {
-              from { opacity: 0; }
-              to { opacity: 1; }
-            }
-            @keyframes shapeHelpPopIn {
-              from { opacity: 0; transform: translateY(-4px) scale(0.97); }
-              to { opacity: 1; transform: translateY(0) scale(1); }
-            }
-          `}</style>
-        </>,
-        document.body,
-      )}
-    </span>
   );
 }
 
@@ -7468,70 +7007,57 @@ function ImportMediaSection({
   };
 
   return (
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-stretch">
-      {/* Dropzone. Inner padding matches the collapsible section
-          cards (px-5) and the content is wrapped in the same flex-
-          chevron layout so the title's left edge lines up with the
-          "Reference images" / "Annotations" / "Don't have images?"
-          titles. Invisible placeholder where the chevron would be
-          keeps the column without adding a fake control. */}
-      <div
-        onDragEnter={onDragEnter} onDragLeave={onDragLeave} onDragOver={onDragOver} onDrop={onDrop}
-        onClick={() => { if (!disabled) fileInputRef.current?.click(); }}
-        aria-disabled={disabled}
-        className={[
-          "relative flex min-w-0 flex-col justify-center overflow-hidden rounded-lg border-2 border-dashed transition-all px-5 py-5 bg-[var(--surface-2)] sm:flex-1",
-          disabled
-            ? "cursor-not-allowed opacity-60 border-foreground/15"
-            : ["cursor-pointer", dragOver ? "border-foreground/50" : "border-foreground/20 hover:border-foreground/40"].join(" "),
-        ].join(" ")}
-      >
-        <input ref={fileInputRef} type="file" accept="image/*,video/*" multiple className="hidden" disabled={disabled} onChange={(e) => { handleMediaFiles(e.target.files); if (fileInputRef.current) fileInputRef.current.value = ""; }} />
+    // Standard flat panel: the whole row is a drop target + click-to-
+    // browse; explicit Browse / Import-from-web actions sit on the right.
+    // Drag-over is an active state, so it may use the accent.
+    <div
+      onDragEnter={onDragEnter} onDragLeave={onDragLeave} onDragOver={onDragOver} onDrop={onDrop}
+      onClick={() => { if (!disabled) fileInputRef.current?.click(); }}
+      aria-disabled={disabled}
+      className={[
+        "relative flex min-w-0 flex-wrap items-center justify-between gap-x-6 gap-y-3 rounded-md border px-5 py-4 transition-colors",
+        disabled
+          ? "cursor-not-allowed border-[var(--line)] bg-[var(--panel)] opacity-60"
+          : dragOver
+            ? "cursor-pointer border-[var(--accent)] bg-[var(--accent-dim)]"
+            : "cursor-pointer border-[var(--line)] bg-[var(--panel)] hover:border-[var(--line-strong)]",
+      ].join(" ")}
+    >
+      <input ref={fileInputRef} type="file" accept="image/*,video/*" multiple className="hidden" disabled={disabled} onChange={(e) => { handleMediaFiles(e.target.files); if (fileInputRef.current) fileInputRef.current.value = ""; }} />
 
-        <div className="flex items-center gap-3 max-w-[80%]">
-          <div className="min-w-0 flex-1">
-            <div className="text-lg font-medium tracking-tight text-[var(--foreground)]">
-              {disabled
-                ? (disabledMessage ?? "Waiting for setup to finish…")
-                : (uploading ? "Uploading…" : "Drop media here or click to browse")}
-            </div>
-            <div className="mt-1.5 text-[12px] text-foreground/45 leading-snug">
-              Images jpg · png · webp · gif · heic · avif · bmp · tiff{" "}
-              <span className="text-foreground/25">·</span>{" "}
-              Videos mp4 · mov · webm · avi · mkv
-            </div>
-            <p className="mt-1.5 text-[10px] text-foreground/30 leading-relaxed">
-              By uploading you agree to our{" "}
-              <a href="/acceptable-use" target="_blank" rel="noopener noreferrer" className="text-foreground/45 hover:text-foreground underline underline-offset-2" onClick={(e) => e.stopPropagation()}>Acceptable Use Policy</a>
-              {" "}and{" "}
-              <a href="/privacy" target="_blank" rel="noopener noreferrer" className="text-foreground/45 hover:text-foreground underline underline-offset-2" onClick={(e) => e.stopPropagation()}>Privacy Policy</a>.
-            </p>
-          </div>
+      <div className="min-w-0 flex-1">
+        <div className="text-[13px] font-medium text-[var(--foreground)]">
+          {disabled
+            ? (disabledMessage ?? "Waiting for setup to finish…")
+            : (uploading ? "Uploading…" : "Drop images or click to browse")}
         </div>
-
-        <div className="absolute pointer-events-none flex items-center" style={{ top: "1.25rem", right: "1.5rem", bottom: "1.25rem" }} aria-hidden="true">
-          {/* Photo-glyph icon, theme-aware (surface fill + muted strokes). Capped
-              height (max-h-20) + centered so it never overgrows when the box gets
-              tall (e.g. text wraps on a narrow viewport) and spills out. */}
-          <svg viewBox="0 0 100 80" className="h-full max-h-20 w-auto" fill="none" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="2" y="2" width="96" height="76" rx="9" fill="rgb(var(--surface-rgb))" stroke="rgb(var(--muted-rgb))" strokeWidth="2" />
-            <circle cx="24" cy="24" r="9" fill="rgb(var(--muted-rgb))" stroke="none" />
-            <polyline points="2 58 26 33 44 48 63 24 98 58" fill="none" stroke="rgb(var(--muted-rgb))" strokeWidth="2" />
-          </svg>
+        <div className="mt-1 font-mono text-[11px] text-[var(--fg-dim)]">
+          jpg · png · webp · gif · heic · avif · bmp · tiff · mp4 · mov · webm · avi · mkv
         </div>
       </div>
 
-      {/* "Don't have images?" - compact card on the right that opens the
-          Openverse importer in a popup. */}
-      {projectId && (
-        <div className="shrink-0 sm:w-56">
+      <div
+        className="flex shrink-0 items-center gap-2"
+        // The action cluster manages its own clicks — don't let them
+        // bubble into the panel's click-to-browse.
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button
+          type="button"
+          onClick={() => { if (!disabled) fileInputRef.current?.click(); }}
+          disabled={disabled}
+          className="pk-btn"
+        >
+          Browse
+        </button>
+        {projectId && (
           <OpenverseInlinePanel
             projectId={projectId}
             alreadyImportedUrls={alreadyImportedUrls ?? []}
             onAdded={onOpenverseAdded}
           />
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }
@@ -8388,9 +7914,9 @@ function DatasetGallery({
   return (
     <>
       <div className="flex items-center justify-between gap-3 mb-1 flex-wrap">
-        <h2 className="text-xl font-medium tracking-tight text-[var(--foreground)] shrink-0">
+        <h2 className="pk-micro shrink-0 text-[var(--fg-soft)]">
           Dataset
-          <span className="ml-3 text-sm text-foreground/40 font-mono tabular-nums">
+          <span className="ml-2 tabular-nums text-[var(--fg-dim)]">
             {/* When the user has filtered, show "shown / total" so the
                 pill effect on the gallery is legible. Otherwise the
                 backend total wins, it's correct from first paint
@@ -8495,7 +8021,7 @@ function DatasetGallery({
           )}
 
           {!readOnly && !hasReferenceEmbeddings && !isGeneralDataset && (
-            <span className="text-[11px] text-amber-700 dark:text-amber-200/80 font-mono uppercase tracking-wider">
+            <span className="text-[11px] text-[var(--warn)] font-mono uppercase tracking-wider">
               No reference embeddings
             </span>
           )}
@@ -8577,7 +8103,7 @@ function DatasetGallery({
             <div
               key={`ds-skel-${visible.length + i}`}
               aria-hidden
-              className="relative rounded-xl border border-foreground/10 bg-foreground/[0.02] overflow-hidden"
+              className="relative rounded-md border border-[var(--line)] bg-[var(--panel)] overflow-hidden"
             >
               <div className="h-[200px] bg-[var(--surface)]" />
               <div className="p-3 space-y-2">
@@ -8590,7 +8116,7 @@ function DatasetGallery({
       </div>
 
       {isPulling && visible.length === 0 && (
-        <div className="mt-6 flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-foreground/15 bg-foreground/[0.02] px-6 py-16 text-center">
+        <div className="mt-6 flex flex-col items-center justify-center gap-3 rounded-md border border-[var(--line)] bg-[var(--panel)] px-6 py-16 text-center">
           <span className="h-7 w-7 animate-spin rounded-full border-2 border-foreground/15 border-t-[var(--accent)]" aria-hidden />
           <div className="text-[13px] font-medium text-foreground/70">Pulling cropped images from the parent project…</div>
           <div className="text-[12px] text-foreground/50">This can take a moment for large datasets; images appear as they are cropped.</div>
@@ -8968,7 +8494,7 @@ function ReviewLauncher({
         type="button"
         onClick={() => defaultCount > 0 && onStartReview(defaultScope)}
         disabled={defaultCount === 0}
-        className="inline-flex items-center gap-1.5 rounded-l-md bg-foreground text-background border border-[var(--foreground)] px-3.5 py-1.5 text-[12px] font-medium capitalize hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+        className="pk-btn rounded-r-none capitalize"
         title={defaultCount === 0
           ? "No images in this bucket"
           : `Swipe left = bad, right = good. Walk the ${defaultScope} set.`}
@@ -8978,14 +8504,14 @@ function ReviewLauncher({
           <path d="M9 18l6-6-6-6" />
         </svg>
         Review {defaultScope}
-        <span className="opacity-70 tabular-nums">{defaultCount}</span>
+        <span className="tabular-nums text-[var(--fg-dim)]">{defaultCount}</span>
       </button>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="listbox"
         aria-expanded={open}
-        className="inline-flex items-center justify-center rounded-r-md bg-foreground text-background border border-l-0 border-[var(--foreground)] px-2.5 py-1.5 hover:opacity-90 transition-opacity"
+        className="pk-btn rounded-l-none border-l-0 px-2"
         title="Pick review scope"
       >
         <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
@@ -8997,7 +8523,7 @@ function ReviewLauncher({
       {open && (
         <div
           role="listbox"
-          className="absolute right-0 top-full mt-1.5 min-w-[10rem] rounded-xl border border-foreground/15 bg-[var(--surface)] shadow-[var(--shadow-strong)] backdrop-blur-md overflow-hidden z-20"
+          className="absolute right-0 top-full mt-1.5 min-w-[10rem] rounded-md border border-[var(--line)] bg-[var(--surface)] shadow-[var(--shadow-strong)] backdrop-blur-md overflow-hidden z-20"
         >
           {scopes.map(({ key, label }) => {
             const n = counts[key];
@@ -9266,13 +8792,13 @@ function AugmentationsViewer({
         </div>
 
         {error && (
-          <div className="rounded-xl border border-red-400/25 bg-red-500/[0.08] px-3 py-1.5 text-[11px] text-red-200 mb-4">
+          <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-[11px] text-[var(--bad)] mb-4">
             {error}
           </div>
         )}
 
         {items !== null && items.length === 0 && (
-          <div className="rounded-lg border border-dashed border-foreground/10 bg-foreground/[0.02] px-5 py-12 text-center">
+          <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-5 py-12 text-center">
             <div className="text-sm text-foreground/65 mb-1">No augmentations generated yet</div>
             <div className="text-[11px] text-foreground/35">
               Set a per-image count + enable some augmentations, then click Update on the Augmentations tab.
@@ -9823,7 +9349,7 @@ function DatasetThumb({
       data-import-id={media.backendId ?? media.id}
       onPointerEnter={onHover}
       className={[
-        "relative rounded-xl border bg-foreground/[0.02] overflow-hidden transition-all",
+        "relative rounded-md border bg-[var(--panel)] overflow-hidden transition-all",
         selected
           ? "border-red-400/70 ring-2 ring-red-400/40"
           : isHighlighted
@@ -10040,13 +9566,13 @@ function DatasetThumb({
                   /overview and /annotations responses, even for
                   images that already have boxes on disk. */}
               {detectionCount === 0 && media.detections !== undefined && (
-                <span className="rounded-md bg-amber-300/85 px-2 py-0.5 text-[10px] font-semibold text-black uppercase tracking-wider">
+                <span className="rounded-md bg-black/60 px-2 py-0.5 font-mono text-[10px] font-medium text-amber-200 uppercase tracking-wider backdrop-blur-sm">
                   Unlabelled
                 </span>
               )}
               {detectionCount > 0 && hasUnsureDetection && (
                 <span
-                  className="rounded-md bg-amber-400/90 px-2 py-0.5 text-[10px] font-semibold text-black uppercase tracking-wider"
+                  className="rounded-md bg-black/60 px-2 py-0.5 font-mono text-[10px] font-medium text-amber-200 uppercase tracking-wider backdrop-blur-sm"
                   title="At least one detection is borderline, open to review"
                 >
                   Unsure
@@ -10063,7 +9589,7 @@ function DatasetThumb({
             <span className="font-mono tabular-nums text-foreground/50 shrink-0">
               {detectionCount} {detectionCount === 1 ? "box" : "boxes"}
               {rejectedCount > 0 && (
-                <span className="ml-1.5 text-amber-300/70" title={`${rejectedCount} rejected by embedding QC`}>
+                <span className="ml-1.5 text-[var(--warn)] opacity-80" title={`${rejectedCount} rejected by embedding QC`}>
                   · {rejectedCount} rej
                 </span>
               )}
@@ -10076,9 +9602,9 @@ function DatasetThumb({
                 return (
                   <span
                     key={lab}
-                    className="inline-block rounded-full px-1.5 py-0.5 text-[9px] font-semibold"
-                    style={{ backgroundColor: bg, color: readableTextForBg(bg) }}
+                    className="inline-flex items-center gap-1 rounded-md border border-[var(--line)] px-1.5 py-0.5 font-mono text-[9px] text-[var(--fg-soft)]"
                   >
+                    <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: bg }} aria-hidden />
                     {displayLabel(lab)}
                   </span>
                 );
@@ -11149,7 +10675,7 @@ function DatasetViewer({
                 type="button"
                 onClick={() => onMediaChange(media.id, { editedBoxes: [] })}
                 title="Clear every box on this image"
-                className="h-8 inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] text-foreground/65 hover:border-rose-400/60 hover:text-rose-700 dark:hover:text-rose-300 px-3 text-[11px] uppercase tracking-wider font-mono transition-colors"
+                className="h-8 inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] text-foreground/65 hover:border-[var(--bad)] hover:text-[var(--bad)] px-3 text-[11px] uppercase tracking-wider font-mono transition-colors"
               >
                 <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                   <polyline points="3 6 5 6 21 6" />
@@ -11205,7 +10731,7 @@ function DatasetViewer({
               }}
               title="Delete this image"
               aria-label="Delete this image"
-              className="h-8 inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] text-foreground/65 hover:border-rose-400/60 hover:text-rose-700 dark:hover:text-rose-300 px-3 text-[11px] uppercase tracking-wider font-mono transition-colors"
+              className="h-8 inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] text-foreground/65 hover:border-[var(--bad)] hover:text-[var(--bad)] px-3 text-[11px] uppercase tracking-wider font-mono transition-colors"
             >
               <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                 <polyline points="3 6 5 6 21 6" />

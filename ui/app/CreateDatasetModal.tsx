@@ -40,7 +40,7 @@ export function CreateDatasetModal({
           Name your dataset. Next you&apos;ll add labels and images.
         </p>
         <label className="flex flex-col gap-1.5">
-          <span className="text-sm font-medium text-foreground/80">Dataset name</span>
+          <span className="pk-micro">Dataset name</span>
           <input
             ref={nameRef}
             value={name}
@@ -50,14 +50,14 @@ export function CreateDatasetModal({
             }}
             maxLength={120}
             placeholder="e.g. Rooftop panels"
-            className="rounded-xl border border-foreground/10 bg-foreground/[0.03] px-3.5 py-2.5 text-sm outline-none focus:border-orange-400 focus:ring-2 focus:ring-orange-400/30"
+            className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-sm outline-none transition-colors focus:border-[var(--accent)]"
           />
         </label>
         <div className="flex justify-end gap-2">
           <button
             type="button"
             onClick={onClose}
-            className="rounded-xl px-4 py-2 text-sm font-medium text-[var(--muted)] hover:bg-foreground/5"
+            className="rounded-md border border-[var(--line)] px-4 py-2 text-[13px] font-medium text-foreground/75 transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)]"
           >
             Cancel
           </button>
@@ -65,7 +65,7 @@ export function CreateDatasetModal({
             type="button"
             onClick={submit}
             disabled={!name.trim()}
-            className="rounded-xl bg-orange-500 px-5 py-2 text-sm font-semibold text-white transition hover:bg-orange-400 disabled:opacity-40"
+            className="rounded-md bg-[var(--accent)] px-4 py-2 text-[13px] font-medium text-[var(--accent-contrast)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-40"
           >
             Continue
           </button>

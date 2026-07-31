@@ -242,7 +242,7 @@ export function DatasetStatsCard({
           card reads as quiet metadata above the page; the only
           visual chrome is the chevron + health badge in the
           summary row. */}
-      <div className="rounded-lg overflow-hidden">
+      <div className="rounded-md overflow-hidden">
         {/* Header / summary row, always visible. Click toggles the
             full breakdown below. The headline metric (health score)
             and the top-three counters live in this row so the user
@@ -268,7 +268,7 @@ export function DatasetStatsCard({
             >
               <path d="M6 9l6 6 6-6" />
             </svg>
-            <h2 className="text-base font-medium tracking-tight text-[var(--foreground)] truncate">
+            <h2 className="pk-micro truncate">
               Dataset stats
             </h2>
             {/* Sub-info wrapper renders unconditionally so it doesn't
@@ -345,7 +345,7 @@ export function DatasetStatsCard({
           style={{ gridTemplateRows: open ? "1fr" : "0fr" }}
         >
           <div className="min-h-0 overflow-hidden">
-            <div className="px-5 pb-5 pt-2 border-t border-foreground/[0.06]">
+            <div className="px-5 pb-5 pt-2 border-t border-[var(--line-soft)]">
               {loading && !stats && (
                 <div className="text-sm text-[var(--muted)] py-4">Loading stats…</div>
               )}
@@ -433,7 +433,7 @@ export function DatasetStatsCard({
                     <div className="pk-micro mb-3 flex items-center justify-between gap-2">
                       <span>Image variation</span>
                       {stats.counts.embeddings_ready > 0 && (
-                        <span className="text-[10px] font-normal text-foreground/40 normal-case tracking-normal">
+                        <span className="text-[10px] font-normal text-foreground/40 normal-case tracking-normal tabular-nums">
                           {stats.counts.embeddings_ready} of {stats.counts.imports} embedded
                         </span>
                       )}
@@ -709,12 +709,12 @@ function RemoveDuplicatesAction({ projectId }: { projectId: string }) {
             className="fixed inset-0 z-[1001] grid place-items-center p-6 pointer-events-none"
           >
             <div
-              className="pointer-events-auto w-full max-w-3xl max-h-[88vh] flex flex-col rounded-lg pk-glass overflow-hidden"
+              className="pointer-events-auto w-full max-w-3xl max-h-[88vh] flex flex-col rounded-md pk-glass overflow-hidden"
               onClick={(e) => e.stopPropagation()}
             >
-              <header className="px-5 py-4 border-b border-foreground/[0.08] flex items-start justify-between gap-3">
+              <header className="px-5 py-4 border-b border-[var(--line)] flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <h2 className="text-base font-medium tracking-tight text-[var(--foreground)]">Review duplicate images</h2>
+                  <h2 className="pk-micro" style={{ color: "var(--foreground)" }}>Review duplicate images</h2>
                   <p className="text-[12px] text-foreground/55 mt-0.5">
                     Each group is a cluster of duplicates. Choose one of:
                   </p>
@@ -744,7 +744,7 @@ function RemoveDuplicatesAction({ projectId }: { projectId: string }) {
                           className={[
                             "rounded-[4px] px-3 py-1 text-[11px] uppercase tracking-wider font-mono transition-colors",
                             active
-                              ? "bg-foreground text-background"
+                              ? "bg-[var(--surface-hover)] text-[var(--foreground)]"
                               : "text-foreground/65 hover:text-foreground",
                           ].join(" ")}
                         >
@@ -763,7 +763,7 @@ function RemoveDuplicatesAction({ projectId }: { projectId: string }) {
                 </button>
               </header>
               {!loading && groups.length > 0 && (
-                <div className="px-5 py-2.5 border-b border-foreground/[0.08] flex items-center justify-between gap-3 bg-foreground/[0.015]">
+                <div className="px-5 py-2.5 border-b border-[var(--line)] flex items-center justify-between gap-3 bg-[var(--panel)]">
                   <button
                     type="button"
                     onClick={toggleSelectAll}
@@ -776,7 +776,7 @@ function RemoveDuplicatesAction({ projectId }: { projectId: string }) {
                     type="button"
                     onClick={() => void bulkDelete()}
                     disabled={selectedIds.size === 0 || bulkBusy}
-                    className="text-[11px] uppercase tracking-wider font-mono px-3 py-1 rounded-md border border-[var(--line)] text-[var(--bad)] hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    className="text-[11px] uppercase tracking-wider font-mono tabular-nums px-3 py-1 rounded-md border border-[var(--line)] text-[var(--bad)] hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                   >
                     {bulkBusy
                       ? "Deleting…"
@@ -800,9 +800,9 @@ function RemoveDuplicatesAction({ projectId }: { projectId: string }) {
                 )}
                 <ul className="grid gap-5">
                   {groups.map((g, gi) => (
-                    <li key={g.keep} className="border border-[var(--line)] rounded-lg p-3">
+                    <li key={g.keep} className="border border-[var(--line)] bg-[var(--panel)] rounded-md p-3">
                       <div className="flex items-center justify-between gap-3 mb-3">
-                        <div className="text-[11px] uppercase tracking-wider font-mono text-foreground/60">
+                        <div className="text-[11px] uppercase tracking-wider font-mono tabular-nums text-foreground/60">
                           Group {gi + 1} · {g.drop.length + 1} images
                         </div>
                         <div className="flex items-center gap-2">
@@ -810,7 +810,7 @@ function RemoveDuplicatesAction({ projectId }: { projectId: string }) {
                             type="button"
                             disabled={busyKey === g.keep}
                             onClick={() => deleteGroup(g)}
-                            className="text-[11px] uppercase tracking-wider font-mono px-2.5 py-1 rounded-md border border-[var(--line)] text-[var(--bad)] hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] disabled:opacity-50 transition-colors"
+                            className="text-[11px] uppercase tracking-wider font-mono tabular-nums px-2.5 py-1 rounded-md border border-[var(--line)] text-[var(--bad)] hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)] disabled:opacity-50 transition-colors"
                           >
                             {busyKey === g.keep ? "…" : `Delete ${g.drop.length}`}
                           </button>
@@ -836,7 +836,7 @@ function RemoveDuplicatesAction({ projectId }: { projectId: string }) {
                               key={m.id}
                               disabled={m.isKeeper || bulkBusy}
                               onClick={() => !m.isKeeper && toggleSelect(m.id)}
-                              className={`relative aspect-square rounded-lg overflow-hidden border text-left transition-shadow ${
+                              className={`relative aspect-square rounded-md overflow-hidden border text-left transition-shadow ${
                                 m.isKeeper
                                   ? "border-[var(--ok)] cursor-default"
                                   : isSelected
@@ -881,7 +881,7 @@ function RemoveDuplicatesAction({ projectId }: { projectId: string }) {
                   ))}
                 </ul>
               </div>
-              <footer className="px-5 py-3 border-t border-foreground/[0.08] flex items-center justify-end">
+              <footer className="px-5 py-3 border-t border-[var(--line)] flex items-center justify-end">
                 <button
                   type="button"
                   onClick={closeAndRefresh}
@@ -912,7 +912,7 @@ function CounterRow({
     ? "text-[var(--warn)]"
     : "text-[var(--foreground)]";
   return (
-    <div className="flex items-baseline justify-between gap-3 py-1.5 border-b border-foreground/[0.06] last:border-b-0">
+    <div className="flex items-baseline justify-between gap-3 py-1.5 border-b border-[var(--line-soft)] last:border-b-0">
       <span className="text-sm text-foreground/70">{label}</span>
       <span className={`text-base font-mono tabular-nums ${valueClass}`}>{value}</span>
     </div>
@@ -948,10 +948,10 @@ function HealthBadge({
       : "red";
   const toneClasses =
     tone === "emerald"
-      ? "border-[var(--line)] bg-[var(--surface)] text-[var(--ok)]"
+      ? "border-[var(--line)] bg-transparent text-[var(--ok)]"
       : tone === "amber"
-      ? "border-[var(--line)] bg-[var(--surface)] text-[var(--warn)]"
-      : "border-[var(--line)] bg-[var(--surface)] text-[var(--bad)]";
+      ? "border-[var(--line)] bg-transparent text-[var(--warn)]"
+      : "border-[var(--line)] bg-transparent text-[var(--bad)]";
 
   const triggerRef = useRef<HTMLSpanElement | null>(null);
   const [open, setOpen] = useState(false);
@@ -991,7 +991,7 @@ function HealthBadge({
           />
           <div
             role="tooltip"
-            className="fixed z-[1002] w-80 rounded-lg border border-[var(--modal-border)] p-4 pointer-events-none"
+            className="fixed z-[1002] w-80 rounded-md border border-[var(--modal-border)] p-4 pointer-events-none"
             style={{
               left: anchor.x,
               top: anchor.y,
@@ -999,8 +999,8 @@ function HealthBadge({
               boxShadow: "var(--shadow-strong)",
             }}
           >
-            <h3 className="text-sm font-semibold text-[var(--foreground)] tracking-tight mb-2">
-              Dataset health · {score}/100
+            <h3 className="pk-micro mb-2" style={{ color: "var(--foreground)" }}>
+              Dataset health · <span className="tabular-nums">{score}/100</span>
             </h3>
             <p className="text-xs text-foreground/70 leading-relaxed mb-3">
               The score blends four equally-weighted factors. Lower factors are usually the cheapest wins, fix the lowest one first.
@@ -1163,7 +1163,7 @@ export function VariationPlot({
       return (
         <div
           ref={wrapRef}
-          className="relative aspect-square rounded-lg border border-[var(--line)] bg-[var(--panel)] grid place-items-center"
+          className="relative aspect-square rounded-md border border-[var(--line)] bg-[var(--panel)] grid place-items-center"
         >
           <style>{`
             @keyframes pk-stats-spin { to { transform: rotate(360deg); } }
@@ -1208,7 +1208,7 @@ export function VariationPlot({
     return (
       <div
         ref={wrapRef}
-        className="relative aspect-square grid place-items-center rounded-lg border border-[var(--line)] bg-[var(--panel)]"
+        className="relative aspect-square grid place-items-center rounded-md border border-[var(--line)] bg-[var(--panel)]"
       >
         {/* Loading wheel rather than a "no embeddings" message, so the plot
             reads as still loading while the embeddings/projection arrive. */}
@@ -1223,7 +1223,7 @@ export function VariationPlot({
   return (
     <div
       ref={wrapRef}
-      className="relative aspect-square rounded-lg border border-[var(--line)] bg-[var(--panel)] overflow-hidden"
+      className="relative aspect-square rounded-md border border-[var(--line)] bg-[var(--panel)] overflow-hidden"
     >
       <svg viewBox="0 0 100 100" className="absolute inset-0 w-full h-full" preserveAspectRatio="none">
         {[25, 50, 75].map((g) => (

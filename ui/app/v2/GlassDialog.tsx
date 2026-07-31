@@ -98,12 +98,12 @@ export function GlassDialog({
         aria-label={title}
         tabIndex={-1}
         onMouseDown={(e) => e.stopPropagation()}
-        className={`pk-glass pk-pop relative w-full ${maxWidth} rounded-xl outline-none`}
+        className={`pk-glass pk-pop relative w-full ${maxWidth} rounded-md outline-none`}
       >
         {(title || showClose) && (
           <div className="flex items-center justify-between gap-3 px-5 pb-3 pt-4">
             {title ? (
-              <h2 className="text-[16px] font-semibold tracking-tight text-foreground">{title}</h2>
+              <h2 className="text-[15px] font-medium tracking-tight text-foreground">{title}</h2>
             ) : (
               <span />
             )}

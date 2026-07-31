@@ -4,8 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ProjectTagsRow } from "./components/ProjectTagsRow";
 import { containsProfanity } from "./profanity";
 import { BlurhashCanvas } from "react-blurhash";
-import { usePlan } from "./PlanPill";
-import { LABEL_COLOURS, readableTextForBg } from "./v2/OnboardLabelsV2";
+import { LABEL_COLOURS } from "./v2/OnboardLabelsV2";
 import type { ReferenceImage } from "./v2/OnboardReferencesV2";
 import { WordCloud } from "./v2/WordCloud";
 import { PixelKitLoader } from "./v2/PixelKitLoader";
@@ -16,7 +15,6 @@ import { CreateDatasetModal } from "./CreateDatasetModal";
 import { apiFetch } from "@/lib/apiFetch";
 import { onNewDatasetRequest, requestExplorerRefresh } from "@/lib/appNav";
 import { addDataset } from "@/lib/containers";
-import { isProPlan } from "@/lib/plans";
 import { readProjectMetaCache, writeProjectMetaCache, type ProjectMetaCache } from "@/lib/projectMetaCache";
 import {
   collectInput,
@@ -120,36 +118,8 @@ function projectsEqual(a: ProjectSummary[] | null, b: ProjectSummary[]): boolean
 }
 
 
-// Stable hash → hue, so each project gets a consistent colour palette for
-// its label chips. Same function as ProjectsView so chips look identical
-// across both pages.
-// Inline padlock used by both Workspace + Public cards to flag projects
-// the owner has marked private. Same orange-glow accent as elsewhere in
-// the privacy UI.
-export function PrivateLockIcon() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      width="16"
-      height="16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className="text-[var(--warn)] shrink-0"
-      aria-label="Private project"
-      role="img"
-    >
-      <title>Private project</title>
-      <rect x="4" y="11" width="16" height="10" rx="2" />
-      <path d="M8 11V7a4 4 0 0 1 8 0v4" />
-    </svg>
-  );
-}
-
-// Branch glyph flagging a derived (cropped child) project on the cards — sky
-// accent so it reads distinctly from the amber privacy padlock.
+// Branch glyph flagging a derived (cropped child) project on the cards —
+// quiet neutral icon tone so it doesn't compete with the status chips.
 export function DerivedBadge({ parentName }: { parentName?: string | null }) {
   return (
     <svg
@@ -161,7 +131,7 @@ export function DerivedBadge({ parentName }: { parentName?: string | null }) {
       strokeWidth="1.3"
       strokeLinecap="round"
       strokeLinejoin="round"
-      className="text-sky-600 dark:text-sky-400/80 shrink-0"
+      className="text-[var(--fg-dim)] shrink-0"
       aria-label="Derived project"
       role="img"
     >
@@ -185,31 +155,31 @@ const SORT_OPTIONS: { key: SortMode; label: string }[] = [
   { key: "images", label: "Most images" },
 ];
 
-// Status pill set for a project card (Labelled / Partial / Unlabelled
-// / In progress, plus Model). Outline style so it reads as a quiet
-// badge on the new card surface. Shared with the public feed so the
-// two card surfaces stay visually identical.
+// Status chip set for a project card (Labelled / Partial / Unlabelled
+// / In progress, plus Model). Rendered as neutral hairline chips with
+// a small colour dot — tone comes from the dot only, never the chip
+// surface, so the cards stay flat in both themes.
 export function projectStatusBadges(
   project: ProjectSummary,
-): { label: string; classes: string }[] {
+): { label: string; dot: string }[] {
   const nImages = project.n_images ?? 0;
   const nLabelled = project.n_labelled ?? 0;
   const nUnlabelled = project.n_unlabelled ?? 0;
   const allLabelled = nImages > 0 && nUnlabelled === 0;
   const someLabelled = nLabelled > 0 && nUnlabelled > 0;
   const allUnlabelled = nImages > 0 && !nLabelled;
-  const badges: { label: string; classes: string }[] = [];
+  const badges: { label: string; dot: string }[] = [];
   if (project.running) {
-    badges.push({ label: "In progress", classes: "border-accent/45 text-accent" });
+    badges.push({ label: "In progress", dot: "bg-[var(--accent)]" });
   } else if (allLabelled) {
-    badges.push({ label: "Labelled", classes: "border-[var(--ok)] text-[var(--ok)]" });
+    badges.push({ label: "Labelled", dot: "bg-[var(--ok)]" });
   } else if (someLabelled) {
-    badges.push({ label: "Partial", classes: "border-[var(--warn)] text-[var(--warn)]" });
+    badges.push({ label: "Partial", dot: "bg-[var(--warn)]" });
   } else if (allUnlabelled) {
-    badges.push({ label: "Unlabelled", classes: "border-[var(--bad)] text-[var(--bad)]" });
+    badges.push({ label: "Unlabelled", dot: "bg-[var(--bad)]" });
   }
   if (project.hasModel) {
-    badges.push({ label: "Model", classes: "border-sky-500/45 text-sky-700 dark:border-sky-400/45 dark:text-sky-300" });
+    badges.push({ label: "Model", dot: "bg-[var(--fg-dim)]" });
   }
   return badges;
 }
@@ -276,7 +246,7 @@ function SortMenu({
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} aria-hidden />
           <div
             role="menu"
-            className="pk-glass absolute right-0 top-[calc(100%+8px)] z-50 w-48 rounded-lg p-1.5 shadow-[var(--shadow-strong)]"
+            className="pk-glass absolute right-0 top-[calc(100%+8px)] z-50 w-48 rounded-md p-1.5 shadow-[var(--shadow-strong)]"
           >
             {SORT_OPTIONS.map((opt) => (
               <button
@@ -288,7 +258,7 @@ function SortMenu({
                   onChange(opt.key);
                 }}
                 className={[
-                  "flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-sm transition-colors",
+                  "flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-left text-sm transition-colors",
                   opt.key === value
                     ? "bg-foreground/[0.08] text-[var(--foreground)]"
                     : "text-foreground/75 hover:bg-foreground/[0.05]",
@@ -514,11 +484,6 @@ export function HomeView({
     });
   }, [creating, v2Stage, onV2Begin]);
 
-  // Whether the new project should be created as private. Toggle is
-  // only rendered when the user's plan allows private projects (the
-  // same gate ProjectSettingsV2 uses). Persisted into the manifest at
-  // create time via the is_private form field on POST /api/v2/projects.
-  const [v2IsPrivate, setV2IsPrivate] = useState(false);
   const v2InputRef = useRef<HTMLInputElement | null>(null);
 
   // Stages that take over the workspace surface. While active the
@@ -698,10 +663,6 @@ export function HomeView({
       // Colours captured during the labels stage so the project view
       // keeps the swatches the user previewed in onboarding.
       fd.append("label_colours", JSON.stringify(v2LabelColours));
-      // Visibility, only sent when the user actually toggled the
-      // private switch (which is itself gated on a Pro / Mega plan).
-      // Backend defaults to public when the field is missing.
-      if (v2IsPrivate) fd.append("is_private", "true");
       fd.append("owner", username || "anonymous");
       const r = await apiFetch(`/api/v2/projects`, { method: "POST", body: fd });
       if (!r.ok) throw new Error(`http ${r.status}`);
@@ -802,7 +763,6 @@ export function HomeView({
       setV2Labels([]);
       setV2LabelColours({});
       setV2Input("");
-      setV2IsPrivate(false);
       setV2ProjectId(null);
       v2ProjectIdRef.current = null;
       setV2ImportParsed(null);
@@ -857,7 +817,6 @@ export function HomeView({
     setV2Labels([]);
     setV2LabelColours({});
     setV2Input("");
-    setV2IsPrivate(false);
     setV2ProjectId(null);
     v2ProjectIdRef.current = null;
   };
@@ -873,30 +832,6 @@ export function HomeView({
   };
 
   const v2SkipFromLabels = () => v2HandOff(v2Name, []);
-
-  const planData = usePlan();
-  // Free-tier projects are always public, surface the consequence
-  // right where the user is about to create one, before they upload
-  // anything sensitive.
-  const isFreePlan = planData?.plan === "free";
-  // Pro, Mega, and Beta get the private-on-create toggle in the
-  // labels stage. Same gate ProjectSettingsV2 applies to its
-  // visibility switch, so the two surfaces stay consistent. Beta
-  // users keep parity with Pro for the duration of their window.
-  const v2CanPrivate =
-    (planData?.plan ? isProPlan(planData.plan) : false)
-    || planData?.plan === "mega"
-    || planData?.plan === "beta"
-    || planData?.plan === "enterprise";
-
-  // A labelled dataset is the user's own (often sensitive) data, so default the
-  // import to private for anyone whose plan allows it the moment they enter the
-  // import stage (free users stay public — the backend forces it). Kept as an
-  // effect rather than inline in v2BeginImport so it can read v2CanPrivate,
-  // which is defined here, after that handler.
-  useEffect(() => {
-    if (v2Stage === "import") setV2IsPrivate(v2CanPrivate);
-  }, [v2Stage, v2CanPrivate]);
 
   // Optimistic patch from a `pixelkit-project-meta-changed` event the
   // project view dispatches the moment a label save / rename PUT
@@ -1324,7 +1259,7 @@ export function HomeView({
         };
         if (usage.usage.projects >= usage.limits.projects) {
           setError(
-            `You've hit your ${usage.planName} plan limit of ${usage.limits.projects} projects. Upgrade or delete a project to create another.`,
+            `You've hit the limit of ${usage.limits.projects} projects. Delete a project to create another.`,
           );
           return;
         }
@@ -1637,28 +1572,26 @@ export function HomeView({
                 className="mt-2.5 inline-flex items-center gap-1.5 text-sm text-foreground/55 hover:text-foreground transition-colors"
               >
                 Already have a labelled dataset?
-                <span className="font-medium text-[var(--accent)]">Import it →</span>
+                <span className="font-medium text-[var(--foreground)]">Import it →</span>
               </button>
 
-              <div className="mt-8 rounded-lg border border-[var(--line)] bg-[var(--panel)] focus-within:border-[var(--line-strong)] transition-colors px-4 py-3.5 flex flex-wrap items-center gap-2">
+              <div className="mt-8 rounded-md border border-[var(--line)] bg-[var(--panel)] focus-within:border-[var(--line-strong)] transition-colors px-4 py-3.5 flex flex-wrap items-center gap-2">
                 {v2Labels.map((lab, i) => {
                   const bg = v2LabelColours[lab.toLowerCase()] ?? LABEL_COLOURS[i % LABEL_COLOURS.length];
                   return (
                     <span
                       key={`${lab}-${i}`}
-                      // Shrunk by default (just the label); on hover the chip
-                      // grows and the remove (×) button expands in from zero
-                      // width, so the chip visibly enlarges under the cursor.
-                      className="group inline-flex items-center rounded-full pl-3 pr-3 group-hover:pr-1.5 h-7 text-sm font-medium animate-[fadeIn_180ms_ease-out] transition-[padding] duration-150 ease-out motion-reduce:transition-none"
-                      style={{ backgroundColor: bg, color: readableTextForBg(bg) }}
+                      // Neutral chip: hairline border, transparent surface,
+                      // the label's colour carried by the dot only.
+                      className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] bg-transparent pl-2.5 pr-1 h-7 font-mono text-[12px] text-[var(--foreground)] animate-[fadeIn_180ms_ease-out]"
                     >
+                      <span aria-hidden className="h-2 w-2 rounded-full shrink-0" style={{ backgroundColor: bg }} />
                       <span className="select-none">{lab}</span>
                       <button
                         type="button"
                         onClick={() => v2RemoveLabel(i)}
                         aria-label={`Remove ${lab}`}
-                        className="inline-flex h-5 w-0 shrink-0 items-center justify-center overflow-hidden rounded-full opacity-0 transition-all duration-150 ease-out group-hover:ml-1 group-hover:w-5 group-hover:opacity-100 hover:bg-black/20 motion-reduce:transition-none"
-                        style={{ color: readableTextForBg(bg) }}
+                        className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-foreground/40 transition-colors hover:bg-[var(--surface-hover)] hover:text-foreground"
                       >
                         <svg width="8" height="8" viewBox="0 0 8 8" fill="none" aria-hidden>
                           <path d="M1.5 1.5l5 5M6.5 1.5l-5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
@@ -1693,42 +1626,8 @@ export function HomeView({
               {error && <p className="mt-3 text-sm text-[var(--bad)]">{error}</p>}
 
               <div className="mt-6 flex items-center gap-3">
-                {/* Visibility toggle, Pro/Mega only. Its left edge
-                    sits flush with the label input above (both live
-                    inside the same w-full max-w-2xl container) and
-                    its centreline lines up with Skip + Done thanks
-                    to items-center on the row. */}
-                {v2CanPrivate && (
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={v2IsPrivate}
-                    onClick={() => setV2IsPrivate((p) => !p)}
-                    className={[
-                      "inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs transition-colors",
-                      v2IsPrivate
-                        ? "border-[var(--warn)] text-[var(--warn)] hover:bg-[var(--surface-hover)]"
-                        : "border-[var(--line)] text-[var(--foreground)] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)]",
-                    ].join(" ")}
-                    title={v2IsPrivate ? "Private, only you will see this project" : "Public, visible in the community feed"}
-                  >
-                    <span
-                      aria-hidden
-                      className={[
-                        "h-4 w-7 rounded-full p-0.5 transition-colors flex",
-                        v2IsPrivate ? "bg-[var(--warn)] justify-end" : "bg-foreground/25",
-                      ].join(" ")}
-                    >
-                      <span className="h-3 w-3 rounded-full bg-background" />
-                    </span>
-                    {v2IsPrivate ? "Private" : "Public"}
-                  </button>
-                )}
-
-                {/* Buttons sit on the right, spaced from the toggle by
-                    an auto-margin so the toggle (or its empty slot)
-                    stays pinned to the left while Skip + Done hold
-                    the right edge. */}
+                {/* Buttons sit on the right via an auto-margin so
+                    Skip + Done hold the right edge. */}
                 {/* Cancel discards the in-progress dataset and returns to the
                     workspace, matching the Cancel on the Project page's create
                     flow. (The toolbar's morphed Cancel sits behind this overlay,
@@ -1851,8 +1750,8 @@ export function HomeView({
               {/* Preview + options once parsed. */}
               {v2ImportParsed && (
                 <div className="mt-8 animate-[fadeIn_220ms_ease-out]">
-                  <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] p-5">
-                    <div className="text-sm text-[var(--foreground)]">
+                  <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] p-5">
+                    <div className="text-sm text-[var(--foreground)] tabular-nums">
                       <span className="font-medium uppercase">{v2ImportParsed.format}</span>
                       <span className="text-foreground/45"> · </span>
                       {v2ImportParsed.stats.images.toLocaleString()} images
@@ -1872,9 +1771,9 @@ export function HomeView({
                           return (
                             <span
                               key={c}
-                              className="inline-flex items-center rounded-full px-2.5 h-6 text-xs font-medium"
-                              style={{ backgroundColor: bg, color: readableTextForBg(bg) }}
+                              className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] bg-transparent px-2 h-6 font-mono text-[12px] text-[var(--foreground)]"
                             >
+                              <span aria-hidden className="h-2 w-2 rounded-full shrink-0" style={{ backgroundColor: bg }} />
                               {c}
                             </span>
                           );
@@ -1917,43 +1816,6 @@ export function HomeView({
                       Full resolution preserves small objects; boxes are rescaled if you downsize.
                     </span>
                   </div>
-
-                  {v2CanPrivate && (
-                    <div className="mt-4 flex items-center gap-3">
-                      <button
-                        type="button"
-                        role="switch"
-                        aria-checked={v2IsPrivate}
-                        onClick={() => setV2IsPrivate((p) => !p)}
-                        disabled={v2ImportBusy}
-                        className={[
-                          "inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs transition-colors disabled:opacity-50",
-                          v2IsPrivate
-                            ? "border-[var(--warn)] text-[var(--warn)] hover:bg-[var(--surface-hover)]"
-                            : "border-[var(--line)] text-[var(--foreground)] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)]",
-                        ].join(" ")}
-                        title={
-                          v2IsPrivate
-                            ? "Private — only you can see this project"
-                            : "Public — visible in the community feed"
-                        }
-                      >
-                        <span
-                          aria-hidden
-                          className={[
-                            "h-4 w-7 rounded-full p-0.5 transition-colors flex",
-                            v2IsPrivate ? "bg-[var(--warn)] justify-end" : "bg-foreground/25",
-                          ].join(" ")}
-                        >
-                          <span className="h-3 w-3 rounded-full bg-background" />
-                        </span>
-                        {v2IsPrivate ? "Private" : "Public"}
-                      </button>
-                      <span className="text-[11px] text-foreground/40">
-                        Imported datasets default to private.
-                      </span>
-                    </div>
-                  )}
 
                   <div className="mt-6 flex items-center gap-3">
                     <button
@@ -2001,7 +1863,7 @@ export function HomeView({
       {!v2Active && (
         <section className="mx-auto max-w-[1400px] px-6 pb-24 grid gap-8">
           {creating && (
-            <div className="rounded-lg border border-[var(--border)] p-5 grid gap-4 animate-[fadeIn_180ms_ease-out]">
+            <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] p-5 grid gap-4 animate-[fadeIn_180ms_ease-out]">
               <div className="flex flex-wrap items-center gap-3">
                 <input
                   autoFocus
@@ -2012,7 +1874,7 @@ export function HomeView({
                     if (e.key === "Escape") setCreating(false);
                   }}
                   placeholder="Project name (e.g. potholes)"
-                  className="flex-1 min-w-[12rem] bg-transparent border-b border-[var(--border)] focus:border-[var(--line-strong)] outline-none py-2 text-base"
+                  className="flex-1 min-w-[12rem] rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-base outline-none focus:border-[var(--accent)] transition-colors"
                 />
                 <button
                   onClick={create}
@@ -2022,18 +1884,6 @@ export function HomeView({
                   Create
                 </button>
               </div>
-              {isFreePlan && (
-                <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-3.5 py-2.5 flex items-start gap-3">
-                  <span aria-hidden className="mt-1.5 h-1.5 w-1.5 rounded-full bg-[var(--warn)] shrink-0" />
-                  <div className="text-[12px] text-foreground/75 leading-relaxed">
-                    <span className="text-[var(--warn)] font-mono uppercase tracking-[0.12em] text-[11px]">Public project</span>
-                    <span className="text-foreground/45"> · </span>
-                    Free projects are public, anyone can see the images, labels and exports.
-                    Don&rsquo;t upload anything personal, sensitive, controlled, restricted or
-                    confidential. Upgrade to Pro for private projects.
-                  </div>
-                </div>
-              )}
             </div>
           )}
 
@@ -2127,7 +1977,14 @@ export function HomeView({
                       v2Reset();
                     }
                   }}
-                  className="h-9 rounded-md bg-[var(--accent)] text-[var(--accent-contrast)] px-4 text-[13px] font-medium hover:brightness-105 transition"
+                  className={[
+                    "h-9 rounded-md px-4 text-[13px] font-medium transition",
+                    // Accent is reserved for the single primary action; the
+                    // morphed Cancel state drops to the flat neutral recipe.
+                    v2Stage !== "idle" || creating
+                      ? "border border-[var(--line)] text-foreground/75 hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)]"
+                      : "bg-[var(--accent)] text-[var(--accent-contrast)] hover:brightness-105",
+                  ].join(" ")}
                 >
                   {v2Stage !== "idle" || creating ? "Cancel" : "+ Add Dataset"}
                 </button>
@@ -2138,7 +1995,7 @@ export function HomeView({
           {sortedProjects === null ? (
             <div className="text-[var(--muted)] text-sm">Loading…</div>
           ) : sortedProjects.length === 0 ? (
-            <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] py-10 text-center text-foreground/50">
+            <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] py-10 text-center text-foreground/50">
               {isSearching ? (
                 <>No projects match <span className="text-foreground/90">&ldquo;{searchQuery.trim()}&rdquo;</span>.</>
               ) : tab === "starred" ? (
@@ -2183,7 +2040,7 @@ export function HomeView({
                   && Array.from({ length: Math.min(WORKSPACE_PAGE_SIZE, total - projects.length) }).map((_, i) => (
                     <div
                       key={`ws-skel-${projects.length + i}`}
-                      className="rounded-lg border border-[var(--line)] bg-[var(--panel)] overflow-hidden"
+                      className="rounded-md border border-[var(--line)] bg-[var(--panel)] overflow-hidden"
                     >
                       <div className="aspect-video bg-foreground/[0.04]" />
                       <div className="p-4 space-y-2">
@@ -2386,7 +2243,7 @@ function ProjectCard({
   const coverBtnShadow = { boxShadow: "var(--shadow-soft)" };
   return (
     <div
-      className="pk-card pk-card-hover group overflow-hidden rounded-lg"
+      className="pk-card pk-card-hover group overflow-hidden rounded-md"
       style={{
         // Lift the card above the dim overlay (z-1000) while either
         // popup (tag overflow / overflow menu) is open so the card
@@ -2413,10 +2270,11 @@ function ProjectCard({
           </div>
         </button>
         {project.certified && (
-          <div className="absolute top-3 left-3 inline-flex items-center gap-1.5 rounded-md bg-amber-500/20 backdrop-blur-md border border-amber-300/40 text-amber-50 px-2.5 py-1 text-[10px] font-medium pointer-events-none">
-            <svg viewBox="0 0 24 24" className="h-3 w-3" fill="currentColor">
-              <path d="M12 1.6l2.6 5.6 6.1.6-4.6 4.2 1.4 6.1L12 14.9 6.5 18.1l1.4-6.1L3.3 7.8l6.1-.6z" />
-            </svg>
+          <div
+            className="absolute top-3 left-3 inline-flex items-center gap-1.5 rounded-md bg-white/85 backdrop-blur-md px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-zinc-700 pointer-events-none"
+            style={{ boxShadow: "var(--shadow-soft)" }}
+          >
+            <span aria-hidden className="h-2 w-2 rounded-full bg-[var(--warn)]" />
             Certified
           </div>
         )}
@@ -2475,7 +2333,7 @@ function ProjectCard({
               />
               <div
                 role="menu"
-                className="pk-glass absolute bottom-[calc(100%+8px)] right-0 z-50 w-44 rounded-lg p-1.5 shadow-[var(--shadow-strong)]"
+                className="pk-glass absolute bottom-[calc(100%+8px)] right-0 z-50 w-44 rounded-md p-1.5 shadow-[var(--shadow-strong)]"
               >
                 {onDuplicate && (
                   <button
@@ -2488,7 +2346,7 @@ function ProjectCard({
                       setMenuOpen(false);
                       onDuplicate();
                     }}
-                    className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-sm text-foreground/80 hover:bg-foreground/[0.06] transition-colors disabled:opacity-50 disabled:cursor-default"
+                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm text-foreground/80 hover:bg-foreground/[0.06] transition-colors disabled:opacity-50 disabled:cursor-default"
                   >
                     <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                       <rect x="9" y="9" width="11" height="11" rx="2" />
@@ -2505,7 +2363,7 @@ function ProjectCard({
                     setMenuOpen(false);
                     onDelete();
                   }}
-                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-sm text-[var(--bad)] hover:bg-[var(--surface-hover)] transition-colors"
+                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm text-[var(--bad)] hover:bg-[var(--surface-hover)] transition-colors"
                 >
                   <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                     <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
@@ -2524,7 +2382,6 @@ function ProjectCard({
             <div className="min-w-0">
               <div className="text-lg font-semibold tracking-tight truncate flex items-center gap-2">
                 <span className="truncate">{project.name}</span>
-                {project.private && <PrivateLockIcon />}
                 {project.derived && <DerivedBadge parentName={project.derived.parentName} />}
               </div>
             </div>
@@ -2533,11 +2390,9 @@ function ProjectCard({
                 {statusBadges.map((b) => (
                   <span
                     key={b.label}
-                    className={[
-                      "rounded px-1.5 py-0.5 font-mono text-[10px] leading-normal uppercase tracking-[0.12em] border",
-                      b.classes,
-                    ].join(" ")}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] bg-transparent px-2 py-0.5 font-mono text-[12px] leading-normal text-[var(--fg-soft)]"
                   >
+                    <span aria-hidden className={["h-2 w-2 rounded-full shrink-0", b.dot].join(" ")} />
                     {b.label}
                   </span>
                 ))}
@@ -2661,7 +2516,7 @@ function DeleteProjectDialog({
         if (e.target === e.currentTarget && !busy) onCancel();
       }}
     >
-      <div className="pk-glass pk-pop max-w-md w-full rounded-lg overflow-hidden">
+      <div className="pk-glass pk-pop max-w-md w-full rounded-md overflow-hidden">
         <header className="px-6 pt-6 pb-3">
           <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--bad)]">Permanent action</div>
           <h2 className="mt-2 text-xl font-semibold tracking-tight">Delete project?</h2>
@@ -2676,7 +2531,7 @@ function DeleteProjectDialog({
             <span className="text-[var(--bad)]">This cannot be recovered.</span>
           </p>
 
-          <div className="rounded-md border border-[var(--bad)] bg-[var(--panel)] px-3 py-2.5 text-xs text-[var(--bad)]">
+          <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-2.5 text-xs text-[var(--bad)]">
             Type the project name{" "}
             <span className="font-mono text-[var(--foreground)]">{project.name}</span> below to confirm.
           </div>
@@ -2689,13 +2544,13 @@ function DeleteProjectDialog({
               if (e.key === "Enter") submit();
             }}
             placeholder={project.name}
-            className="w-full rounded-md border border-[var(--border)] bg-transparent px-3 py-2.5 font-mono text-sm focus:outline-none focus:border-[var(--line-strong)]"
+            className="w-full rounded-md border border-[var(--line)] bg-transparent px-3 py-2.5 font-mono text-sm focus:outline-none focus:border-[var(--line-strong)]"
             spellCheck={false}
             autoComplete="off"
           />
         </div>
 
-        <footer className="px-6 py-4 border-t border-[var(--border)] flex items-center justify-end gap-2">
+        <footer className="px-6 py-4 border-t border-[var(--line)] flex items-center justify-end gap-2">
           <button
             onClick={onCancel}
             className="rounded-md border border-[var(--line)] px-4 py-2 text-[13px] hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)] transition-colors"
@@ -2705,12 +2560,7 @@ function DeleteProjectDialog({
           <button
             onClick={submit}
             disabled={!matches || busy}
-            className={[
-              "rounded-md px-4 py-2 text-[13px] font-medium transition-colors",
-              matches && !busy
-                ? "bg-red-600 dark:bg-red-500 text-white hover:bg-red-700 dark:hover:bg-red-400"
-                : "bg-red-500/20 text-red-700/60 dark:text-red-300/60 cursor-not-allowed",
-            ].join(" ")}
+            className="rounded-md bg-[var(--bad)] px-4 py-2 text-[13px] font-medium text-[var(--background)] transition-all hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {busy ? "Deleting…" : "Delete forever"}
           </button>
