@@ -1,8 +1,6 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
 import "./globals.css";
-import { SessionProviderWrapper } from "./SessionProviderWrapper";
-import { MobileBlock } from "./MobileBlock";
 import { ThemeProvider } from "./ThemeProvider";
 
 const geistSans = localFont({
@@ -154,10 +152,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         />
       </head>
       <body className={`${geistSans.variable} ${geistMono.variable} antialiased font-sans`}>
-        <ThemeProvider>
-          <SessionProviderWrapper>{children}</SessionProviderWrapper>
-          <MobileBlock />
-        </ThemeProvider>
+        <ThemeProvider>{children}</ThemeProvider>
       </body>
     </html>
   );

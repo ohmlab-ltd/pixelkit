@@ -8,7 +8,11 @@ import { colourForLabelStable } from "./OnboardLabelsV2";
 import { VariationPlot, type StatsPoint, type AugmentPoint } from "./DatasetStatsCard";
 import { FactorRadar, FACTOR_INFO, FACTOR_ORDER } from "./HealthRadar";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8001";
+const API =
+  process.env.NEXT_PUBLIC_API_URL ??
+  (typeof window !== "undefined" && window.location.port === "3000"
+    ? "http://localhost:8001"
+    : "");
 
 // One modal, two equal-height columns: dataset HEALTH on the left, the
 // near-duplicate REVIEW (already expanded) on the right. No pop-up within a

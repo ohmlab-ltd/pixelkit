@@ -18402,5 +18402,45 @@ async def v2_reference_detect_point(
     return result
 
 
+
+# ── Static UI serving (portable build) ───────────────────────────────────────
+# The packaged app serves the exported UI (ui/out) from this process, so one
+# port serves everything and the SPA's deep links (/app/<id>) fall back to
+# app.html. Registered LAST so every API route wins first. In dev (`next
+# dev` on :3000) the dir may be absent — the catch-all then 404s harmlessly.
+
+def _ui_dir() -> Path | None:
+    env = (os.environ.get("PIXELKIT_UI_DIR") or "").strip()
+    cand = Path(env).expanduser() if env else Path(__file__).resolve().parents[2] / "ui" / "out"
+    return cand if (cand / "index.html").is_file() else None
+
+
+_UI_DIR = _ui_dir()
+if _UI_DIR:
+    print(f"[server] serving UI from {_UI_DIR}")
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def serve_ui(full_path: str):
+    if _UI_DIR is None or full_path.startswith("api/") or full_path == "api":
+        raise HTTPException(404, "not found")
+    p = (_UI_DIR / full_path).resolve() if full_path else _UI_DIR / "index.html"
+    try:
+        p.relative_to(_UI_DIR)
+    except ValueError:
+        raise HTTPException(404, "not found")
+    if p.is_file():
+        return FileResponse(p)
+    html = _UI_DIR / f"{full_path}.html"
+    if html.is_file():
+        return FileResponse(html)
+    if full_path.split("/", 1)[0] in ("app", "guide"):
+        return FileResponse(_UI_DIR / f"{full_path.split('/', 1)[0]}.html")
+    nf = _UI_DIR / "404.html"
+    if nf.is_file():
+        return FileResponse(nf, status_code=404)
+    raise HTTPException(404, "not found")
+
+
 if __name__ == "__main__":
     uvicorn.run("server:app", host="127.0.0.1", port=8001, reload=False)

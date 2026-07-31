@@ -10,7 +10,11 @@ import { usePlan } from "../PlanPill";
 import { containsProfanity } from "../profanity";
 import { buildProjectLabelColourMap, LABEL_COLOURS, colourForLabelStable } from "./OnboardLabelsV2";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API =
+  process.env.NEXT_PUBLIC_API_URL ??
+  (typeof window !== "undefined" && window.location.port === "3000"
+    ? "http://localhost:8001"
+    : "");
 
 // V2-native settings popup. Five sections:
 //   1. Rename           , POST /api/projects/{id}/rename

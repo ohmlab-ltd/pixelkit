@@ -19,7 +19,11 @@ import { isProPlan } from "@/lib/plans";
 import { containsProfanity } from "./profanity";
 import { usePlan } from "./PlanPill";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API =
+  process.env.NEXT_PUBLIC_API_URL ??
+  (typeof window !== "undefined" && window.location.port === "3000"
+    ? "http://localhost:8001"
+    : "");
 
 // Block a labelling job if it would push the user over their plan's
 // monthly quota. Returns null when the run is allowed, or a
@@ -976,12 +980,8 @@ export function ProjectView({
       for (const f of resized) fd.append("images", f);
 
       setUploadProgress({ phase: "uploading", fileCount: files.length, bytesLoaded: 0, bytesTotal: 0 });
-      // XHR (not fetch) for upload progress events. The bearer token
-      // is fetched out-of-band via getSession() and applied with
-      // setRequestHeader before send.
-      const { getSession } = await import("next-auth/react");
-      const sess = await getSession();
-      const backendToken = (sess?.user as { backendToken?: string | null } | undefined)?.backendToken ?? null;
+      // XHR (not fetch) for upload progress events. Portable build:
+      // no accounts, so no bearer to attach.
       const body = await new Promise<{
         added?: string[];
         skipped?: string[];
@@ -989,7 +989,6 @@ export function ProjectView({
       }>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open("POST", `${API}/api/projects/${name}/images?user=${encodeURIComponent(username)}`);
-        if (backendToken) xhr.setRequestHeader("Authorization", `Bearer ${backendToken}`);
         xhr.upload.addEventListener("progress", (ev) => {
           if (!ev.lengthComputable) return;
           setUploadProgress((prev) => prev && {

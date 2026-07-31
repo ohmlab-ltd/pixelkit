@@ -36,7 +36,11 @@ const V2_MAX_REFS = 20;
 // Annotations required per label (shown as a target, not enforced in the UI).
 const V2_ANNOTS_PER_LABEL = 5;
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API =
+  process.env.NEXT_PUBLIC_API_URL ??
+  (typeof window !== "undefined" && window.location.port === "3000"
+    ? "http://localhost:8001"
+    : "");
 
 export type ProjectSummary = {
   id: string;

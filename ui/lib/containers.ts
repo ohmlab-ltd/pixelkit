@@ -3,9 +3,7 @@
 // members; the legacy code-level "project" is a single Dataset. All calls go
 // through apiFetch so the backend's membership-aware guards see the bearer.
 
-import { apiFetch } from "./apiFetch";
-
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8001";
+import { API_BASE as API, apiFetch } from "./apiFetch";
 
 export type Role = "owner" | "editor" | "viewer";
 

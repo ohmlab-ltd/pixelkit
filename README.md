@@ -55,10 +55,13 @@ choose.
       token stored owner-only in the app config (never the workspace),
       boot auto-loads only already-cached models, VLM load/unload toggle.
       Setup UI screens land in Phase 5.
-- [ ] Phase 5 — UI slimming: strip remaining SaaS chrome (pricing/community/
-      terminal tabs, plan gates), first-run wizard. **Guarantee: no login or
-      auth surface anywhere** — the logged-out views and /login–/signup
-      links are already gone. (Engine-served UI here is an interim dev
+- [x] **Phase 5 — UI slimming + first-run setup:** pricing/community/
+      terminal tabs, ProfileView, plan chip and next-auth removed entirely
+      (no login or auth surface anywhere); new SetupWizard (HF token →
+      weight downloads with live progress) and SettingsView (workspace,
+      device, token, model load/unload) on the Phase 4 endpoints; UI is a
+      static export the engine serves itself at 127.0.0.1:8001 with SPA
+      deep-link fallback — one process runs the whole product. (Interim
       shape; the shipped product is the Phase 8 application.)
 - [ ] Phase 6 — packaging: pinned engine env + weights/bundling groundwork
       the Phase 8 app builds on
@@ -88,7 +91,8 @@ cd engine && pip install -r requirements.txt && python gd/server.py
 #   (override with PIXELKIT_WORKSPACE)
 
 # ui
-cd ui && npm install && npm run dev   # http://localhost:3000
+cd ui && npm install && npm run build   # engine then serves ui/out itself
+# (or `npm run dev` on :3000 for UI development)
 
 # migrate data from the SaaS deployment
 cd engine && python import_legacy.py <old-backend-dir-or-backup.zip>

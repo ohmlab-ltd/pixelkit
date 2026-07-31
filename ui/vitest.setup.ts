@@ -37,14 +37,6 @@ vi.mock("resend", () => ({
   Resend: vi.fn(() => ({ emails: { send: vi.fn(async () => ({ data: {}, error: null })) } })),
 }));
 
-vi.mock("next-auth", () => ({ default: vi.fn(() => ({ handlers: {}, auth: vi.fn(), signIn: vi.fn(), signOut: vi.fn() })) }));
-vi.mock("next-auth/react", () => ({
-  getSession: vi.fn(async () => null),
-  useSession: vi.fn(() => ({ data: null, status: "unauthenticated" })),
-  signIn: vi.fn(),
-  signOut: vi.fn(),
-}));
-
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), refresh: vi.fn(), prefetch: vi.fn() }),
   usePathname: () => "/",

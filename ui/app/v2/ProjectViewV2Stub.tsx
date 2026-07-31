@@ -63,7 +63,11 @@ import { ScrollToTop } from "../components/ScrollToTop";
 import { useIdle } from "../../lib/useIdle";
 import { DatasetTypePill, type DatasetTypeValue } from "./DatasetTypePill";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API =
+  process.env.NEXT_PUBLIC_API_URL ??
+  (typeof window !== "undefined" && window.location.port === "3000"
+    ? "http://localhost:8001"
+    : "");
 
 // Pipeline router for the imports flow. The portable engine is SAM3-only
 // (the GroundingDINO "v2" import endpoints no longer exist), so charlie is

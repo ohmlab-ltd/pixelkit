@@ -1,0 +1,96 @@
+// Client for the engine's model manager + settings (portable build).
+import { apiFetch } from "@/lib/apiFetch";
+
+export type ModelName = "sam3" | "dinov2" | "vlm";
+
+export type DownloadRec = {
+  status: "downloading" | "done" | "error";
+  downloaded_bytes: number;
+  total_bytes: number;
+  error: string | null;
+} | null;
+
+export type ModelInfo = {
+  repo: string;
+  label: string;
+  gated: boolean;
+  required: boolean;
+  approxGb: number;
+  downloaded: boolean;
+  loaded: boolean;
+  download: DownloadRec;
+};
+
+export type ModelsStatus = {
+  models: Record<ModelName, ModelInfo>;
+  weightsDir: string;
+  freeDiskGb: number;
+  hfTokenConfigured: boolean;
+};
+
+export type TokenStatus = {
+  configured: boolean;
+  valid: boolean | null;
+  username: string | null;
+  sam3Access: boolean | null;
+  detail: string | null;
+};
+
+export type EngineSettings = {
+  workspace: string;
+  device: "cuda" | "mps" | "cpu";
+  vlmEnabled: boolean;
+  hfTokenConfigured: boolean;
+  sam3Repo: string;
+};
+
+async function json<T>(r: Response): Promise<T> {
+  if (!r.ok) {
+    let detail = `${r.status}`;
+    try {
+      detail = (await r.json()).detail ?? detail;
+    } catch {}
+    throw new Error(detail);
+  }
+  return r.json();
+}
+
+export const fetchModelsStatus = () =>
+  apiFetch("/api/models/status").then((r) => json<ModelsStatus>(r));
+
+export const fetchEngineSettings = () =>
+  apiFetch("/api/settings").then((r) => json<EngineSettings>(r));
+
+export const fetchTokenStatus = () =>
+  apiFetch("/api/settings/hf-token").then((r) => json<TokenStatus>(r));
+
+export const setHfToken = (token: string) =>
+  apiFetch("/api/settings/hf-token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  }).then((r) => json<TokenStatus>(r));
+
+export const clearHfToken = () =>
+  apiFetch("/api/settings/hf-token", { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r));
+
+export const downloadModel = (name: ModelName) =>
+  apiFetch(`/api/models/${name}/download`, { method: "POST" }).then((r) => json<unknown>(r));
+
+export const loadModel = (name: ModelName) =>
+  apiFetch(`/api/models/${name}/load`, { method: "POST" }).then((r) => json<unknown>(r));
+
+export const unloadModel = (name: ModelName) =>
+  apiFetch(`/api/models/${name}/unload`, { method: "POST" }).then((r) => json<unknown>(r));
+
+export const setWorkspacePath = (path: string) =>
+  apiFetch("/api/settings/workspace", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  }).then((r) => json<{ ok: boolean; workspace: string; restartRequired: boolean }>(r));
+
+export function downloadPct(d: DownloadRec): number | null {
+  if (!d || d.status !== "downloading" || !d.total_bytes) return null;
+  return Math.min(99, Math.round((d.downloaded_bytes / d.total_bytes) * 100));
+}

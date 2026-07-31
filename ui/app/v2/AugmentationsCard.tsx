@@ -33,7 +33,11 @@ const REMOVE_AUGMENT_PHRASES = [
   "Returning the dataset to its source state…",
 ];
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8001";
+const API =
+  process.env.NEXT_PUBLIC_API_URL ??
+  (typeof window !== "undefined" && window.location.port === "3000"
+    ? "http://localhost:8001"
+    : "");
 
 export type AugmentPreviewSource = {
   source: "reference" | "import";

@@ -1,23 +1,19 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useSession } from "next-auth/react";
-import { useRouter } from "next/navigation";
 import { HomeView } from "../HomeView";
 import { ProjectView } from "../ProjectView";
-import { ProjectsView } from "../ProjectsView";
 import { ScrollToTop } from "../components/ScrollToTop";
-import { PricingView } from "../PricingView";
-import { ProfileView } from "../ProfileView";
-import { TerminalView } from "../TerminalView";
 import { GuideView } from "../GuideView";
+import { SettingsView } from "../SettingsView";
+import { SetupWizard, setupNeeded } from "../SetupWizard";
 import { TopNav, NavTab } from "../TopNav";
 import { broadcastCurrentTab, onAppNavigate } from "@/lib/appNav";
 import type { ReferenceImage } from "../v2/OnboardReferencesV2";
 import { ProjectViewV2Stub } from "../v2/ProjectViewV2Stub";
 import { patchProjectMeta, readProjectMeta } from "@/lib/projectMetaCache";
-import { apiFetch, primeBackendToken } from "@/lib/apiFetch";
-import { installApiAuth, ensureAuthCookie } from "@/lib/apiAuth";
+import { apiFetch } from "@/lib/apiFetch";
+import { fetchModelsStatus } from "@/lib/models";
 
 // Result of the full V2 onboarding flow. HomeView owns every stage
 // (name + labels + references) and fires onV2Begin once with the
@@ -53,22 +49,17 @@ type V2Result = {
 };
 
 export default function Page() {
-  const { data: session, status } = useSession();
-  const router = useRouter();
-
-  // Default tab depends on auth: signed-in visitors land on Workspace,
-  // anonymous visitors land on Demo. Resolved once status is known so the
-  // first paint goes to the right place without a flicker.
   const [tab, setTab] = useState<NavTab>("workspaces");
-  const [tabResolved, setTabResolved] = useState(false);
   const [openProject, setOpenProject] = useState<string | null>(null);
-  const [openProjectOwner, setOpenProjectOwner] = useState<string>("");
   const [openProjectName, setOpenProjectName] = useState<string>("");
   const [profileOpen, setProfileOpen] = useState(false);
   // V2 post-onboarding stub. HomeView owns the entire onboarding
   // (name + labels + references) inline so the V2 path here is a
   // single piece of state, flipping back to V1 is one tweak.
   const [openV2Project, setOpenV2Project] = useState<V2Result | null>(null);
+  // First-run setup wizard. Shown when the engine reports missing model
+  // weights AND the user hasn't dismissed it before ("pk-setup-dismissed").
+  const [setupOpen, setSetupOpen] = useState(false);
 
   const [projectOriginTab, setProjectOriginTab] = useState<NavTab>("workspaces");
   // Set when the user deep-links to a project id that the backend
@@ -167,74 +158,55 @@ export default function Page() {
       return;
     }
     setOpenProject(id);
-    setOpenProjectOwner(owner);
     setOpenProjectName(displayName);
   };
 
-  // Compute these BEFORE any early returns so the hook order below stays
-  // stable across renders (loading -> authenticated transitions).
   // Portable build: no accounts. Everything renders as the local user —
-  // never show a logged-out state (the /login route doesn't exist).
+  // there is no logged-out state (the /login route doesn't exist).
   const loggedIn = true;
-  void status;
-  const username = (session?.user?.username ?? "") as string;
 
-  // OAuth users with no username yet, finish onboarding before they can do
-  // anything else. Logged-out viewers fall through and see the public chrome.
+  // A `?tab=` query param deep-links into a specific tab without needing a
+  // separate top-level route per tab. `?profile=1` re-opens the settings
+  // pane after a hard reload (e.g. post-settings-save); strip the param
+  // afterwards so back/refresh don't reopen it forever.
   useEffect(() => {
-    if (status === "authenticated" && session?.user && !session.user.username) {
-      router.replace("/onboard");
+    if (typeof window === "undefined") return;
+    const search = new URLSearchParams(window.location.search);
+    const t = search.get("tab");
+    const valid: NavTab[] = ["workspaces", "guide"];
+    if (t && (valid as string[]).includes(t)) setTab(t as NavTab);
+    if (search.get("profile") === "1") {
+      setProfileOpen(true);
+      const cleaned = new URLSearchParams(window.location.search);
+      cleaned.delete("profile");
+      const next = cleaned.toString();
+      window.history.replaceState(null, "", next ? `?${next}` : window.location.pathname);
     }
-  }, [status, session, router]);
+  }, []);
 
-  // Anonymous users who land on the workspaces tab (which used to
-  // fall through to DemoView) get bounced to /login instead. Public
-  // tabs (projects feed, pricing, guide) stay accessible without auth.
-  // Preserve the originating URL via ?callbackUrl= so NextAuth lands
-  // the user back where they were after signing in.
+  // First-run setup: ask the engine once whether the model weights are in
+  // place. Engine may be down / restarting — swallow the error and skip the
+  // wizard (Settings can always reach it later).
   useEffect(() => {
-    if (status !== "unauthenticated") return;
-    if (!tabResolved) return;
-    if (tab !== "workspaces") return;
-    const callbackUrl =
-      typeof window !== "undefined"
-        ? window.location.pathname + window.location.search
-        : "/app";
-    router.replace(`/login?callbackUrl=${encodeURIComponent(callbackUrl)}`);
-  }, [status, tab, tabResolved, router]);
-
-  // Pick the landing tab based on auth state. We only set it once (on first
-  // resolution) so subsequent navigations the user makes aren't clobbered.
-  // A `?tab=` query param wins over the auth-based default, that's how
-  // links from /profile or /pricing-related CTAs deep-link into a specific
-  // tab without needing a separate top-level route per tab.
-  useEffect(() => {
-    if (tabResolved || status === "loading") return;
-    if (typeof window !== "undefined") {
-      const search = new URLSearchParams(window.location.search);
-      const t = search.get("tab");
-      const valid: NavTab[] = ["workspaces", "projects", "guide", "pricing", "terminal"];
-      const fromUrl = t && (valid as string[]).includes(t) ? (t as NavTab) : null;
-      if (fromUrl) setTab(fromUrl);
-      else if (status === "authenticated") setTab("workspaces");
-      else setTab("projects");
-      // `?profile=1` re-opens the profile pane after a hard reload
-      // (e.g. post-settings-save). Strip the param afterwards so the
-      // URL stays clean and back/refresh don't reopen profile forever.
-      if (search.get("profile") === "1") {
-        setProfileOpen(true);
-        const cleaned = new URLSearchParams(window.location.search);
-        cleaned.delete("profile");
-        const next = cleaned.toString();
-        window.history.replaceState(null, "", next ? `?${next}` : window.location.pathname);
+    let cancelled = false;
+    (async () => {
+      try {
+        const status = await fetchModelsStatus();
+        if (cancelled) return;
+        if (
+          setupNeeded(status) &&
+          window.localStorage.getItem("pk-setup-dismissed") !== "1"
+        ) {
+          setSetupOpen(true);
+        }
+      } catch {
+        /* engine unreachable — no wizard */
       }
-    } else if (status === "authenticated") {
-      setTab("workspaces");
-    } else {
-      setTab("projects");
-    }
-    setTabResolved(true);
-  }, [status, tabResolved]);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Broadcast the resolved tab so root-layout components (e.g.
   // ScrollToTop) can gate themselves on the current section without
@@ -317,14 +289,13 @@ export default function Page() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Listen for in-app navigation events. Lets any nested component
-  // (PlanPill, Upgrade buttons, billing warnings, AI-Review-upgrade link)
-  // ask to switch tabs without prop-drilling or relying on URL
-  // changes, those don't reliably re-trigger this page since /app
-  // is a single SPA route.
+  // Listen for in-app navigation events. Lets any nested component ask to
+  // switch tabs without prop-drilling. Legacy tabs (pricing / projects /
+  // terminal) no longer exist in the portable build, ignore those events.
   useEffect(() => {
-    return onAppNavigate((tab) => {
-      setTab(tab);
+    return onAppNavigate((next) => {
+      if (next !== "workspaces" && next !== "guide") return;
+      setTab(next);
       setOpenProject(null);
       setOpenV2Project(null);
       setProfileOpen(false);
@@ -332,67 +303,19 @@ export default function Page() {
     });
   }, []);
 
-  // Heartbeat, pings the backend every 15s while a logged-in user has the
-  // app open, so the Terminal's "Live now" panel reflects current usage.
-  // Pure presence, never persisted. Declared above the early return so the
-  // hook order is identical on every render.
-  const backendToken = (session?.user as { backendToken?: string | null } | undefined)?.backendToken ?? null;
-  // Prime apiFetch's token cache the moment the session resolves, so
-  // the first backend call on project-open fires immediately instead
-  // of waiting on a getSession() → /api/auth/session round-trip. This
-  // is what makes "click project → data loads" feel instant rather
-  // than stalling for a few seconds before the requests even leave.
-  useEffect(() => {
-    if (status === "loading") return;
-    primeBackendToken(backendToken);
-    // Phase 0 security: patch fetch so every backend call carries the bearer
-    // (covers legacy plain-fetch sites), and set the pk_auth cookie so private
-    // <img> image loads authenticate against the new project guards too.
-    installApiAuth();
-    if (backendToken) ensureAuthCookie();
-  }, [status, backendToken]);
-  useEffect(() => {
-    if (!loggedIn || !username) return;
-    const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8001";
-    const ping = () => {
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (backendToken) headers["Authorization"] = `Bearer ${backendToken}`;
-      fetch(`${API}/api/heartbeat`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ username }),
-        keepalive: true,
-      }).catch(() => {});
-    };
-    ping();
-    const id = window.setInterval(ping, 15000);
-    return () => window.clearInterval(id);
-  }, [loggedIn, username, backendToken]);
-
-  // Don't flash anything while the session is still resolving.
-  if (status === "loading") return null;
-
-  const user = loggedIn
-    ? {
-        name: session!.user.name ?? session!.user.username ?? "User",
-        username: session!.user.username ?? "",
-        email: session!.user.email ?? "",
-        image: session!.user.image ?? null,
-      }
-    : { name: "", username: "", email: "", image: null };
-
-  // Gate the Terminal link to the single operator account. The page itself
-  // already requires a backend token, but hiding the link in nav keeps it
-  // out of sight for everyone else.
-  const ADMIN_USERNAMES = ["hamish", "mukund"];
-  const isAdmin = loggedIn && ADMIN_USERNAMES.includes(user.username);
+  // Portable build: the single local user, no session round-trip.
+  const user = {
+    name: "Local",
+    username: "local",
+    email: "local@pixelkit.local",
+    image: null,
+  };
 
   return (
     <>
       <TopNav
         current={(openProject || openV2Project) ? projectOriginTab : tab}
         onNavigate={(t) => {
-          if (t === "terminal" && !isAdmin) return;
           // Clicking the tab you're already on is a "scroll to top"
           // gesture, not a no-op. Only counts when no project (V1
           // OR V2) / profile pane is open over the tab, otherwise
@@ -432,10 +355,6 @@ export default function Page() {
           window.location.href = "/";
         }}
         user={user}
-        loggedIn={loggedIn}
-        // Terminal entry now lives on the profile page (admins only), not the
-        // top bar.
-        showTerminal={false}
       />
       {/* HomeView stays mounted under the project overlay so coming
           back from a project is instant, its `projects` state, the
@@ -492,30 +411,7 @@ export default function Page() {
           </p>
         </main>
       ) : profileOpen ? (
-        <ProfileView
-          user={user}
-          onJumpWorkspaces={() => {
-            setProfileOpen(false);
-            setOpenProject(null);
-            setOpenV2Project(null);
-            setTab("workspaces");
-          }}
-          onJumpProjects={() => {
-            setProfileOpen(false);
-            setOpenProject(null);
-            setOpenV2Project(null);
-            setTab("projects");
-          }}
-          // Operator terminal entry, admins (@hamish / @mukund) only. Moved here
-          // from the top bar.
-          showTerminal={isAdmin}
-          onJumpTerminal={() => {
-            setProfileOpen(false);
-            setOpenProject(null);
-            setOpenV2Project(null);
-            setTab("terminal");
-          }}
-        />
+        <SettingsView onClose={() => setProfileOpen(false)} />
       ) : openV2Project ? (
         <>
         <ProjectViewV2Stub
@@ -589,42 +485,28 @@ export default function Page() {
           name={openProject}
           initialDisplayName={openProjectName}
           username={user.username}
-          // Read-only only when viewing *someone else's* project from the
-          // community Projects tab. Own projects stay editable wherever
-          // they're opened from.
-          readOnly={
-            projectOriginTab === "projects" &&
-            !!openProjectOwner &&
-            openProjectOwner !== user.username
-          }
+          // Portable build: single local user, every legacy (V1) dataset on
+          // this machine is theirs — always editable.
+          readOnly={false}
           onClose={() => { setOpenProject(null); syncUrl(null); }}
           onRename={(newName) => { setOpenProject(newName); syncUrl(newName); }}
         />
         <ScrollToTop />
         </>
-      ) : tab === "workspaces" ? (
-        // Logged-in workspace renders via the always-mounted block
-        // above; anonymous viewers are redirected to /login by the
-        // effect higher up, so we render null while that bounce
-        // completes (one tick) instead of flashing any fallback UI.
-        null
-      ) : tab === "terminal" ? (
-        <TerminalView username={user.username} />
-      ) : tab === "pricing" ? (
-        <PricingView />
       ) : tab === "guide" ? (
         <GuideView />
       ) : (
-        <>
-          <ProjectsView onOpen={openProj} username={user.username} loggedIn={loggedIn} />
-          {/* Back-to-top, only mounted on the Projects feed where the
-              user actually scrolls through a long grid. No global
-              mount, no cross-component broadcast required. */}
-          <ScrollToTop />
-        </>
+        // Workspace renders via the always-mounted block above.
+        null
       )}
-
-
+      {setupOpen && (
+        <SetupWizard
+          onClose={() => {
+            window.localStorage.setItem("pk-setup-dismissed", "1");
+            setSetupOpen(false);
+          }}
+        />
+      )}
     </>
   );
 }

@@ -14,7 +14,11 @@
 import { useEffect, useState } from "react";
 import { capture } from "./lib/analytics";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API =
+  process.env.NEXT_PUBLIC_API_URL ??
+  (typeof window !== "undefined" && window.location.port === "3000"
+    ? "http://localhost:8001"
+    : "");
 
 type ExportFormat = {
   id: "yolo" | "coco" | "voc";

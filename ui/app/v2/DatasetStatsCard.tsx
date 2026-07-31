@@ -20,7 +20,11 @@ import { createPortal } from "react-dom";
 import { apiFetch } from "../../lib/apiFetch";
 import { buildProjectLabelColourMap, colourForLabelStable, readableTextForBg } from "./OnboardLabelsV2";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8001";
+const API =
+  process.env.NEXT_PUBLIC_API_URL ??
+  (typeof window !== "undefined" && window.location.port === "3000"
+    ? "http://localhost:8001"
+    : "");
 
 export type StatsPoint = {
   id: string;

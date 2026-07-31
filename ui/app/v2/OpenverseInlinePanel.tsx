@@ -10,7 +10,11 @@ import {
 import { apiFetch } from "../../lib/apiFetch";
 import { GlassDialog } from "./GlassDialog";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8001";
+const API =
+  process.env.NEXT_PUBLIC_API_URL ??
+  (typeof window !== "undefined" && window.location.port === "3000"
+    ? "http://localhost:8001"
+    : "");
 
 // Ported 1:1 from V1's ProjectView Openverse panel, same UX,
 // adapted to V2's manifest shape (imports + /from_urls endpoint).

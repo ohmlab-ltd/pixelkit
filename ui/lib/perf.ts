@@ -72,8 +72,13 @@ async function flush(): Promise<void> {
     // because that's the only reliable transport during pagehide.
     const body = JSON.stringify({ events, session: SESSION_ID });
     const path = "/api/perf/log";
+    // Same base logic as lib/apiFetch.ts (not imported — apiFetch
+    // imports this module, so importing back would be circular).
     const apiBase =
-      process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8001";
+      process.env.NEXT_PUBLIC_API_URL ??
+      (typeof window !== "undefined" && window.location.port === "3000"
+        ? "http://localhost:8001"
+        : "");
     const url = `${apiBase}${path}`;
     if (
       document.visibilityState === "hidden" &&

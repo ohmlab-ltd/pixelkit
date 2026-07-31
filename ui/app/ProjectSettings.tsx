@@ -4,7 +4,11 @@ import { useEffect, useRef, useState } from "react";
 import { containsProfanity } from "./profanity";
 import { apiFetch } from "@/lib/apiFetch";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API =
+  process.env.NEXT_PUBLIC_API_URL ??
+  (typeof window !== "undefined" && window.location.port === "3000"
+    ? "http://localhost:8001"
+    : "");
 
 type ResultLite = { image: string; pending?: boolean };
 
