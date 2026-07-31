@@ -675,11 +675,30 @@ async def lifespan(app: FastAPI):
             state["charlie"] = None
         elif models_mgr.is_downloaded("sam3"):
             asyncio.create_task(_bg_load_charlie())
+        elif models_mgr.hf_token():
+            # SAM3 is the product — with a token on file, get it without
+            # being asked: download in the background, load when it lands.
+            state["charlie"] = None
+
+            async def _auto_sam3() -> None:
+                print("[server] SAM3 weights missing — auto-downloading (token on file)...")
+                await asyncio.to_thread(models_mgr.start_download, "sam3")
+                while True:
+                    await asyncio.sleep(5)
+                    with models_mgr._DL_LOCK:
+                        rec = dict(models_mgr._DOWNLOADS.get("sam3") or {})
+                    if rec.get("status") == "error":
+                        print(f"[server] SAM3 auto-download failed: {rec.get('error')}")
+                        return
+                    if rec.get("status") == "done":
+                        break
+                await _bg_load_charlie()
+            asyncio.create_task(_auto_sam3())
         else:
             state["charlie"] = None
             print(
-                "[server] SAM3 weights not downloaded yet — set the HF token "
-                "(POST /api/settings/hf-token) then POST /api/models/sam3/download"
+                "[server] SAM3 needs a Hugging Face token (license-gated) — "
+                "add it in the setup screen and it downloads + loads automatically"
             )
         if vlm_on and models_mgr.is_downloaded("vlm"):
             asyncio.create_task(_bg_load_vlm())
@@ -11815,92 +11834,27 @@ def _write_dataset_type_sidecar(project_id: str, data: dict) -> None:
 
 
 def _classify_dataset_type_cached(project_id: str, tags: list[str]) -> dict:
-    """Return {type, reason, labels_signature, prompt_version, source}.
-
-    Resolution order, highest priority first:
-      1. A user/reference OVERRIDE persisted in the sidecar
-         (`override` field). This wins regardless of the label
-         signature — the user explicitly chose it (or added reference
-         images), so a later label edit must not silently undo it. The
-         label pipeline reads this same resolver, so an override flips
-         centroid-vs-kNN scoring too, not just the UI badge.
-      2. A fresh cached Claude verdict (matching signature + prompt
-         version).
-      3. A fresh Claude classification (cached for next time).
-
-    Always returns a dict — silent fallback on any error so the V2
-    project page never blocks on Claude. `source` is "manual",
-    "references", or "auto" so the UI can explain where the verdict
-    came from and offer a "let PixelKit decide" reset."""
+    """Portable build: no user choice, no Claude. A dataset is "specific"
+    exactly when it has reference images (the embedding resolver can then
+    use them) and "general" otherwise — labels alone always just work,
+    references are an optional upgrade added any time."""
     sig = _labels_signature(tags)
-    existing = _read_dataset_type_sidecar(project_id)
-
-    if isinstance(existing, dict):
-        ov = existing.get("override")
-        if ov in ("general", "specific"):
-            return {
-                "type": ov,
-                "reason": existing.get("override_reason") or _DEFAULT_OVERRIDE_REASON,
-                "labels_signature": sig,
-                "prompt_version": _DATASET_TYPE_PROMPT_VERSION,
-                "override": ov,
-                "source": existing.get("override_source") or "manual",
-            }
-        if (
-            existing.get("labels_signature") == sig
-            and existing.get("prompt_version") == _DATASET_TYPE_PROMPT_VERSION
-            and existing.get("type") in ("general", "specific")
-        ):
-            out = dict(existing)
-            out.setdefault("source", "auto")
-            return out
-
-    # Portable build: no Claude auto-classification. Datasets default to
-    # "general"; adding reference images or the explicit POST /dataset-type
-    # override (both handled above) flip it to "specific".
-    out = {
-        "type": "general",
-        "reason": "default (set reference images or choose manually to switch)",
+    try:
+        m = load_manifest(project_id, copy=False) or {}
+        has_refs = bool(m.get("references"))
+    except Exception:
+        has_refs = False
+    return {
+        "type": "specific" if has_refs else "general",
+        "reason": "reference images present" if has_refs else "no reference images",
         "labels_signature": sig,
         "prompt_version": _DATASET_TYPE_PROMPT_VERSION,
         "source": "auto",
     }
-    _write_dataset_type_sidecar(project_id, out)
-    return out
 
 
 def _resolve_dataset_type_cached_only(project_id: str, tags: list[str]) -> dict | None:
-    """Cheap, LLM-free resolve of the dataset type for first-paint use.
-
-    Mirrors the two early-return branches of `_classify_dataset_type_cached`
-    (a sticky override, or a fresh cached verdict matching the current label
-    signature) but returns None instead of falling through to a Claude call.
-    Lets /overview embed the general/specific badge so it paints in the same
-    frame as the rest of the hero, without ever blocking the overview build on
-    the classifier. A None result means the FE still does its own /dataset-type
-    fetch (which may classify)."""
-    existing = _read_dataset_type_sidecar(project_id)
-    if not isinstance(existing, dict):
-        return None
-    sig = _labels_signature(tags)
-    ov = existing.get("override")
-    if ov in ("general", "specific"):
-        return {
-            "type": ov,
-            "reason": existing.get("override_reason") or _DEFAULT_OVERRIDE_REASON,
-            "source": existing.get("override_source") or "manual",
-        }
-    if (
-        existing.get("labels_signature") == sig
-        and existing.get("prompt_version") == _DATASET_TYPE_PROMPT_VERSION
-        and existing.get("type") in ("general", "specific")
-    ):
-        return {
-            "type": existing.get("type"),
-            "reason": existing.get("reason") or "",
-            "source": existing.get("source") or "auto",
-        }
-    return None
+    return _classify_dataset_type_cached(project_id, tags)
 
 
 def _set_dataset_type_override(project_id: str, choice: str, *, source: str, reason: str) -> None:
@@ -18231,6 +18185,25 @@ async def hf_token_set(payload: HfTokenIn):
         raise HTTPException(400, result.get("detail") or "token rejected by Hugging Face")
     models_mgr.set_hf_token(tok)
     result["configured"] = True
+    # Token in hand: kick the SAM3 pipeline immediately (download if
+    # missing, then load) so labelling lights up without another step.
+    if result.get("sam3Access") and state.get("device") != "cpu":
+        if models_mgr.is_downloaded("sam3"):
+            if state.get("charlie") is None:
+                asyncio.create_task(_bg_load_charlie())
+        else:
+            async def _dl_then_load() -> None:
+                await asyncio.to_thread(models_mgr.start_download, "sam3")
+                while True:
+                    await asyncio.sleep(5)
+                    if models_mgr.is_downloaded("sam3"):
+                        await _bg_load_charlie()
+                        return
+                    with models_mgr._DL_LOCK:
+                        rec = dict(models_mgr._DOWNLOADS.get("sam3") or {})
+                    if rec.get("status") == "error":
+                        return
+            asyncio.create_task(_dl_then_load())
     return result
 
 

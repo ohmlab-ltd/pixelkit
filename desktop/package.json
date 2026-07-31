@@ -47,6 +47,23 @@
       ],
       "category": "Graphics",
       "icon": "build/icon.png"
-    }
+    },
+    "extraResources": [
+      {
+        "from": "runtime",
+        "to": "runtime"
+      },
+      {
+        "from": "../engine/gd",
+        "to": "engine/gd",
+        "filter": [
+          "**/*.py"
+        ]
+      },
+      {
+        "from": "../ui/out",
+        "to": "ui"
+      }
+    ]
   }
 }

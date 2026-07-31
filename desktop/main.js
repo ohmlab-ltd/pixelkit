@@ -80,8 +80,24 @@ function engineLogPath() {
 // directory, then whatever `python3` is on PATH.
 // TODO(packaging): when the app is packaged, the engine + a bundled Python
 // env should live in process.resourcesPath; add that lookup here.
+// Packaged app: the bundled runtime + engine live in resources/.
+function bundledPaths() {
+  const res = process.resourcesPath || '';
+  const python =
+    process.platform === 'win32'
+      ? path.join(res, 'runtime', 'py', 'python.exe')
+      : path.join(res, 'runtime', 'py', 'bin', 'python3');
+  return {
+    python,
+    engineCwd: path.join(res, 'engine', 'gd'),
+    uiDir: path.join(res, 'ui'),
+  };
+}
+
 function resolvePython() {
   if (process.env.PIXELKIT_PYTHON) return process.env.PIXELKIT_PYTHON;
+  const b = bundledPaths();
+  if (app.isPackaged && fs.existsSync(b.python)) return b.python;
   const venvPython =
     process.platform === 'win32'
       ? path.join(__dirname, '..', 'engine', '.venv', 'Scripts', 'python.exe')
@@ -92,7 +108,11 @@ function resolvePython() {
 
 function spawnEngine() {
   const python = resolvePython();
-  const cwd = path.join(__dirname, '..', 'engine', 'gd');
+  const b = bundledPaths();
+  const cwd =
+    app.isPackaged && fs.existsSync(b.engineCwd)
+      ? b.engineCwd
+      : path.join(__dirname, '..', 'engine', 'gd');
   const logFile = engineLogPath();
 
   fs.mkdirSync(path.dirname(logFile), { recursive: true });
@@ -101,7 +121,12 @@ function spawnEngine() {
 
   const proc = spawn(python, ['server.py'], {
     cwd,
-    env: { ...process.env },
+    env: {
+      ...process.env,
+      ...(app.isPackaged && fs.existsSync(bundledPaths().uiDir)
+        ? { PIXELKIT_UI_DIR: bundledPaths().uiDir }
+        : {}),
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   proc.stdout.pipe(log);
