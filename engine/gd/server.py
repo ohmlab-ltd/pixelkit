@@ -16940,7 +16940,9 @@ async def export_project(
 ):
     """Build a downloadable export of the project's labels.
 
-    Supported `format` values: `yolo`, `coco`, `voc`. Everything else 400s.
+    Supported `format` values: `yolo`, `coco`, `voc`, `cvat` (images 1.1
+    XML), `labelstudio` (task JSON, percent coords), `masks`
+    (class-indexed PNG masks from segmentations). Everything else 400s.
 
     Box content is gated by `include_boxes` / `include_segmentations`. At
     least one must be true. VOC is bbox-only so an `include_boxes=false`
@@ -16970,12 +16972,14 @@ async def export_project(
     if not manifest:
         raise HTTPException(404, "no manifest")
 
-    if format not in ("yolo", "coco", "voc"):
+    if format not in ("yolo", "coco", "voc", "cvat", "labelstudio", "masks"):
         raise HTTPException(400, f"unsupported format: {format}")
     if not include_boxes and not include_segmentations:
         raise HTTPException(400, "at least one of include_boxes / include_segmentations must be true")
     if format == "voc" and not include_boxes:
         raise HTTPException(400, "Pascal VOC only supports bounding boxes; include_boxes must be true")
+    if format == "masks" and not include_segmentations:
+        raise HTTPException(400, "PNG masks are built from segmentations; include_segmentations must be true")
     train_split = max(0.0, min(1.0, float(train_split)))
 
     base = _safe_slug(manifest.get("name") or project_id)
@@ -17068,6 +17072,87 @@ async def export_project(
             headers={"Content-Disposition": f'attachment; filename="{base}-yolo.zip"'},
         )
 
+    if format in ("cvat", "labelstudio", "masks"):
+        rows = _export_rows(
+            manifest,
+            project_id=project_id,
+            include_boxes=include_boxes,
+            include_segmentations=include_segmentations,
+            exclude_red=exclude_red,
+            exclude_orange=exclude_orange,
+            input_shape=input_shape,
+            with_augmentations=with_augs,
+            train_split=train_split,
+        )
+        cats = _categories(manifest)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            zf.writestr("README.txt", readme)
+            if format == "cvat":
+                xml = _build_cvat_xml(
+                    rows,
+                    cats,
+                    manifest.get("name") or project_id,
+                    include_boxes=include_boxes,
+                    include_segmentations=include_segmentations,
+                )
+                zf.writestr("annotations.xml", xml)
+                if include_images:
+                    # CVAT matches images by bare filename — flat images/.
+                    _write_images(zf, train_subdir="images", val_subdir="images")
+            elif format == "labelstudio":
+                tasks = _build_labelstudio(
+                    rows,
+                    include_boxes=include_boxes,
+                    include_segmentations=include_segmentations,
+                )
+                zf.writestr("tasks.json", json.dumps(tasks, indent=2))
+                zf.writestr(
+                    "labeling-config.xml",
+                    "<View>\n"
+                    '  <Image name="image" value="$image"/>\n'
+                    '  <RectangleLabels name="label" toName="image">\n'
+                    + "".join(f'    <Label value="{c}"/>\n' for c in cats)
+                    + "  </RectangleLabels>\n"
+                    "</View>\n",
+                )
+                if include_images:
+                    _write_images(zf, train_subdir="images", val_subdir="images")
+            else:  # masks
+                import cv2  # lazy — headless OpenCV, only this format needs it here
+
+                class_idx = {c: i + 1 for i, c in enumerate(cats)}
+                zf.writestr(
+                    "labels.txt",
+                    "0 background\n"
+                    + "".join(f"{i} {name}\n" for name, i in class_idx.items()),
+                )
+                for row in rows:
+                    if not any(a["polys"] for a in row["anns"]):
+                        continue
+                    mask = np.zeros((row["height"], row["width"]), dtype=np.uint8)
+                    for a in row["anns"]:
+                        cls = class_idx.get(a["label"])
+                        if not cls:
+                            continue
+                        for pts in a["polys"]:
+                            cv2.fillPoly(
+                                mask,
+                                [np.array(pts, dtype=np.int32).reshape(-1, 1, 2)],
+                                int(cls),
+                            )
+                    ok, png = cv2.imencode(".png", mask)
+                    if ok:
+                        stem = Path(row["file"]).stem
+                        zf.writestr(f"masks/{row['split']}/{stem}.png", png.tobytes())
+                if include_images:
+                    _write_images(zf, train_subdir="images/train", val_subdir="images/val")
+        return Response(
+            buf.getvalue(),
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{base}-{format}.zip"'},
+        )
+
     # format == "voc". VOC uses ImageSets/Main/{train,val}.txt to record
     # the split; all JPEGs sit in JPEGImages/ regardless. Annotation
     # XMLs sit in Annotations/. Uses the V1+V2 unified image index so
@@ -17117,6 +17202,194 @@ async def export_project(
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{base}-voc.zip"'},
     )
+
+
+def _export_rows(
+    manifest: dict,
+    *,
+    project_id: str,
+    include_boxes: bool,
+    include_segmentations: bool,
+    exclude_red: bool,
+    exclude_orange: bool,
+    input_shape: str,
+    with_augmentations: bool,
+    train_split: float,
+) -> list[dict]:
+    """Flat per-image rows shared by the CVAT / Label Studio / PNG-mask
+    exporters: [{file, split, width, height, anns: [{label, box, polys}]}].
+    Same filtering rules as the COCO/YOLO builders (size classes, split
+    by parent filename, augmentations follow their source image)."""
+    in_w, in_h = _parse_input_shape(input_shape)
+    rows: dict[str, dict] = {}
+
+    def _reg(file_name: str, w, h, split: str) -> None:
+        rows[file_name] = {
+            "file": file_name,
+            "split": split,
+            "width": int(w),
+            "height": int(h),
+            "anns": [],
+        }
+
+    img_idx = _image_index(manifest)
+    for img_name, info in img_idx.items():
+        w, h = info["width"], info["height"]
+        if not w or not h:
+            continue
+        _reg(img_name, w, h, _split_for(img_name, train_split))
+    if with_augmentations:
+        seen: set[str] = set()
+        for export_name, parent, cw, ch, _det, _iid, _cn in _iter_augmentations(project_id, manifest):
+            if export_name in seen:
+                continue
+            seen.add(export_name)
+            _reg(export_name, cw, ch, _split_for(parent, train_split))
+
+    def _append(file_name: str, W: int, H: int, b: dict) -> None:
+        row = rows.get(file_name)
+        if row is None:
+            return
+        rect = _box_xyxy(b)
+        if rect is None:
+            return
+        x0, y0, x1, y1 = rect
+        if not _keep_by_size(x0, y0, x1, y1, W, H, in_w, in_h, exclude_red, exclude_orange):
+            return
+        label = _box_label(b).lower()
+        polys: list[list[tuple[float, float]]] = []
+        for poly in (b.get("mask") or {}).get("polygons") or []:
+            pts = [
+                (float(pt[0]), float(pt[1]))
+                for pt in poly
+                if isinstance(pt, (list, tuple)) and len(pt) >= 2
+            ]
+            if len(pts) >= 3:
+                polys.append(pts)
+        if include_segmentations and not include_boxes and not polys:
+            return
+        row["anns"].append({"label": label, "box": (x0, y0, x1, y1), "polys": polys})
+
+    for img_name, sz, b in _project_box_iter(manifest):
+        W, H = sz
+        if not W or not H:
+            continue
+        _append(img_name, W, H, b)
+    if with_augmentations:
+        for export_name, _parent, cw, ch, det, _iid, _cn in _iter_augmentations(project_id, manifest):
+            _append(export_name, int(cw), int(ch), det)
+    return list(rows.values())
+
+
+def _build_cvat_xml(
+    rows: list[dict],
+    cats: list[str],
+    task_name: str,
+    *,
+    include_boxes: bool,
+    include_segmentations: bool,
+) -> str:
+    """CVAT "images 1.1" annotations.xml. Polygon preferred where a mask
+    exists (and segmentations are enabled); box otherwise."""
+    import xml.etree.ElementTree as ET
+
+    root = ET.Element("annotations")
+    ET.SubElement(root, "version").text = "1.1"
+    meta = ET.SubElement(root, "meta")
+    task = ET.SubElement(meta, "task")
+    ET.SubElement(task, "name").text = task_name
+    labels_el = ET.SubElement(task, "labels")
+    for c in cats:
+        le = ET.SubElement(labels_el, "label")
+        ET.SubElement(le, "name").text = c
+    for i, row in enumerate(rows):
+        img = ET.SubElement(
+            root,
+            "image",
+            id=str(i),
+            name=row["file"],
+            width=str(row["width"]),
+            height=str(row["height"]),
+        )
+        for a in row["anns"]:
+            x0, y0, x1, y1 = a["box"]
+            if a["polys"] and include_segmentations:
+                for pts in a["polys"]:
+                    ET.SubElement(
+                        img,
+                        "polygon",
+                        label=a["label"],
+                        occluded="0",
+                        source="manual",
+                        points=";".join(f"{x:.2f},{y:.2f}" for x, y in pts),
+                    )
+            elif include_boxes:
+                ET.SubElement(
+                    img,
+                    "box",
+                    label=a["label"],
+                    occluded="0",
+                    source="manual",
+                    xtl=f"{x0:.2f}",
+                    ytl=f"{y0:.2f}",
+                    xbr=f"{x1:.2f}",
+                    ybr=f"{y1:.2f}",
+                )
+    return ET.tostring(root, encoding="unicode", xml_declaration=True)
+
+
+def _build_labelstudio(
+    rows: list[dict],
+    *,
+    include_boxes: bool,
+    include_segmentations: bool,
+) -> list[dict]:
+    """Label Studio task list (percent coordinates). Assumes the standard
+    object-detection labeling config with from_name="label" and
+    to_name="image" — documented in the export README."""
+    tasks: list[dict] = []
+    for row in rows:
+        W, H = row["width"], row["height"]
+        results: list[dict] = []
+        for a in row["anns"]:
+            x0, y0, x1, y1 = a["box"]
+            if a["polys"] and include_segmentations:
+                for pts in a["polys"]:
+                    results.append({
+                        "type": "polygonlabels",
+                        "from_name": "label",
+                        "to_name": "image",
+                        "original_width": W,
+                        "original_height": H,
+                        "value": {
+                            "points": [
+                                [round(x / W * 100, 2), round(y / H * 100, 2)]
+                                for x, y in pts
+                            ],
+                            "polygonlabels": [a["label"]],
+                        },
+                    })
+            elif include_boxes:
+                results.append({
+                    "type": "rectanglelabels",
+                    "from_name": "label",
+                    "to_name": "image",
+                    "original_width": W,
+                    "original_height": H,
+                    "value": {
+                        "x": round(x0 / W * 100, 2),
+                        "y": round(y0 / H * 100, 2),
+                        "width": round((x1 - x0) / W * 100, 2),
+                        "height": round((y1 - y0) / H * 100, 2),
+                        "rotation": 0,
+                        "rectanglelabels": [a["label"]],
+                    },
+                })
+        tasks.append({
+            "data": {"image": f"images/{row['file']}"},
+            "annotations": [{"result": results}],
+        })
+    return tasks
 
 
 def _aug_parent_lookup(project_id: str, manifest: dict) -> dict[str, str]:

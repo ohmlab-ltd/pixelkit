@@ -21,7 +21,7 @@ const API =
     : "");
 
 type ExportFormat = {
-  id: "yolo" | "coco" | "voc";
+  id: "yolo" | "coco" | "voc" | "cvat" | "labelstudio" | "masks";
   name: string;
   blurb: string;
   supportsSegmentation: boolean;
@@ -45,6 +45,24 @@ const EXPORT_FORMATS: ExportFormat[] = [
     name: "Pascal VOC",
     blurb: "Per-image XML annotations. Bounding boxes only, no polygon spec in the format.",
     supportsSegmentation: false,
+  },
+  {
+    id: "cvat",
+    name: "CVAT",
+    blurb: "CVAT images-1.1 XML — re-import your labels into a CVAT instance for team review.",
+    supportsSegmentation: true,
+  },
+  {
+    id: "labelstudio",
+    name: "Label Studio",
+    blurb: "Task JSON (with a matching labeling config) for importing into Label Studio.",
+    supportsSegmentation: true,
+  },
+  {
+    id: "masks",
+    name: "PNG masks",
+    blurb: "Class-indexed segmentation masks, one PNG per image, plus labels.txt. Needs polygons.",
+    supportsSegmentation: true,
   },
 ];
 
