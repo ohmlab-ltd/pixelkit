@@ -36,9 +36,14 @@ export type TokenStatus = {
   detail: string | null;
 };
 
+export type DevicePreference = "auto" | "cuda" | "mps" | "cpu";
+
 export type EngineSettings = {
   workspace: string;
   device: "cuda" | "mps" | "cpu";
+  devicePreference: DevicePreference;
+  deviceEnvOverride: string | null;
+  gpuAvailable: boolean;
   hfTokenConfigured: boolean;
   sam3Repo: string;
 };
@@ -83,6 +88,15 @@ export const setWorkspacePath = (path: string) =>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path }),
   }).then((r) => json<{ ok: boolean; workspace: string; restartRequired: boolean }>(r));
+
+export const setDevicePreference = (device: DevicePreference) =>
+  apiFetch("/api/settings/device", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ device }),
+  }).then((r) =>
+    json<{ ok: boolean; devicePreference: DevicePreference; restartRequired: boolean }>(r),
+  );
 
 export function downloadPct(d: DownloadRec): number | null {
   if (!d || d.status !== "downloading" || !d.total_bytes) return null;

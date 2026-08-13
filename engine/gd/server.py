@@ -71,22 +71,38 @@ import re
 import secrets
 
 
+def _configured_device() -> str:
+    """The user's explicit device choice, or "" for auto-detect.
+
+    PK_DEVICE env (power users, tests) beats the app-config "device" key
+    (written by the Settings UI picker via POST /api/settings/device)."""
+    env = (os.environ.get("PK_DEVICE") or "").strip().lower()
+    if env:
+        return env
+    try:
+        import workspace as _ws
+        cfg = (_ws.load_config().get("device") or "").strip().lower()
+    except Exception:
+        return ""
+    return cfg if cfg in ("cuda", "mps", "cpu") else ""
+
+
 def _resolve_device() -> str:
-    """cuda > mps > cpu, with PK_DEVICE as an explicit override.
+    """cuda > mps > cpu, with _configured_device() as an explicit override.
 
     An unavailable override falls back down the chain with a warning
     rather than failing boot — a saved config from another machine
     shouldn't brick the app."""
-    env = (os.environ.get("PK_DEVICE") or "").strip().lower()
+    want = _configured_device()
     has_mps = getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
-    if env:
-        if env.startswith("cuda") and torch.cuda.is_available():
-            return env
-        if env == "mps" and has_mps:
+    if want:
+        if want.startswith("cuda") and torch.cuda.is_available():
+            return want
+        if want == "mps" and has_mps:
             return "mps"
-        if env == "cpu":
+        if want == "cpu":
             return "cpu"
-        print(f"[server] PK_DEVICE={env!r} not available on this machine — auto-detecting.")
+        print(f"[server] device {want!r} not available on this machine — auto-detecting.")
     if torch.cuda.is_available():
         return "cuda"
     if has_mps:
@@ -625,10 +641,11 @@ async def lifespan(app: FastAPI):
     # Model loading policy: SAM3 + DINOv2, with the small VLM tiebreak
     # opt-in (VLM_ENABLED=1). Models load on cuda and mps. Plain CPU is
     # too slow to be useful, so it loads models only when the user
-    # explicitly forced PK_DEVICE=cpu; otherwise a CPU-only machine
-    # boots with the ML endpoints on 503 and every dataset/annotation
-    # API fully live. PK_DISABLE_MODELS=1 forces that mode anywhere.
-    cpu_forced = (os.environ.get("PK_DEVICE") or "").strip().lower() == "cpu"
+    # explicitly chose CPU (PK_DEVICE=cpu or the Settings device picker);
+    # otherwise a CPU-only machine boots with the ML endpoints on 503 and
+    # every dataset/annotation API fully live. PK_DISABLE_MODELS=1 forces
+    # that mode anywhere.
+    cpu_forced = _configured_device() == "cpu"
     models_disabled = (
         os.environ.get("PK_DISABLE_MODELS", "").lower() in ("1", "true", "yes", "on")
         or (device == "cpu" and not cpu_forced)
@@ -640,7 +657,7 @@ async def lifespan(app: FastAPI):
             + ") — labelling endpoints 503; dataset/annotation APIs fully live."
         )
     elif device == "cpu":
-        print("[server] PK_DEVICE=cpu — models will load on CPU. Labelling will be very slow.")
+        print("[server] device forced to CPU — models will load on CPU. Labelling will be very slow.")
 
 
     # Model loading policy (portable): the model manager (gd/models.py)
@@ -18150,8 +18167,10 @@ async def models_load(name: str):
         raise HTTPException(404, f"unknown model: {name}")
     if not models_mgr.is_downloaded(name):
         raise HTTPException(409, f"{name} weights not downloaded yet")
-    if state.get("device") == "cpu" and (os.environ.get("PK_DEVICE") or "").lower() != "cpu":
-        raise HTTPException(409, "no GPU on this machine (set PK_DEVICE=cpu to force CPU)")
+    if state.get("device") == "cpu" and _configured_device() != "cpu":
+        raise HTTPException(
+            409, "no GPU on this machine (switch Compute to CPU in Settings to force CPU)"
+        )
     task = {"sam3": _bg_load_charlie, "dinov2": _bg_load_dino}[name]
     asyncio.create_task(task())
     return {"ok": True, "loading": name}
@@ -18226,9 +18245,15 @@ async def hf_token_clear():
 async def get_settings():
     import workspace as _ws
     cfg = _ws.load_config()
+    pref = (cfg.get("device") or "").strip().lower()
+    env = (os.environ.get("PK_DEVICE") or "").strip().lower()
+    has_mps = getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
     return {
         "workspace": str(_ws.dir()),
         "device": state.get("device"),
+        "devicePreference": pref if pref in ("cuda", "mps", "cpu") else "auto",
+        "deviceEnvOverride": env or None,
+        "gpuAvailable": bool(torch.cuda.is_available() or has_mps),
         "hfTokenConfigured": bool(models_mgr.hf_token()),
         "sam3Repo": models_mgr.SAM3_REPO,
     }
@@ -18248,6 +18273,28 @@ async def set_workspace_path(payload: WorkspaceIn):
     import workspace as _ws
     new = _ws.set_workspace(p)
     return {"ok": True, "workspace": str(new), "restartRequired": True}
+
+
+class DeviceIn(BaseModel):
+    device: str
+
+
+@app.post("/api/settings/device")
+async def set_device_preference(payload: DeviceIn):
+    """Persist the compute-device choice (Settings picker). Takes effect on
+    next start — models are loaded onto a device at boot, same restart
+    contract as the workspace setting. PK_DEVICE env still wins at boot."""
+    want = (payload.device or "").strip().lower()
+    if want not in ("auto", "cuda", "mps", "cpu"):
+        raise HTTPException(400, "device must be one of: auto, cuda, mps, cpu")
+    import workspace as _ws
+    cfg = _ws.load_config()
+    if want == "auto":
+        cfg.pop("device", None)
+    else:
+        cfg["device"] = want
+    _ws.save_config(cfg)
+    return {"ok": True, "devicePreference": want, "restartRequired": True}
 
 
 

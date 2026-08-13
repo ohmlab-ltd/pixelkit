@@ -13,6 +13,7 @@ import {
   downloadPct,
   fetchEngineSettings,
   fetchModelsStatus,
+  setDevicePreference,
   setHfToken,
   setWorkspacePath,
 } from "@/lib/models";
@@ -69,6 +70,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
   const [models, setModels] = useState<ModelsStatus | null>(null);
   const [wsPath, setWsPath] = useState("");
   const [wsNote, setWsNote] = useState<string | null>(null);
+  const [devNote, setDevNote] = useState<string | null>(null);
   const [token, setToken] = useState("");
   const [note, setNote] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -105,12 +107,19 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
     }
   };
 
+  const cpuForced =
+    settings?.devicePreference === "cpu" || settings?.deviceEnvOverride === "cpu";
   const deviceLabel =
     settings?.device === "cuda"
       ? "NVIDIA GPU (CUDA)"
       : settings?.device === "mps"
       ? "Apple GPU (Metal)"
-      : "CPU (labelling unavailable)";
+      : cpuForced
+      ? "CPU (labelling runs on the CPU — very slow)"
+      : "CPU (no GPU detected — labelling unavailable)";
+  // cuda/mps preferences (settable via the API) both mean "use the GPU",
+  // so the picker collapses them onto Automatic.
+  const pickedDevice = settings?.devicePreference === "cpu" ? "cpu" : "auto";
 
   return (
     <div className="fixed inset-0 z-[400] overflow-y-auto bg-[var(--background)]">
@@ -172,6 +181,72 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
               Weights: {models.weightsDir} · {models.freeDiskGb} GB free
             </p>
           )}
+          {settings &&
+            (settings.deviceEnvOverride ? (
+              <p className="mt-3 text-[12px] text-foreground/40">
+                Device is pinned by the <span className="font-mono">PK_DEVICE</span>{" "}
+                environment variable; unset it to choose here.
+              </p>
+            ) : (
+              <>
+                <div className="mt-4 flex flex-col gap-2">
+                  {(
+                    [
+                      {
+                        value: "auto",
+                        title: "Automatic",
+                        desc: settings.gpuAvailable
+                          ? "Use the GPU when one is available."
+                          : "Use the GPU when one is available. No GPU was detected on this machine, so labelling stays off.",
+                      },
+                      {
+                        value: "cpu",
+                        title: "CPU",
+                        desc: "Run labelling on the CPU. Works on any machine, but is very slow — expect minutes per image.",
+                      },
+                    ] as const
+                  ).map((opt) => {
+                    const selected = pickedDevice === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        onClick={() => {
+                          if (selected) return;
+                          act(async () => {
+                            await setDevicePreference(opt.value);
+                            setDevNote(
+                              "Saved — restart PixelKit to switch compute device.",
+                            );
+                          });
+                        }}
+                        className={`flex items-start gap-3 rounded-md border px-3 py-2.5 text-left transition-colors ${
+                          selected
+                            ? "border-[var(--line-strong)] bg-[var(--surface-hover)]"
+                            : "border-[var(--line)] hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)]"
+                        }`}
+                      >
+                        <span
+                          className={`mt-[5px] h-2 w-2 shrink-0 rounded-full ${
+                            selected
+                              ? "bg-[var(--accent)]"
+                              : "border border-[var(--line-strong)]"
+                          }`}
+                        />
+                        <span className="min-w-0">
+                          <span className="block text-[13px]">{opt.title}</span>
+                          <span className="mt-0.5 block text-[12px] text-foreground/45">
+                            {opt.desc}
+                          </span>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                {devNote && (
+                  <p className="mt-2 text-[12px] text-foreground/55">{devNote}</p>
+                )}
+              </>
+            ))}
         </section>
 
         {/* Hugging Face */}
