@@ -412,12 +412,32 @@ function createSplash() {
   );
 }
 
-function showSplashError() {
+// Any HTTP response on the engine port (even an error) means something
+// else owns it — checkHealth() already said it isn't a PixelKit engine.
+function portOccupied() {
+  return new Promise((resolve) => {
+    const req = http.get(`${ENGINE_ORIGIN}/`, { timeout: HEALTH_TIMEOUT_MS }, (res) => {
+      res.resume();
+      resolve(true);
+    });
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(false);
+    });
+    req.on('error', () => resolve(false));
+  });
+}
+
+function showSplashError(kind) {
   const logFile = engineLogPath().replace(/&/g, '&amp;').replace(/</g, '&lt;');
   const body =
-    '<h1>PixelKit</h1>' +
-    '<p class="err">The engine failed to start.</p>' +
-    `<p>See engine.log:<br><small>${logFile}</small></p>`;
+    kind === 'port'
+      ? '<h1>PixelKit</h1>' +
+        '<p class="err">Port 8001 is in use by another application.</p>' +
+        '<p>Close whatever is listening on 127.0.0.1:8001 and start PixelKit again.</p>'
+      : '<h1>PixelKit</h1>' +
+        '<p class="err">The engine failed to start.</p>' +
+        `<p>See engine.log:<br><small>${logFile}</small></p>`;
   if (splashWindow && !splashWindow.isDestroyed()) {
     splashWindow.setSize(480, 280);
     splashWindow.loadURL(splashHtml(body));
@@ -678,7 +698,7 @@ app.whenReady().then(async () => {
       }, 5000);
     }
   } else if (!bootstrapQuit) {
-    showSplashError();
+    showSplashError((await portOccupied()) ? 'port' : undefined);
   }
 });
 

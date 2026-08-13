@@ -191,6 +191,24 @@ async function ensureWindowsRuntime({ requirementsPath, onStatus, log }) {
 
   fs.mkdirSync(root, { recursive: true });
 
+  // Disk preflight: CUDA torch unpacks to ~7 GB, CPU ~1.5 GB; demand
+  // headroom up front so the failure is one readable sentence instead
+  // of a pip ENOSPC stack halfway through.
+  const needGb = hasNvidiaGpu() ? 9 : 3;
+  try {
+    const { bavail, bsize } = fs.statfsSync(root);
+    const freeGb = (bavail * bsize) / 1024 ** 3;
+    if (freeGb < needGb) {
+      throw new Error(
+        `not enough disk space for the AI runtime: ${freeGb.toFixed(1)} GB free, ` +
+          `~${needGb} GB needed (in ${root})`
+      );
+    }
+  } catch (e) {
+    if (e && /not enough disk space/.test(String(e.message))) throw e;
+    // statfs unsupported -> skip the preflight rather than block install.
+  }
+
   // 1. Interpreter ----------------------------------------------------------
   if (!fs.existsSync(py)) {
     status('Locating Python runtime…');
