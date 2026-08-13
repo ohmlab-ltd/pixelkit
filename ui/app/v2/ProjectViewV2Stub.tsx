@@ -1720,6 +1720,59 @@ export function ProjectViewV2Stub({
   const [videoExtracting, setVideoExtracting] = useState<{ done: number; total: number } | null>(null);
   const [videoError, setVideoError] = useState<string | null>(null);
 
+  // Window-level drag-and-drop: dropping image files anywhere on the
+  // open dataset imports them through the exact same path as the
+  // Import button. The handler is re-created every render, so the
+  // listeners (mounted once per readOnly flip) go through a ref.
+  const importFilesRef = useRef<(files: FileList | null) => Promise<void>>();
+  const [dropActive, setDropActive] = useState(false);
+  useEffect(() => {
+    if (readOnly) return;
+    let depth = 0;
+    const hasFiles = (e: DragEvent) =>
+      Array.from(e.dataTransfer?.types ?? []).includes("Files");
+    const onEnter = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth += 1;
+      setDropActive(true);
+    };
+    const onOver = (e: DragEvent) => {
+      if (hasFiles(e)) e.preventDefault();
+    };
+    const onLeave = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) setDropActive(false);
+    };
+    const onDrop = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth = 0;
+      setDropActive(false);
+      const files = Array.from(e.dataTransfer?.files ?? []).filter(
+        (f) =>
+          f.type.startsWith("image/") ||
+          /\.(jpe?g|png|webp|bmp|heic|avif)$/i.test(f.name),
+      );
+      if (files.length) void importFilesRef.current?.(files as unknown as FileList);
+    };
+    window.addEventListener("dragenter", onEnter);
+    window.addEventListener("dragover", onOver);
+    window.addEventListener("dragleave", onLeave);
+    window.addEventListener("drop", onDrop);
+    return () => {
+      window.removeEventListener("dragenter", onEnter);
+      window.removeEventListener("dragover", onOver);
+      window.removeEventListener("dragleave", onLeave);
+      window.removeEventListener("drop", onDrop);
+    };
+  }, [readOnly]);
+
+  useEffect(() => {
+    importFilesRef.current = handleImportFiles;
+  });
+
   const handleImportFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
     if (!referencesSettled) {
@@ -5893,6 +5946,20 @@ export function ProjectViewV2Stub({
           activeSection={tab}
         />
       </section>
+
+      {/* Drag-and-drop target overlay: shown while files are dragged
+          over the window (listeners live in the drop effect above).
+          Pointer-events none — the drop lands on window. */}
+      {dropActive && typeof window !== "undefined" &&
+        createPortal(
+          <div className="pointer-events-none fixed inset-0 z-[1400] grid place-items-center bg-[var(--background)]/70 backdrop-blur-[2px]">
+            <div className="rounded-lg border-2 border-dashed border-[var(--accent)] bg-[var(--panel-solid)] px-8 py-6 text-center shadow-[var(--shadow-strong)]">
+              <p className="text-sm font-medium text-[var(--foreground)]">Drop images to import</p>
+              <p className="mt-1 text-xs text-[var(--fg-muted)]">They join this dataset like any other upload</p>
+            </div>
+          </div>,
+          document.body,
+        )}
 
       {reviewing && projectId && (
         <ReviewModeV2
