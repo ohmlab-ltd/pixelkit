@@ -26,10 +26,10 @@ const GUIDE_SECTIONS: { key: GuideSectionKey; title: string; blurb: string }[] =
   { key: "labelling", title: "Labelling", blurb: "Auto-labelling, the Annotations card, manual edits, fast Review mode." },
   { key: "augmentations", title: "Augmentations", blurb: "Every dial, the Randomise button, the per-tile viewer." },
   { key: "stats", title: "Dataset stats", blurb: "The health score, insights, the variation plot, near-duplicate review." },
-  { key: "settings", title: "Settings & themes", blurb: "Renaming, recolouring labels, visibility, light / dark, export." },
-  { key: "teams", title: "Projects & teams", blurb: "Group datasets into a Project, invite members, owner / editor / viewer roles, activity." },
+  { key: "settings", title: "Settings & themes", blurb: "Renaming, recolouring labels, annotation snapshots, export." },
+  { key: "teams", title: "Projects & teams", blurb: "Group datasets into a Project: shared labels, covers, activity." },
   { key: "derived", title: "Derived datasets", blurb: "Crop each detection into a child dataset: ROI squares, inherited or fresh labels, live sync." },
-  { key: "reference", title: "Reference", blurb: "Keyboard shortcuts, plan limits, content-safety policies." },
+  { key: "reference", title: "Reference", blurb: "Keyboard shortcuts and reference tables." },
 ];
 
 export function GuideView() {
@@ -287,7 +287,6 @@ References tab on the dataset page — they help PixelKit tell the
 classes apart. You can add or remove references at any time.
 
 Project names are display-only; the URL uses a stable identifier.
-A profanity guard runs on names and labels.
 
 ==============================================================
 ADDING IMAGES
@@ -299,9 +298,6 @@ Three ways to add images:
     fps. PixelKit extracts the frames as still images.
   - Search Openverse. Type what you're looking for and PixelKit
     shows you a grid of CC-licensed images you can pull in.
-
-Each image runs through a content-safety check before it lands in
-the dataset.
 
 The dataset gallery shows a thumbnail for every image. Indicators
 on each thumbnail include a sparkle icon (augmentations exist),
@@ -402,27 +398,19 @@ project name to confirm.
 ==============================================================
 PROJECTS (TEAMS) AND ROLES
 ==============================================================
-A Project (capital P) is a team container that groups several
-datasets, with shared members, a cover, a privacy setting, and an
-activity timeline. It is different from a single dataset (which is
-one labelled image collection).
+A Project (capital P) is a folder that groups several related
+datasets, with a cover and an activity timeline. It is different
+from a single dataset (which is one labelled image collection).
 
 Create a Project from the New project tile on the Workspace. Add
-datasets with "Add existing" or "+ New dataset". Privacy defaults to
-private; a private Project and its datasets are hidden from Community.
+datasets with "Add existing" or "+ New dataset".
 
-Members have a role:
-  - Owner: full control, including rename, cover, privacy, members,
-    and deleting the Project.
-  - Editor: can add and create datasets, upload, label, augment, and
-    edit datasets created by other members, but cannot rename or
-    delete the Project, change its cover, or manage members.
-  - Viewer: read-only.
+The Project page also has a Labels card: label usage across every
+dataset in the Project, with rename. Renaming onto an existing
+label merges the two everywhere.
 
 Deleting a dataset from a Project asks whether to remove it from the
 Project (it survives as a standalone dataset) or delete it entirely.
-Deleting entirely is creator-only: even the owner can only detach
-someone else's dataset, never destroy it.
 
 ==============================================================
 DERIVED DATASETS
@@ -447,19 +435,12 @@ parent can have many derived datasets, but you cannot derive from a
 derived dataset.
 
 ==============================================================
-WORKSPACE AND COMMUNITY
+WORKSPACE
 ==============================================================
-The Workspace tab shows your own area: your Projects (team
-containers) in a row across the top, then the datasets you own below.
-The Community tab is the public feed (it used to be called Projects):
-a carousel of public Projects above a grid of public datasets,
-sortable by Trending / Newest / Most liked.
-
-Opening any public dataset gives you a read-only view of the full
-dataset, stats, and variation plot.
-
-Star a dataset to pin it to the top of your own workspace; heart a
-dataset for a public Like that feeds the Trending sort.
+The Explorer shows everything in your workspace: Projects (folders
+of datasets) as expandable nodes in the tree, with standalone
+datasets at the root level. Everything is stored as plain files in
+the workspace folder on this machine.
 
 ==============================================================
 SHORTCUTS
@@ -493,11 +474,8 @@ None. PixelKit runs entirely on this machine — the only ceilings
 are your disk space and compute.
 
 ==============================================================
-CONTENT SAFETY AND LICENSING
+LICENSING
 ==============================================================
-Every image entering PixelKit is checked before it's saved. Adult
-content is rejected with a clear error.
-
 Openverse imports carry their original CC licence and source URL;
 both are stamped into exports. Direct uploads carry no licence
 metadata - you're responsible for your right to use the images,
@@ -1035,8 +1013,7 @@ function ProjectsSection({ go }: { go: (k: GuideSectionKey) => void }) {
         <Bullets
           items={[
             "Project names can be any text. They&rsquo;re display-only. The URL uses a stable UUID under the hood.",
-            "A profanity guard runs on both the client and the server. Blocked terms surface as an inline red error before the request even leaves your browser.",
-            "Names are editable any time from project Settings.",
+                        "Names are editable any time from project Settings.",
           ]}
         />
       </GuideSection>
@@ -1070,8 +1047,7 @@ function DatasetSection({ go }: { go: (k: GuideSectionKey) => void }) {
         </p>
         <Bullets
           items={[
-            "Every image runs through a content-safety check before it&rsquo;s saved. Anything flagged as adult content is rejected with a clear error.",
-            "Image orientation from EXIF metadata is honoured so iPhone photos don&rsquo;t end up sideways.",
+                        "Image orientation from EXIF metadata is honoured so iPhone photos don&rsquo;t end up sideways.",
             "Upload progress streams into the dataset gallery one tile at a time, with blurred placeholders for in-flight files.",
             "Up to 100 MB per video, then the file gets split into per-frame images on the server.",
           ]}
@@ -1107,7 +1083,7 @@ function DatasetSection({ go }: { go: (k: GuideSectionKey) => void }) {
             ["Tap Search", "You get a preview grid of candidate images."],
             ["Tap Yes, this is what I’m looking for", "Confirms the search direction."],
             ["Choose how many", "Slider from 1 up to your remaining import quota."],
-            ["Pull images", "PixelKit downloads, content-safety-checks, and adds them to your dataset. <strong>Check the CC licence on each image before reusing it.</strong> Licences vary per image. Some require attribution, some restrict commercial use, some prohibit derivatives. The footer&rsquo;s Openverse policy page covers attribution and takedown."],
+            ["Pull images", "PixelKit downloads them and adds them to your dataset. <strong>Check the CC licence on each image before reusing it.</strong> Licences vary per image. Some require attribution, some restrict commercial use, some prohibit derivatives. The footer&rsquo;s Openverse policy page covers attribution and takedown."],
           ]}
         />
         <Callout tone="info">
@@ -1507,8 +1483,7 @@ function AugmentationsSection({ go }: { go: (k: GuideSectionKey) => void }) {
         <Bullets
           items={[
             "Upload up to three backgrounds. They are compressed in the browser before upload so the page does not stall on slow connections.",
-            "Backgrounds run through the same content-safety check as dataset uploads.",
-            "Mix any number of backgrounds. PixelKit picks one at random per generated copy.",
+                        "Mix any number of backgrounds. PixelKit picks one at random per generated copy.",
           ]}
         />
       </GuideSection>
@@ -1698,7 +1673,7 @@ function SettingsSection({ go }: { go: (k: GuideSectionKey) => void }) {
 
       <GuideSection n={2} title="Renaming the project">
         <p>
-          Type the new name and click <em>Rename</em>. Profanity guard runs
+          Type the new name and click <em>Rename</em>. It runs
           on the new value before the request is sent. Blocked terms surface
           as an inline red error.
         </p>
@@ -1740,7 +1715,7 @@ function SettingsSection({ go }: { go: (k: GuideSectionKey) => void }) {
         </p>
         <Bullets
           items={[
-            "<strong>Rename</strong> a label by clicking the pencil icon. The change cascades to every chip in the workspace card, dataset gallery, and image viewer instantly. Profanity guard applies.",
+            "<strong>Rename</strong> a label by clicking the pencil icon. The change cascades to every chip in the workspace card, dataset gallery, and image viewer instantly.",
             "<strong>Recolour</strong> by clicking the swatch. Pick from the eight-tone palette or paste a hex value. Colours persist into the per-project meta cache so they survive reloads with no re-fetch.",
             "<strong>Reset</strong> the colour to the default palette pick by clicking the reset icon when a custom colour is set.",
           ]}
@@ -1784,43 +1759,23 @@ function SettingsSection({ go }: { go: (k: GuideSectionKey) => void }) {
         </Callout>
       </GuideSection>
 
-      <GuideSection n={8} title="Workspace, Community, and read-only view">
+      <GuideSection n={8} title="Your workspace on disk">
         <p>
-          Two separate tabs in the top-nav:
-        </p>
-        <Bullets
-          items={[
-            "<strong>Workspace</strong> is your own area: your Projects (team containers) across the top row, then the datasets you own below. Paginated, loads the top page first and infinite-scrolls more as you go.",
-            "<strong>Community</strong> is the public feed (it used to be called Projects). A carousel of public Projects sits above the grid of public datasets, which is sortable by Trending, Newest, or Most liked.",
-          ]}
-        />
-        <p>
-          Click any public dataset to open it in read-only view. You see the
-          full dataset gallery, stats card, variation plot, and image viewer
-          (without edit controls). Owner-only chrome (the Drop card, Annotations
-          controls, Settings, and Export) is hidden.
+          Everything lives in the workspace folder you picked at first run:
+          one folder per Project, one per dataset, original images untouched
+          in <code>images/</code>, one annotation file per image in
+          <code>annotations/</code>. The Explorer tree mirrors that layout.
+          Back up or sync the folder like any other files; the format is
+          documented in the repository&rsquo;s workspace spec.
         </p>
       </GuideSection>
 
-      <GuideSection n={9} title="Favourites and likes">
+      <GuideSection n={9} title="Annotation snapshots">
         <p>
-          Two distinct gestures, two different signals.
-        </p>
-        <Bullets
-          items={[
-            "<strong>Favourite</strong>. The star button on a project card. Favourites pin to the top of your workspace and the public feed sort. Useful for projects you want quick access to.",
-            "<strong>Like</strong>. The heart button on a public project. Likes are public and feed into the Trending sort. They don&rsquo;t change a project&rsquo;s position in your own workspace.",
-          ]}
-        />
-      </GuideSection>
-
-      <GuideSection n={10} title="Light and dark mode">
-        <p>
-          The moon / sun toggle in the top-right of every page switches
-          between dark and light modes. The choice is stored in your browser
-          so it persists across navigations and refreshes. It also syncs
-          across tabs you have open. PixelKit defaults to light mode for new
-          visitors.
+          The dataset settings panel can save a snapshot of the current
+          annotation state (labels + boxes/masks, never the images) and
+          restore any earlier one. Restoring first snapshots the current
+          state automatically, so it&rsquo;s always undoable.
         </p>
       </GuideSection>
 
@@ -1837,10 +1792,10 @@ function TeamsSection({ go }: { go: (k: GuideSectionKey) => void }) {
         title="Projects & teams"
         intro={
           <>
-            A <Strong>Project</Strong> is a team container that groups several
-            datasets together with shared members and roles. It is the layer
-            above an individual dataset, useful once more than one person is
-            working on related datasets.
+            A <Strong>Project</Strong> is a folder that groups several
+            related datasets together, with a shared cover, an activity
+            timeline, and project-wide label tools. It is the layer above
+            an individual dataset.
           </>
         }
       />
@@ -1850,7 +1805,7 @@ function TeamsSection({ go }: { go: (k: GuideSectionKey) => void }) {
         <Bullets
           items={[
             "A <strong>dataset</strong> is one collection of labelled images (the thing you build in the Create a dataset, Labelling, and Augmentations sections).",
-            "A <strong>Project</strong> is a container that holds many datasets, plus members, a cover photo, a privacy setting, and an activity timeline.",
+            "A <strong>Project</strong> is a container that holds many datasets, plus a cover photo and an activity timeline.",
           ]}
         />
         <p>
@@ -1864,8 +1819,7 @@ function TeamsSection({ go }: { go: (k: GuideSectionKey) => void }) {
           items={[
             ["Click the New project tile", "It sits at the start of the Projects row on the Workspace."],
             ["Name it and pick a cover", "The cover photo is optional. It shows on the Project hero and card."],
-            ["Set the privacy", "The toggle is on for private (the default), off for public. A private Project is hidden from the Community feed, and so are its datasets."],
-            ["Create", "You land on the Project page, ready to add datasets and members."],
+            ["Create", "You land on the Project page, ready to add datasets."],
           ]}
         />
       </GuideSection>
@@ -1879,56 +1833,36 @@ function TeamsSection({ go }: { go: (k: GuideSectionKey) => void }) {
           ]}
         />
         <p>
-          A dataset can belong to a Project and still be edited exactly as you
-          always edit it. Datasets created by other members can be added too.
+          A dataset can belong to a Project and still be edited exactly as
+          you always edit it.
         </p>
       </GuideSection>
 
-      <GuideSection n={4} title="Members and roles">
+      <GuideSection n={4} title="Labels across the Project">
         <p>
-          Each member of a Project has one of three roles, which control what
-          that person can do inside it.
+          The Project page&rsquo;s <Strong>Labels</Strong> card lists every
+          label used across the Project&rsquo;s datasets with its box and
+          dataset counts. Rename a label there and it is rewritten
+          everywhere at once: dataset tag lists, every annotation, and the
+          colour/alias maps.
         </p>
-        <ul className="grid gap-4">
-          <li className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-5 py-4">
-            <Strong>Owner</Strong>
-            <p className="mt-2 text-sm">
-              Full control. Everything an editor can do, plus renaming the
-              Project, changing its cover, setting its privacy, adding and
-              removing members, and deleting the Project.
-            </p>
-          </li>
-          <li className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-5 py-4">
-            <Strong>Editor</Strong>
-            <p className="mt-2 text-sm">
-              Can do almost everything inside the Project: add and create
-              datasets, upload images, run labelling and augmentation, and edit
-              datasets created by other members. An editor cannot rename or
-              delete the Project, change its cover, or manage members.
-            </p>
-          </li>
-          <li className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-5 py-4">
-            <Strong>Viewer</Strong>
-            <p className="mt-2 text-sm">
-              Read-only access to the Project and its datasets.
-            </p>
-          </li>
-        </ul>
+        <Callout tone="info">
+          <Strong>Merging.</Strong> Renaming onto a label that already
+          exists merges the two — the fix for &ldquo;bolt&rdquo; vs
+          &ldquo;bolts&rdquo; drift between datasets.
+        </Callout>
         <Callout tone="info">
           <Strong>Deleting a dataset</Strong> from a Project asks what should
           happen: <em>remove from project</em> detaches it (it survives as a
-          standalone dataset), or <em>delete entirely</em> destroys it. Deleting
-          entirely is creator-only: even the Project owner can only detach a
-          dataset somebody else created, never permanently delete it.
+          standalone dataset), or <em>delete entirely</em> destroys it.
         </Callout>
       </GuideSection>
 
-      <GuideSection n={5} title="Cover, privacy, and activity">
+      <GuideSection n={5} title="Cover and activity">
         <Bullets
           items={[
-            "<strong>Cover</strong>. Upload a cover photo for the Project hero and card. A small cover is AI-upscaled on the GPU so the full-width banner stays sharp.",
-            "<strong>Privacy</strong>. A private Project (and every dataset in it) is hidden from the Community feed. Public Projects appear in the Community carousel.",
-            "<strong>Activity</strong>. The Project page carries a timeline of recent events across all its datasets: uploads, labelling runs, members added, datasets added or removed.",
+            "<strong>Cover</strong>. Upload a cover photo for the Project hero and card.",
+            "<strong>Activity</strong>. The Project page carries a timeline of recent events across all its datasets: uploads, labelling runs, datasets added or removed.",
             "<strong>Derived icon</strong>. A dataset that is a cropped child of another shows a small branch icon next to its name (see the next section).",
           ]}
         />
@@ -2031,9 +1965,8 @@ function ReferenceSection() {
         title="Reference"
         intro={
           <>
-            Keyboard shortcuts, plan limits (including the Beta tier), and
-            the content-safety policy. The bits you reach for sporadically,
-            kept in one place.
+            Keyboard shortcuts and the other reference tables — the bits
+            you reach for sporadically, kept in one place.
           </>
         }
       />
@@ -2088,36 +2021,15 @@ function ReferenceSection() {
         </p>
       </GuideSection>
 
-      <GuideSection n={5} title="Content safety">
+      <GuideSection n={5} title="Licensing">
         <p>
-          Every image entering PixelKit is checked before it lands in your
-          dataset. The check runs server-side and applies to all three
-          ingress paths:
-        </p>
-        <Bullets
-          items={[
-            "<strong>Direct uploads</strong>. Drag-and-drop and file-picker.",
-            "<strong>Openverse imports</strong>. Even though Openverse pre-filters, we re-check every fetched image.",
-            "<strong>Background uploads</strong>. The backgrounds you upload for the augmentation swap.",
-          ]}
-        />
-        <p>
-          Anything classified as adult content is rejected with a clear
-          error. The image is never written to disk. Nothing flagged at
-          upload makes it into your dataset, into the public feed, or into
-          any export.
+          Openverse imports carry their original CC licence and source URL,
+          and both are stamped into exports. Direct uploads carry no licence
+          metadata — you are responsible for your right to use the images,
+          especially in a redistributable dataset or model.
         </p>
       </GuideSection>
 
-      <GuideSection n={6} title="Profanity guard">
-        <p>
-          Project names, label names, and any other user-typed text gets
-          run through a profanity filter before it&rsquo;s saved. The list
-          covers the obvious cases plus the common bypass spellings. If
-          you&rsquo;re working on a legitimate dataset that needs a flagged
-          word, get in touch and we&rsquo;ll add an exception.
-        </p>
-      </GuideSection>
 
       <GuideSection n={7} title="Licensing of imported imagery">
         <p>
