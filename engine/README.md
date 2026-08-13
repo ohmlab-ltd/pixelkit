@@ -23,4 +23,9 @@ mode is explicitly chosen (very slow).
 
 Migrate SaaS-era data: `python import_legacy.py <old-dir-or-backup.zip>`.
 
+Headless batch labelling (no UI, results land in the normal workspace):
+
+    pixelkit label ./photos --prompts "bolt,washer" --export yolo
+    # options: --name, --out DIR, --device cpu|cuda:N, --model-timeout S
+
 Tests: `python -m pytest tests/`.
