@@ -15,9 +15,11 @@ Run:
     pip install -r requirements.txt
     python gd/server.py            # http://127.0.0.1:8001
 
-No auth, no cloud, binds localhost only. Models load on CUDA today
-(Metal/MPS lands in the device phase); without a GPU the engine still runs
-every dataset/annotation/export API and the labelling endpoints return 503.
+No auth, no cloud, binds localhost only. Device auto-detects
+cuda → mps → cpu (`PK_DEVICE` or the Settings picker override it). On a
+machine with no supported GPU the engine still runs every dataset/
+annotation/export API; the labelling endpoints return 503 unless CPU
+mode is explicitly chosen (very slow).
 
 Migrate SaaS-era data: `python import_legacy.py <old-dir-or-backup.zip>`.
 

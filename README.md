@@ -1,123 +1,85 @@
-# PixelKit (portable)
+# PixelKit
 
 Open-source, local-first dataset auto-labelling for computer vision.
 Text-prompted detection and segmentation with **SAM 3**, an interactive
 annotation editor (boxes, polygon masks, click-to-segment), GPU-accelerated
 augmentations, and YOLO / COCO / Pascal VOC export — all running on your own
 machine, with every image and annotation stored in a workspace folder you
-choose.
+choose. No accounts, no cloud, no telemetry.
 
-> **Status: pre-release, under active development.** This repo is being ported
-> from the PixelKit SaaS codebase. The port plan and current progress are in
+> **Status: pre-release, under active development.** Ported from the
+> PixelKit SaaS codebase; the port plan and progress live in
 > [`docs/PLAN.md`](docs/PLAN.md).
 
-## Targets
+## Download
 
-- **macOS** (Apple Silicon, Metal/MPS) and **Windows x64** (NVIDIA CUDA, or
-  CPU-only with labelling in slow mode). Linux runs the engine + UI from
-  source; a packaged Linux build is deferred past v1.
-- **12 GB VRAM** budget (VLM assist optional)
-- Single-command install; no accounts, no cloud, no telemetry
+Grab the latest installer from
+[**Releases**](https://github.com/ohmlab-ltd/pixelkit/releases):
 
-## Layout
+- **Windows x64** — `PixelKit-Setup-<version>.exe` (~80 MB). On first launch
+  the app downloads its AI runtime once: Python plus PyTorch (~3.5 GB CUDA
+  build on NVIDIA machines, ~300 MB CPU build otherwise) into
+  `%LOCALAPPDATA%\PixelKit\runtime`. The installer is currently **unsigned**,
+  so SmartScreen will warn: *More info → Run anyway*.
+- **macOS (Apple Silicon)** — `PixelKit-<version>.dmg` with the runtime
+  bundled. Also unsigned for now: right-click the app → Open, or allow it
+  under System Settings → Privacy & Security.
+- **Linux** — no packaged build yet; run from source (below).
 
-| Path | What it is |
+Model weights download separately on first run into your workspace
+(`weights/`): SAM 3 (~1.7 GB, needs a free Hugging Face token — see
+[`docs/HF-TOKEN.md`](docs/HF-TOKEN.md)) and DINOv2 (~0.6 GB, automatic).
+
+## Requirements
+
+| Machine | Labelling |
 |---|---|
-| `engine/` | Python FastAPI engine: SAM 3 labelling pipeline, jobs + SSE progress, augmentations, export. Serves the UI in the packaged app. |
-| `ui/` | Next.js workspace UI: annotation editor, review mode, augmentation designer, dataset stats. |
-| `installers/` | Install scripts and packaging (later phase). |
-| `docs/` | [`PLAN.md`](docs/PLAN.md) — full architecture + phase plan. |
+| Windows/Linux + NVIDIA GPU (12 GB VRAM recommended) | Full speed (CUDA) |
+| Apple Silicon Mac (16 GB+ unified memory) | Full speed (Metal) |
+| No supported GPU (incl. AMD/Intel) | App fully works — editor, datasets, import/export, augmentations. AI labelling is off by default; Settings → Compute → CPU enables it in very-slow mode. |
 
-## Port progress
+## Where your data lives
 
-- [x] **Phase 0 — bootstrap:** fresh-history monorepo; training stack, cloud
-      deploy, billing/auth/telemetry SaaS surface and dead code removed;
-      UI builds with a static local session.
-- [x] **Phase 1 — local engine:** R2 → workspace filesystem storage, auth
-      stubbed to a single local user, localhost-only binding, GroundingDINO/
-      SAM2/SigLIP/8B-VLM stack removed (SAM3 + DINOv2 + optional 2B VLM),
-      Claude/NSFW/credits/telemetry gone. Engine boots with zero config.
-- [x] **Phase 2 — workspace schema:** one folder per project, one per
-      dataset (`<workspace>/projects/<project>/<dataset>/`), the old
-      monolithic manifest split into `dataset.json` + one annotation JSON
-      per image, originals alone in `images/`, weights under
-      `<workspace>/weights`; `import_legacy.py` migrates SaaS-era data.
-      Golden-path test green (create → upload → annotate → export → delete).
-- [x] **Phase 3 — device layer:** cuda → mps → cpu auto-detection with a
-      `PK_DEVICE` override; SAM3/VLM CUDA-only gates relaxed (fp16 on Metal,
-      fp32 + explicit opt-in on CPU); model loads serialized (fixes a
-      transformers lazy-import thread race and boot VRAM spikes). Verified
-      on Apple Silicon: DINOv2-large runs real inference on MPS; SAM3
-      reaches its loader on MPS and awaits only the HF token (Phase 4).
-- [x] **Phase 4 — model manager + HF token flow:** `/api/models/*` +
-      `/api/settings/*` — per-model downloaded/loaded status, background
-      downloads with byte-level progress + disk preflight into
-      `<workspace>/weights`, token validation that distinguishes
-      invalid-token from license-not-accepted (`facebook/sam3` is gated),
-      token stored owner-only in the app config (never the workspace),
-      boot auto-loads only already-cached models, VLM load/unload toggle.
-      Setup UI screens land in Phase 5.
-- [x] **Phase 5 — UI slimming + first-run setup:** pricing/community/
-      terminal tabs, ProfileView, plan chip and next-auth removed entirely
-      (no login or auth surface anywhere); new SetupWizard (HF token →
-      weight downloads with live progress) and SettingsView (workspace,
-      device, token, model load/unload) on the Phase 4 endpoints; UI is a
-      static export the engine serves itself at 127.0.0.1:8001 with SPA
-      deep-link fallback — one process runs the whole product. (Interim
-      shape; the shipped product is the Phase 8 application.)
-- [x] **Phase 6 — packaging groundwork:** engine is an installable package
-      (`pip install -e engine` → `pixelkit` launcher + `pixelkit doctor`
-      environment checks), `requirements.lock` pins the verified env the
-      Phase 8 app will bundle, `installers/install.sh|.ps1` dev installs
-      with CUDA-vs-default torch detection, GitHub Actions CI (engine
-      pytest + UI build/test).
-- [ ] Phase 7 — QA on real hardware (PARKED: needs a 12 GB CUDA box; Metal-
-      only right now), docs, v0.1.0
-- [~] Phase 8 — **standalone desktop application** (in progress — landed:
-      `desktop/` Electron shell with engine auto-start/health/shutdown,
-      splash, window-state, native menu, PixelKit dock/taskbar icon; and a
-      full desktop-shell UI reframe — title bar, activity bar, project/
-      dataset explorer tree, models pane, status bar with engine/device/
-      SAM3 state, VS Code-density styling (see docs/DESKTOP-UI.md); a slim
-      **Windows NSIS installer** — ships shell + engine sources + UI only,
-      and on first launch bootstraps CPython + torch (CUDA if NVIDIA is
-      present, else CPU) into `%LOCALAPPDATA%\PixelKit\runtime` with splash
-      progress and Retry/Quit error handling — plus a launch-time update
-      check against GitHub Releases (notify + link, no self-update while
-      builds are unsigned); next: macOS signing/notarization, then
-      Vite/`app://` migration): the whole UI converted
-      off Next.js into a self-contained JavaScript application (Vite SPA
-      bundle loaded from disk inside an Electron shell — the VS Code /
-      LM Studio architecture) that owns the engine as a child process.
-      Nothing browser-based: no URL, no localhost page, no tabs — a native
-      window, real menu bar, native file dialogs, drag-and-drop, and signed
-      installers (.dmg / .msi / AppImage) with auto-update. A Flutter
-      rewrite is documented in the plan as the fallback if the JS app
-      doesn't feel native enough (cost: full editor rewrite, +8–12 weeks).
+Everything is plain files in one folder you pick on first run (default
+`~/PixelKit`): one folder per project, one per dataset, original images
+untouched in `images/`, one annotation JSON per image in `annotations/`.
+The format is documented in [`docs/WORKSPACE.md`](docs/WORKSPACE.md) —
+it's yours to sync, back up, or parse.
 
-## Models
+Coming from the SaaS? **File → Import Legacy Backup…** converts an old
+backup zip into the workspace format (CLI: `python import_legacy.py`).
 
-All weights download from Hugging Face into `<workspace>/weights` on first
-run. `facebook/sam3` is license-gated: you accept Meta's SAM license on
-Hugging Face and provide your own access token in the app's setup screen.
-
-## Development (current state)
+## Run from source
 
 ```bash
-# engine — boots anywhere; ML endpoints need CUDA until the MPS phase lands
+# engine — Python 3.12, FastAPI; binds 127.0.0.1:8001
 cd engine && pip install -r requirements.txt && python gd/server.py
-# → http://127.0.0.1:8001, workspace auto-created at ~/PixelKit
-#   (override with PIXELKIT_WORKSPACE)
 
-# ui
-cd ui && npm install && npm run build   # engine then serves ui/out itself
-# (or `npm run dev` on :3000 for UI development)
+# ui — served by the engine after a build (or `npm run dev` on :3000)
+cd ui && npm install && npm run build
 
-# migrate data from the SaaS deployment
-cd engine && python import_legacy.py <old-backend-dir-or-backup.zip>
+# desktop shell (optional in dev; packaged builds bundle everything)
+cd desktop && npm ci && npm start
 ```
+
+`pip install -e engine` gives you the `pixelkit` launcher and
+`pixelkit doctor` environment checks. Device auto-detects cuda → mps → cpu
+(`PK_DEVICE` overrides; `PK_DISABLE_MODELS=1` runs the engine with no ML).
+
+## Port status
+
+Phases 0–6 are done: local engine (workspace storage, no auth, split
+per-image annotation schema), cuda/mps/cpu device layer, model manager +
+HF-token flow, slimmed UI with first-run setup, packaging groundwork and CI.
+Phase 8 (standalone desktop app) is in progress — Electron shell with
+engine sidecar, desktop-shell UI (see [`docs/DESKTOP-UI.md`](docs/DESKTOP-UI.md)),
+slim Windows NSIS installer with first-run runtime bootstrap, update check,
+tag-driven release workflow. Remaining before v0.1.0: real-hardware QA
+matrix (Phase 7), macOS signing/notarization, Vite/`app://` migration.
+The full history is in [`docs/PLAN.md`](docs/PLAN.md) and the git log.
 
 ## License
 
-Code: [Apache-2.0](LICENSE). Model weights are downloaded separately and
-carry their own licenses — see [NOTICE](NOTICE).
+Code: [Apache-2.0](LICENSE). Model weights download separately and carry
+their own licenses — see [NOTICE](NOTICE). `facebook/sam3` is gated: you
+accept Meta's license on Hugging Face and use your own token.
