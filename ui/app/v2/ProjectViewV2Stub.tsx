@@ -2998,8 +2998,8 @@ export function ProjectViewV2Stub({
       // Retry helper, the user hit an intermittent case on the
       // large project where this fetch silently bailed (non-ok or
       // network blip) and the gallery froze at /initial's 20 tiles.
-      // Three tries with linear back-off gets us past transient
-      // Cloudflare warm-ups + Vast.ai cold-starts. cache:no-store so
+      // Three tries with linear back-off rides out transient engine
+      // stalls (e.g. a model load hogging the GPU). cache:no-store so
       // browser HTTP cache can't serve a stale truncated response
       // from a previous session.
       const fetchOverview = async (

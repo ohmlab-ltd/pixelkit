@@ -7,9 +7,7 @@ augmentations, and YOLO / COCO / Pascal VOC export — all running on your own
 machine, with every image and annotation stored in a workspace folder you
 choose. No accounts, no cloud, no telemetry.
 
-> **Status: pre-release, under active development.** Ported from the
-> PixelKit SaaS codebase; the port plan and progress live in
-> [`docs/PLAN.md`](docs/PLAN.md).
+> **Status: pre-release, under active development.**
 
 ## Download
 
@@ -66,17 +64,16 @@ cd desktop && npm ci && npm start
 `pixelkit doctor` environment checks. Device auto-detects cuda → mps → cpu
 (`PK_DEVICE` overrides; `PK_DISABLE_MODELS=1` runs the engine with no ML).
 
-## Port status
+## Status
 
-Phases 0–6 are done: local engine (workspace storage, no auth, split
+Working today: local engine (workspace storage, no accounts, split
 per-image annotation schema), cuda/mps/cpu device layer, model manager +
-HF-token flow, slimmed UI with first-run setup, packaging groundwork and CI.
-Phase 8 (standalone desktop app) is in progress — Electron shell with
-engine sidecar, desktop-shell UI (see [`docs/DESKTOP-UI.md`](docs/DESKTOP-UI.md)),
-slim Windows NSIS installer with first-run runtime bootstrap, update check,
-tag-driven release workflow. Remaining before v0.1.0: real-hardware QA
-matrix (Phase 7), macOS signing/notarization, Vite/`app://` migration.
-The full history is in [`docs/PLAN.md`](docs/PLAN.md) and the git log.
+HF-token flow, first-run setup, and the Electron desktop shell with a
+slim Windows NSIS installer (first-run runtime bootstrap), update check
+and a tag-driven release workflow. The desktop-shell UI is documented in
+[`docs/DESKTOP-UI.md`](docs/DESKTOP-UI.md). Remaining before v0.1.0:
+a real-hardware QA matrix, macOS signing/notarization, and the
+Vite/`app://` migration.
 
 ## License
 

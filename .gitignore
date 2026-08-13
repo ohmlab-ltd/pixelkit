@@ -11,3 +11,9 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+
+# graphify knowledge graph (generated; rebuild with `graphify update`)
+graphify-out/
+
+# Local agent instructions (machine-specific, not part of the product)
+CLAUDE.md
