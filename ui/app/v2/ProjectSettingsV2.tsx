@@ -561,6 +561,9 @@ export function ProjectSettingsV2({
           )}
         </section>
 
+        {/* Snapshots */}
+        <SnapshotsSection projectId={projectId} />
+
         {/* Delete */}
         <section className="px-6 py-5 grid gap-3">
           <label className="pk-micro">Delete project</label>
@@ -724,5 +727,139 @@ function LabelColourRow({
         />
       </div>
     </li>
+  );
+}
+
+// ── Snapshots ────────────────────────────────────────────────────────
+// Point-in-time copies of the annotation state (labels + boxes/masks,
+// never the images). Restore always writes a safety snapshot of the
+// current state first, so it's a two-click, always-undoable action.
+
+type Snapshot = { id: string; createdAt: string; sizeBytes: number };
+
+function fmtSnapBytes(n: number): string {
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(n / 1024))} KB`;
+}
+
+function SnapshotsSection({ projectId }: { projectId: string }) {
+  const [snaps, setSnaps] = useState<Snapshot[] | null>(null);
+  const [busy, setBusy] = useState<string | null>(null); // "create" | snapshot id
+  const [armed, setArmed] = useState<string | null>(null); // restore confirm state
+  const [note, setNote] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const r = await apiFetch(`/api/v2/projects/${projectId}/snapshots`);
+      if (r.ok) setSnaps(((await r.json()) as { snapshots: Snapshot[] }).snapshots);
+    } catch {
+      /* engine unreachable — section just shows nothing */
+    }
+  }, [projectId]);
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const create = async () => {
+    setBusy("create");
+    setError(null);
+    setNote(null);
+    try {
+      const r = await apiFetch(`/api/v2/projects/${projectId}/snapshots`, { method: "POST" });
+      if (!r.ok) throw new Error(`snapshot failed (${r.status})`);
+      setNote("Snapshot saved.");
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const restore = async (id: string) => {
+    if (armed !== id) {
+      setArmed(id);
+      window.setTimeout(() => setArmed((cur) => (cur === id ? null : cur)), 4000);
+      return;
+    }
+    setArmed(null);
+    setBusy(id);
+    setError(null);
+    setNote(null);
+    try {
+      const r = await apiFetch(`/api/v2/projects/${projectId}/snapshots/${id}/restore`, {
+        method: "POST",
+      });
+      if (!r.ok) throw new Error(`restore failed (${r.status})`);
+      setNote("Restored — reloading…");
+      // Annotations changed under every open view; a reload is the
+      // honest way to resync the whole dataset page.
+      window.setTimeout(() => window.location.reload(), 600);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setBusy(null);
+    }
+  };
+
+  const fmtDate = (iso: string): string => {
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? iso : d.toLocaleString();
+  };
+
+  return (
+    <section className="px-6 py-5 border-b border-foreground/10 grid gap-3">
+      <div className="flex items-center justify-between">
+        <label className="pk-micro">Annotation snapshots</label>
+        <button
+          type="button"
+          onClick={create}
+          disabled={busy !== null}
+          className="text-[10px] uppercase tracking-wider font-mono text-foreground/55 hover:text-foreground transition-colors disabled:opacity-40"
+        >
+          {busy === "create" ? "Saving…" : "Snapshot now"}
+        </button>
+      </div>
+      <p className="text-xs text-foreground/50">
+        Labels and annotations only — images aren&rsquo;t duplicated. Restoring
+        snapshots the current state first, so it&rsquo;s always undoable.
+      </p>
+      {(note || error) && (
+        <p className={`text-xs ${error ? "text-[var(--bad)]" : "text-[var(--ok)]"}`}>
+          {error ?? note}
+        </p>
+      )}
+      {snaps && snaps.length > 0 && (
+        <ul className="grid gap-1.5 max-h-48 overflow-auto pr-1">
+          {snaps.map((s) => (
+            <li
+              key={s.id}
+              className="flex items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-2"
+            >
+              <span className="min-w-0 truncate text-xs text-foreground/75 tabular-nums">
+                {fmtDate(s.createdAt)}
+                <span className="ml-2 text-foreground/40">{fmtSnapBytes(s.sizeBytes)}</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => restore(s.id)}
+                disabled={busy !== null}
+                className={[
+                  "shrink-0 rounded-md border px-2.5 py-1 text-[10px] uppercase tracking-wider font-mono transition-colors disabled:opacity-40",
+                  armed === s.id
+                    ? "border-[var(--warn)] text-[var(--warn)]"
+                    : "border-[var(--line)] text-foreground/55 hover:border-[var(--line-strong)] hover:text-foreground",
+                ].join(" ")}
+              >
+                {busy === s.id ? "Restoring…" : armed === s.id ? "Confirm restore" : "Restore"}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {snaps && snaps.length === 0 && (
+        <p className="text-sm text-foreground/45">No snapshots yet.</p>
+      )}
+    </section>
   );
 }

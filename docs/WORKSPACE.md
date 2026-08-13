@@ -21,6 +21,7 @@ This document is the public contract; the implementation is
         annotations/              # one JSON per image (see below)
         references/               # reference crops ("specific" datasets)
         augmentations/            # generated variants + transformed anns
+        snapshots/                # annotation snapshots (zips; see below)
         thumbs/                   # thumbnails/previews (regenerable cache)
         exports/                  # export zips land here
     <dataset-slug>/               # datasets outside any Project sit at root
@@ -56,6 +57,14 @@ Consequences you can rely on:
   rewritten when their content changes.
 - Diff/sync tools see per-image churn, not a giant file rewritten on
   every save.
+
+## Snapshots
+
+`snapshots/<UTCstamp>-<hash>.zip` holds a point-in-time copy of
+`dataset.json` + `annotations/` (never images). Created from the
+dataset's settings panel; restoring writes a safety snapshot of the
+current state first, so restores are always undoable. They're plain
+zips — safe to copy out as backups.
 
 ## Caches
 

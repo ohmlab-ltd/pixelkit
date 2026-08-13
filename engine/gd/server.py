@@ -18652,6 +18652,131 @@ async def import_legacy_endpoint(payload: LegacyImportIn):
     return {"ok": True}
 
 
+# ── Dataset snapshots ─────────────────────────────────────────────────────────
+# Point-in-time copies of the annotation state (dataset.json + one JSON
+# per image) as zips under <dataset>/snapshots/. Images are immutable
+# originals and are deliberately NOT included — a snapshot is cheap and
+# captures exactly what editing can lose. Restores are guarded by an
+# automatic safety snapshot of the current state.
+
+_SNAP_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
+
+
+def _snapshot_write(d: Path) -> dict:
+    """Zip the dataset's annotation state into snapshots/. Returns meta.
+    Runs on a worker thread (file IO only)."""
+    dj = d / "dataset.json"
+    if not dj.exists():
+        raise HTTPException(404, "dataset.json missing")
+    h = hashlib.blake2b(digest_size=4)
+    payload: list[tuple[str, bytes]] = []
+    data = dj.read_bytes()
+    h.update(data)
+    payload.append(("dataset.json", data))
+    ann_dir = d / "annotations"
+    if ann_dir.exists():
+        for p in sorted(ann_dir.glob("*.json")):
+            b = p.read_bytes()
+            h.update(p.name.encode())
+            h.update(b)
+            payload.append((f"annotations/{p.name}", b))
+    snap_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + h.hexdigest()
+    sdir = d / "snapshots"
+    sdir.mkdir(exist_ok=True)
+    path = sdir / f"{snap_id}.zip"
+    tmp = sdir / f"{snap_id}.zip.tmp"
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        for name, b in payload:
+            zf.writestr(name, b)
+    os.replace(tmp, path)
+    return {
+        "id": snap_id,
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "sizeBytes": path.stat().st_size,
+        "annotations": len(payload) - 1,
+    }
+
+
+def _snapshot_meta(p: Path) -> dict:
+    stem = p.name[:-4]
+    try:
+        created = (
+            datetime.strptime(stem.split("-")[0], "%Y%m%dT%H%M%SZ")
+            .replace(tzinfo=timezone.utc)
+            .isoformat()
+        )
+    except ValueError:
+        created = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc).isoformat()
+    return {"id": stem, "createdAt": created, "sizeBytes": p.stat().st_size}
+
+
+@app.get("/api/v2/projects/{project_id}/snapshots")
+async def snapshots_list(project_id: str):
+    try:
+        d = store.dataset_dir(project_id)
+    except KeyError:
+        raise HTTPException(404, "project not found")
+    sdir = d / "snapshots"
+    out = []
+    if sdir.exists():
+        for p in sorted(sdir.glob("*.zip"), reverse=True):
+            if _SNAP_ID_RE.fullmatch(p.name[:-4]):
+                out.append(_snapshot_meta(p))
+    return {"snapshots": out}
+
+
+@app.post("/api/v2/projects/{project_id}/snapshots")
+async def snapshots_create(project_id: str):
+    try:
+        d = store.dataset_dir(project_id)
+    except KeyError:
+        raise HTTPException(404, "project not found")
+    return await asyncio.to_thread(_snapshot_write, d)
+
+
+@app.post("/api/v2/projects/{project_id}/snapshots/{snapshot_id}/restore")
+async def snapshots_restore(project_id: str, snapshot_id: str):
+    if not _SNAP_ID_RE.fullmatch(snapshot_id):
+        raise HTTPException(400, "bad snapshot id")
+    try:
+        d = store.dataset_dir(project_id)
+    except KeyError:
+        raise HTTPException(404, "project not found")
+    path = d / "snapshots" / f"{snapshot_id}.zip"
+    if not path.exists():
+        raise HTTPException(404, "snapshot not found")
+
+    def _do() -> dict:
+        with zipfile.ZipFile(path) as zf:
+            names = set(zf.namelist())
+            if "dataset.json" not in names:
+                raise HTTPException(400, "corrupt snapshot: no dataset.json")
+            new_manifest = zf.read("dataset.json")
+            anns = {
+                Path(n).name: zf.read(n)  # basename only — no zip-slip
+                for n in names
+                if n.startswith("annotations/") and n.endswith(".json") and n.count("/") == 1
+            }
+        # Current state is snapshotted first so a restore is always undoable.
+        safety = _snapshot_write(d)
+        ann_dir = d / "annotations"
+        ann_dir.mkdir(exist_ok=True)
+        for p in ann_dir.glob("*.json"):
+            p.unlink()
+        for fn, b in anns.items():
+            tmp = ann_dir / (fn + ".tmp")
+            tmp.write_bytes(b)
+            os.replace(tmp, ann_dir / fn)
+        tmp = d / "dataset.json.tmp"
+        tmp.write_bytes(new_manifest)
+        # dataset.json last: its mtime is the manifest-cache validity
+        # stamp, so the cached copy self-invalidates on the next load.
+        os.replace(tmp, d / "dataset.json")
+        return {"ok": True, "restored": snapshot_id, "safetySnapshot": safety["id"]}
+
+    return await asyncio.to_thread(_do)
+
+
 
 # ── Reference-editor interactive tools (portable build: SAM3-backed) ─────────
 # The SaaS build served these with SAM2 (segment) + GroundingDINO (classify).
