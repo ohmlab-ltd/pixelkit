@@ -18341,6 +18341,9 @@ async def import_legacy_endpoint(payload: LegacyImportIn):
         raise
     except Exception as e:  # surfaced verbatim in the desktop dialog
         raise HTTPException(500, f"legacy import failed: {e}")
+    # The id->path index scans once per process; without this the imported
+    # projects/containers stay invisible until an engine restart.
+    store.rescan()
     return {"ok": True}
 
 
