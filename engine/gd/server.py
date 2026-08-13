@@ -15805,6 +15805,72 @@ async def add_images_from_urls(project_id: str, body: ImagesFromUrlsRequest, use
     return {"added": added, "skipped": skipped, "rejected": rejected}
 
 
+# Every field that can carry a label name on a box/detection record —
+# matches _box_label's resolution order so a rename never leaves a
+# stale synonym behind in a different key.
+_LABEL_KEYS = ("label", "predLabel", "pred_label", "gdLabel", "gd_label", "gd_variant")
+
+
+def _rename_label_fields(manifest: dict, old: str, new: str) -> int:
+    """Rename/merge a label everywhere it appears in one manifest:
+    tags (deduped, so renaming onto an existing label merges), V1
+    results[]/editedBoxes{}, V2 imports[] records, and the
+    labelColours / labelAliases maps. Returns the number of renamed
+    occurrences (tag hit counts as one)."""
+    renamed = 0
+    ol = old.strip().lower()
+
+    tags = manifest.get("tags", []) or []
+    out_tags: list[str] = []
+    hit_tag = False
+    for t in tags:
+        s = (t or "").strip()
+        if s.lower() == ol:
+            hit_tag = True
+            if new not in out_tags:
+                out_tags.append(new)
+        elif s not in out_tags:
+            out_tags.append(s)
+    if hit_tag:
+        renamed += 1
+    manifest["tags"] = out_tags
+
+    def _boxes(lst) -> None:
+        nonlocal renamed
+        for b in lst or []:
+            if not isinstance(b, dict):
+                continue
+            for k in _LABEL_KEYS:
+                v = b.get(k)
+                if isinstance(v, str) and v.strip().lower() == ol:
+                    b[k] = new
+                    renamed += 1
+
+    for r in manifest.get("results", []) or []:  # V1 layout
+        _boxes(r.get("detections"))
+    for boxes in (manifest.get("editedBoxes", {}) or {}).values():  # V1 layout
+        if isinstance(boxes, list):
+            _boxes(boxes)
+    for imp in manifest.get("imports", []) or []:  # V2 layout
+        if not isinstance(imp, dict):
+            continue
+        _boxes(imp.get("detections"))
+        _boxes(imp.get("editedBoxes"))
+
+    # Colour override + display-alias maps follow the label. An existing
+    # entry for the target label wins (merge keeps the target's look).
+    for map_key in ("labelColours", "labelAliases"):
+        m = manifest.get(map_key)
+        if not isinstance(m, dict):
+            continue
+        for k in list(m.keys()):
+            if isinstance(k, str) and k.strip().lower() == ol:
+                val = m.pop(k)
+                m.setdefault(new.strip().lower(), val)
+
+    return renamed
+
+
 class RenameLabelRequest(BaseModel):
     old_label: str
     new_label: str
@@ -15837,52 +15903,90 @@ async def rename_label(project_id: str, body: RenameLabelRequest):
     if not manifest:
         raise HTTPException(404)
 
-    renamed = 0
-
-    # Project tag list — case-insensitive match, dedupe so renaming
-    # to an existing tag merges rather than duplicates.
-    tags = manifest.get("tags", []) or []
-    out_tags: list[str] = []
-    for t in tags:
-        s = (t or "").strip()
-        if s.lower() == old.lower():
-            if new not in out_tags:
-                out_tags.append(new)
-            renamed += 1
-        else:
-            if s not in out_tags:
-                out_tags.append(s)
-    manifest["tags"] = out_tags
-
-    # Detections on every image.
-    for r in manifest.get("results", []) or []:
-        for det in r.get("detections", []) or []:
-            label = (det.get("label") or "").strip()
-            if label.lower() == old.lower():
-                det["label"] = new
-                renamed += 1
-
-    # User-edited boxes — same rename applies. Boxes carry the label
-    # that drives the right-hand list inside the image editor, so
-    # this is what makes the rename "pull through" to the UI.
-    edited = manifest.get("editedBoxes", {}) or {}
-    for boxes in edited.values():
-        if not isinstance(boxes, list):
-            continue
-        for b in boxes:
-            if not isinstance(b, dict):
-                continue
-            label = (b.get("label") or "").strip()
-            if label.lower() == old.lower():
-                b["label"] = new
-                renamed += 1
+    renamed = _rename_label_fields(manifest, old, new)
 
     manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     save_manifest(project_id, manifest)
 
-    # (synonyms cache removed with the GroundingDINO pipeline)
+    return {"ok": True, "renamed": renamed, "tags": manifest.get("tags") or []}
 
-    return {"ok": True, "renamed": renamed, "tags": out_tags}
+
+# ── Project-level label ontology ─────────────────────────────────────────────
+# A Project (container) usually accumulates the same concepts across its
+# datasets with drifting names ("bolt" / "bolts" / "hex bolt"). These
+# endpoints give one place to see label usage across the whole Project
+# and to rename/merge a label everywhere in one action.
+
+
+@app.get("/api/containers/{container_id}/labels")
+async def container_labels(container_id: str):
+    c = containers.load_container(container_id)
+    if not c:
+        raise HTTPException(404, "project not found")
+    ds_ids = list(c.get("dataset_ids") or [])
+
+    def _collect() -> list[dict]:
+        agg: dict[str, dict] = {}
+        for pid in ds_ids:
+            m = load_manifest(pid, copy=False)
+            if not m:
+                continue
+            seen_here: set[str] = set()
+
+            def _touch(s: str, boxes: int) -> None:
+                a = agg.setdefault(s, {"label": s, "datasets": 0, "boxes": 0})
+                a["boxes"] += boxes
+                if s not in seen_here:
+                    a["datasets"] += 1
+                    seen_here.add(s)
+
+            for t in m.get("tags") or []:
+                s = (t or "").strip().lower()
+                if s:
+                    _touch(s, 0)
+            for _img, _sz, b in _project_box_iter(m):
+                s = _box_label(b).strip().lower()
+                if s:
+                    _touch(s, 1)
+        return sorted(agg.values(), key=lambda x: (-x["boxes"], x["label"]))
+
+    labels = await asyncio.to_thread(_collect)
+    return {"datasets": len(ds_ids), "labels": labels}
+
+
+@app.post("/api/containers/{container_id}/labels/rename")
+async def container_rename_label(container_id: str, body: RenameLabelRequest):
+    c = containers.load_container(container_id)
+    if not c:
+        raise HTTPException(404, "project not found")
+    old = (body.old_label or "").strip()
+    new = (body.new_label or "").strip()
+    if not old or not new:
+        raise HTTPException(400, "old_label and new_label are required")
+    from profanity import assert_clean
+
+    assert_clean(new, field="label")
+    if old.lower() == new.lower():
+        return {"ok": True, "renamed": 0, "datasetsTouched": 0}
+
+    ds_ids = list(c.get("dataset_ids") or [])
+
+    def _do() -> dict:
+        total = 0
+        touched = 0
+        for pid in ds_ids:
+            m = load_manifest(pid)
+            if not m:
+                continue
+            n = _rename_label_fields(m, old, new)
+            if n:
+                m["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                save_manifest(pid, m)
+                total += n
+                touched += 1
+        return {"ok": True, "renamed": total, "datasetsTouched": touched}
+
+    return await asyncio.to_thread(_do)
 
 
 @app.post(

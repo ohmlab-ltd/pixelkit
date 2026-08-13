@@ -8,6 +8,7 @@
 // legacy single-DATASET view.)
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 
+import { apiFetch } from "@/lib/apiFetch";
 import { ProjectSettingsModal } from "./ProjectSettingsModal";
 import { AddDatasetModal } from "./AddDatasetModal";
 import { CreateDatasetModal } from "./CreateDatasetModal";
@@ -441,8 +442,9 @@ export function ProjectPage({
           )}
         </div>
 
-        {/* Side: activity */}
+        {/* Side: labels + activity */}
         <aside className="flex flex-col gap-6">
+          <LabelsCard containerId={containerId} />
           <section className="pk-card rounded-2xl p-5">
             <h2 className="pk-eyebrow mb-4">Activity</h2>
             {activity.length === 0 ? (
@@ -559,5 +561,122 @@ export function ProjectPage({
         />
       )}
     </div>
+  );
+}
+
+// ── Labels (project-wide ontology) ───────────────────────────────────
+// Usage of every label across the Project's datasets, with an inline
+// rename that rewrites tags + annotations everywhere in one action.
+// Renaming onto an existing label merges the two.
+
+type LabelUsage = { label: string; datasets: number; boxes: number };
+
+function LabelsCard({ containerId }: { containerId: string }) {
+  const [rows, setRows] = useState<LabelUsage[] | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const r = await apiFetch(`/api/containers/${containerId}/labels`);
+      if (r.ok) setRows(((await r.json()) as { labels: LabelUsage[] }).labels);
+    } catch {
+      /* engine unreachable — card shows nothing */
+    }
+  }, [containerId]);
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const commit = async (from: string) => {
+    const to = draft.trim().toLowerCase();
+    setEditing(null);
+    if (!to || to === from) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await apiFetch(`/api/containers/${containerId}/labels/rename`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ old_label: from, new_label: to }),
+      });
+      if (!r.ok) {
+        const body = (await r.json().catch(() => null)) as { detail?: string } | null;
+        throw new Error(body?.detail ?? `rename failed (${r.status})`);
+      }
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!rows || rows.length === 0) return null;
+  const merging =
+    editing !== null &&
+    rows.some((r) => r.label === draft.trim().toLowerCase() && r.label !== editing);
+
+  return (
+    <section className="pk-card rounded-2xl p-5">
+      <h2 className="pk-eyebrow mb-1.5">Labels</h2>
+      <p className="mb-4 text-xs text-foreground/45">
+        Across every dataset in this project. Rename to fix drift —
+        renaming onto an existing label merges them.
+      </p>
+      {error && <p className="mb-2 text-xs text-[var(--bad)]">{error}</p>}
+      <ul className="grid gap-1.5">
+        {rows.map((r) => (
+          <li
+            key={r.label}
+            className="flex items-center justify-between gap-2 rounded-md border border-[var(--line)] px-2.5 py-1.5"
+          >
+            {editing === r.label ? (
+              <form
+                className="flex min-w-0 flex-1 items-center gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void commit(r.label);
+                }}
+              >
+                <input
+                  autoFocus
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onBlur={() => setEditing(null)}
+                  onKeyDown={(e) => e.key === "Escape" && setEditing(null)}
+                  className="w-full min-w-0 rounded border border-[var(--line-strong)] bg-transparent px-1.5 py-0.5 font-mono text-xs outline-none"
+                />
+                <span className="shrink-0 text-[10px] uppercase tracking-wider text-foreground/40">
+                  {merging ? "merge ⏎" : "rename ⏎"}
+                </span>
+              </form>
+            ) : (
+              <>
+                <span className="min-w-0 truncate font-mono text-xs text-foreground/85">
+                  {r.label}
+                </span>
+                <span className="flex shrink-0 items-center gap-2.5 text-[11px] tabular-nums text-foreground/40">
+                  {r.boxes} boxes · {r.datasets} ds
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => {
+                      setEditing(r.label);
+                      setDraft(r.label);
+                    }}
+                    className="text-[10px] uppercase tracking-wider text-foreground/50 transition-colors hover:text-foreground disabled:opacity-40"
+                  >
+                    Rename
+                  </button>
+                </span>
+              </>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
