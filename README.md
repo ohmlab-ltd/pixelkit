@@ -13,7 +13,9 @@ choose.
 
 ## Targets
 
-- **macOS** (Apple Silicon, Metal/MPS), **Linux** and **Windows** (NVIDIA CUDA)
+- **macOS** (Apple Silicon, Metal/MPS) and **Windows x64** (NVIDIA CUDA, or
+  CPU-only with labelling in slow mode). Linux runs the engine + UI from
+  source; a packaged Linux build is deferred past v1.
 - **12 GB VRAM** budget (VLM assist optional)
 - Single-command install; no accounts, no cloud, no telemetry
 
@@ -76,9 +78,14 @@ choose.
       splash, window-state, native menu, PixelKit dock/taskbar icon; and a
       full desktop-shell UI reframe — title bar, activity bar, project/
       dataset explorer tree, models pane, status bar with engine/device/
-      SAM3 state, VS Code-density styling (see docs/DESKTOP-UI.md); next:
-      bundled Python env + packaged installers, then Vite/`app://`
-      migration): the whole UI converted
+      SAM3 state, VS Code-density styling (see docs/DESKTOP-UI.md); a slim
+      **Windows NSIS installer** — ships shell + engine sources + UI only,
+      and on first launch bootstraps CPython + torch (CUDA if NVIDIA is
+      present, else CPU) into `%LOCALAPPDATA%\PixelKit\runtime` with splash
+      progress and Retry/Quit error handling — plus a launch-time update
+      check against GitHub Releases (notify + link, no self-update while
+      builds are unsigned); next: macOS signing/notarization, then
+      Vite/`app://` migration): the whole UI converted
       off Next.js into a self-contained JavaScript application (Vite SPA
       bundle loaded from disk inside an Electron shell — the VS Code /
       LM Studio architecture) that owns the engine as a child process.

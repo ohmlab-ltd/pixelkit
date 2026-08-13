@@ -6,7 +6,7 @@
   "private": true,
   "main": "main.js",
   "author": "Ohm Lab <team@ohmlab.co.uk>",
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder",
@@ -25,6 +25,8 @@
     },
     "files": [
       "main.js",
+      "bootstrap.js",
+      "updater.js",
       "package.json",
       "build/icon.png"
     ],
@@ -44,22 +46,19 @@
     },
     "win": {
       "target": [
-        "zip"
-      ],
-      "icon": "build/icon.png",
-      "extraResources": [
         {
-          "from": "runtime-win",
-          "to": "runtime"
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
         }
-      ]
-    },
-    "linux": {
-      "target": [
-        "AppImage"
       ],
-      "category": "Graphics",
       "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "PixelKit-Setup-${version}.exe"
     },
     "extraResources": [
       {
@@ -68,6 +67,10 @@
         "filter": [
           "**/*.py"
         ]
+      },
+      {
+        "from": "../engine/requirements-win.txt",
+        "to": "engine/requirements-win.txt"
       },
       {
         "from": "../ui/out",

@@ -7,12 +7,15 @@
 
 'use strict';
 
-const { app, BrowserWindow, Menu, screen, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, screen, shell } = require('electron');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
+
+const bootstrap = require('./bootstrap');
+const { checkForUpdates } = require('./updater');
 
 const ENGINE_ORIGIN = 'http://127.0.0.1:8001';
 const HEALTH_URL = `${ENGINE_ORIGIN}/api/health`;
@@ -76,11 +79,10 @@ function engineLogPath() {
   return path.join(app.getPath('logs'), 'engine.log');
 }
 
-// Resolution order: PIXELKIT_PYTHON env var, the repo venv next to this
-// directory, then whatever `python3` is on PATH.
-// TODO(packaging): when the app is packaged, the engine + a bundled Python
-// env should live in process.resourcesPath; add that lookup here.
-// Packaged app: the bundled runtime + engine live in resources/.
+// Packaged app: a fat bundle (macOS dmg) carries runtime/py inside
+// resources/; the slim Windows install has no bundled runtime and instead
+// bootstraps one into %LOCALAPPDATA%\PixelKit\runtime on first run
+// (bootstrap.js). Dev runs use the repo venv.
 function bundledPaths() {
   const res = process.resourcesPath || '';
   const python =
@@ -97,12 +99,16 @@ function bundledPaths() {
 function resolvePython() {
   if (process.env.PIXELKIT_PYTHON) return process.env.PIXELKIT_PYTHON;
   const b = bundledPaths();
-  if (app.isPackaged && fs.existsSync(b.python)) return b.python;
+  if (app.isPackaged) {
+    if (fs.existsSync(b.python)) return b.python; // fat bundle (macOS dmg)
+    return bootstrap.runtimePython(); // slim install — ensureEngine bootstraps it first
+  }
   const venvPython =
     process.platform === 'win32'
       ? path.join(__dirname, '..', 'engine', '.venv', 'Scripts', 'python.exe')
       : path.join(__dirname, '..', 'engine', '.venv', 'bin', 'python');
   if (fs.existsSync(venvPython)) return venvPython;
+  if (fs.existsSync(bootstrap.runtimePython())) return bootstrap.runtimePython();
   return 'python3';
 }
 
@@ -143,12 +149,68 @@ function spawnEngine() {
   engine.external = false;
 }
 
+// Slim Windows installs set up their Python runtime on first launch.
+// Loops on failure (Retry / Quit); returns false only when the user quits.
+async function runFirstRunBootstrap() {
+  const requirementsPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'engine', 'requirements-win.txt')
+    : path.join(__dirname, '..', 'engine', 'requirements-win.txt');
+  const logFile = path.join(path.dirname(engineLogPath()), 'bootstrap.log');
+  fs.mkdirSync(path.dirname(logFile), { recursive: true });
+
+  for (;;) {
+    const log = fs.createWriteStream(logFile, { flags: 'a' });
+    log.write(`\n--- PixelKit runtime bootstrap ${new Date().toISOString()} ---\n`);
+    try {
+      setSplashStatus('Preparing first run…');
+      await bootstrap.ensureWindowsRuntime({ requirementsPath, onStatus: setSplashStatus, log });
+      log.end();
+      return true;
+    } catch (err) {
+      log.write(`\nBOOTSTRAP FAILED: ${err && err.stack ? err.stack : err}\n`);
+      log.end();
+      const opts = {
+        type: 'error',
+        title: 'PixelKit setup',
+        message: 'PixelKit could not finish setting up its runtime.',
+        detail:
+          `${(err && err.message) || err}\n\nLog: ${logFile}\n\n` +
+          'First run needs an internet connection — the AI runtime is downloaded once.',
+        buttons: ['Retry', 'Quit'],
+        defaultId: 0,
+        cancelId: 1,
+      };
+      const choice =
+        splashWindow && !splashWindow.isDestroyed()
+          ? dialog.showMessageBoxSync(splashWindow, opts)
+          : dialog.showMessageBoxSync(opts);
+      if (choice !== 0) return false;
+    }
+  }
+}
+
+let bootstrapQuit = false;
+
 async function ensureEngine() {
   if (await checkHealth()) {
     engine.external = true; // someone else owns it -> never kill it
     return true;
   }
 
+  // Slim Windows install: make sure a runtime exists before spawning.
+  if (process.platform === 'win32' && app.isPackaged && !process.env.PIXELKIT_PYTHON) {
+    const b = bundledPaths();
+    if (!fs.existsSync(b.python) && !bootstrap.runtimeReady()) {
+      const ok = await runFirstRunBootstrap();
+      if (!ok) {
+        bootstrapQuit = true;
+        app.quit();
+        return false;
+      }
+    }
+  }
+
+  setSplashStatus('Starting engine…');
   spawnEngine();
 
   const deadline = Date.now() + STARTUP_TIMEOUT_MS;
@@ -195,8 +257,20 @@ function splashHtml(body) {
     .spin{width:22px;height:22px;margin:16px auto 0;border-radius:50%;
       border:2.5px solid #33333c;border-top-color:#8f7bff;animation:s 0.9s linear infinite}
     @keyframes s{to{transform:rotate(360deg)}}
+    #st{min-height:1.5em;max-width:380px;margin:12px auto 0;font-size:12px;color:#8a8a94;
+      overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   </style></head><body><div class="card">${body}</div></body></html>`;
   return 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
+}
+
+// Update the one-line status on the splash (no-op once it's closed).
+function setSplashStatus(text) {
+  if (!splashWindow || splashWindow.isDestroyed()) return;
+  splashWindow.webContents
+    .executeJavaScript(
+      `(el => { if (el) el.textContent = ${JSON.stringify(String(text))}; })(document.getElementById('st'))`
+    )
+    .catch(() => {});
 }
 
 function createSplash() {
@@ -214,7 +288,7 @@ function createSplash() {
     splashWindow = null;
   });
   splashWindow.loadURL(
-    splashHtml('<h1>PixelKit</h1><p>Starting engine…</p><div class="spin"></div>')
+    splashHtml('<h1>PixelKit</h1><p>Starting up…</p><div class="spin"></div><p id="st"></p>')
   );
 }
 
@@ -416,7 +490,12 @@ app.whenReady().then(async () => {
   const ok = await ensureEngine();
   if (ok) {
     createMainWindow();
-  } else {
+    if (app.isPackaged) {
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) checkForUpdates(mainWindow);
+      }, 5000);
+    }
+  } else if (!bootstrapQuit) {
     showSplashError();
   }
 });
