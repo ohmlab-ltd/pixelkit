@@ -109,14 +109,46 @@ export function ReviewModeV2({
     for (const it of items) m.set(it.id, it);
     return m;
   }, [items]);
-  const list = useMemo(
-    () => snapshot.map((r) => liveById.get(r.id) ?? r),
-    [snapshot, liveById],
-  );
+
+  // "Least confident first": order the deck by each image's weakest
+  // detection score so borderline predictions get eyes before easy
+  // ones. Images with no scored detections sort last (nothing to
+  // judge by). Off by default; remembered across sessions.
+  const [byConfidence, setByConfidence] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem("pk-review-confidence-sort") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const minScore = (r: ReviewItem): number => {
+    let min = Infinity;
+    for (const d of r.detections ?? []) {
+      if (typeof d.score === "number") min = Math.min(min, d.score);
+    }
+    return min;
+  };
+  const list = useMemo(() => {
+    const merged = snapshot.map((r) => liveById.get(r.id) ?? r);
+    if (!byConfidence) return merged;
+    return [...merged].sort((a, b) => minScore(a) - minScore(b));
+  }, [snapshot, liveById, byConfidence]);
 
   const firstUnrated = list.findIndex((r) => !verdicts[r.id]);
   const startIdx = scope === "unrated" ? (firstUnrated === -1 ? 0 : firstUnrated) : 0;
   const [idx, setIdx] = useState(startIdx);
+  const toggleConfidenceSort = () => {
+    setByConfidence((cur) => {
+      const next = !cur;
+      try {
+        window.localStorage.setItem("pk-review-confidence-sort", next ? "1" : "0");
+      } catch {
+        /* private mode etc. — the toggle still works for this session */
+      }
+      return next;
+    });
+    setIdx(0); // deck reorders — restart from the top of the new order
+  };
   const [animating, setAnimating] = useState<"left" | "right" | null>(null);
   const [drag, setDrag] = useState(0);
   // Index of the annotation the user is hovering in the sidebar.
@@ -301,6 +333,19 @@ export function ReviewModeV2({
             <VerdictPill v={verdicts[current.id]} />
           )}
         </div>
+        <button
+          type="button"
+          onClick={toggleConfidenceSort}
+          title="Order the deck by each image's weakest detection score"
+          className={[
+            "ml-auto shrink-0 rounded-md border px-2.5 py-1 text-[11px] font-mono uppercase tracking-[0.08em] transition-colors",
+            byConfidence
+              ? "border-[var(--accent)] text-[var(--accent)] bg-[var(--accent-dim)]"
+              : "border-[var(--line)] text-[var(--fg-dim)] hover:border-[var(--line-strong)] hover:bg-[var(--surface-hover)]",
+          ].join(" ")}
+        >
+          Least confident first
+        </button>
       </header>
 
       <div className="relative flex-1 flex items-stretch overflow-hidden">
