@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import { HomeView } from "../HomeView";
-import { ProjectView } from "../ProjectView";
 import { ScrollToTop } from "../components/ScrollToTop";
 import { GuideView } from "../GuideView";
 import { SettingsView } from "../SettingsView";
@@ -59,8 +58,6 @@ export default function Page() {
   // icon re-expands it (and always returns to the workspace).
   const [activity, setActivity] = useState<ActivityKey>("explorer");
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [openProject, setOpenProject] = useState<string | null>(null);
-  const [openProjectName, setOpenProjectName] = useState<string>("");
   const [profileOpen, setProfileOpen] = useState(false);
   // V2 post-onboarding stub. HomeView owns the entire onboarding
   // (name + labels + references) inline so the V2 path here is a
@@ -110,9 +107,12 @@ export default function Page() {
     id: string,
     owner: string = "",
     displayName: string = "",
-    v2 = false,
+    v2 = true,
     fromProjectId?: string,
   ) => {
+    // Every dataset opens in the V2 view now — the engine normalises
+    // v2=true on load, so the flag callers pass is historical.
+    void v2;
     setProjectOriginTab(activity === "guide" ? "guide" : "workspaces");
     setNotFoundProjectId(null);
     // Every open lands on Overview. Callers that want a specific
@@ -120,10 +120,7 @@ export default function Page() {
     // after — the later update wins within the same batch.
     setDatasetSection("overview");
     syncUrl(id);
-    if (v2) {
-      // Opening a V2 dataset replaces any open V1 view (the sidebar
-      // tree can switch datasets without going through the workspace).
-      setOpenProject(null);
+    {
       // V2 project: seed name + labels from the per-project meta
       // cache (populated by HomeView's workspace list refresh) so
       // the page paints with chips, dataset health, and the
@@ -192,9 +189,6 @@ export default function Page() {
         .catch(() => { /* silent — owner check still grants the creator access */ });
       return;
     }
-    setOpenV2Project(null);
-    setOpenProject(id);
-    setOpenProjectName(displayName);
   };
 
   // Portable build: no accounts. Everything renders as the local user —
@@ -265,8 +259,7 @@ export default function Page() {
       const idFromUrl = m ? m[1] : null;
       if (idFromUrl) {
         if (
-          openProject !== idFromUrl
-          && (openV2Project?.projectId ?? null) !== idFromUrl
+          (openV2Project?.projectId ?? null) !== idFromUrl
           && notFoundProjectId !== idFromUrl
         ) {
           // Optimistic open: mount the V2 view IMMEDIATELY and let
@@ -290,7 +283,6 @@ export default function Page() {
             .then(async (r) => {
               if (r.status === 404) {
                 setNotFoundProjectId(idFromUrl);
-                setOpenProject(null);
                 setOpenV2Project(null);
                 return;
               }
@@ -311,7 +303,6 @@ export default function Page() {
         }
       } else {
         setNotFoundProjectId(null);
-        setOpenProject(null);
         setOpenV2Project(null);
       }
     };
@@ -332,7 +323,6 @@ export default function Page() {
     return onAppNavigate((next) => {
       if (next !== "workspaces" && next !== "guide") return;
       setActivity(next === "guide" ? "guide" : "explorer");
-      setOpenProject(null);
       setOpenV2Project(null);
       setProfileOpen(false);
       syncUrl(null);
@@ -359,7 +349,6 @@ export default function Page() {
       setProfileOpen(false);
       // Guide replaces the content pane — close any dataset overlay so
       // the user actually sees it (mirrors the old tab-switch flow).
-      setOpenProject(null);
       setOpenV2Project(null);
       setNotFoundProjectId(null);
       syncUrl(null);
@@ -389,7 +378,6 @@ export default function Page() {
   // non-guide activity, so the listener is guaranteed to be attached.
   const handleNewDataset = () => {
     setActivity("explorer");
-    setOpenProject(null);
     setOpenV2Project(null);
     setProfileOpen(false);
     setNotFoundProjectId(null);
@@ -397,12 +385,8 @@ export default function Page() {
     requestNewDataset();
   };
 
-  const openDatasetId = openProject ?? openV2Project?.projectId ?? null;
-  const titleBarName = openV2Project
-    ? openV2Project.name
-    : openProject
-    ? (openProjectName || openProject)
-    : "";
+  const openDatasetId = openV2Project?.projectId ?? null;
+  const titleBarName = openV2Project ? openV2Project.name : "";
 
   // ONE tree, ALWAYS visible: the Explorer side bar stays up while a
   // dataset is open (the dataset view has no internal nav column any
@@ -489,7 +473,7 @@ export default function Page() {
               fixed overlays, so HomeView is hidden visually while one
               of those is up. */}
           {loggedIn && activity !== "guide" && (
-            <div hidden={!!profileOpen || !!openV2Project || !!openProject || !!notFoundProjectId}>
+            <div hidden={!!profileOpen || !!openV2Project || !!notFoundProjectId}>
               <HomeView
                 onOpen={openProj}
                 onV2Begin={(name, labels, references, projectId, firstLoad) => {
@@ -610,23 +594,6 @@ export default function Page() {
           {/* Back-to-top is rendered INSIDE ProjectViewV2Stub so it can
               suppress itself while the image viewer or augmentations
               viewer modal is open. */}
-        </div>
-      ) : openProject ? (
-        // No key here: ProjectView refetches itself when `name` changes
-        // (rename + tree switches), and keying by name would force a
-        // full remount on every rename.
-        <div data-dataset-scroll className={`${overlayCls} overflow-y-auto overscroll-contain`}>
-          <ProjectView
-            name={openProject}
-            initialDisplayName={openProjectName}
-            username={user.username}
-            // Portable build: single local user, every legacy (V1) dataset on
-            // this machine is theirs — always editable.
-            readOnly={false}
-            onClose={() => { setOpenProject(null); syncUrl(null); }}
-            onRename={(newName) => { setOpenProject(newName); syncUrl(newName); }}
-          />
-          <ScrollToTop />
         </div>
       ) : null}
       {setupOpen && (

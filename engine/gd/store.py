@@ -285,6 +285,10 @@ def load(pid: str) -> dict | None:
             digests[iid] = hashlib.blake2b(_dumps(ann), digest_size=16).digest()
     with _LOCK:
         _ANN_DIGESTS[pid] = digests
+    # One-way upgrade: the V1 dataset view is gone, every dataset renders
+    # through the V2 path. Ancient SaaS-era manifests (and hand-rolled
+    # folders) get the flag in memory here and on disk at next save.
+    manifest["v2"] = True
     return manifest
 
 
