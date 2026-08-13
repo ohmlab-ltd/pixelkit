@@ -1,0 +1,66 @@
+name: release
+# Tag vX.Y.Z -> build the Windows installer + macOS dmg (both unsigned for
+# now) and attach them to a GitHub Release. The slim Windows installer
+# carries no Python/torch, so this stays fast and small; macOS bundles its
+# runtime via prepare-runtime.sh.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  versions:
+    # The tag is the single source of truth — refuse to ship if the three
+    # in-repo version stamps disagree with it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check version stamps match tag
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          grep -q "\"version\": \"$TAG\"" desktop/package.json \
+            || { echo "desktop/package.json != $TAG"; exit 1; }
+          grep -q "^PK_VERSION = \"$TAG\"" engine/gd/server.py \
+            || { echo "engine PK_VERSION != $TAG"; exit 1; }
+          grep -q "^version = \"$TAG\"" engine/pyproject.toml \
+            || { echo "engine/pyproject.toml != $TAG"; exit 1; }
+
+  windows:
+    needs: versions
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm, cache-dependency-path: ui/package-lock.json }
+      - name: Build UI
+        run: cd ui && npm ci && npm run build
+      - name: Build installer (unsigned)
+        run: cd desktop && npm ci && npx electron-builder --win
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: desktop/dist/PixelKit-Setup-*.exe
+          generate_release_notes: true
+
+  macos:
+    needs: versions
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm, cache-dependency-path: ui/package-lock.json }
+      - name: Build UI
+        run: cd ui && npm ci && npm run build
+      - name: Bundle Python runtime
+        run: bash desktop/scripts/prepare-runtime.sh
+      - name: Build dmg (unsigned)
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: cd desktop && npm ci && npx electron-builder --mac
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: desktop/dist/*.dmg
+          generate_release_notes: true

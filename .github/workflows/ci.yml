@@ -13,6 +13,10 @@ jobs:
         run: |
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install -r engine/requirements.txt pytest httpx
+      - name: SAM3 import gate
+        # The floor install must expose the classes the labelling pipeline
+        # needs — catches a transformers release breaking us before users do.
+        run: python -c "from transformers import Sam3Model, Sam3Processor, AutoProcessor"
       - name: Tests
         run: cd engine && python -m pytest tests/
   ui:

@@ -1,22 +1,25 @@
-# PixelKit engine — portable build. torch/torchvision first (macOS: default
-# wheels include MPS; CUDA boxes: pick the matching cu12x index or let the
-# installer script handle it).
+# PixelKit engine — portable build, Windows. Consumed by the desktop
+# shell's first-run bootstrap (desktop/bootstrap.js), which installs
+# torch/torchvision FIRST from the matching index (cu126 on NVIDIA
+# machines, CPU otherwise) — so torch stays a floor here while every
+# other dependency is pinned to the verified set (from the 2026-08-13
+# Windows/CUDA env; refresh deliberately, with the engine tests green).
 torch>=2.4
 torchvision>=0.19
-transformers>=5.14
-accelerate>=1.0
-huggingface_hub>=0.26
-fastapi>=0.115
-uvicorn>=0.30
-sse-starlette>=2.1
-python-multipart>=0.0.9
-python-dotenv>=1.0
-numpy>=1.26
-Pillow>=10.4
-pillow-heif>=0.18
-opencv-python-headless>=4.10
-blurhash>=1.1
-orjson>=3.10
-msgpack>=1.0
-psutil>=5.9
-requests>=2.31
+transformers==5.15.0
+accelerate==1.14.0
+huggingface_hub==1.27.0
+fastapi==0.141.1
+uvicorn==0.52.2
+sse-starlette==3.4.8
+python-multipart==0.0.32
+python-dotenv==1.2.2
+numpy==2.4.4
+Pillow==12.2.0
+pillow-heif==1.5.0
+opencv-python-headless==5.0.0.93
+blurhash==1.1.5
+orjson==3.11.9
+msgpack==1.2.1
+psutil==7.2.2
+requests==2.34.2
