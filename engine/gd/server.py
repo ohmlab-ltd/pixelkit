@@ -90,7 +90,9 @@ def _configured_device() -> str:
         cfg = (_ws.load_config().get("device") or "").strip().lower()
     except Exception:
         return ""
-    return cfg if cfg in ("cuda", "mps", "cpu") else ""
+    if cfg in ("cuda", "mps", "cpu") or re.fullmatch(r"cuda:\d+", cfg):
+        return cfg
+    return ""
 
 
 def _resolve_device() -> str:
@@ -3485,6 +3487,19 @@ async def _run_purge_label_job(job, emit, cancel_event):
 
 @app.get("/api/health")
 async def health():
+    # Live VRAM for the status bar (cuda only; mem_get_info is a cheap
+    # driver query). Never let a driver hiccup fail the health check.
+    vram = None
+    dev = state.get("device") or ""
+    if dev.startswith("cuda") and torch.cuda.is_available():
+        try:
+            free_b, total_b = torch.cuda.mem_get_info(torch.device(dev))
+            vram = {
+                "usedGb": round((total_b - free_b) / 1024**3, 1),
+                "totalGb": round(total_b / 1024**3, 1),
+            }
+        except Exception:
+            vram = None
     return {
         "ok": True,
         # Identity marker: the desktop shell refuses to adopt a server on
@@ -3492,6 +3507,7 @@ async def health():
         "app": "pixelkit",
         "version": PK_VERSION,
         "device": state["device"],
+        "vram": vram,
         "model_loaded": state["model"] is not None,
     }
 
@@ -18262,12 +18278,28 @@ async def get_settings():
     pref = (cfg.get("device") or "").strip().lower()
     env = (os.environ.get("PK_DEVICE") or "").strip().lower()
     has_mps = getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
+    valid_pref = pref in ("cuda", "mps", "cpu") or bool(re.fullmatch(r"cuda:\d+", pref))
+    gpus = []
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            try:
+                props = torch.cuda.get_device_properties(i)
+                gpus.append(
+                    {
+                        "index": i,
+                        "name": props.name,
+                        "vramGb": round(props.total_memory / 1024**3),
+                    }
+                )
+            except Exception:
+                continue
     return {
         "workspace": str(_ws.dir()),
         "device": state.get("device"),
-        "devicePreference": pref if pref in ("cuda", "mps", "cpu") else "auto",
+        "devicePreference": pref if valid_pref else "auto",
         "deviceEnvOverride": env or None,
         "gpuAvailable": bool(torch.cuda.is_available() or has_mps),
+        "gpus": gpus,
         "hfTokenConfigured": bool(models_mgr.hf_token()),
         "sam3Repo": models_mgr.SAM3_REPO,
     }
@@ -18299,8 +18331,8 @@ async def set_device_preference(payload: DeviceIn):
     next start — models are loaded onto a device at boot, same restart
     contract as the workspace setting. PK_DEVICE env still wins at boot."""
     want = (payload.device or "").strip().lower()
-    if want not in ("auto", "cuda", "mps", "cpu"):
-        raise HTTPException(400, "device must be one of: auto, cuda, mps, cpu")
+    if want not in ("auto", "cuda", "mps", "cpu") and not re.fullmatch(r"cuda:\d+", want):
+        raise HTTPException(400, "device must be one of: auto, cuda, mps, cpu, cuda:<n>")
     import workspace as _ws
     cfg = _ws.load_config()
     if want == "auto":

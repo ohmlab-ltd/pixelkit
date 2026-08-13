@@ -56,10 +56,12 @@ function jobProjectName(projectId: string): string {
 
 function deviceLabel(device: EngineSettings["device"] | null): string | null {
   if (device === "mps") return "Metal";
-  if (device === "cuda") return "CUDA";
+  if (device?.startsWith("cuda")) return device === "cuda" ? "CUDA" : `CUDA:${device.split(":")[1]}`;
   if (device === "cpu") return "CPU";
   return null;
 }
+
+type VramInfo = { usedGb: number; totalGb: number };
 
 function folderName(path: string | undefined): string | null {
   if (!path) return null;
@@ -95,6 +97,7 @@ function Segment({
 export function StatusBar() {
   const [engineUp, setEngineUp] = useState<boolean | null>(null);
   const [version, setVersion] = useState<string | null>(null);
+  const [vram, setVram] = useState<VramInfo | null>(null);
   const [settings, setSettings] = useState<EngineSettings | null>(null);
   // Settings only change on user action (and the workspace path needs a
   // restart anyway) so one successful fetch is enough; re-fetch only
@@ -136,12 +139,14 @@ export function StatusBar() {
     const pollHealth = async () => {
       let up = false;
       let ver: string | null = null;
+      let mem: VramInfo | null = null;
       try {
         const r = await apiFetch("/api/health", { cache: "no-store" });
         up = r.ok;
         if (r.ok) {
-          const d = (await r.json()) as { version?: string };
+          const d = (await r.json()) as { version?: string; vram?: VramInfo | null };
           if (typeof d.version === "string" && d.version) ver = d.version;
+          if (d.vram && typeof d.vram.totalGb === "number") mem = d.vram;
         }
       } catch {
         up = false;
@@ -149,6 +154,7 @@ export function StatusBar() {
       if (cancelled) return;
       setEngineUp(up);
       if (ver) setVersion(ver);
+      setVram(up ? mem : null);
       if (!up) {
         settingsFresh.current = false;
       } else if (!settingsFresh.current) {
@@ -189,7 +195,10 @@ export function StatusBar() {
                 : "bg-[var(--bad)]",
             ].join(" ")}
           />
-          <span>{engineUp === false ? "Engine down" : device ?? "Engine"}</span>
+          <span>
+            {engineUp === false ? "Engine down" : device ?? "Engine"}
+            {engineUp !== false && vram ? ` ${vram.usedGb}/${vram.totalGb} GB` : ""}
+          </span>
         </Segment>
         {jobs.length > 0 && (() => {
           const primary = jobs.find((j) => j.status === "running") ?? jobs[0];

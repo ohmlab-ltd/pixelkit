@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  DevicePreference,
   EngineSettings,
   ModelInfo,
   ModelName,
@@ -109,17 +110,25 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 
   const cpuForced =
     settings?.devicePreference === "cpu" || settings?.deviceEnvOverride === "cpu";
-  const deviceLabel =
-    settings?.device === "cuda"
-      ? "NVIDIA GPU (CUDA)"
-      : settings?.device === "mps"
-      ? "Apple GPU (Metal)"
-      : cpuForced
-      ? "CPU (labelling runs on the CPU — very slow)"
-      : "CPU (no GPU detected — labelling unavailable)";
-  // cuda/mps preferences (settable via the API) both mean "use the GPU",
-  // so the picker collapses them onto Automatic.
-  const pickedDevice = settings?.devicePreference === "cpu" ? "cpu" : "auto";
+  const activeGpu =
+    settings?.device.startsWith("cuda") && settings.gpus.length > 0
+      ? settings.gpus[Number(settings.device.split(":")[1] ?? 0)] ?? settings.gpus[0]
+      : null;
+  const deviceLabel = settings?.device.startsWith("cuda")
+    ? `NVIDIA GPU (CUDA${activeGpu ? ` — ${activeGpu.name}` : ""})`
+    : settings?.device === "mps"
+    ? "Apple GPU (Metal)"
+    : cpuForced
+    ? "CPU (labelling runs on the CPU — very slow)"
+    : "CPU (no GPU detected — labelling unavailable)";
+  // A bare cuda/mps preference means "use the GPU" and collapses onto
+  // Automatic; cuda:<n> keeps its own row when several GPUs exist.
+  const pickedDevice: string =
+    settings?.devicePreference === "cpu"
+      ? "cpu"
+      : /^cuda:\d+$/.test(settings?.devicePreference ?? "")
+      ? (settings!.devicePreference as string)
+      : "auto";
 
   return (
     <div className="fixed inset-0 z-[400] overflow-y-auto bg-[var(--background)]">
@@ -190,22 +199,28 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
             ) : (
               <>
                 <div className="mt-4 flex flex-col gap-2">
-                  {(
-                    [
-                      {
-                        value: "auto",
-                        title: "Automatic",
-                        desc: settings.gpuAvailable
-                          ? "Use the GPU when one is available."
-                          : "Use the GPU when one is available. No GPU was detected on this machine, so labelling stays off.",
-                      },
-                      {
-                        value: "cpu",
-                        title: "CPU",
-                        desc: "Run labelling on the CPU. Works on any machine, but is very slow — expect minutes per image.",
-                      },
-                    ] as const
-                  ).map((opt) => {
+                  {[
+                    {
+                      value: "auto",
+                      title: "Automatic",
+                      desc: settings.gpuAvailable
+                        ? "Use the GPU when one is available."
+                        : "Use the GPU when one is available. No GPU was detected on this machine, so labelling stays off.",
+                    },
+                    // Explicit per-GPU rows only when there's a real choice.
+                    ...(settings.gpus.length > 1
+                      ? settings.gpus.map((g) => ({
+                          value: `cuda:${g.index}`,
+                          title: `GPU ${g.index} — ${g.name}`,
+                          desc: `${g.vramGb} GB VRAM. Pin all labelling to this card.`,
+                        }))
+                      : []),
+                    {
+                      value: "cpu",
+                      title: "CPU",
+                      desc: "Run labelling on the CPU. Works on any machine, but is very slow — expect minutes per image.",
+                    },
+                  ].map((opt) => {
                     const selected = pickedDevice === opt.value;
                     return (
                       <button
@@ -213,7 +228,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
                         onClick={() => {
                           if (selected) return;
                           act(async () => {
-                            await setDevicePreference(opt.value);
+                            await setDevicePreference(opt.value as DevicePreference);
                             setDevNote(
                               "Saved — restart PixelKit to switch compute device.",
                             );

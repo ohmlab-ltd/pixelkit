@@ -36,14 +36,17 @@ export type TokenStatus = {
   detail: string | null;
 };
 
-export type DevicePreference = "auto" | "cuda" | "mps" | "cpu";
+export type DevicePreference = "auto" | "cuda" | "mps" | "cpu" | `cuda:${number}`;
+
+export type GpuInfo = { index: number; name: string; vramGb: number };
 
 export type EngineSettings = {
   workspace: string;
-  device: "cuda" | "mps" | "cpu";
+  device: string; // "cuda" | "cuda:<n>" | "mps" | "cpu"
   devicePreference: DevicePreference;
   deviceEnvOverride: string | null;
   gpuAvailable: boolean;
+  gpus: GpuInfo[];
   hfTokenConfigured: boolean;
   sam3Repo: string;
 };
