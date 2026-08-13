@@ -13,7 +13,8 @@ import { apiFetch } from "@/lib/apiFetch";
 import { type EngineSettings, fetchEngineSettings } from "@/lib/models";
 import { readProjectMeta } from "@/lib/projectMetaCache";
 
-const VERSION = "v0.1.0-dev";
+// Shown until the engine's /api/health reports its real version.
+const VERSION_FALLBACK = "v0.1.0";
 
 // Queued/running engine jobs, from GET /api/jobs/active (see gd/jobs.py
 // Job.to_public — progress is {index, total, image, phase}).
@@ -93,6 +94,7 @@ function Segment({
 
 export function StatusBar() {
   const [engineUp, setEngineUp] = useState<boolean | null>(null);
+  const [version, setVersion] = useState<string | null>(null);
   const [settings, setSettings] = useState<EngineSettings | null>(null);
   // Settings only change on user action (and the workspace path needs a
   // restart anyway) so one successful fetch is enough; re-fetch only
@@ -133,14 +135,20 @@ export function StatusBar() {
     let cancelled = false;
     const pollHealth = async () => {
       let up = false;
+      let ver: string | null = null;
       try {
         const r = await apiFetch("/api/health", { cache: "no-store" });
         up = r.ok;
+        if (r.ok) {
+          const d = (await r.json()) as { version?: string };
+          if (typeof d.version === "string" && d.version) ver = d.version;
+        }
       } catch {
         up = false;
       }
       if (cancelled) return;
       setEngineUp(up);
+      if (ver) setVersion(ver);
       if (!up) {
         settingsFresh.current = false;
       } else if (!settingsFresh.current) {
@@ -225,7 +233,7 @@ export function StatusBar() {
       <span className="flex items-stretch">
         <Segment title="PixelKit version">
           {/* Version keeps its literal casing (lowercase v + suffix). */}
-          <span className="normal-case">{VERSION}</span>
+          <span className="normal-case">{version ? `v${version}` : VERSION_FALLBACK}</span>
         </Segment>
       </span>
     </footer>

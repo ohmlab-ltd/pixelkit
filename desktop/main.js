@@ -61,14 +61,56 @@ const engine = { external: false, proc: null, exited: false };
 function checkHealth() {
   return new Promise((resolve) => {
     const req = http.get(HEALTH_URL, { timeout: HEALTH_TIMEOUT_MS }, (res) => {
-      res.resume(); // drain
-      resolve(res.statusCode === 200);
+      if (res.statusCode !== 200) {
+        res.resume();
+        return resolve(false);
+      }
+      // Identity check: something else listening on 8001 must not be
+      // adopted as "the engine" just because it answers 200.
+      let body = '';
+      res.on('data', (c) => (body += c));
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(body).app === 'pixelkit');
+        } catch {
+          resolve(false);
+        }
+      });
+      res.on('error', () => resolve(false));
     });
     req.on('timeout', () => {
       req.destroy();
       resolve(false);
     });
     req.on('error', () => resolve(false));
+  });
+}
+
+// POST JSON to the engine with no timeout (legacy imports can run for
+// minutes); resolves {status, body}.
+function postJson(pathname, payload) {
+  return new Promise((resolve, reject) => {
+    const data = Buffer.from(JSON.stringify(payload));
+    const req = http.request(
+      `${ENGINE_ORIGIN}${pathname}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': data.length },
+      },
+      (res) => {
+        let body = '';
+        res.on('data', (c) => (body += c));
+        res.on('end', () => {
+          let parsed = null;
+          try {
+            parsed = JSON.parse(body);
+          } catch {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      }
+    );
+    req.on('error', reject);
+    req.end(data);
   });
 }
 
@@ -220,6 +262,84 @@ async function ensureEngine() {
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Crash watch — if the engine dies mid-session, restart it (bounded) and
+// reload the window; if it won't come back, tell the user instead of
+// leaving a dead page.
+// ---------------------------------------------------------------------------
+
+let crashWatchTimer = null;
+let restartInFlight = false;
+const restartTimes = []; // timestamps of recent automatic restarts
+
+async function restartEngine() {
+  engine.proc = null;
+  engine.exited = false;
+  engine.external = false;
+  spawnEngine();
+  const deadline = Date.now() + STARTUP_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (engine.exited) return false;
+    if (await checkHealth()) return true;
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  }
+  return false;
+}
+
+function startCrashWatch() {
+  if (crashWatchTimer) clearInterval(crashWatchTimer);
+  let misses = 0;
+  crashWatchTimer = setInterval(async () => {
+    if (shuttingDown || restartInFlight) return;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+
+    const ownedDead = Boolean(engine.proc) && !engine.external && engine.exited;
+    const healthy = ownedDead ? false : await checkHealth();
+    if (healthy) {
+      misses = 0;
+      return;
+    }
+    misses += 1;
+    if (!ownedDead && misses < 3) return; // ride out transient blips
+
+    restartInFlight = true;
+    misses = 0;
+    try {
+      // Crashloop guard: at most 2 automatic restarts per 5 minutes.
+      const now = Date.now();
+      while (restartTimes.length && now - restartTimes[0] > 5 * 60 * 1000) restartTimes.shift();
+      let ok = false;
+      if (restartTimes.length < 2) {
+        restartTimes.push(now);
+        ok = await restartEngine();
+      }
+      if (ok) {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reload();
+        return;
+      }
+      const choice = dialog.showMessageBoxSync(mainWindow, {
+        type: 'error',
+        title: 'PixelKit',
+        message: 'The PixelKit engine stopped and could not be restarted.',
+        detail: `See the engine log:\n${engineLogPath()}`,
+        buttons: ['Try again', 'Quit'],
+        defaultId: 0,
+        cancelId: 1,
+      });
+      if (choice === 0) {
+        restartTimes.length = 0;
+        if (await restartEngine()) {
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reload();
+        }
+      } else {
+        app.quit();
+      }
+    } finally {
+      restartInFlight = false;
+    }
+  }, 5000);
 }
 
 function stopOwnedEngine() {
@@ -419,6 +539,53 @@ function createMainWindow() {
 // Menu
 // ---------------------------------------------------------------------------
 
+async function importLegacyBackup() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const picked = await dialog.showOpenDialog(mainWindow, {
+    title: 'Import legacy PixelKit data',
+    message: 'Choose a nightly backup zip or an old backend data folder',
+    properties: ['openFile'],
+    filters: [{ name: 'PixelKit backup', extensions: ['zip'] }],
+  });
+  if (picked.canceled || !picked.filePaths[0]) return;
+  const src = picked.filePaths[0];
+  try {
+    const r = await postJson('/api/import-legacy', { path: src });
+    if (r.status === 200) {
+      await dialog.showMessageBox(mainWindow, {
+        type: 'info',
+        title: 'PixelKit',
+        message: 'Legacy data imported.',
+        detail: 'Your projects are in the workspace now; the window will reload.',
+      });
+      mainWindow.webContents.reload();
+    } else {
+      const detail = (r.body && r.body.detail) || `engine answered ${r.status}`;
+      dialog.showMessageBox(mainWindow, {
+        type: 'error',
+        title: 'PixelKit',
+        message: 'Legacy import failed.',
+        detail: String(detail),
+      });
+    }
+  } catch (err) {
+    dialog.showMessageBox(mainWindow, {
+      type: 'error',
+      title: 'PixelKit',
+      message: 'Legacy import failed.',
+      detail: String((err && err.message) || err),
+    });
+  }
+}
+
+function openEngineLogFolder() {
+  const logFile = engineLogPath();
+  if (fs.existsSync(logFile)) shell.showItemInFolder(logFile);
+  else shell.openPath(path.dirname(logFile));
+}
+
+const ISSUES_URL = 'https://github.com/ohmlab-ltd/pixelkit/issues';
+
 function buildMenu() {
   const isMac = process.platform === 'darwin';
   app.setAboutPanelOptions({ applicationName: 'PixelKit', applicationVersion: app.getVersion() });
@@ -440,6 +607,13 @@ function buildMenu() {
           },
         ]
       : []),
+    {
+      label: 'File',
+      submenu: [
+        { label: 'Import Legacy Backup…', click: () => importLegacyBackup() },
+        ...(isMac ? [] : [{ type: 'separator' }, { role: 'quit' }]),
+      ],
+    },
     {
       label: 'Edit',
       submenu: [
@@ -469,7 +643,14 @@ function buildMenu() {
       ],
     },
     { role: 'windowMenu' },
-    ...(isMac ? [] : [{ role: 'help', submenu: [{ role: 'about' }] }]),
+    {
+      role: 'help',
+      submenu: [
+        { label: 'Open Engine Log Folder', click: () => openEngineLogFolder() },
+        { label: 'Report an Issue…', click: () => shell.openExternal(ISSUES_URL) },
+        ...(isMac ? [] : [{ type: 'separator' }, { role: 'about' }]),
+      ],
+    },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
@@ -490,6 +671,7 @@ app.whenReady().then(async () => {
   const ok = await ensureEngine();
   if (ok) {
     createMainWindow();
+    startCrashWatch();
     if (app.isPackaged) {
       setTimeout(() => {
         if (mainWindow && !mainWindow.isDestroyed()) checkForUpdates(mainWindow);

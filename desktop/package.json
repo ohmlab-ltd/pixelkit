@@ -73,6 +73,10 @@
         "to": "engine/requirements-win.txt"
       },
       {
+        "from": "../engine/import_legacy.py",
+        "to": "engine/import_legacy.py"
+      },
+      {
         "from": "../ui/out",
         "to": "ui"
       }

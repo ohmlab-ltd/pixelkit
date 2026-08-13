@@ -71,6 +71,12 @@ import re
 import secrets
 
 
+# Single source of truth for the shipped engine version. Keep in sync with
+# engine/pyproject.toml and desktop/package.json (the release workflow
+# checks all three match the tag).
+PK_VERSION = "0.1.0"
+
+
 def _configured_device() -> str:
     """The user's explicit device choice, or "" for auto-detect.
 
@@ -3479,7 +3485,15 @@ async def _run_purge_label_job(job, emit, cancel_event):
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "device": state["device"], "model_loaded": state["model"] is not None}
+    return {
+        "ok": True,
+        # Identity marker: the desktop shell refuses to adopt a server on
+        # this port that doesn't identify as a PixelKit engine.
+        "app": "pixelkit",
+        "version": PK_VERSION,
+        "device": state["device"],
+        "model_loaded": state["model"] is not None,
+    }
 
 
 def _charlie_reference_detections(image_pil, tags) -> "list[dict] | None":
@@ -18295,6 +18309,39 @@ async def set_device_preference(payload: DeviceIn):
         cfg["device"] = want
     _ws.save_config(cfg)
     return {"ok": True, "devicePreference": want, "restartRequired": True}
+
+
+class LegacyImportIn(BaseModel):
+    path: str
+
+
+@app.post("/api/import-legacy")
+async def import_legacy_endpoint(payload: LegacyImportIn):
+    """Convert SaaS-era data (backup zip or old backend dir) into the
+    workspace. Runs import_legacy.py's run() in a worker thread — the
+    desktop menu waits on this request (localhost, no timeout)."""
+    src = Path((payload.path or "").strip()).expanduser()
+    if not str(src):
+        raise HTTPException(400, "empty path")
+    if not src.exists():
+        raise HTTPException(400, f"path not found: {src}")
+
+    import importlib.util
+
+    mod_path = Path(__file__).resolve().parent.parent / "import_legacy.py"
+    if not mod_path.exists():
+        raise HTTPException(500, f"import_legacy.py not bundled at {mod_path}")
+    spec = importlib.util.spec_from_file_location("pixelkit_import_legacy", mod_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    try:
+        await asyncio.to_thread(mod.run, src)
+    except HTTPException:
+        raise
+    except Exception as e:  # surfaced verbatim in the desktop dialog
+        raise HTTPException(500, f"legacy import failed: {e}")
+    return {"ok": True}
 
 
 
