@@ -50,7 +50,13 @@ def test_golden_path(client, workspace_dir):
     assert r.status_code == 200, r.text
 
     # -- on-disk shape ---------------------------------------------------
-    ds_dirs = [d for d in workspace_dir.glob("projects/*/*/dataset.json")]
+    # Other test files share the session workspace, so find THIS test's
+    # dataset by id instead of asserting a global count.
+    ds_dirs = [
+        p
+        for p in workspace_dir.glob("projects/**/dataset.json")
+        if json.loads(p.read_text())["id"] == pid
+    ]
     assert len(ds_dirs) == 1, ds_dirs
     ds = ds_dirs[0].parent
     images = list((ds / "images").iterdir())
