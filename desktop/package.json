@@ -58,7 +58,8 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "artifactName": "PixelKit-Setup-${version}.exe"
+      "artifactName": "PixelKit-Setup-${version}.exe",
+      "include": "build/installer.nsh"
     },
     "extraResources": [
       {

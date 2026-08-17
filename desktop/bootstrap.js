@@ -51,15 +51,16 @@ function runtimeReady() {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function httpGet(url, { json = false } = {}) {
+function httpGet(url, { json = false, hops = 0 } = {}) {
   return new Promise((resolve, reject) => {
+    if (hops > 10) return reject(new Error(`too many redirects for ${url}`));
     const req = https.get(
       url,
       { headers: { 'User-Agent': 'PixelKit-bootstrap' } },
       (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume();
-          return resolve(httpGet(res.headers.location, { json }));
+          return resolve(httpGet(res.headers.location, { json, hops: hops + 1 }));
         }
         if (res.statusCode !== 200) {
           res.resume();
@@ -80,15 +81,16 @@ function httpGet(url, { json = false } = {}) {
   });
 }
 
-function download(url, dest, onProgress) {
+function download(url, dest, onProgress, hops = 0) {
   return new Promise((resolve, reject) => {
+    if (hops > 10) return reject(new Error(`too many redirects for ${url}`));
     const req = https.get(
       url,
       { headers: { 'User-Agent': 'PixelKit-bootstrap' } },
       (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume();
-          return resolve(download(res.headers.location, dest, onProgress));
+          return resolve(download(res.headers.location, dest, onProgress, hops + 1));
         }
         if (res.statusCode !== 200) {
           res.resume();
@@ -111,9 +113,30 @@ function download(url, dest, onProgress) {
   });
 }
 
+// The currently-running bootstrap child (tar/pip), so a quit mid-install
+// can kill it instead of orphaning a multi-GB pip run that later races a
+// relaunch over the same runtime dir.
+let _activeChild = null;
+
+function abort() {
+  const proc = _activeChild;
+  if (!proc) return;
+  try {
+    if (process.platform === 'win32') {
+      // Kill the tree: pip spawns its own children on Windows.
+      spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { windowsHide: true });
+    } else {
+      proc.kill('SIGTERM');
+    }
+  } catch {
+    /* already gone */
+  }
+}
+
 function run(cmd, args, { onLine, log } = {}) {
   return new Promise((resolve, reject) => {
     const proc = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    _activeChild = proc;
     let lastLines = [];
     const handle = (buf) => {
       const text = buf.toString();
@@ -127,8 +150,15 @@ function run(cmd, args, { onLine, log } = {}) {
     };
     proc.stdout.on('data', handle);
     proc.stderr.on('data', handle);
-    proc.on('error', reject);
-    proc.on('exit', (code) => {
+    proc.on('error', (e) => {
+      if (_activeChild === proc) _activeChild = null;
+      reject(e);
+    });
+    // 'close', not 'exit': close fires after stdio has drained, so no
+    // buffered pip output can land on the log stream after the caller
+    // has already end()ed it.
+    proc.on('close', (code) => {
+      if (_activeChild === proc) _activeChild = null;
       if (code === 0) return resolve();
       reject(new Error(`${path.basename(cmd)} ${args[0] || ''} exited ${code}:\n${lastLines.join('\n')}`));
     });
@@ -277,4 +307,4 @@ async function ensureWindowsRuntime({ requirementsPath, onStatus, log }) {
   return py;
 }
 
-module.exports = { ensureWindowsRuntime, runtimePython, runtimeReady };
+module.exports = { ensureWindowsRuntime, runtimePython, runtimeReady, abort };

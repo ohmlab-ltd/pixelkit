@@ -70,6 +70,7 @@ function fetchLatestRelease() {
         });
       }
     );
+    req.setTimeout(10000, () => req.destroy(new Error('update check timed out')));
     req.on('error', reject);
   });
 }

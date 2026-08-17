@@ -184,15 +184,20 @@ function spawnEngine() {
   });
   proc.stdout.pipe(log);
   proc.stderr.pipe(log);
+  // Tag the handlers to THIS proc: a stale exit event from a replaced
+  // process must never mark the current engine dead (that stale flag
+  // used to wedge the crash watch into a restart loop over a healthy
+  // engine and let will-quit skip shutdown of a live one).
   proc.on('exit', () => {
-    engine.exited = true;
+    if (engine.proc === proc) engine.exited = true;
   });
   proc.on('error', () => {
     // e.g. python binary not found; poll loop will time out and report.
-    engine.exited = true;
+    if (engine.proc === proc) engine.exited = true;
   });
 
   engine.proc = proc;
+  engine.exited = false;
   engine.external = false;
 }
 
@@ -280,9 +285,20 @@ let restartInFlight = false;
 const restartTimes = []; // timestamps of recent automatic restarts
 
 async function restartEngine() {
-  engine.proc = null;
-  engine.exited = false;
-  engine.external = false;
+  // Something healthy may already own the port (the user started their
+  // own engine, or ours recovered) — adopt it instead of spawning into
+  // a guaranteed bind failure.
+  if (await checkHealth()) {
+    engine.proc = null;
+    engine.exited = false;
+    engine.external = true;
+    return true;
+  }
+  // A hung-but-alive owned process still holds the port; kill and wait
+  // before respawning, or the replacement dies on the bind.
+  if (engine.proc && !engine.external && !engine.exited) {
+    await stopOwnedEngine();
+  }
   spawnEngine();
   const deadline = Date.now() + STARTUP_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -552,6 +568,18 @@ function createMainWindow() {
     if (splashWindow && !splashWindow.isDestroyed()) splashWindow.close();
   });
 
+  // A transient failure loading the app page (engine mid-listen, socket
+  // reset) would otherwise leave an eternal splash: ready-to-show never
+  // fires and nothing retries. Retry the load a few times.
+  let loadRetries = 0;
+  wc.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
+    if (!isMainFrame || loadRetries >= 5) return;
+    loadRetries += 1;
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadURL(APP_URL);
+    }, 1000 * loadRetries);
+  });
+
   mainWindow.on('close', () => saveWindowState(mainWindow));
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -564,7 +592,10 @@ function createMainWindow() {
 // Menu
 // ---------------------------------------------------------------------------
 
+let importBusy = false;
+
 async function importLegacyBackup() {
+  if (importBusy) return; // one minutes-long import at a time
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const picked = await dialog.showOpenDialog(mainWindow, {
     title: 'Import legacy PixelKit data',
@@ -574,8 +605,11 @@ async function importLegacyBackup() {
   });
   if (picked.canceled || !picked.filePaths[0]) return;
   const src = picked.filePaths[0];
+  importBusy = true;
+  const alive = () => mainWindow && !mainWindow.isDestroyed();
   try {
     const r = await postJson('/api/import-legacy', { path: src });
+    if (!alive()) return; // window closed during a long import
     if (r.status === 200) {
       await dialog.showMessageBox(mainWindow, {
         type: 'info',
@@ -583,7 +617,7 @@ async function importLegacyBackup() {
         message: 'Legacy data imported.',
         detail: 'Your projects are in the workspace now; the window will reload.',
       });
-      mainWindow.webContents.reload();
+      if (alive()) mainWindow.webContents.reload();
     } else {
       const detail = (r.body && r.body.detail) || `engine answered ${r.status}`;
       dialog.showMessageBox(mainWindow, {
@@ -594,12 +628,16 @@ async function importLegacyBackup() {
       });
     }
   } catch (err) {
-    dialog.showMessageBox(mainWindow, {
-      type: 'error',
-      title: 'PixelKit',
-      message: 'Legacy import failed.',
-      detail: String((err && err.message) || err),
-    });
+    if (alive()) {
+      dialog.showMessageBox(mainWindow, {
+        type: 'error',
+        title: 'PixelKit',
+        message: 'Legacy import failed.',
+        detail: String((err && err.message) || err),
+      });
+    }
+  } finally {
+    importBusy = false;
   }
 }
 
@@ -703,6 +741,10 @@ app.whenReady().then(async () => {
       }, 5000);
     }
   } else if (!bootstrapQuit) {
+    // Startup timed out: reap our own spawn first, both to avoid a
+    // zombie engine behind the error splash and so the port probe
+    // can't blame "another application" for a process we started.
+    await stopOwnedEngine();
     showSplashError((await portOccupied()) ? 'port' : undefined);
   }
 });
@@ -725,6 +767,9 @@ app.on('window-all-closed', () => {
 let shuttingDown = false;
 app.on('will-quit', (event) => {
   if (shuttingDown) return;
+  // Quitting mid-bootstrap: kill the tar/pip child so a multi-GB
+  // install doesn't keep running headless and race the next launch.
+  bootstrap.abort();
   if (engine.proc && !engine.external && !engine.exited) {
     shuttingDown = true;
     event.preventDefault();
