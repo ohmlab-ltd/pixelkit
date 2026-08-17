@@ -1,0 +1,46 @@
+name: Bug report
+description: Something in PixelKit doesn't work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. The engine log usually tells the whole story —
+        grabbing it first makes most bugs one-round-trip fixes.
+  - type: input
+    id: version
+    attributes:
+      label: PixelKit version
+      description: Bottom-right of the status bar (e.g. v0.2.1).
+      placeholder: v0.2.1
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows (NVIDIA GPU)
+        - Windows (no NVIDIA GPU / CPU mode)
+        - macOS (Apple Silicon)
+        - Linux (from source)
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+      description: Steps to reproduce if you have them.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Engine log
+      description: |
+        Help → Open Engine Log Folder, or find it at
+        `%APPDATA%\PixelKit\logs\engine.log` (Windows) /
+        `~/Library/Logs/PixelKit/engine.log` (macOS).
+        Paste the last ~50 lines (it's local-only — but skim for
+        file paths you'd rather not share).
+      render: text

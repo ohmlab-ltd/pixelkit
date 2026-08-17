@@ -1,5 +1,8 @@
 # PixelKit
 
+[![ci](https://github.com/ohmlab-ltd/pixelkit/actions/workflows/ci.yml/badge.svg)](https://github.com/ohmlab-ltd/pixelkit/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/ohmlab-ltd/pixelkit)](https://github.com/ohmlab-ltd/pixelkit/releases/latest)
+
 Open-source, local-first dataset auto-labelling for computer vision.
 Text-prompted detection and segmentation with **SAM 3**, an interactive
 annotation editor (boxes, polygon masks, click-to-segment), GPU-accelerated
@@ -14,7 +17,8 @@ choose. No accounts, no cloud, no telemetry.
 Grab the latest installer from
 [**Releases**](https://github.com/ohmlab-ltd/pixelkit/releases):
 
-- **Windows x64** — `PixelKit-Setup-<version>.exe` (~80 MB). On first launch
+- **Windows x64** — `PixelKit-Setup.exe` (~80 MB) from the latest
+  release. On first launch
   the app downloads its AI runtime once: Python plus PyTorch (~3.5 GB CUDA
   build on NVIDIA machines, ~300 MB CPU build otherwise) into
   `%LOCALAPPDATA%\PixelKit\runtime`. The installer is currently **unsigned**,

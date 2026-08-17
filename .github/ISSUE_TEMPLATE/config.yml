@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Setup help (HF token, downloads)
+    url: https://github.com/ohmlab-ltd/pixelkit/blob/main/docs/HF-TOKEN.md
+    about: The token walkthrough answers most first-run questions.

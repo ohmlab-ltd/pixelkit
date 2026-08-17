@@ -1,0 +1,21 @@
+name: Feature request
+description: Something PixelKit should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The task or workflow, not the button — knowing the goal often reveals a better shape than the first idea.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like PixelKit to do?
+    validations:
+      required: true
+  - type: input
+    id: workaround
+    attributes:
+      label: How do you handle it today?

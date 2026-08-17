@@ -41,7 +41,9 @@ jobs:
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
-          files: desktop/dist/PixelKit-Setup-*.exe
+          # Version-less asset name -> releases/latest/download/PixelKit-Setup.exe
+          # is a permanent URL (the release's tag carries the version).
+          files: desktop/dist/PixelKit-Setup*.exe
           generate_release_notes: true
 
   macos:
