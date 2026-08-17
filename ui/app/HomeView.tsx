@@ -1280,32 +1280,6 @@ export function HomeView({
     }
   };
 
-  const toggleLike = async (project_id: string) => {
-    if (!username) return;
-    // Optimistic flip so the heart feels instant.
-    setProjects((prev) =>
-      prev?.map((p) =>
-        p.id === project_id
-          ? { ...p, likedByMe: !p.likedByMe, likes: p.likes + (p.likedByMe ? -1 : 1) }
-          : p,
-      ) ?? null,
-    );
-    try {
-      const r = await fetch(`${API}/api/projects/${project_id}/like`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user: username }),
-      });
-      if (!r.ok) throw new Error(`http ${r.status}`);
-      const data: { likes: number; likedByMe: boolean } = await r.json();
-      setProjects((prev) =>
-        prev?.map((p) => (p.id === project_id ? { ...p, likes: data.likes, likedByMe: data.likedByMe } : p)) ?? null,
-      );
-    } catch {
-      // Snap back to truth on failure.
-      refresh();
-    }
-  };
 
   const confirmDelete = async (project_id: string) => {
     // Guard against re-entry: if a delete is already in flight for
@@ -1454,7 +1428,7 @@ export function HomeView({
                   : "opacity-100 translate-y-0 delay-150",
               ].join(" ")}
             >
-              Label data. Train models. Deploy and optimise - everything in one place.
+              Label data. Augment it. Export training-ready datasets - all on this machine.
             </p>
             <div
               aria-hidden={!v2Active}
@@ -1987,7 +1961,6 @@ export function HomeView({
                     onDelete={() => setDeleteTarget(p)}
                     onDuplicate={() => duplicateProject(p)}
                     duplicating={duplicatingId === p.id}
-                    onLike={() => toggleLike(p.id)}
                     /* First WORKSPACE_PAGE_SIZE cards load real bytes
                        immediately; the rest blurhash-only until the
                        cover scrolls into the near-viewport. */
@@ -2181,7 +2154,6 @@ function ProjectCard({
   onDelete,
   onDuplicate,
   duplicating = false,
-  onLike,
   eagerCover = false,
 }: {
   project: ProjectSummary;
@@ -2192,7 +2164,6 @@ function ProjectCard({
   onDelete: () => void;
   onDuplicate?: () => void;
   duplicating?: boolean;
-  onLike: () => void;
   /** First-row hint, when true, the cover skips its
       IntersectionObserver gate and loads bytes immediately on
       mount. */
@@ -2396,26 +2367,11 @@ function ProjectCard({
           )}
         </div>
       </button>
+      {/* Likes were the SaaS public feed's gesture; a single local user
+          has nobody to like at. The slot keeps the Open-project chip
+          right-aligned via an empty spacer. */}
       <div className="px-4 pb-3.5 flex items-center justify-between text-xs">
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onLike();
-          }}
-          aria-pressed={project.likedByMe}
-          className={[
-            "inline-flex items-center gap-1.5 rounded-md px-2 py-1 -ml-2 transition-colors",
-            project.likedByMe
-              ? "text-accent hover:text-accent/80"
-              : "text-foreground/45 hover:text-foreground",
-          ].join(" ")}
-          title={project.likedByMe ? "Unlike" : "Like"}
-        >
-          <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill={project.likedByMe ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78L12 21.23l8.84-8.84a5.5 5.5 0 000-7.78z" />
-          </svg>
-          <span className="tabular-nums">{project.likes}</span>
-        </button>
+        <span />
         {project.container && onOpenProject && (
           <button
             onClick={(e) => {

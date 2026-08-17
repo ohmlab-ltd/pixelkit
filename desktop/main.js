@@ -171,6 +171,11 @@ function spawnEngine() {
     cwd,
     env: {
       ...process.env,
+      // Piped stdio on Windows defaults Python to the legacy codepage;
+      // a log line with ≥/²/→ then raises inside the printing code.
+      // The engine also reconfigures its own streams — this covers
+      // interpreter startup and any subprocesses it spawns.
+      PYTHONIOENCODING: 'utf-8',
       ...(app.isPackaged && fs.existsSync(bundledPaths().uiDir)
         ? { PIXELKIT_UI_DIR: bundledPaths().uiDir }
         : {}),

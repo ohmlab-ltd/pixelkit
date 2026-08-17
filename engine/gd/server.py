@@ -28,7 +28,19 @@ import hmac
 import io
 import json
 import os
+import sys
 import uuid as _uuid
+
+# Windows consoles and pipes default to the legacy codepage (cp1252),
+# where printing any character outside it (≥, ², →) raises
+# UnicodeEncodeError inside whatever was logging — which killed whole
+# labelling jobs. Force UTF-8 with replacement so a log line can never
+# take down the work it was narrating. Done first, before any print.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass  # non-reconfigurable stream (embedded/frozen) — fine
 
 # orjson is 3-5× faster than the stdlib json on both parse and dump
 # for the large nested manifests this server reads and the large
