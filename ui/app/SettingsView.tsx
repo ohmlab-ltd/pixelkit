@@ -122,11 +122,13 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
     ? "CPU (labelling runs on the CPU — very slow)"
     : "CPU (no GPU detected — labelling unavailable)";
   // A bare cuda/mps preference means "use the GPU" and collapses onto
-  // Automatic; cuda:<n> keeps its own row when several GPUs exist.
+  // Automatic; cuda:<n> keeps its own row only while several GPUs exist
+  // (with one/none, the row isn't rendered — fall back to highlighting
+  // Automatic rather than leaving nothing selected).
   const pickedDevice: string =
     settings?.devicePreference === "cpu"
       ? "cpu"
-      : /^cuda:\d+$/.test(settings?.devicePreference ?? "")
+      : /^cuda:\d+$/.test(settings?.devicePreference ?? "") && (settings?.gpus.length ?? 0) > 1
       ? (settings!.devicePreference as string)
       : "auto";
 

@@ -128,26 +128,46 @@ export function ReviewModeV2({
     }
     return min;
   };
+  // The confidence ORDER is frozen when the sort engages, exactly like
+  // the membership snapshot above: neighbouring /annotations fetches
+  // update scores live, and re-sorting on every response would swap the
+  // top card between glance and keypress.
+  const orderRef = useRef<string[] | null>(null);
   const list = useMemo(() => {
     const merged = snapshot.map((r) => liveById.get(r.id) ?? r);
     if (!byConfidence) return merged;
-    return [...merged].sort((a, b) => minScore(a) - minScore(b));
+    if (orderRef.current === null) {
+      orderRef.current = [...merged]
+        .sort((a, b) => minScore(a) - minScore(b))
+        .map((r) => r.id);
+    }
+    const byId = new Map(merged.map((r) => [r.id, r]));
+    return orderRef.current
+      .map((id) => byId.get(id))
+      .filter((r): r is ReviewItem => !!r);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [snapshot, liveById, byConfidence]);
 
   const firstUnrated = list.findIndex((r) => !verdicts[r.id]);
   const startIdx = scope === "unrated" ? (firstUnrated === -1 ? 0 : firstUnrated) : 0;
   const [idx, setIdx] = useState(startIdx);
   const toggleConfidenceSort = () => {
-    setByConfidence((cur) => {
-      const next = !cur;
-      try {
-        window.localStorage.setItem("pk-review-confidence-sort", next ? "1" : "0");
-      } catch {
-        /* private mode etc. — the toggle still works for this session */
-      }
-      return next;
-    });
-    setIdx(0); // deck reorders — restart from the top of the new order
+    const next = !byConfidence;
+    orderRef.current = null; // re-freeze from current scores on next render
+    try {
+      window.localStorage.setItem("pk-review-confidence-sort", next ? "1" : "0");
+    } catch {
+      /* private mode etc. — the toggle still works for this session */
+    }
+    // Deck reorders: land on the first unrated card of the new order
+    // (index 0 would re-deal already-rated cards in "unrated" scope).
+    const merged = snapshot.map((r) => liveById.get(r.id) ?? r);
+    const ordered = next
+      ? [...merged].sort((a, b) => minScore(a) - minScore(b))
+      : merged;
+    const first = scope === "unrated" ? ordered.findIndex((r) => !verdicts[r.id]) : 0;
+    setByConfidence(next);
+    setIdx(first === -1 ? 0 : first);
   };
   const [animating, setAnimating] = useState<"left" | "right" | null>(null);
   const [drag, setDrag] = useState(0);

@@ -145,7 +145,9 @@ export function ExportModal({
   // VOC can't carry polygons, so the seg toggle is effectively a no-op
   // when VOC is picked. Show it disabled (rather than hidden) so the
   // user understands the constraint instead of silently being ignored.
-  const effectiveSeg = includeSegmentations && fmtSupportsSeg;
+  // PNG masks are the inverse: they're BUILT from segmentations, so the
+  // toggle is forced on (the engine 400s a masks export without them).
+  const effectiveSeg = picked === "masks" || (includeSegmentations && fmtSupportsSeg);
   const canExport = includeBoxes || effectiveSeg;
 
   const triggerExport = async () => {
@@ -314,13 +316,15 @@ export function ExportModal({
           <label
             className={[
               "flex items-center gap-3 select-none",
-              fmtSupportsSeg ? "cursor-pointer" : "cursor-not-allowed opacity-50",
+              fmtSupportsSeg && picked !== "masks"
+                ? "cursor-pointer"
+                : "cursor-not-allowed opacity-50",
             ].join(" ")}
           >
             <input
               type="checkbox"
               checked={effectiveSeg}
-              disabled={!fmtSupportsSeg}
+              disabled={!fmtSupportsSeg || picked === "masks"}
               onChange={(e) => setIncludeSegmentations(e.target.checked)}
               className="h-4 w-4 accent-[var(--accent)]"
             />
@@ -329,6 +333,11 @@ export function ExportModal({
               {!fmtSupportsSeg && (
                 <span className="ml-2 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-dim)]">
                   not supported in {fmt.name}
+                </span>
+              )}
+              {picked === "masks" && (
+                <span className="ml-2 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-dim)]">
+                  required for PNG masks
                 </span>
               )}
             </span>

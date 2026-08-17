@@ -1726,48 +1726,6 @@ export function ProjectViewV2Stub({
   // listeners (mounted once per readOnly flip) go through a ref.
   const importFilesRef = useRef<(files: FileList | null) => Promise<void>>();
   const [dropActive, setDropActive] = useState(false);
-  useEffect(() => {
-    if (readOnly) return;
-    let depth = 0;
-    const hasFiles = (e: DragEvent) =>
-      Array.from(e.dataTransfer?.types ?? []).includes("Files");
-    const onEnter = (e: DragEvent) => {
-      if (!hasFiles(e)) return;
-      e.preventDefault();
-      depth += 1;
-      setDropActive(true);
-    };
-    const onOver = (e: DragEvent) => {
-      if (hasFiles(e)) e.preventDefault();
-    };
-    const onLeave = (e: DragEvent) => {
-      if (!hasFiles(e)) return;
-      depth = Math.max(0, depth - 1);
-      if (depth === 0) setDropActive(false);
-    };
-    const onDrop = (e: DragEvent) => {
-      if (!hasFiles(e)) return;
-      e.preventDefault();
-      depth = 0;
-      setDropActive(false);
-      const files = Array.from(e.dataTransfer?.files ?? []).filter(
-        (f) =>
-          f.type.startsWith("image/") ||
-          /\.(jpe?g|png|webp|bmp|heic|avif)$/i.test(f.name),
-      );
-      if (files.length) void importFilesRef.current?.(files as unknown as FileList);
-    };
-    window.addEventListener("dragenter", onEnter);
-    window.addEventListener("dragover", onOver);
-    window.addEventListener("dragleave", onLeave);
-    window.addEventListener("drop", onDrop);
-    return () => {
-      window.removeEventListener("dragenter", onEnter);
-      window.removeEventListener("dragover", onOver);
-      window.removeEventListener("dragleave", onLeave);
-      window.removeEventListener("drop", onDrop);
-    };
-  }, [readOnly]);
 
   useEffect(() => {
     importFilesRef.current = handleImportFiles;
@@ -3693,6 +3651,63 @@ export function ProjectViewV2Stub({
   // Derived ("child") link, from /overview - drives the derived badge next to
   // the title (mirrors the workspace card). null for normal projects.
   const [derivedInfo, setDerivedInfo] = useState<{ parentProjectId?: string; parentName?: string } | null>(null);
+
+  // Window-level drag-and-drop listeners (state + ref live near
+  // handleImportFiles above; the effect sits here because it gates on
+  // derivedInfo, declared just above).
+  useEffect(() => {
+    // Derived datasets are auto-cropped from their parent — every other
+    // import affordance is hidden for them, so the window-level drop
+    // must not offer a back door.
+    if (readOnly || derivedInfo) return;
+    let depth = 0;
+    const hasFiles = (e: DragEvent) =>
+      Array.from(e.dataTransfer?.types ?? []).includes("Files");
+    const onEnter = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth += 1;
+      setDropActive(true);
+    };
+    const onOver = (e: DragEvent) => {
+      if (hasFiles(e)) e.preventDefault();
+    };
+    const onLeave = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) setDropActive(false);
+    };
+    const onDrop = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      depth = 0;
+      setDropActive(false);
+      // A dedicated drop zone (import card, per-label reference grid)
+      // already handled this event — importing here too would double
+      // every file. Their handlers preventDefault; that's the signal.
+      if (e.defaultPrevented) return;
+      e.preventDefault();
+      // Match the import card's accepted set — images AND videos (the
+      // video queue/frame-extraction path handles the latter).
+      const files = Array.from(e.dataTransfer?.files ?? []).filter(
+        (f) =>
+          f.type.startsWith("image/") ||
+          f.type.startsWith("video/") ||
+          /\.(jpe?g|png|webp|bmp|heic|avif|mp4|mov|webm|mkv)$/i.test(f.name),
+      );
+      if (files.length) void importFilesRef.current?.(files as unknown as FileList);
+    };
+    window.addEventListener("dragenter", onEnter);
+    window.addEventListener("dragover", onOver);
+    window.addEventListener("dragleave", onLeave);
+    window.addEventListener("drop", onDrop);
+    return () => {
+      window.removeEventListener("dragenter", onEnter);
+      window.removeEventListener("dragover", onOver);
+      window.removeEventListener("dragleave", onLeave);
+      window.removeEventListener("drop", onDrop);
+    };
+  }, [readOnly, derivedInfo]);
+
   // A freshly-created derived (child) project has its crops generated in the
   // background, so it starts with zero imports. While that's the case we poll
   // the overview so the gallery fills in, and show a "pulling images" loader
@@ -5954,8 +5969,8 @@ export function ProjectViewV2Stub({
         createPortal(
           <div className="pointer-events-none fixed inset-0 z-[1400] grid place-items-center bg-[var(--background)]/70 backdrop-blur-[2px]">
             <div className="rounded-lg border-2 border-dashed border-[var(--accent)] bg-[var(--panel-solid)] px-8 py-6 text-center shadow-[var(--shadow-strong)]">
-              <p className="text-sm font-medium text-[var(--foreground)]">Drop images to import</p>
-              <p className="mt-1 text-xs text-[var(--fg-muted)]">They join this dataset like any other upload</p>
+              <p className="text-sm font-medium text-[var(--foreground)]">Drop to import</p>
+              <p className="mt-1 text-xs text-[var(--fg-muted)]">Images and videos join this dataset like any other upload</p>
             </div>
           </div>,
           document.body,

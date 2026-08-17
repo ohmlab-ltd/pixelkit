@@ -457,9 +457,9 @@ Image viewer:
   0 - reset zoom and pan to fit-on-screen
 
 Review mode:
-  Left arrow - Good
-  Right arrow - Bad
-  Space - Unsure
+  Left arrow - Bad
+  Right arrow - Good
+  Up or down arrow - Unsure
   Esc - close Review mode
 
 Global:
@@ -1347,14 +1347,14 @@ function LabellingSection({ go }: { go: (k: GuideSectionKey) => void }) {
           viewer. It paints the current image with all its detections so you
           can decide at a glance whether the labelling is worth keeping.
         </p>
-        <Figure caption="Swipe or arrow-left to mark the current image good, swipe or arrow-right to mark it bad, space to mark it unsure. Verdicts feed the gallery filter chips.">
+        <Figure caption="Swipe right or arrow-right to mark the current image good, swipe left or arrow-left to mark it bad, up/down arrow to mark it unsure. Verdicts feed the gallery filter chips.">
           <ReviewModeMock />
         </Figure>
         <Bullets
           items={[
-            "<strong>← Good</strong>. Confirms the labelling on this image.",
-            "<strong>→ Bad</strong>. Flags the image for follow-up. Doesn&rsquo;t delete anything.",
-            "<strong>Space / Unsure</strong>. Park for later review.",
+            "<strong>→ Good</strong>. Confirms the labelling on this image.",
+            "<strong>← Bad</strong>. Flags the image for follow-up. Doesn&rsquo;t delete anything.",
+            "<strong>↑ / ↓ Unsure</strong>. Park for later review.",
             "<strong>Tap a label chip</strong> to filter visible boxes by that label as you scrub through.",
             "<strong>Hover-highlight</strong>. Hovering a detection box dims everything else so the focus pops.",
             "<strong>Verdict persists</strong>. Stored on the image, surfaces in the gallery filter chips, and survives reloads.",
@@ -1995,9 +1995,9 @@ function ReferenceSection() {
       <GuideSection n={2} title="Review mode shortcuts">
         <ShortcutTable
           rows={[
-            ["←", "Mark current image Good and advance."],
-            ["→", "Mark current image Bad and advance."],
-            ["Space", "Mark current image Unsure and advance."],
+            ["→", "Mark current image Good and advance."],
+            ["←", "Mark current image Bad and advance."],
+            ["↑ / ↓", "Mark current image Unsure and advance."],
             ["Esc", "Close Review mode and return to the dataset gallery."],
           ]}
         />

@@ -252,6 +252,15 @@ export default function Page() {
   // Also listens for popstate so the browser back/forward
   // buttons toggle the project overlay correctly.
   const urlHydratedRef = useRef(false);
+  // Live mirror of the open project id: the popstate handler below runs
+  // under an empty-dep effect, so reading openV2Project directly would
+  // see first-render state forever (and a late /initial 404 could
+  // clobber a DIFFERENT project the user had opened meanwhile).
+  const openIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    openIdRef.current = openV2Project?.projectId ?? null;
+  }, [openV2Project]);
+
   useEffect(() => {
     if (typeof window === "undefined") return;
     const handle = async () => {
@@ -259,7 +268,7 @@ export default function Page() {
       const idFromUrl = m ? m[1] : null;
       if (idFromUrl) {
         if (
-          (openV2Project?.projectId ?? null) !== idFromUrl
+          openIdRef.current !== idFromUrl
           && notFoundProjectId !== idFromUrl
         ) {
           // Optimistic open: mount the V2 view IMMEDIATELY and let
@@ -282,8 +291,13 @@ export default function Page() {
           void apiFetch(`/api/v2/projects/${idFromUrl}/initial?n=20`, { cache: "no-store" })
             .then(async (r) => {
               if (r.status === 404) {
-                setNotFoundProjectId(idFromUrl);
-                setOpenV2Project(null);
+                // Only surface the 404 if THIS project is still the open
+                // one — a slow response must not unmount whatever the
+                // user navigated to meanwhile.
+                if (openIdRef.current === idFromUrl) {
+                  setNotFoundProjectId(idFromUrl);
+                  setOpenV2Project(null);
+                }
                 return;
               }
               if (!r.ok) return;
