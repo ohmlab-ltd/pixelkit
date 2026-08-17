@@ -14,7 +14,7 @@ import { type EngineSettings, fetchEngineSettings } from "@/lib/models";
 import { readProjectMeta } from "@/lib/projectMetaCache";
 
 // Shown until the engine's /api/health reports its real version.
-const VERSION_FALLBACK = "v0.2.0";
+const VERSION_FALLBACK = "v0.2.1";
 
 // Queued/running engine jobs, from GET /api/jobs/active (see gd/jobs.py
 // Job.to_public — progress is {index, total, image, phase}).

@@ -1,7 +1,7 @@
 {
   "name": "pixelkit-desktop",
   "productName": "PixelKit",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "PixelKit desktop shell (Electron wrapper around the local PixelKit engine)",
   "private": true,
   "main": "main.js",

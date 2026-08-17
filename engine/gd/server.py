@@ -86,7 +86,7 @@ import secrets
 # Single source of truth for the shipped engine version. Keep in sync with
 # engine/pyproject.toml and desktop/package.json (the release workflow
 # checks all three match the tag).
-PK_VERSION = "0.2.0"
+PK_VERSION = "0.2.1"
 
 
 def _configured_device() -> str:
