@@ -105,3 +105,33 @@ def test_masks_requires_segmentations(client):
         params={"format": "masks", "include_segmentations": False},
     )
     assert r.status_code == 400
+
+
+def test_labelstudio_config_escapes_special_labels(client):
+    pid = _make_dataset(client, "Escape Fmt")
+    # Give the dataset a label with XML-hostile characters.
+    r = client.post(
+        f"/api/projects/{pid}/labels/rename",
+        json={"old_label": "apple", "new_label": 'black & "white"'},
+    )
+    assert r.status_code == 200, r.text
+    zf = _export_zip(client, pid, "labelstudio")
+    import xml.etree.ElementTree as ET
+
+    cfg = zf.read("labeling-config.xml").decode()
+    root = ET.fromstring(cfg)  # raises on unescaped & or "
+    values = [el.get("value") for el in root.iter("Label")]
+    assert 'black & "white"' in values
+
+
+def test_masks_export_covers_unannotated_images(client):
+    pid = _make_dataset(client, "Masks All")
+    # Second image with no annotations at all.
+    r = client.post(
+        f"/api/v2/projects/{pid}/imports/raw",
+        files={"image": ("empty.jpg", _jpeg_bytes(), "image/jpeg")},
+    )
+    assert r.status_code == 200
+    zf = _export_zip(client, pid, "masks")
+    pngs = [n for n in zf.namelist() if n.endswith(".png")]
+    assert len(pngs) == 2, pngs  # annotated AND background-only image

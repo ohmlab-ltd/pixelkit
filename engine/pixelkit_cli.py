@@ -123,10 +123,11 @@ def label(args) -> int:
     with TestClient(server.app) as client:
         settings = client.get("/api/settings").json()
         dev = settings.get("device") or "cpu"
-        forced_cpu = (
-            settings.get("deviceEnvOverride") == "cpu"
-            or settings.get("devicePreference") == "cpu"
-        )
+        env_dev = settings.get("deviceEnvOverride")
+        # Mirror the engine's precedence: PK_DEVICE beats the config, so
+        # a config cpu preference doesn't count as forced when the env
+        # overrode it to something else.
+        forced_cpu = env_dev == "cpu" or (not env_dev and settings.get("devicePreference") == "cpu")
         if dev == "cpu" and not forced_cpu:
             print("error: no supported GPU detected. Re-run with --device cpu to")
             print("       force (very slow), or use an NVIDIA/Apple-Silicon machine.")
@@ -146,7 +147,11 @@ def label(args) -> int:
                 print("       and finish setup (Hugging Face token + download).")
                 return 2
             if not nudged:
-                client.post("/api/models/sam3/load")
+                r = client.post("/api/models/sam3/load")
+                if r.status_code == 409:
+                    detail = r.json().get("detail", r.text[:160])
+                    print(f"error: {detail}")
+                    return 2
                 nudged = True
             if time.time() > deadline:
                 print(f"error: SAM 3 didn't finish loading in {args.model_timeout}s")
@@ -199,6 +204,14 @@ def label(args) -> int:
             if idx is not None and total:
                 print(f"\r  labelling {idx}/{total}", end="", flush=True)
             time.sleep(2)
+        # A failed job vanishes from /active exactly like a finished one
+        # — ask for the final status before claiming victory.
+        final = client.get(f"/api/jobs/{jid}")
+        body = final.json() if final.status_code == 200 else {}
+        status = body.get("status", "unknown")
+        if status != "done":
+            print(f"\rerror: labelling job ended with status '{status}': {body.get('error') or 'no detail'}")
+            return 1
         print("\r  labelling done.          ")
 
         if args.export:

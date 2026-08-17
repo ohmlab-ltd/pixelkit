@@ -82,3 +82,43 @@ def test_dataset_rename_covers_v2_records(client):
     assert r.status_code == 200, r.text
     text = json.dumps(r.json())
     assert "kitten" in text and '"cat"' not in text
+
+
+def test_case_only_rename_and_case_insensitive_merge(client):
+    # cat -> Cat must be a real rename (used to be rejected as "same
+    # name"), and renaming onto a different-cased twin must merge.
+    pid = _dataset(client, "Case Fix", "cat")
+    r = client.post(
+        f"/api/projects/{pid}/labels/rename",
+        json={"old_label": "cat", "new_label": "Cat"},
+    )
+    assert r.status_code == 200 and r.json()["renamed"] >= 1
+    tags = r.json()["tags"]
+    assert tags.count("Cat") == 1 and "cat" not in tags
+
+    # Now a Feline/feline-style merge: no case-duplicate twins allowed.
+    r = client.post(
+        f"/api/projects/{pid}/labels/rename",
+        json={"old_label": "Cat", "new_label": "CAT"},
+    )
+    tags = r.json()["tags"]
+    assert len([t for t in tags if t.lower() == "cat"]) == 1
+
+
+def test_rename_migrates_snake_case_alias(client):
+    pid = _dataset(client, "Alias Move", "bolt")
+    # Plant a display alias under the manifest's real (snake_case) key.
+    r = client.put(
+        f"/api/projects/{pid}",
+        json={"label_aliases": {"bolt": "Bolt (M6)"}},
+    )
+    assert r.status_code == 200, r.text
+    r = client.post(
+        f"/api/projects/{pid}/labels/rename",
+        json={"old_label": "bolt", "new_label": "fastener"},
+    )
+    assert r.status_code == 200, r.text
+    m = client.get(f"/api/projects/{pid}").json()
+    aliases = m.get("label_aliases") or {}
+    assert "bolt" not in aliases
+    assert aliases.get("fastener") == "Bolt (M6)"

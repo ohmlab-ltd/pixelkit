@@ -116,11 +116,16 @@ def _resolve_device() -> str:
     want = _configured_device()
     has_mps = getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
     if want:
-        if want.startswith("cuda") and torch.cuda.is_available():
-            return want
-        if want == "mps" and has_mps:
+        if re.fullmatch(r"cuda(:\d+)?", want) and torch.cuda.is_available():
+            # Validate the ordinal: a config saved on a 2-GPU machine
+            # ("cuda:1") moved to a 1-GPU one must fall back, not boot
+            # into invalid-device-ordinal errors on every tensor op.
+            idx = int(want.split(":")[1]) if ":" in want else 0
+            if idx < torch.cuda.device_count():
+                return want
+        elif want == "mps" and has_mps:
             return "mps"
-        if want == "cpu":
+        elif want == "cpu":
             return "cpu"
         print(f"[server] device {want!r} not available on this machine — auto-detecting.")
     if torch.cuda.is_available():
@@ -15832,17 +15837,21 @@ def _rename_label_fields(manifest: dict, old: str, new: str) -> int:
     renamed = 0
     ol = old.strip().lower()
 
+    # Dedupe case-INsensitively: "Feline" + a cat→feline rename must
+    # merge into one tag, not leave "Feline"/"feline" twins that the
+    # case-equal short-circuit would then make unmergeable forever.
     tags = manifest.get("tags", []) or []
     out_tags: list[str] = []
+    seen_lower: set[str] = set()
     hit_tag = False
     for t in tags:
         s = (t or "").strip()
+        target = new if s.lower() == ol else s
         if s.lower() == ol:
             hit_tag = True
-            if new not in out_tags:
-                out_tags.append(new)
-        elif s not in out_tags:
-            out_tags.append(s)
+        if target.lower() not in seen_lower:
+            seen_lower.add(target.lower())
+            out_tags.append(target)
     if hit_tag:
         renamed += 1
     manifest["tags"] = out_tags
@@ -15868,10 +15877,22 @@ def _rename_label_fields(manifest: dict, old: str, new: str) -> int:
             continue
         _boxes(imp.get("detections"))
         _boxes(imp.get("editedBoxes"))
+    # Reference crops are the label source of truth for specific-mode
+    # resolving — left un-renamed they'd resurrect the old label on the
+    # next labelling run.
+    for ref in manifest.get("references", []) or []:
+        if not isinstance(ref, dict):
+            continue
+        v = ref.get("label")
+        if isinstance(v, str) and v.strip().lower() == ol:
+            ref["label"] = new
+            renamed += 1
+        _boxes(ref.get("detections"))
 
     # Colour override + display-alias maps follow the label. An existing
     # entry for the target label wins (merge keeps the target's look).
-    for map_key in ("labelColours", "labelAliases"):
+    # NB: the alias map's manifest key is snake_case.
+    for map_key in ("labelColours", "label_aliases"):
         m = manifest.get(map_key)
         if not isinstance(m, dict):
             continue
@@ -15907,18 +15928,25 @@ async def rename_label(project_id: str, body: RenameLabelRequest):
     if not old or not new:
         raise HTTPException(400, "old_label and new_label are required")
     assert_clean(new, field="label")
-    if old.lower() == new.lower():
-        # Trivial — same name. Nothing to do.
+    if old == new:
+        # Exact same name. (Case-only changes like cat→Cat are real
+        # renames and fall through — they used to be rejected here,
+        # which made fixing a label's casing impossible.)
         return {"ok": True, "renamed": 0}
 
-    manifest = load_manifest(project_id)
-    if not manifest:
-        raise HTTPException(404)
+    # Same write lock as every other whole-manifest mutator: an
+    # unlocked load→rename→save racing a labelling-job flush would
+    # revert the flushed images wholesale.
+    lock = await _manifest_write_lock(project_id)
+    async with lock:
+        manifest = load_manifest(project_id)
+        if not manifest:
+            raise HTTPException(404)
 
-    renamed = _rename_label_fields(manifest, old, new)
+        renamed = _rename_label_fields(manifest, old, new)
 
-    manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    save_manifest(project_id, manifest)
+        manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        save_manifest(project_id, manifest)
 
     return {"ok": True, "renamed": renamed, "tags": manifest.get("tags") or []}
 
@@ -15978,27 +16006,33 @@ async def container_rename_label(container_id: str, body: RenameLabelRequest):
     from profanity import assert_clean
 
     assert_clean(new, field="label")
-    if old.lower() == new.lower():
+    if old == new:
+        # Exact same name only — case-only renames are legitimate.
         return {"ok": True, "renamed": 0, "datasetsTouched": 0}
 
     ds_ids = list(c.get("dataset_ids") or [])
 
-    def _do() -> dict:
-        total = 0
-        touched = 0
-        for pid in ds_ids:
-            m = load_manifest(pid)
-            if not m:
-                continue
-            n = _rename_label_fields(m, old, new)
-            if n:
-                m["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-                save_manifest(pid, m)
-                total += n
-                touched += 1
-        return {"ok": True, "renamed": total, "datasetsTouched": touched}
+    def _one(pid: str) -> int:
+        m = load_manifest(pid)
+        if not m:
+            return 0
+        n = _rename_label_fields(m, old, new)
+        if n:
+            m["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            save_manifest(pid, m)
+        return n
 
-    return await asyncio.to_thread(_do)
+    total = 0
+    touched = 0
+    for pid in ds_ids:
+        # Per-dataset write lock, same as the single-dataset endpoint.
+        lock = await _manifest_write_lock(pid)
+        async with lock:
+            n = await asyncio.to_thread(_one, pid)
+        if n:
+            total += n
+            touched += 1
+    return {"ok": True, "renamed": total, "datasetsTouched": touched}
 
 
 @app.post(
@@ -17223,12 +17257,14 @@ async def export_project(
                     include_segmentations=include_segmentations,
                 )
                 zf.writestr("tasks.json", json.dumps(tasks, indent=2))
+                from xml.sax.saxutils import quoteattr
+
                 zf.writestr(
                     "labeling-config.xml",
                     "<View>\n"
                     '  <Image name="image" value="$image"/>\n'
                     '  <RectangleLabels name="label" toName="image">\n'
-                    + "".join(f'    <Label value="{c}"/>\n' for c in cats)
+                    + "".join(f"    <Label value={quoteattr(c)}/>\n" for c in cats)
                     + "  </RectangleLabels>\n"
                     "</View>\n",
                 )
@@ -17243,9 +17279,10 @@ async def export_project(
                     "0 background\n"
                     + "".join(f"{i} {name}\n" for name, i in class_idx.items()),
                 )
+                # Every shipped image gets a mask — all-zero (background)
+                # when nothing is annotated — so trainers pairing
+                # images/ with masks/ never hit a missing file.
                 for row in rows:
-                    if not any(a["polys"] for a in row["anns"]):
-                        continue
                     mask = np.zeros((row["height"], row["width"]), dtype=np.uint8)
                     for a in row["anns"]:
                         cls = class_idx.get(a["label"])
@@ -17360,6 +17397,8 @@ def _export_rows(
             if export_name in seen:
                 continue
             seen.add(export_name)
+            if not cw or not ch:  # dim-less legacy aug records — skip like originals
+                continue
             _reg(export_name, cw, ch, _split_for(parent, train_split))
 
     def _append(file_name: str, W: int, H: int, b: dict) -> None:
@@ -18561,6 +18600,17 @@ async def jobs_active():
     return {"jobs": out}
 
 
+@app.get("/api/jobs/{job_id}")
+async def job_get(job_id: str):
+    """One job, any status — the headless CLI polls /active until a job
+    disappears, then needs THIS to learn whether it finished or failed
+    (both vanish from /active identically)."""
+    for j in state["jobs"].list(limit=500):
+        if j.id == job_id:
+            return j.to_public()
+    raise HTTPException(404, "job not found")
+
+
 @app.get("/api/models/status")
 async def models_status():
     return await asyncio.to_thread(models_mgr.status)
@@ -18841,13 +18891,30 @@ async def snapshots_list(project_id: str):
     return {"snapshots": out}
 
 
+def _project_job_active(project_id: str) -> bool:
+    mgr = state.get("jobs")
+    if mgr is None:
+        return False
+    try:
+        return any(
+            j.project == project_id and j.status in ("queued", "running")
+            for j in mgr.list()
+        )
+    except Exception:
+        return False
+
+
 @app.post("/api/v2/projects/{project_id}/snapshots")
 async def snapshots_create(project_id: str):
     try:
         d = store.dataset_dir(project_id)
     except KeyError:
         raise HTTPException(404, "project not found")
-    return await asyncio.to_thread(_snapshot_write, d)
+    # Under the project write lock so a concurrent flush can't tear the
+    # snapshot between reading dataset.json and the annotation files.
+    lock = await _manifest_write_lock(project_id)
+    async with lock:
+        return await asyncio.to_thread(_snapshot_write, d)
 
 
 @app.post("/api/v2/projects/{project_id}/snapshots/{snapshot_id}/restore")
@@ -18861,6 +18928,11 @@ async def snapshots_restore(project_id: str, snapshot_id: str):
     path = d / "snapshots" / f"{snapshot_id}.zip"
     if not path.exists():
         raise HTTPException(404, "snapshot not found")
+    # A running labelling/augment job holds a loaded manifest it will
+    # flush later — restoring underneath it would interleave two
+    # timelines. Refuse instead of corrupting.
+    if _project_job_active(project_id):
+        raise HTTPException(409, "a job is running on this dataset — wait for it to finish before restoring")
 
     def _do() -> dict:
         with zipfile.ZipFile(path) as zf:
@@ -18888,9 +18960,18 @@ async def snapshots_restore(project_id: str, snapshot_id: str):
         # dataset.json last: its mtime is the manifest-cache validity
         # stamp, so the cached copy self-invalidates on the next load.
         os.replace(tmp, d / "dataset.json")
+        # The files changed behind store.save()'s digest cache and the
+        # manifest RAM cache — drop both so no writer trusts stale state.
+        store.forget(project_id)
+        invalidate_manifest_cache(project_id)
         return {"ok": True, "restored": snapshot_id, "safetySnapshot": safety["id"]}
 
-    return await asyncio.to_thread(_do)
+    # Same write lock every other manifest writer takes: a concurrent
+    # flush between our file swap and its save would otherwise revert
+    # half the restore (and skip rewriting "unchanged" annotations).
+    lock = await _manifest_write_lock(project_id)
+    async with lock:
+        return await asyncio.to_thread(_do)
 
 
 

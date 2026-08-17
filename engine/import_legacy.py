@@ -94,6 +94,10 @@ def run(src: Path, workspace_override: str | None = None) -> None:
             if not m:
                 continue
             pid = str(m.get("id") or d.name)
+            # Identity lives in the JSON: an id-less legacy manifest
+            # would save fine but be dropped by the next index scan
+            # (invisible dataset). Stamp the fallback id in.
+            m["id"] = pid
             if store.dataset_exists(pid):
                 print(f"  = dataset {m.get('name')!r} already present, skipping")
                 continue

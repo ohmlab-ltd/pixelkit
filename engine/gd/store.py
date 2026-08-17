@@ -146,6 +146,15 @@ def rescan() -> None:
         _scan_locked()
 
 
+def forget(pid: str) -> None:
+    """Drop the annotation digests for one dataset. Callers that swap
+    annotation files on disk behind save()'s back (snapshot restore)
+    must call this, or save()'s unchanged-content skip will trust
+    stale digests and leave the swapped files unwritten."""
+    with _LOCK:
+        _ANN_DIGESTS.pop(pid, None)
+
+
 # ---------------------------------------------------------------- datasets
 
 def dataset_exists(pid: str) -> bool:
