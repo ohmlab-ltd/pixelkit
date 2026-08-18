@@ -33,14 +33,14 @@ import uuid as _uuid
 
 # Windows consoles and pipes default to the legacy codepage (cp1252),
 # where printing any character outside it (≥, ², →) raises
-# UnicodeEncodeError inside whatever was logging — which killed whole
+# UnicodeEncodeError inside whatever was logging - which killed whole
 # labelling jobs. Force UTF-8 with replacement so a log line can never
 # take down the work it was narrating. Done first, before any print.
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
-        pass  # non-reconfigurable stream (embedded/frozen) — fine
+        pass  # non-reconfigurable stream (embedded/frozen) - fine
 
 # orjson is 3-5× faster than the stdlib json on both parse and dump
 # for the large nested manifests this server reads and the large
@@ -66,7 +66,7 @@ load_dotenv(_Path(__file__).resolve().parent.parent / ".env", override=True)
 
 # CUDA allocator: switch to expandable segments BEFORE `import torch`.
 # This is the single biggest fix for the long-run-slowdown we kept
-# hitting — Qwen-VL allocates differently shaped tensors per image
+# hitting - Qwen-VL allocates differently shaped tensors per image
 # crop, and the default caching allocator fragments around those into
 # pinned chunks it can't reuse. With expandable segments, those chunks
 # grow instead of getting orphaned, so VRAM stays usable across many
@@ -111,7 +111,7 @@ def _resolve_device() -> str:
     """cuda > mps > cpu, with _configured_device() as an explicit override.
 
     An unavailable override falls back down the chain with a warning
-    rather than failing boot — a saved config from another machine
+    rather than failing boot - a saved config from another machine
     shouldn't brick the app."""
     want = _configured_device()
     has_mps = getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
@@ -127,7 +127,7 @@ def _resolve_device() -> str:
             return "mps"
         elif want == "cpu":
             return "cpu"
-        print(f"[server] device {want!r} not available on this machine — auto-detecting.")
+        print(f"[server] device {want!r} not available on this machine - auto-detecting.")
     if torch.cuda.is_available():
         return "cuda"
     if has_mps:
@@ -162,7 +162,7 @@ PILImage.MAX_IMAGE_PIXELS = 100_000_000
 # Pillow can decode .heic/.heif/.avif uploads (iPhone photos, modern
 # web image formats). Pillow 11+ has native AVIF support; pillow-heif
 # covers older Pillow + HEIC. Best-effort: a missing package is a
-# no-op — the import path then rejects undecodable formats with a clean
+# no-op - the import path then rejects undecodable formats with a clean
 # 400 rather than storing a file nothing downstream can read.
 try:
     import pillow_heif as _pillow_heif  # type: ignore
@@ -229,15 +229,15 @@ NSFW_THRESHOLD = 0.3  # referenced by dead guarded branches; gate itself removed
 EXPOSED_CLASSES: tuple = ()  # dead-branch stub (NSFW gate removed)
 
 
-def nsfw_score(*_a, **_k):  # dead-branch stub — state["nsfw"] is always None
+def nsfw_score(*_a, **_k):  # dead-branch stub - state["nsfw"] is always None
     return 0.0, ""
 
 
-def segment_point(*_a, **_k):  # dead-branch stub — SAM2 removed, guards keep these unreached
+def segment_point(*_a, **_k):  # dead-branch stub - SAM2 removed, guards keep these unreached
     return None
 
 
-def segment_boxes(*_a, **_k):  # dead-branch stub — SAM2 removed
+def segment_boxes(*_a, **_k):  # dead-branch stub - SAM2 removed
     return []
 
 
@@ -250,7 +250,7 @@ def _enforce_nsfw_or_451(
     file: str = "",
     user: str = "",
 ) -> None:
-    """NSFW gate removed in the portable build — a local user labelling
+    """NSFW gate removed in the portable build - a local user labelling
     their own images doesn't get content-policed."""
     return
 
@@ -266,7 +266,7 @@ def r2_required() -> LocalStorage:
 
 def _redirect_to_r2(key: str) -> FileResponse:
     """SaaS build 302'd to a presigned R2 URL. Locally we serve the file
-    directly. Name kept — many call sites."""
+    directly. Name kept - many call sites."""
     try:
         path = R2.resolve(key)
     except FileNotFoundError:
@@ -394,7 +394,7 @@ def _job_to_audit(job) -> None:
     """Persist a finished job to audit.db so the Terminal can show it after a
     backend restart. Only terminal states are passed in (done/failed/cancelled).
 
-    NOTE: we use `job_kind` rather than `kind` for the audit blob field —
+    NOTE: we use `job_kind` rather than `kind` for the audit blob field -
     the row-level `kind` column is already "job" and a kwarg of `kind`
     would clash with the first positional arg of `add_event`."""
     add_event(
@@ -420,7 +420,7 @@ def _load_vlm_into_state() -> None:
 
     When `VLM_WORKER_URL` is set in the environment, `vlm_classify` in
     `vlm_validate.py` routes calls over HTTP to that worker, so we
-    have no reason to keep the model resident here — that's ~3 GB of
+    have no reason to keep the model resident here - that's ~3 GB of
     VRAM freed on the main backend, which is the whole point of the
     worker split (matters on 12 GB cards where the rest of the stack
     barely fits).
@@ -432,7 +432,7 @@ def _load_vlm_into_state() -> None:
     """
     worker_url = (os.environ.get("VLM_WORKER_URL") or "").strip()
     if worker_url:
-        print(f"[server] VLM offloaded to worker at {worker_url} — local load skipped.")
+        print(f"[server] VLM offloaded to worker at {worker_url} - local load skipped.")
         state["vlm_model"] = None
         state["vlm_processor"] = None
         return
@@ -450,7 +450,7 @@ def _load_vlm_into_state() -> None:
 # embeddings, /embeddings/* endpoints, post-auto-label scan,
 # relabel-driven refresh). When False, the model never loads, the
 # refresh / scan helpers no-op, and the endpoints return empty
-# payloads — so the frontend's modal never opens and the
+# payloads - so the frontend's modal never opens and the
 # infrastructure is dormant. Flip back to True to re-enable; all
 # the wiring stays in place.
 _EMBEDDINGS_ENABLED = False
@@ -462,21 +462,21 @@ def _load_dinov2_into_state() -> None:
     CUDA in fp16); override via the EMBED_MODEL env var. Cached to
     disk on first run, resident in VRAM after."""
     if not _EMBEDDINGS_ENABLED:
-        print("[server] Label Cascade embeddings disabled — skipping model load.")
+        print("[server] Label Cascade embeddings disabled - skipping model load.")
         return
     try:
         import embeddings as _emb
         _emb.load_dinov2(state["device"])
         _emb.warmup()
     except Exception as e:
-        print(f"[server] embedding model load failed: {e} — Label Cascade disabled.")
+        print(f"[server] embedding model load failed: {e} - Label Cascade disabled.")
 
 
 import heapq as _heapq_module
 
 
 class PriorityGPUGate:
-    """Priority-aware async lock for GPU access — drop-in replacement
+    """Priority-aware async lock for GPU access - drop-in replacement
     for asyncio.Lock that wakes the highest-priority waiter first when
     the lock releases.
 
@@ -494,7 +494,7 @@ class PriorityGPUGate:
     """
     P_INTERACTIVE = 0
     P_JOB = 10
-    # Lowest priority — fire-and-forget work the user isn't waiting on
+    # Lowest priority - fire-and-forget work the user isn't waiting on
     # (per-upload whole-image embeddings, stats backfill). Yields the
     # GPU to interactive clicks AND labelling jobs so a burst of
     # background embeddings can never stall a click-to-detect or a
@@ -567,7 +567,7 @@ class PriorityGPUGate:
 
     @asynccontextmanager
     async def interactive(self):
-        """Highest priority — click-to-detect, add-box, segment_box."""
+        """Highest priority - click-to-detect, add-box, segment_box."""
         await self._acquire(self.P_INTERACTIVE)
         try:
             yield
@@ -576,7 +576,7 @@ class PriorityGPUGate:
 
     @asynccontextmanager
     async def job(self):
-        """Explicit P_JOB CM — same as `async with gate:`, just
+        """Explicit P_JOB CM - same as `async with gate:`, just
         spelled out so call sites can be explicit about intent."""
         await self._acquire(self.P_JOB)
         try:
@@ -586,7 +586,7 @@ class PriorityGPUGate:
 
     @asynccontextmanager
     async def background(self):
-        """Lowest priority — fire-and-forget embeddings / backfill.
+        """Lowest priority - fire-and-forget embeddings / backfill.
         Yields to interactive clicks and labelling jobs."""
         await self._acquire(self.P_BACKGROUND)
         try:
@@ -598,7 +598,7 @@ class PriorityGPUGate:
 # ── Shared model-load tasks ──────────────────────────────────────────────────
 # Used by both lifespan auto-load and the /api/models/{name}/load endpoints.
 # Serialized through state["model_load_lock"]: (a) transformers' lazy module
-# init is not thread-safe — two concurrent executor imports race into
+# init is not thread-safe - two concurrent executor imports race into
 # spurious "cannot import name" failures; (b) concurrent loads spike VRAM.
 
 async def _bg_load_dino() -> None:
@@ -626,7 +626,7 @@ async def _bg_load_charlie() -> None:
         state["charlie"] = pipeline_charlie
         print("[server] pipeline_charlie ready (SAM3).")
     except Exception as e:
-        print(f"[server] pipeline_charlie load failed: {e} — /api/charlie/* will return 503.")
+        print(f"[server] pipeline_charlie load failed: {e} - /api/charlie/* will return 503.")
         state["charlie"] = None
 
 
@@ -637,7 +637,7 @@ async def lifespan(app: FastAPI):
     # GPU serialization lock for V2 pipelines. Multiple concurrent
     # /api/v2/references/process or /api/v2/imports/process requests
     # used to all enter `loop.run_in_executor(None, ...)` at once and
-    # blow the 12 GB GPU's VRAM budget — each pipeline transiently
+    # blow the 12 GB GPU's VRAM budget - each pipeline transiently
     # needs ~2 GB on top of the warm models, so 4 parallel calls
     # CUDA-OOM each other. Holding this lock across the executor
     # call serialises GPU work without queuing on the event loop
@@ -660,7 +660,7 @@ async def lifespan(app: FastAPI):
 
     state["device"] = device
     state["model"] = None       # GroundingDINO removed in the portable build
-    state["segmenter"] = None   # SAM2 removed — SAM3 covers interactive segmentation
+    state["segmenter"] = None   # SAM2 removed - SAM3 covers interactive segmentation
     state["nsfw"] = None        # NSFW gate removed
 
     # Model loading policy: SAM3 + DINOv2, with the small VLM tiebreak
@@ -679,10 +679,10 @@ async def lifespan(app: FastAPI):
         print(
             f"[server] models disabled (device={device}"
             + (", PK_DISABLE_MODELS set" if os.environ.get("PK_DISABLE_MODELS") else "")
-            + ") — labelling endpoints 503; dataset/annotation APIs fully live."
+            + ") - labelling endpoints 503; dataset/annotation APIs fully live."
         )
     elif device == "cpu":
-        print("[server] device forced to CPU — models will load on CPU. Labelling will be very slow.")
+        print("[server] device forced to CPU - models will load on CPU. Labelling will be very slow.")
 
 
     # Model loading policy (portable): the model manager (gd/models.py)
@@ -696,9 +696,9 @@ async def lifespan(app: FastAPI):
         if models_mgr.is_downloaded("dinov2"):
             asyncio.create_task(_bg_load_dino())
         else:
-            # Ungated — no token needed. Models are built in: fetch silently.
+            # Ungated - no token needed. Models are built in: fetch silently.
             async def _auto_dino() -> None:
-                print("[server] DINOv2 weights missing — auto-downloading...")
+                print("[server] DINOv2 weights missing - auto-downloading...")
                 await asyncio.to_thread(models_mgr.start_download, "dinov2")
                 while True:
                     await asyncio.sleep(5)
@@ -712,17 +712,17 @@ async def lifespan(app: FastAPI):
                         return
             asyncio.create_task(_auto_dino())
         if os.environ.get("CHARLIE_DISABLED", "").lower() in ("1", "true", "yes", "on"):
-            print("[server] CHARLIE_DISABLED set — pipeline_charlie endpoints will return 503.")
+            print("[server] CHARLIE_DISABLED set - pipeline_charlie endpoints will return 503.")
             state["charlie"] = None
         elif models_mgr.is_downloaded("sam3"):
             asyncio.create_task(_bg_load_charlie())
         elif models_mgr.hf_token():
-            # SAM3 is the product — with a token on file, get it without
+            # SAM3 is the product - with a token on file, get it without
             # being asked: download in the background, load when it lands.
             state["charlie"] = None
 
             async def _auto_sam3() -> None:
-                print("[server] SAM3 weights missing — auto-downloading (token on file)...")
+                print("[server] SAM3 weights missing - auto-downloading (token on file)...")
                 await asyncio.to_thread(models_mgr.start_download, "sam3")
                 while True:
                     await asyncio.sleep(5)
@@ -738,7 +738,7 @@ async def lifespan(app: FastAPI):
         else:
             state["charlie"] = None
             print(
-                "[server] SAM3 needs a Hugging Face token (license-gated) — "
+                "[server] SAM3 needs a Hugging Face token (license-gated) - "
                 "add it in the setup screen and it downloads + loads automatically"
             )
     else:
@@ -762,7 +762,7 @@ async def lifespan(app: FastAPI):
     state["jobs"].start_worker()
 
     # Worker watchdog: if any of the JobManager's worker tasks exits
-    # (shouldn't happen — we hardened it — but be paranoid), revive the
+    # (shouldn't happen - we hardened it - but be paranoid), revive the
     # missing slots. `start_worker(n=...)` is idempotent: live workers
     # stay, dead/missing slots get respawned.
     async def _worker_watchdog() -> None:
@@ -771,7 +771,7 @@ async def lifespan(app: FastAPI):
             wts = state["jobs"].worker_tasks
             live = [t for t in wts if not t.done()]
             if len(live) < len(wts):
-                print(f"[jobs] {len(wts) - len(live)} of {len(wts)} workers exited — restarting")
+                print(f"[jobs] {len(wts) - len(live)} of {len(wts)} workers exited - restarting")
                 state["jobs"].start_worker()
     state["_worker_watchdog"] = asyncio.create_task(_worker_watchdog())
 
@@ -785,7 +785,7 @@ app = FastAPI(
     lifespan=lifespan,
     # Disable the auto-generated OpenAPI schema + Swagger / ReDoc UIs.
     # Public scanners hitting our Cloudflare tunnel were pulling the
-    # full API surface map from /openapi.json — turning these off
+    # full API surface map from /openapi.json - turning these off
     # makes /openapi.json, /docs, /redoc all 404. If you ever need
     # the docs locally, re-enable conditionally on an env flag.
     docs_url=None,
@@ -829,7 +829,7 @@ def manifest_path(project_id: str) -> Path:
 
 
 # ─── Manifest RAM cache ──────────────────────────────────────────
-# Every API request hits load_manifest at least once (often more —
+# Every API request hits load_manifest at least once (often more -
 # `/api/projects` walks every project, the per-request handlers
 # read-modify-write, etc.). Reading + parsing the JSON off disk on
 # each call adds up to a noticeable share of latency, especially on
@@ -847,11 +847,11 @@ def manifest_path(project_id: str) -> Path:
 # logged at startup. Skipping eviction is fine until that scales by
 # orders of magnitude.
 # Built-payload cache. Stores the output of expensive endpoints
-# (/overview, /annotations, /dataset-stats — both lite and full)
+# (/overview, /annotations, /dataset-stats - both lite and full)
 # keyed by (project_id, name) → (manifest_mtime, payload).
 # A handler checks _PAYLOAD_CACHE before doing any work; on a hit
 # (cached mtime >= current disk mtime) it returns the cached dict
-# immediately. save_manifest doesn't need to touch this — the next
+# immediately. save_manifest doesn't need to touch this - the next
 # read picks up the new mtime and misses the cache automatically.
 _PAYLOAD_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 _PAYLOAD_CACHE_LOCK = __import__("threading").Lock()
@@ -929,7 +929,7 @@ async def _payload_revalidate(project_id: str, name: str, builder) -> None:
 # After every manifest write the backend pre-builds:
 #   - overview_first100.json  (the first-batch /overview payload)
 #   - dataset_stats_lite.json (already exists)
-# Reads pull straight from these files — zero compute, zero manifest
+# Reads pull straight from these files - zero compute, zero manifest
 # parse on the request path. The labelling job's per-image saves
 # trigger an async rebuild that's deduped through
 # _SIDECAR_REFRESH_IN_FLIGHT so rapid writes don't pile up rebuilds.
@@ -939,7 +939,7 @@ _INITIAL_PAYLOAD_LIMIT = 20  # matches FE's /initial first-paint slice
 _SIDECAR_REFRESH_IN_FLIGHT: set[str] = set()
 # Projects with sidecar refresh suppressed. Used by long-running jobs
 # (label_charlie, augment_generate) that save the manifest many times
-# in quick succession — without suppression each flush kicks a fresh
+# in quick succession - without suppression each flush kicks a fresh
 # overview + stats + initial + workspace-card rebuild, and on a big
 # manifest those rebuilds can each take seconds, piling up faster
 # than they drain. The job adds its project_id at start, removes it
@@ -953,7 +953,7 @@ def _overview_sidecar_path(project_id: str) -> Path:
 
 
 def _workspace_card_sidecar_path(project_id: str) -> Path:
-    """Per-project sidecar for /api/projects' card payload — id, name,
+    """Per-project sidecar for /api/projects' card payload - id, name,
     counters, tags, cover info. Built once on save_manifest so the
     list endpoint just reads N small JSON files instead of opening
     N multi-MB manifests on cold-start."""
@@ -982,7 +982,7 @@ def _build_workspace_card_payload(project_id: str, manifest: dict) -> dict:
                 return False
             # User edits (click-to-detect, add-box, Clear all) are
             # the authoritative signal once editedBoxesSet flips
-            # True — a labelled=False entry that the user manually
+            # True - a labelled=False entry that the user manually
             # drew boxes on IS labelled; a labelled=True entry the
             # user emptied via Clear all is NOT.
             if entry.get("editedBoxesSet"):
@@ -1003,7 +1003,7 @@ def _build_workspace_card_payload(project_id: str, manifest: dict) -> dict:
     cover_subdir: str | None = None
     # A user-uploaded cover wins over any picked/random one and is served via
     # the cover_thumb endpoint, so we only need a truthy thumbnail marker here
-    # (no subdir — it lives at the project root, not in references/imports).
+    # (no subdir - it lives at the project root, not in references/imports).
     if manifest.get("cover_uploaded"):
         cover = "cover_upload.jpg"
         cover_subdir = None
@@ -1157,7 +1157,7 @@ def _write_overview_sidecar(project_id: str) -> None:
 
 def _read_overview_sidecar(project_id: str) -> dict | None:
     """Return the persisted first-100 overview, or None when missing /
-    unreadable. Allow-stale — the file is good enough until the next
+    unreadable. Allow-stale - the file is good enough until the next
     write replaces it. /overview compute path is the fallback."""
     p = _overview_sidecar_path(project_id)
     if not p.exists():
@@ -1174,7 +1174,7 @@ def _read_overview_sidecar(project_id: str) -> dict | None:
 def _write_initial_sidecar(project_id: str) -> None:
     """Combine the just-written overview + dataset-stats sidecars into
     one initial-paint document. Cheap because it's just two file reads
-    plus a slice — no manifest reload, no recompute. Called from
+    plus a slice - no manifest reload, no recompute. Called from
     _kick_sidecar_refresh AFTER the two upstream sidecars have been
     rewritten."""
     try:
@@ -1186,7 +1186,7 @@ def _write_initial_sidecar(project_id: str) -> None:
         if overview is None:
             return
         imports = (overview.get("imports") or [])[:_INITIAL_PAYLOAD_LIMIT]
-        # Stats-lite sidecar is read fresh from disk — same path the
+        # Stats-lite sidecar is read fresh from disk - same path the
         # /dataset-stats?lite=true endpoint uses. If it doesn't exist
         # yet (first-ever build), stats fall through to None and the
         # FE re-fetches.
@@ -1200,7 +1200,7 @@ def _write_initial_sidecar(project_id: str) -> None:
             except Exception:
                 stats_payload = None
         payload = {
-            # Project meta — flat, mirrors what /overview returns at
+            # Project meta - flat, mirrors what /overview returns at
             # the top level so the FE's destructuring keeps working.
             "id": overview.get("id"),
             "name": overview.get("name"),
@@ -1227,12 +1227,12 @@ def _write_initial_sidecar(project_id: str) -> None:
             "owner": overview.get("owner"),
             "createdBy": overview.get("createdBy"),
             "dataset_health": overview.get("dataset_health"),
-            # First-paint payload — gallery covers + chip rails + box
+            # First-paint payload - gallery covers + chip rails + box
             # counts + reference metadata.
             "references": overview.get("references") or [],
             "imports": imports,
             "imports_total": overview.get("imports_total") or 0,
-            # Stats card data — counts + label distribution + 3-factor
+            # Stats card data - counts + label distribution + 3-factor
             # health score. The variation plot (full payload) is fetched
             # later via /dataset-stats when the user expands the card.
             "stats": stats_payload,
@@ -1251,7 +1251,7 @@ def _write_initial_sidecar(project_id: str) -> None:
 
 def _read_initial_sidecar(project_id: str) -> dict | None:
     """Return the persisted first-paint document, or None if missing.
-    Allow-stale — by the time the user sees this on the next nav, the
+    Allow-stale - by the time the user sees this on the next nav, the
     next manifest write will have rewritten it."""
     p = _initial_sidecar_path(project_id)
     if not p.exists():
@@ -1267,12 +1267,12 @@ def _read_initial_sidecar(project_id: str) -> dict | None:
 
 def _kick_sidecar_refresh(project_id: str) -> None:
     """Schedule async rebuild of every read-path sidecar for this
-    project. Deduped — if a refresh is already in flight, subsequent
+    project. Deduped - if a refresh is already in flight, subsequent
     calls are no-ops until it finishes (in which case the new save
     is reflected in the next refresh anyway because save_manifest
     bumps disk mtime which the rebuild reads)."""
     # Suppressed during long-running jobs (label_charlie's per-flush
-    # save loop is the worst offender — on a big manifest each
+    # save loop is the worst offender - on a big manifest each
     # rebuild can take seconds, faster than the job is saving). The
     # job will fire one final refresh on completion to capture the
     # end state.
@@ -1284,7 +1284,7 @@ def _kick_sidecar_refresh(project_id: str) -> None:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         # save_manifest can run outside an event loop (CLI scripts,
-        # tests). Skip silently — sidecars will be (re)built lazily
+        # tests). Skip silently - sidecars will be (re)built lazily
         # on the next read.
         return
     _SIDECAR_REFRESH_IN_FLIGHT.add(project_id)
@@ -1298,7 +1298,7 @@ def _kick_sidecar_refresh(project_id: str) -> None:
             # Run the rebuilds on the dedicated bg pool, NOT asyncio's
             # default executor. These are multi-second manifest reads;
             # on the default pool they starve request-path work (the
-            # FE's /annotations + /overview builds, image serving) —
+            # FE's /annotations + /overview builds, image serving) -
             # which is what left freshly-labelled tiles showing
             # "Unlabelled" for 10-15s after a job completed while the
             # default pool churned through the completion-time sidecar
@@ -1306,11 +1306,11 @@ def _kick_sidecar_refresh(project_id: str) -> None:
             # syncAnnotations build runs immediately.
             await loop.run_in_executor(_BG_IMAGE_EXECUTOR, _write_overview_sidecar, project_id)
             await loop.run_in_executor(_BG_IMAGE_EXECUTOR, _persist_dataset_stats, project_id, True)
-            # Combined first-paint sidecar — reads the two upstream
+            # Combined first-paint sidecar - reads the two upstream
             # files (already on disk by now) and merges. Must run
             # AFTER both above so it captures their fresh contents.
             await loop.run_in_executor(_BG_IMAGE_EXECUTOR, _write_initial_sidecar, project_id)
-            # Workspace card sidecar — fields /api/projects' loop used
+            # Workspace card sidecar - fields /api/projects' loop used
             # to compute by loading the full multi-MB manifest per
             # project. Bake them once here so the list endpoint can
             # serve N projects from N small JSON reads instead.
@@ -1326,7 +1326,7 @@ def _kick_sidecar_refresh(project_id: str) -> None:
 _MANIFEST_CACHE: dict[str, dict] = {}
 # Disk mtime when the cache entry was populated. Used to invalidate
 # the cache when the manifest file has been written by ANY process
-# (a different gunicorn worker, an external editor, etc.) — without
+# (a different gunicorn worker, an external editor, etc.) - without
 # this check, the cache became a "labels / refs lost on reopen" bug
 # when the backend ran with multiple workers, since each worker had
 # a private cache that never noticed sibling-worker writes.
@@ -1344,13 +1344,13 @@ _manifest_cache_stale = 0
 # Tombstones for recently-deleted projects. delete_project records the
 # id here (under _MANIFEST_CACHE_LOCK) BEFORE removing the folder, and
 # save_manifest refuses to write for a tombstoned id. Without this, a
-# write that races the delete — a debounced label-metadata autosave, a
-# like/favourite, or an in-flight job/sidecar flush — would re-run
+# write that races the delete - a debounced label-metadata autosave, a
+# like/favourite, or an in-flight job/sidecar flush - would re-run
 # save_manifest's `mkdir(parents=True)` and recreate the project
 # directory + manifest, resurrecting the deleted project (which then
 # reappears in the workspace, sometimes alongside a stale card as a
 # duplicate). Bounded FIFO: ids are random UUIDs and never reused, so
-# evicting the oldest entry once the cap is hit is safe — any write
+# evicting the oldest entry once the cap is hit is safe - any write
 # racing that delete is long finished by then.
 _DELETED_PROJECT_IDS: "OrderedDict[str, float]" = __import__("collections").OrderedDict()
 _DELETED_PROJECT_IDS_MAX = 4096
@@ -1365,7 +1365,7 @@ def _mark_project_deleted(project_id: str) -> None:
 
 
 def _unmark_project_deleted(project_id: str) -> None:
-    """Undo a tombstone — used when a delete fails partway so a project
+    """Undo a tombstone - used when a delete fails partway so a project
     that's still on disk doesn't get permanently frozen against writes."""
     with _MANIFEST_CACHE_LOCK:
         _DELETED_PROJECT_IDS.pop(project_id, None)
@@ -1378,7 +1378,7 @@ def _is_project_deleted(project_id: str) -> bool:
 
 def _manifest_disk_mtime(project_id: str) -> float:
     """Change stamp in seconds, or 0 if missing. store.save() always
-    rewrites dataset.json, so its mtime moves on every persisted change —
+    rewrites dataset.json, so its mtime moves on every persisted change -
     the cache validity marker survives the manifest split unchanged."""
     return store.manifest_stamp(project_id)
 
@@ -1386,7 +1386,7 @@ def _manifest_disk_mtime(project_id: str) -> float:
 def load_manifest(project_id: str, copy: bool = True) -> dict:
     """Read the on-disk manifest, going through the in-memory cache when
     fresh. The deep-copy on warm-cache hits is the biggest single cost
-    for big projects (~200-500 ms on a 30 MB nested dict) — callers that
+    for big projects (~200-500 ms on a 30 MB nested dict) - callers that
     only READ the manifest can pass copy=False and skip it entirely. The
     cache lifetime is the response, not the process, so racing mutations
     aren't a concern in the read-only paths.
@@ -1415,7 +1415,7 @@ def load_manifest(project_id: str, copy: bool = True) -> dict:
             _manifest_cache_hits += 1
             return _copy.deepcopy(cached) if copy else cached
         if cached is not None and disk_mtime > cached_mtime:
-            # Cache is stale (disk was written by someone else —
+            # Cache is stale (disk was written by someone else -
             # another worker, an external edit, etc.). Drop and
             # re-read.
             _manifest_cache_stale += 1
@@ -1439,7 +1439,7 @@ def load_manifest(project_id: str, copy: bool = True) -> dict:
     # Caller that asked for a copy gets a fresh deepcopy of what we
     # just parsed. The cache also stores a fresh copy in that case
     # (above) so subsequent reads aren't aliased to the caller's
-    # dict. When copy=False we share the parsed dict directly — the
+    # dict. When copy=False we share the parsed dict directly - the
     # cache and the caller see the same reference.
     return _copy.deepcopy(data) if copy else data
 
@@ -1452,7 +1452,7 @@ def save_manifest(project_id: str, manifest: dict, *, cache_by_ref: bool = False
     # folder + manifest below via mkdir, bringing the project back.
     if _is_project_deleted(project_id):
         return
-    # New datasets get their workspace folder on first save — creation
+    # New datasets get their workspace folder on first save - creation
     # flows (create, duplicate, derive) don't need a separate step.
     if not store.dataset_exists(project_id):
         store.create_dataset_dir(
@@ -1462,8 +1462,8 @@ def save_manifest(project_id: str, manifest: dict, *, cache_by_ref: bool = False
         )
     # One-time slim: older label_charlie runs persisted the raw DINOv2
     # (1024-d) + SigLIP (768-d) embedding vectors on every TEST-IMAGE
-    # detection. Those vectors are never read back for imports — the
-    # resolver re-embeds fresh crops on each (re)label — so they were
+    # detection. Those vectors are never read back for imports - the
+    # resolver re-embeds fresh crops on each (re)label - so they were
     # pure bloat that made big manifests ~10× larger (≈200 MB at 4000
     # imgs). That bloat is what made every whole-manifest write O(n²)
     # past ~400 labels AND made the cached + parsed giant dict drag
@@ -1471,7 +1471,7 @@ def save_manifest(project_id: str, manifest: dict, *, cache_by_ref: bool = False
     # (see _flush_label_updates); this heals any pre-existing manifest
     # the first time it's saved, then sets a flag so the walk is
     # skipped on every later save (keeping the hot per-edit path free).
-    # References (manifest["references"]) keep their embeddings — the
+    # References (manifest["references"]) keep their embeddings - the
     # resolve step genuinely reads those back.
     if not manifest.get("_imports_embeddings_stripped"):
         for _e in manifest.get("imports") or []:
@@ -1493,7 +1493,7 @@ def save_manifest(project_id: str, manifest: dict, *, cache_by_ref: bool = False
         # Default seeds the cache with a deepcopy so future mutations
         # of the caller's `manifest` variable don't bleed into the
         # cache. `cache_by_ref=True` skips the deepcopy and is safe
-        # ONLY when the caller is the last writer of the dict — e.g.
+        # ONLY when the caller is the last writer of the dict - e.g.
         # a label_charlie flush that's inside the per-project write
         # lock and discards `mm` immediately after save. Skipping
         # the deepcopy saves 200-500ms per call on a 30MB manifest,
@@ -1529,7 +1529,7 @@ def invalidate_manifest_cache(project_id: str) -> None:
 # O(1); it's built once in the background on first use. Live re-sync is debounced
 # so a burst of parent saves (e.g. a labelling job) coalesces into one pass.
 try:  # never let the derived feature break the server's boot
-    import derived as _derived_mod  # noqa: E402  (gd/derived.py — no server import, no cycle)
+    import derived as _derived_mod  # noqa: E402  (gd/derived.py - no server import, no cycle)
 except Exception as _derive_imp_err:
     _derived_mod = None
     print(f"[derived] feature disabled (import failed): {_derive_imp_err}", flush=True)
@@ -1709,14 +1709,14 @@ def _log_manifest_cache_capacity() -> None:
         _set_image_cache_budget(img_budget_bytes)
         print(
             f"[manifest-cache] system RAM: {total_gb:.1f} GB total, "
-            f"{avail_gb:.1f} GB available — cap-free cache (target ≤ {cap} manifests)"
+            f"{avail_gb:.1f} GB available - cap-free cache (target ≤ {cap} manifests)"
         )
         print(
             f"[image-cache] budget: {img_budget_bytes / 1e9:.1f} GB "
             f"(LRU eviction over budget)"
         )
     except Exception:
-        # psutil missing or any other error — just don't log the
+        # psutil missing or any other error - just don't log the
         # capacity hint. Caches still work; image cache stays at
         # its default 0-byte budget (effectively disabled until
         # explicitly set).
@@ -1724,7 +1724,7 @@ def _log_manifest_cache_capacity() -> None:
         # Conservative fallback so the image cache still works
         # without the RAM probe.
         _set_image_cache_budget(1_000_000_000)
-        print("[image-cache] budget: 1.0 GB (default — psutil unavailable)")
+        print("[image-cache] budget: 1.0 GB (default - psutil unavailable)")
 
 
 # Now that load_manifest is defined we can finish wiring the
@@ -1758,7 +1758,7 @@ def empty_manifest(name: str, owner: str = "", project_id: str | None = None) ->
         "prompt": "",
         "tags": [],
         # Match the frontend's "Normal" preset so new projects open
-        # cleanly on Normal mode in the picker — the old (0.25, 0.25,
+        # cleanly on Normal mode in the picker - the old (0.25, 0.25,
         # 0.5) defaults don't line up with any named mode and so showed
         # up as a Custom pill on first load, which surprised users.
         "thresholds": {"box": 0.05, "text": 0.15, "nms": 0.7},
@@ -1815,7 +1815,7 @@ def image_size(p: Path) -> dict[str, int]:
 
 
 # Preference-model code (review checkpoint, logistic-regression trainer,
-# CLIP-augmented features) lived here. Removed — VLM validation alone
+# CLIP-augmented features) lived here. Removed - VLM validation alone
 # now decides accept/reject, and auto-label runs through to completion.
 
 
@@ -1955,10 +1955,10 @@ def _charlie_segment_specific_with_fallback(
     nothing, so well-behaved projects (every label detected) are
     untouched. Generic boxes overlapping an existing detection (IoU > 0.5)
     are dropped, and their `gd_label` is cleared so "object"/"animal"
-    never leaks in as a label prior — the references decide.
+    never leaks in as a label prior - the references decide.
     """
     # Both passes (real labels + generic fallback) honour the same
-    # resolution choice — tiled native crops or the classic 1500px pass.
+    # resolution choice - tiled native crops or the classic 1500px pass.
     def _seg(im, lbls):
         if tile_native:
             return charlie.segment_labels_tiled(
@@ -2022,11 +2022,11 @@ def _charlie_fuse_embed_vlm(
     if the VLM picked the OTHER candidate (an active vote against
     this one), and 0 if the VLM declined or picked outside the
     candidate set. `weight` controls how much the VLM can move things
-    relative to the embedding signal — at the default 0.3 a VLM at
+    relative to the embedding signal - at the default 0.3 a VLM at
     full confidence can flip an embed sim margin of up to ~0.6.
 
     Returns `(winner_label, fused_margin, fused_scores)`. The margin
-    is over the candidate set only — it's the post-fusion equivalent
+    is over the candidate set only - it's the post-fusion equivalent
     of the resolver's `embed_margin` and the caller uses it to decide
     whether the detection is still ambiguous after fusion.
     """
@@ -2067,7 +2067,7 @@ _CHARLIE_NMS_IOU = float(os.environ.get("CHARLIE_SPECIFIC_NMS_IOU", "0.6"))
 # Containment ratio: when one same-label box is THIS fraction-or-more
 # inside another (intersection / smaller_area), suppress regardless
 # of IoU. Catches the partial-mask case where SAM3 segments most of
-# an object once AND segments a sub-region a second time — the two
+# an object once AND segments a sub-region a second time - the two
 # boxes share a label and the smaller is clearly the same object
 # viewed at a smaller crop. 0.7 keeps "two glasses overlapping at a
 # corner" out but kills "one box inside another" duplicates.
@@ -2076,7 +2076,7 @@ _CHARLIE_NMS_CONTAINMENT = float(os.environ.get("CHARLIE_NMS_CONTAINMENT", "0.7"
 
 def _charlie_boxes_should_merge(box_a, box_b) -> bool:
     """Same-label dedupe predicate. True when boxes a + b probably
-    cover the same physical object — high IoU OR one box mostly
+    cover the same physical object - high IoU OR one box mostly
     contained inside the other."""
     if not box_a or not box_b or len(box_a) < 4 or len(box_b) < 4:
         return False
@@ -2104,7 +2104,7 @@ def _charlie_nms_same_label(detections: list[dict]) -> list[dict]:
     always the same object detected twice (SAM3 occasionally fires
     duplicate concept matches on the same region). Drop the lower-
     scoring member of each high-IoU same-label pair; keep the rest
-    untouched. Different-label boxes are NEVER suppressed here — a
+    untouched. Different-label boxes are NEVER suppressed here - a
     "person" overlapping a "skateboard" is a real annotation and
     the user picks both.
     """
@@ -2114,7 +2114,7 @@ def _charlie_nms_same_label(detections: list[dict]) -> list[dict]:
     def _label(d: dict) -> str:
         # pred_label > gd_label, lowercased. pred_label only fires
         # on specific (resolver-set) and shouldn't differ from
-        # gd_label on general — but we look at both for safety.
+        # gd_label on general - but we look at both for safety.
         lab = (d.get("pred_label") or d.get("gd_label") or "").strip().lower()
         return lab
 
@@ -2158,7 +2158,7 @@ def _charlie_nms_post_resolve(detections: list[dict], iou_thresh: float = _CHARL
     """Post-resolution NMS for Charlie's specific path.
 
     SAM3's per-label prompting makes the same physical object appear
-    once per sibling label — same box, near-identical mask, possibly
+    once per sibling label - same box, near-identical mask, possibly
     resolver-assigned to different labels depending on which crop
     landed on top of which reference cluster. Drops the lower-scoring
     member of each high-IoU pair so the gallery shows one detection
@@ -2294,7 +2294,7 @@ def _charlie_resolve_label_for_box(
 
     # Reference embeddings loaded from disk for this project, then scored
     # via _charlie_resolve_from_refs (interactive click-to-detect / add-box
-    # path — uses Fisher + patch tokens). NOTE: the labelling JOB
+    # path - uses Fisher + patch tokens). NOTE: the labelling JOB
     # (label_charlie) and the public demo deliberately skip Fisher/patches
     # and call _v2_resolve_label_specific directly with raw refs.
     try:
@@ -2324,15 +2324,15 @@ def _charlie_resolve_from_refs(
 ):
     """Score one already-embedded box crop against pre-loaded reference
     embeddings with the V2 specific resolver. Extracted from
-    _charlie_resolve_label_for_box so the public demo — which encodes
-    references in memory and has no persisted project — runs the
+    _charlie_resolve_label_for_box so the public demo - which encodes
+    references in memory and has no persisted project - runs the
     IDENTICAL resolver the app's labelling job + interactive endpoints
     use: same kNN scoring, same Fisher handling, same LOO class
     thresholds, same patch-token refinement.
 
     Patch tokens come from disk for a persisted project (project_id set),
     or the caller can pass them in directly (refs_patch / refs_patch_siglip
-    keyed by lowercased label) — that's how the demo gets patch-token
+    keyed by lowercased label) - that's how the demo gets patch-token
     parity without a project on disk. When neither is available the
     resolver falls back to pooled scoring.
     """
@@ -2347,7 +2347,7 @@ def _charlie_resolve_from_refs(
     if not refs_dino_arr:
         return None, timings
 
-    # No Fisher reweighting — match the batch labelling job, which
+    # No Fisher reweighting - match the batch labelling job, which
     # resolves with RAW refs (see _run_label_charlie_job_impl: "Pass raw
     # embeddings directly, no Fisher weighting. Fisher LDA overfits on
     # small reference sets and was causing systematic bias toward one
@@ -2433,7 +2433,7 @@ def _charlie_interactive_ref_label(
     candidate_labels: list[str],
 ) -> tuple[str | None, float | None]:
     """Resolve a label for an interactively-placed region (a SAM2 point /
-    box mask) against the project's references — the SAME basis the batch
+    box mask) against the project's references - the SAME basis the batch
     labelling job uses. Returns (label, score), or (None, None) when there
     are no usable references (general projects), so the caller falls back
     to the SAM3 / VLM path.
@@ -2569,11 +2569,11 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
 
     charlie = state.get("charlie")
     if charlie is None:
-        raise RuntimeError("pipeline_charlie not loaded — cannot run labelling")
+        raise RuntimeError("pipeline_charlie not loaded - cannot run labelling")
 
     # Timestamped progress markers so we can attribute slow labelling
     # jobs to specific stages (setup vs SAM3 vs resolver). The user
-    # report was "hangs at 0/1 forever on a 1000-image project" — the
+    # report was "hangs at 0/1 forever on a 1000-image project" - the
     # logs needed to differentiate "setup takes forever" from "first
     # SAM3 call takes forever" from "GPU is busy with another job".
     _t_job_start = time.perf_counter()
@@ -2582,7 +2582,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
         print(f"[label-charlie] {job.project} +{dt:.0f}ms {label}")
 
     _stage("setup: load manifest")
-    # copy=False — we read tags + iterate imports for the pending
+    # copy=False - we read tags + iterate imports for the pending
     # filter without mutating. Saves 200-500ms of deepcopy on big
     # manifests at job start.
     manifest = load_manifest(job.project, copy=False) or {}
@@ -2591,7 +2591,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
         raise RuntimeError("no labels defined for this project")
 
 
-    # Per-run SAM3 knobs — sent from the project page's Annotations
+    # Per-run SAM3 knobs - sent from the project page's Annotations
     # card. Each value is optional; None means "use the SAM3_* module
     # default in pipeline_charlie." Sanity-clamped so a malformed FE
     # payload can't push thresholds outside [0, 1] (which would either
@@ -2658,7 +2658,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
             refs_by_label_siglip_arr = _v2_stack_refs(by_label_siglip)
 
             # Plain LOO thresholds on raw (un-weighted) ref arrays.
-            # No Fisher LDA weighting — it overfits on small ref sets
+            # No Fisher LDA weighting - it overfits on small ref sets
             # (hare/rabbit with <20 refs per class) and amplifies noise
             # dimensions. Patch matching also disabled: plain pooled kNN
             # is more reliable when classes look visually similar.
@@ -2695,7 +2695,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
         if force_relabel:
             pending.append(entry)
             continue
-        # User-edited boxes win as the source of truth — see
+        # User-edited boxes win as the source of truth - see
         # _v2_is_labelled. A "Clear all" in the viewer leaves
         # labelled=True but flips editedBoxesSet=True with an
         # empty editedBoxes list, which is the user explicitly
@@ -2714,7 +2714,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
         if is_unlabelled:
             pending.append(entry)
     # Process pending in the same order the FE gallery shows them
-    # (createdAt DESC — newest at top-left, oldest at bottom-right).
+    # (createdAt DESC - newest at top-left, oldest at bottom-right).
     # The FE pre-assigns timestamps in REVERSE drop order within
     # each batch so this DESC iteration walks the grid top-left
     # → bottom-right consistently with how the user sees uploads
@@ -2770,7 +2770,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
             # in the same critical section: save_manifest re-seeds the
             # cache with its own deepcopy after the write lands, so
             # any concurrent reader who picks up our mutations
-            # transiently sees the post-flush state — which is the
+            # transiently sees the post-flush state - which is the
             # state we're about to persist anyway. The per-project
             # _manifest_write_lock above keeps other writers out of
             # the cache while we're mutating.
@@ -2782,7 +2782,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
                     continue
                 # If this image is here because the prior state was
                 # "edited boxes explicitly empty" (e.g. user did click-
-                # to-detect, then deleted that label — purge_label leaves
+                # to-detect, then deleted that label - purge_label leaves
                 # editedBoxes=[] + editedBoxesSet=True), the new auto
                 # detections we're about to write should become the
                 # source of truth in the viewer. Without this clear,
@@ -2800,7 +2800,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
                 # Persist the resolved detections WITHOUT the raw
                 # embedding vectors. The DINOv2 (1024-d) + SigLIP (768-d)
                 # float arrays on each detection are only needed during
-                # the resolve step above — which already ran — and a
+                # the resolve step above - which already ran - and a
                 # re-label always re-embeds fresh crops (see the
                 # _charlie_embed_detections call earlier in the loop), so
                 # a stored test-image embedding is never read back. Every
@@ -2808,14 +2808,14 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
                 # (manifest["references"], untouched here) or a freshly
                 # computed vector. Keeping them on test-image detections
                 # ballooned the manifest ~10× on specific projects (~200 MB
-                # at 4000 imgs) — which is what turned each flush's
+                # at 4000 imgs) - which is what turned each flush's
                 # whole-manifest write into an O(n²) slog past ~400 labels
                 # AND left the bloated cache + sidecar rebuilds dragging
                 # every other project's load. Stripping at the source
                 # keeps every flush's write small, so labelling stays
                 # fast regardless of dataset size. _strip_embedding keeps
                 # mask polygons + embed_sims, so the gallery overlay and
-                # the pipeline popup still work — it only drops the dead
+                # the pipeline popup still work - it only drops the dead
                 # vectors.
                 e["detections"] = [
                     _strip_embedding(d) if isinstance(d, dict) else d
@@ -2826,7 +2826,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
                 # Persisted cachebuster (epoch ms) for the labelled
                 # preview. Surfaced in _tile_overview so a cold reopen
                 # rebuilds the SAME ?v= the browser cached the segmented
-                # bake under — instead of dropping to the bare URL where
+                # bake under - instead of dropping to the bare URL where
                 # the pre-label blank preview is still cached.
                 e["labelledAt"] = int(time.time() * 1000)
                 # Snapshot the tags this entry was searched with so the
@@ -2858,7 +2858,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
                 # settingsLastRun mirrors labelsLastRun. The slider trio is
                 # only written when all three are present (a missing value
                 # means "use backend default", not a real pick); the tiling
-                # choice is written unconditionally — OUTSIDE that gate — so
+                # choice is written unconditionally - OUTSIDE that gate - so
                 # a default-slider run with tiling on still persists it for
                 # the FE to re-hydrate.
                 slr = dict(mm.get("settingsLastRun") or {})
@@ -2877,7 +2877,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
                     slr["tile_size"] = charlie_tile_size
                 else:
                     # Don't let an older run's explicit tile_size linger next
-                    # to this run's settings — absent means "backend default".
+                    # to this run's settings - absent means "backend default".
                     slr.pop("tile_size", None)
                 mm["settingsLastRun"] = slr
             mm["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -2928,14 +2928,14 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
         # Pre-emit so the FE knows which image is currently in flight
         # (paints a "Labelling…" overlay on the matching tile). The
         # post-emit at the bottom of the loop bumps n_done after the
-        # manifest write — the index never goes backwards.
+        # manifest write - the index never goes backwards.
         await emit("progress", {
             "index": n_done,
             "total": len(pending),
             "image": filename,
         })
 
-        # Retrieve the PIL image — either from the prefetch future
+        # Retrieve the PIL image - either from the prefetch future
         # (started at end of previous iteration / before the loop) or
         # freshly decoded. Running in executor keeps the event loop
         # free during the PIL decode (~20-100 ms for large images).
@@ -2977,7 +2977,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
                 # Specific datasets get the generic-fallback detector so a
                 # candidate box still surfaces for labels SAM3 can't localise
                 # by name (the references then assign the real label). General
-                # datasets keep plain segment_labels — SAM3's text label IS
+                # datasets keep plain segment_labels - SAM3's text label IS
                 # their label, so a generic box would have no meaning.
                 if dataset_type == "specific":
                     detections, timings = await loop.run_in_executor(
@@ -3017,7 +3017,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
                 # Specific-dataset path: embed immediately under the same
                 # lock so we don't pay a second acquire cycle or risk
                 # another job stealing the GPU slot between the two passes.
-                # General projects skip this — SAM3's text-prompt assignment
+                # General projects skip this - SAM3's text-prompt assignment
                 # is the label source of truth for them.
                 if dataset_type == "specific" and detections and refs_by_label_arr:
                     t_embed = time.perf_counter()
@@ -3033,7 +3033,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
 
         # Cancel landed mid-image (tiled runs are ~7× the work, so this is
         # the likely cancel point). The tiled detector returns ([], cancelled)
-        # — DON'T queue that as a real result: persisting it would mark the
+        # - DON'T queue that as a real result: persisting it would mark the
         # image labelled-with-zero-detections and, on a force_relabel run,
         # wipe its existing boxes. Bail before the append so the image stays
         # exactly as it was and is re-picked next run. Deliberately checks
@@ -3048,14 +3048,14 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
             for k_det, d in enumerate(detections):
                 emb_raw = d.get("embedding") or []
                 if not emb_raw:
-                    # Encoder failed for this crop — leave SAM3's
+                    # Encoder failed for this crop - leave SAM3's
                     # text-prompt label in place rather than rejecting
                     # outright. The detection will surface in the
                     # gallery; the user can fix it manually if wrong.
                     continue
                 emb_siglip_raw = d.get("siglip_embedding") or None
 
-                # Pass raw embeddings directly — no Fisher weighting.
+                # Pass raw embeddings directly - no Fisher weighting.
                 # Fisher LDA overfits on small reference sets and was
                 # causing systematic bias toward one class.
                 try:
@@ -3074,7 +3074,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
                 except Exception as e:
                     print(f"[label-charlie] resolver failed for one detection: {e}")
                     continue
-                # Merge resolver output into the detection — keys
+                # Merge resolver output into the detection - keys
                 # mirror what V2's runner writes so the FE pipeline
                 # popup + reject-reason explanations work without any
                 # wire-shape changes on Charlie's side.
@@ -3098,9 +3098,9 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
             timings["resolve_ms"] = round((time.perf_counter() - t_resolve) * 1000.0, 1)
 
             # VLM tiebreak. Detections the resolver flagged ambiguous
-            # (top-1 vs top-2 embed sim within V2_AMBIGUOUS_MARGIN —
+            # (top-1 vs top-2 embed sim within V2_AMBIGUOUS_MARGIN -
             # default 0.005) are coin-flip calls. Restrict Qwen-VL to
-            # those two labels and let it pick — same logic V2 uses
+            # those two labels and let it pick - same logic V2 uses
             # for its specific path. Confident embed decisions skip
             # the VLM entirely so the per-image cost stays low.
             ambiguous_indices = [
@@ -3220,7 +3220,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
 
             # Specific datasets never hard-reject. Any detection the
             # resolver would have rejected (low ref similarity, signal
-            # disagreement, etc.) is surfaced as "unsure" instead — kept
+            # disagreement, etc.) is surfaced as "unsure" instead - kept
             # with its best-guess label + the amber Unsure chip so the
             # user reviews it rather than silently losing the box. Runs
             # after NMS so overlapping duplicates are already gone (we
@@ -3304,7 +3304,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
             "n_detections": len(detections),
         })
         # Yield to the event loop between images. Matches the same
-        # pattern in _run_augment_generate_job — without this the
+        # pattern in _run_augment_generate_job - without this the
         # labelling runner hogged the loop for the full duration of
         # a 941-image run, blocking concurrent image fetches /
         # click-to-detect calls from other tabs.
@@ -3317,7 +3317,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
     # freshLabels intact so the user can re-trigger the unfinished label.
     await _flush_label_updates(mark_run=not cancel_event.is_set())
 
-    # Auto-augment-after-labelling hook removed by user request —
+    # Auto-augment-after-labelling hook removed by user request -
     # augmentations now only run when the user explicitly clicks
     # the Update button in the Augmentations card. The previous
     # implementation scheduled augment_generate at the end of every
@@ -3345,7 +3345,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
 
 
 async def _run_purge_label_job(job, emit, cancel_event):
-    """Strip every reference to a single label from a project — across
+    """Strip every reference to a single label from a project - across
     all imports' detections + editedBoxes, plus the manifest's tags /
     labelColours / label_aliases / verdicts. Emits per-image progress
     so the FE can render a labelling-style progress card. Survives a
@@ -3415,7 +3415,7 @@ async def _run_purge_label_job(job, emit, cancel_event):
                     dets = list(target_imp.get("detections") or [])
                     new_dets = [d for d in dets if _label_of(d) != target_key]
                     # Only touch editedBoxes if it ALREADY exists on
-                    # this import — otherwise we'd persist an empty
+                    # this import - otherwise we'd persist an empty
                     # list for an image that never had user edits,
                     # which makes the FE treat it as "user cleared
                     # everything" and flag the tile Unlabelled until
@@ -3433,8 +3433,8 @@ async def _run_purge_label_job(job, emit, cancel_event):
                         target_imp["detections"] = new_dets
                         # Only write editedBoxes back when this image
                         # already had user edits. Empty edited result
-                        # is fine to persist — that's the user having
-                        # explicitly cleared a labelled image — but a
+                        # is fine to persist - that's the user having
+                        # explicitly cleared a labelled image - but a
                         # MISSING editedBoxes must stay missing so
                         # the gallery's "is this user-edited?" gate
                         # doesn't misfire.
@@ -3474,7 +3474,7 @@ async def _run_purge_label_job(job, emit, cancel_event):
         # Yield so concurrent endpoints stay responsive.
         await asyncio.sleep(0)
 
-    # Final pass — strip the label from the project-level fields so
+    # Final pass - strip the label from the project-level fields so
     # the chip rail + colour map don't reanimate the term on next
     # mount. Done in one lock acquisition.
     async with write_lock:
@@ -3557,7 +3557,7 @@ def _charlie_reference_detections(image_pil, tags) -> "list[dict] | None":
             continue
         out.append({
             # SAM3's text-prompt match IS the label (same as the
-            # general label_charlie path — no reference resolver here).
+            # general label_charlie path - no reference resolver here).
             "label": d.get("gd_label") or d.get("pred_label"),
             "score": round(float(d.get("gd_score") or 0.0), 4),
             "box": [float(c) for c in box],
@@ -3576,8 +3576,8 @@ async def v2_process_reference(
     force_label: str = Form(""),
 ):
     """Detect + segment a single reference image, no VLM, no project
-    context. Prefers SAM3 (Charlie) — the same detector as the project
-    import labelling — and falls back to GroundingDINO + SAM2 when SAM3
+    context. Prefers SAM3 (Charlie) - the same detector as the project
+    import labelling - and falls back to GroundingDINO + SAM2 when SAM3
     isn't loaded.
 
     Request: multipart with the image file + a JSON-encoded list of
@@ -3604,7 +3604,7 @@ async def v2_process_reference(
         raise HTTPException(400, f"invalid labels payload: {e}")
     tags = [t.strip() for t in tag_list if t and t.strip()]
     if not tags:
-        # No labels means nothing to detect — fast-path empty result.
+        # No labels means nothing to detect - fast-path empty result.
         data = await image.read()
         with PILImage.open(io.BytesIO(data)) as pil:
             pil = pil.convert("RGB")
@@ -3616,7 +3616,7 @@ async def v2_process_reference(
     if not raw:
         raise HTTPException(400, "empty image upload")
 
-    # NSFW gate — same classifier as import endpoints. Blocks NSFW
+    # NSFW gate - same classifier as import endpoints. Blocks NSFW
     # reference images before any GPU work is done.
     _enforce_nsfw_or_451(raw, label="v2-ref-process", file=image.filename or "")
 
@@ -3643,7 +3643,7 @@ async def v2_process_reference(
 
     def _infer():
         try:
-            # SAM3 (Charlie) path — same detector as the project's import
+            # SAM3 (Charlie) path - same detector as the project's import
             # labelling. Preferred when loaded; falls back to GD+SAM2.
             charlie_dets = _charlie_reference_detections(image_pil, tags)
             if charlie_dets is not None:
@@ -3665,15 +3665,15 @@ async def v2_process_reference(
                     for d in charlie_dets:
                         d["box"] = [round(c, 2) for c in d["box"]]
                 return charlie_dets
-            # GD+SAM2 fallback removed in the portable build — SAM3 is the
+            # GD+SAM2 fallback removed in the portable build - SAM3 is the
             # only reference detector. None here means it isn't loaded yet.
-            raise RuntimeError("SAM3 not loaded — reference processing unavailable")
+            raise RuntimeError("SAM3 not loaded - reference processing unavailable")
         except Exception as exc:
             import traceback
             traceback.print_exc()
             raise RuntimeError(f"v2 reference pipeline failed: {exc}") from exc
 
-    # Interactive GPU priority — the user is watching a progress
+    # Interactive GPU priority - the user is watching a progress
     # spinner and reference processing blocks onboarding. Jumps ahead
     # of background label_charlie / augment jobs.
     try:
@@ -3737,7 +3737,7 @@ async def v2_create_project(
             for k, v in raw_colours.items():
                 key = str(k).strip().lower()
                 val = str(v).strip()
-                # Loose hex validation — anything malformed silently
+                # Loose hex validation - anything malformed silently
                 # drops, the frontend will derive a fallback colour.
                 if key and val.startswith("#") and 4 <= len(val) <= 9:
                     colour_map[key] = val
@@ -3754,7 +3754,7 @@ async def v2_create_project(
     manifest["references"] = []
     if colour_map:
         manifest["labelColours"] = colour_map
-    # Visibility — onboarding toggle. Same {private: true|false} flag
+    # Visibility - onboarding toggle. Same {private: true|false} flag
     # the settings page sets via PUT; baking it in at creation time
     # saves a follow-up round-trip.
     if str(is_private).strip().lower() in ("true", "1", "yes"):
@@ -3780,7 +3780,7 @@ async def v2_derive_project(
     user: str = Depends(current_user),
 ):
     """Create a CHILD project: per-detection crops of this (parent) project for
-    the selected labels — one image + one box + one label each. One-way linked:
+    the selected labels - one image + one box + one label each. One-way linked:
     the child re-syncs from the parent and never writes back."""
     parent = load_manifest(project_id, copy=False)
     if not parent:
@@ -3833,7 +3833,7 @@ async def v2_derive_project(
     child["tags"] = [] if new_labels else (sel or list(parent.get("tags") or []))
     child["references"] = []
     # If the parent is a SPECIFIC dataset (has reference images), pull its
-    # references through so the child is specific too — copy the ref entries
+    # references through so the child is specific too - copy the ref entries
     # (with their detection embeddings) + the image files, keeping only refs
     # relevant to the selected labels. Skipped entirely in "new" label mode:
     # the parent's references are tied to the parent's labels, which we're
@@ -3860,7 +3860,7 @@ async def v2_derive_project(
                 try:
                     _sh.copy2(src_refs / fn, dst_refs / fn)
                 except Exception:
-                    continue  # missing source file — skip this ref
+                    continue  # missing source file - skip this ref
             kept_refs.append(dict(ref))
         child["references"] = kept_refs
     # Carry the parent's label colours only when inheriting labels; "new" mode
@@ -3869,7 +3869,7 @@ async def v2_derive_project(
     if not new_labels and isinstance(pcol, dict):
         lower_sel = {s.lower() for s in sel}
         child["labelColours"] = {k: v for k, v in pcol.items() if not sel or str(k).lower() in lower_sel}
-    # Derived datasets are private by default — they're a working copy of the
+    # Derived datasets are private by default - they're a working copy of the
     # parent, not something to publish to the community feed.
     child["private"] = True
     child["derived"] = {
@@ -3890,7 +3890,7 @@ async def v2_derive_project(
     # in a Project the child joins it; otherwise auto-create a Project named
     # after the parent (privacy = the parent's own, so the parent's visibility is
     # unchanged) and add both. Best-effort: a failure here never blocks the
-    # derive itself. Skipped entirely when create_project is off — the child is
+    # derive itself. Skipped entirely when create_project is off - the child is
     # then left as a standalone dataset (not in any Project).
     if make_project:
         try:
@@ -3958,7 +3958,7 @@ async def v2_resync_child(project_id: str, user: str = Depends(current_user)):
     dependencies=[Depends(require_project_owner)],
 )
 async def v2_list_children(project_id: str):
-    """The derived (child) projects of this parent — for the parent's 'Derived
+    """The derived (child) projects of this parent - for the parent's 'Derived
     datasets' list."""
     _ensure_derived_index()
     out = []
@@ -4003,9 +4003,9 @@ async def v2_upload_reference(
     Two call modes:
 
       a) Pre-computed (legacy): caller passes `detections` (already
-         from /api/v2/references/process) — server skips inference.
+         from /api/v2/references/process) - server skips inference.
       b) Single-shot: caller passes `labels` (a JSON list of label
-         strings) and an empty `detections` — server runs GD+SAM
+         strings) and an empty `detections` - server runs GD+SAM
          inline, replacing the now-deprecated /process round-trip.
          This is what the V2 onboarding does so each reference image
          hits the server exactly once instead of twice.
@@ -4017,7 +4017,7 @@ async def v2_upload_reference(
     proj = project_dir(project_id)
     if not proj.exists():
         raise HTTPException(404, "project not found")
-    # Existence check only — the actual manifest used for the
+    # Existence check only - the actual manifest used for the
     # mutate+save lives inside the manifest_write lock at the
     # bottom of the handler so concurrent uploads don't clobber
     # each other's appends.
@@ -4079,7 +4079,7 @@ async def v2_upload_reference(
                         d["box"] = [round(c, 2) for c in d["box"]]
                     print(f"[v2-ref-upload] inline SAM3 tags={tags} → {len(charlie_dets)} det(s)")
                     return charlie_dets
-                # GD+SAM2 fallback removed — no detections when SAM3 isn't
+                # GD+SAM2 fallback removed - no detections when SAM3 isn't
                 # loaded; the whole-image fallback box below still applies.
                 return []
 
@@ -4158,11 +4158,11 @@ async def v2_upload_reference(
                 print(
                     f"[v2-ref-upload] embedded {len(indices)} of {len(det_list)} detection(s) "
                     f"for ref {ref_id} (dinov{v2_dinov2.EMBED_VERSION}"
-                    + (f" + siglipv{v2_siglip.EMBED_VERSION}" if sig_vecs is not None else " — siglip deferred")
+                    + (f" + siglipv{v2_siglip.EMBED_VERSION}" if sig_vecs is not None else " - siglip deferred")
                     + ")"
                 )
         else:
-            print(f"[v2-ref-upload] DINOv2 not loaded yet — embeddings deferred (lazy backfill on first import).")
+            print(f"[v2-ref-upload] DINOv2 not loaded yet - embeddings deferred (lazy backfill on first import).")
 
     # BlurHash placeholder so the FE can render a coloured gradient
     # before the real image bytes stream in. Encoded once at upload
@@ -4184,7 +4184,7 @@ async def v2_upload_reference(
     # load → mutate → save sequence so two concurrent /references
     # POSTs can't each load a stale manifest and overwrite each
     # other's append. Reload INSIDE the lock so we always start
-    # from the latest persisted state — the manifest variable
+    # from the latest persisted state - the manifest variable
     # checked above was just for the existence guard.
     write_lock = await _manifest_write_lock(project_id)
     async with write_lock:
@@ -4205,7 +4205,7 @@ async def v2_upload_reference(
         _apply_reference_dataset_flip(project_id)
     print(
         f"[v2-ref-upload] saved ref {ref_id} for project {project_id} "
-        f"— manifest now has {n_refs} reference(s), cover={manifest.get('cover')!r}"
+        f"- manifest now has {n_refs} reference(s), cover={manifest.get('cover')!r}"
     )
     return {
         "reference_id": ref_id,
@@ -4214,7 +4214,7 @@ async def v2_upload_reference(
         "height": height,
         # Echo detections back so the FE doesn't have to re-fetch the
         # manifest after a single-shot upload to render boxes.
-        # Embeddings are stripped from the response payload — they're
+        # Embeddings are stripped from the response payload - they're
         # 1024-dim float arrays that bloat the wire and the FE can
         # hydrate them on next manifest GET if it actually needs them.
         "detections": [
@@ -4231,7 +4231,7 @@ async def v2_upload_reference(
 )
 async def v2_delete_reference(project_id: str, reference_id: str):
     """Remove a single reference image from the project. Called when the
-    user deletes a ref during onboarding — the eager-upload path had
+    user deletes a ref during onboarding - the eager-upload path had
     already POSTed it to the server, so a local-only delete would leave
     an orphaned entry that would resurface on the next /initial hydration."""
     proj = project_dir(project_id)
@@ -4276,7 +4276,7 @@ async def v2_update_reference(project_id: str, reference_id: str, payload: Updat
     """Replace a reference's detections in the manifest and (re-)embed
     any boxes whose `embedding` is missing or whose geometry/mask
     doesn't match the previously stored copy. Used when the user
-    edits boxes in the V2 editor and clicks next/prev/close — the
+    edits boxes in the V2 editor and clicks next/prev/close - the
     FE batches the resulting detection list here so the manifest
     stays consistent with what they see and we don't re-encode on
     every reopen.
@@ -4287,7 +4287,7 @@ async def v2_update_reference(project_id: str, reference_id: str, payload: Updat
     """
     if not project_dir(project_id).exists():
         raise HTTPException(404, "project not found")
-    # Existence check only — the actual manifest used for the
+    # Existence check only - the actual manifest used for the
     # mutate+save lives inside the manifest_write lock at the
     # bottom of the handler so a concurrent /references POST
     # can't reset the references array between our load and save.
@@ -4361,7 +4361,7 @@ async def v2_update_reference(project_id: str, reference_id: str, payload: Updat
                     continue
                 # Old-version embeddings get re-encoded so the manifest
                 # stops mixing v3 (224×224 input) and v4 (518×518 input)
-                # vectors — the dim is the same but the feature space
+                # vectors - the dim is the same but the feature space
                 # subtly drifts between input resolutions.
                 bb = d.get("box") or []
                 if not (isinstance(bb, list) and len(bb) == 4):
@@ -4387,7 +4387,7 @@ async def v2_update_reference(project_id: str, reference_id: str, payload: Updat
             if squares:
                 loop = asyncio.get_running_loop()
 
-                # Encode under the GPU lock — sequential DINOv2 then
+                # Encode under the GPU lock - sequential DINOv2 then
                 # SigLIP keeps VRAM usage bounded vs. running them in
                 # parallel (each model owns its own forward pass on
                 # the same device).
@@ -4420,7 +4420,7 @@ async def v2_update_reference(project_id: str, reference_id: str, payload: Updat
                         new_dets[i]["siglip_version"] = v2_siglip.EMBED_VERSION
                         s_count += 1
                 print(
-                    f"[v2-ref-update] re-embedded ref {reference_id} — "
+                    f"[v2-ref-update] re-embedded ref {reference_id} - "
                     f"dino={d_count}/{len(new_dets)}, siglip={s_count}/{len(new_dets)}"
                 )
 
@@ -4550,7 +4550,7 @@ async def v2_upload_import(
         except Exception:
             pass
 
-    # BlurHash placeholder for the dataset gallery — same pattern
+    # BlurHash placeholder for the dataset gallery - same pattern
     # as references: render a colour gradient until the image bytes
     # arrive (lazily, on scroll-into-view).
     blurhash_str = _encode_blurhash_from_path(imports_dir / stored_name)
@@ -4568,7 +4568,7 @@ async def v2_upload_import(
     }
     # Atomic append under the per-project manifest write lock so
     # concurrent /imports POSTs don't overwrite each other (same
-    # bug as /references — load_manifest+mutate+save needs to be
+    # bug as /references - load_manifest+mutate+save needs to be
     # an atomic critical section).
     write_lock = await _manifest_write_lock(project_id)
     async with write_lock:
@@ -4577,7 +4577,7 @@ async def v2_upload_import(
         # Seed the project's cover from the first uploaded import if no
         # cover is set yet. V2 originally relied on references-flow to
         # set this, but Charlie / V3 projects skip references entirely
-        # — without this fallback the workspace card stays on a 404
+        # - without this fallback the workspace card stays on a 404
         # forever.
         if not manifest.get("cover"):
             manifest["cover"] = stored_name
@@ -4614,7 +4614,7 @@ async def v2_upload_import_raw(
     user: str = Depends(current_user),
 ):
     """Persist an imported image WITHOUT running detection. The
-    image is added to the project's manifest with empty detections —
+    image is added to the project's manifest with empty detections -
     the labelling pass runs later, kicked off by a separate job
     (kind='label_charlie') from the project page.
 
@@ -4629,7 +4629,7 @@ async def v2_upload_import_raw(
     # "manifest file disappeared between the dep and here" race
     # without paying for a second load_manifest deepcopy (which on a
     # 30MB / 1000-image project was 300-500ms of dead weight per
-    # upload — i.e. why "NSFW processing" felt 10s slower on a big
+    # upload - i.e. why "NSFW processing" felt 10s slower on a big
     # project than a small one).
     if not manifest_path(project_id).exists():
         raise HTTPException(404, "manifest not found")
@@ -4641,7 +4641,7 @@ async def v2_upload_import_raw(
     # request-completion and response-reception (Safari "Load failed",
     # intermediary timeout) triggers the FE catch-block retry and
     # creates two records for one user action. Cheap manifest scan
-    # — we re-check under the write lock below to close the TOCTOU
+    # - we re-check under the write lock below to close the TOCTOU
     # gap on concurrent retries.
     idem = (idempotency_key or "").strip()
     if idem:
@@ -4652,7 +4652,7 @@ async def v2_upload_import_raw(
     raw = await image.read()
     if not raw:
         print(
-            f"[v2-import-raw] 400 empty upload — filename={image.filename!r} "
+            f"[v2-import-raw] 400 empty upload - filename={image.filename!r} "
             f"content_type={image.content_type!r}"
         )
         raise HTTPException(400, "empty image upload")
@@ -4669,7 +4669,7 @@ async def v2_upload_import_raw(
     _loop = asyncio.get_running_loop()
 
     # Decode header for dimensions + detect format. JPEG sources are
-    # stored as-is (fast — no re-encode). Every NON-JPEG source (AVIF,
+    # stored as-is (fast - no re-encode). Every NON-JPEG source (AVIF,
     # WEBP, PNG, HEIC, CMYK JPEG, …) is FULLY decoded and re-encoded to
     # a baseline RGB JPEG so every downstream consumer handles a single
     # uniform format: the SAM3 labelling pipeline, the labelled_preview
@@ -4677,7 +4677,7 @@ async def v2_upload_import_raw(
     # kept its original bytes but was stored under a forced ".jpg" name
     # (format/extension mismatch); the GPU pipeline + preview renderer
     # couldn't always decode it, leaving the gallery tile a white square
-    # that never labelled — even though the browser, which decodes the
+    # that never labelled - even though the browser, which decodes the
     # raw bytes itself, still showed the image in the viewer.
     store_bytes = raw
     try:
@@ -4744,7 +4744,7 @@ async def v2_upload_import_raw(
     if idem:
         entry["idempotencyKey"] = idem
 
-    # NSFW gate — run synchronously BEFORE writing anything, so a blocked
+    # NSFW gate - run synchronously BEFORE writing anything, so a blocked
     # image never lands on disk or in the manifest. Previously this ran
     # in a background task AFTER the upload returned 200, which deleted
     # the file out from under a tile the FE had already painted, leaving
@@ -4776,7 +4776,7 @@ async def v2_upload_import_raw(
             )
         await _loop.run_in_executor(_BG_IMAGE_EXECUTOR, _nsfw_enforce)
 
-    # Write file to disk and update manifest concurrently — neither
+    # Write file to disk and update manifest concurrently - neither
     # depends on the other and both are fast I/O. Scheduling the write
     # here (before awaiting anything) means the file lands on disk in
     # parallel with the manifest lock acquisition.
@@ -4817,7 +4817,7 @@ async def v2_upload_import_raw(
 
     # Background task: blurhash only. NSFW already ran synchronously
     # above (a blocked image 451s before it ever reaches here), so
-    # there's no file/manifest entry to purge — we just compute the
+    # there's no file/manifest entry to purge - we just compute the
     # BlurHash gradient placeholder and stamp it onto the entry.
     _bg_pid = project_id
     _bg_iid = import_id
@@ -4858,7 +4858,7 @@ async def v2_upload_import_raw(
     # executor: a burst of uploads yields the GPU to any click-to-detect
     # (P_INTERACTIVE) or labelling job (P_JOB) instead of storming it,
     # and never ties up a request-path thread. This is what stops the
-    # import burst from stalling — embeddings trickle through in the
+    # import burst from stalling - embeddings trickle through in the
     # background while uploads return immediately.
     # Whole-image embedding for the stats card, off the hot path. The
     # shared helper bounds concurrency + pauses while a GPU job runs so a
@@ -4904,7 +4904,7 @@ def _sanitize_imported_boxes(raw_boxes, width: int, height: int) -> tuple[list[d
     {id, label, x0, y0, x1, y1, score, mask?} in absolute top-left pixel
     coords. Coerces numbers, repairs reversed corners, clamps to the image,
     and drops degenerate (effectively zero-area) boxes so a later re-export
-    can't silently lose them — _box_xyxy rejects any box with x1<=x0 or
+    can't silently lose them - _box_xyxy rejects any box with x1<=x0 or
     y1<=y0. Returns (clean_boxes, n_dropped)."""
     clean: list[dict] = []
     dropped = 0
@@ -5161,7 +5161,7 @@ async def v2_upload_import_raw_batch(
         # source of truth; labelled=True so the image counts as labelled even
         # when its annotation is intentionally EMPTY (background/negative
         # frames are valid training data). Boxes arrive in the uploaded
-        # image's pixel space — the FE scales them to match any downscale.
+        # image's pixel space - the FE scales them to match any downscale.
         _labels: list[str] = []
         _dropped = 0
         if idx < len(boxes):
@@ -5223,7 +5223,7 @@ async def v2_upload_import_raw_batch(
             mm.setdefault("imports", []).extend(to_add)
             # Union any imported class names into the project's label
             # vocabulary (manifest['tags']) so every imported box label is a
-            # first-class tag — colour assignment, the label picker, and the
+            # first-class tag - colour assignment, the label picker, and the
             # YOLO/COCO export category order all key off tags. Normally a
             # no-op (the project is created with the dataset's class list),
             # but it keeps boxes whose label is somehow missing exportable.
@@ -5306,7 +5306,7 @@ async def v2_imports_from_urls(
     """V2 mirror of /api/projects/{id}/images_from_urls. Pulls a
     list of Openverse-curated URLs, downloads each, validates,
     NSFW-gates, and appends to manifest["imports"] using the V2
-    deferred-labelling shape — same envelope /imports/raw writes,
+    deferred-labelling shape - same envelope /imports/raw writes,
     so the gallery + label_charlie job pick the new images up
     without any further FE work.
 
@@ -5399,7 +5399,7 @@ async def v2_imports_from_urls(
                 _tmp.write(data)
                 _tmp_path = Path(_tmp.name)
             try:
-                # Strict EXPOSED-only set — same rationale as the
+                # Strict EXPOSED-only set - same rationale as the
                 # /imports/raw gate: the broad COVERED classes
                 # false-positive on innocuous dataset/Openverse imagery
                 # (fruit, animals, people in PPE) and wrongly reject them.
@@ -5566,14 +5566,14 @@ class V2ImportPatch(BaseModel):
     dependencies=[Depends(require_project_owner)],
 )
 async def v2_update_import(project_id: str, import_id: str, payload: V2ImportPatch):
-    """Patch an existing import — typically the user's editedBoxes
+    """Patch an existing import - typically the user's editedBoxes
     after they've drawn / edited / deleted boxes in the viewer."""
     proj = project_dir(project_id)
     if not proj.exists():
         raise HTTPException(404, "project not found")
     write_lock = await _manifest_write_lock(project_id)
     async with write_lock:
-        # copy=False — we mutate + save under the per-project write
+        # copy=False - we mutate + save under the per-project write
         # lock and discard `manifest` right after. cache_by_ref on
         # the save closes the loop, both removing the deepcopies that
         # made each box-drag take 200-500ms longer than necessary on
@@ -5588,7 +5588,7 @@ async def v2_update_import(project_id: str, import_id: str, payload: V2ImportPat
                     imp["editedBoxes"] = payload.editedBoxes
                     # Mark this import as user-edited. The annotations
                     # endpoint reads this flag to decide whether to
-                    # send `editedBoxes` to the FE — without it, an
+                    # send `editedBoxes` to the FE - without it, an
                     # explicit delete-all (editedBoxes: []) would be
                     # indistinguishable from "no edits yet" and the
                     # auto detections would re-appear.
@@ -5614,7 +5614,7 @@ async def v2_update_import(project_id: str, import_id: str, payload: V2ImportPat
                 manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 save_manifest(project_id, manifest, cache_by_ref=True)
                 # The labelled preview was rendered from the previous
-                # detection set — drop it AND queue an immediate re-
+                # detection set - drop it AND queue an immediate re-
                 # bake so the next gallery thumb request hits a warm
                 # cache. The lazy GET path covers the race between
                 # invalidate + bake completion.
@@ -5684,7 +5684,7 @@ async def v2_delete_import(project_id: str, import_id: str):
         manifest["imports"] = kept
 
         # Child project: tombstone the source detection so a re-sync from the
-        # parent won't resurrect a crop the user deleted here. One-way only —
+        # parent won't resurrect a crop the user deleted here. One-way only -
         # this never touches the parent.
         if deleted_detkey and _derived_mod is not None and (manifest.get("derived") or {}).get("parentProjectId"):
             _derived_mod.suppress_detkey(manifest, deleted_detkey)
@@ -5764,7 +5764,7 @@ async def v2_delete_imports_batch(project_id: str, payload: DeleteImportsBatchIn
                 kept.append(imp)
         manifest["imports"] = kept
 
-        # Same cover-rescue logic as the single-import delete — if the
+        # Same cover-rescue logic as the single-import delete - if the
         # cover pointed at a now-deleted file, pick a fresh one from
         # what's left so the workspace card keeps a thumbnail.
         cover_filename = manifest.get("cover")
@@ -5800,7 +5800,7 @@ async def v2_delete_imports_batch(project_id: str, payload: DeleteImportsBatchIn
 def _invalidate_project_payloads(project_id: str) -> None:
     """Drop the in-memory payload cache entries AND the on-disk sidecars
     for a project. Called from any mutation that doesn't naturally fall
-    out of the sidecar mtime check — for instance the dedupe commit,
+    out of the sidecar mtime check - for instance the dedupe commit,
     which deletes imports + bumps manifest mtime but, without this, lets
     the stale-while-revalidate path serve the pre-delete /overview +
     /dataset-stats payloads to the very next request after the user's
@@ -5829,7 +5829,7 @@ class DedupeIn(BaseModel):
     destructive. `strategy` picks between exact byte-hash dedup
     (catches literal "same file uploaded twice" cases) and embedding-
     based near-duplicate dedup (catches the common "Roboflow re-export
-    of my own dataset" case — same pixels but JPEG-recompressed so byte
+    of my own dataset" case - same pixels but JPEG-recompressed so byte
     hashes differ). `threshold` is the cosine cutoff for "near" mode;
     default matches the dataset-stats card so the count it reports
     and the modal's group list reference the same source."""
@@ -5840,7 +5840,7 @@ class DedupeIn(BaseModel):
 
 
 def _import_file_sha256(project_id: str, filename: str) -> str | None:
-    """SHA256 of an import's file bytes. None on missing/unreadable —
+    """SHA256 of an import's file bytes. None on missing/unreadable -
     those imports just don't participate in the exact-dedup groups."""
     import hashlib
     p = project_dir(project_id) / "images" / filename
@@ -5875,7 +5875,7 @@ def _import_keeper_score(imp: dict) -> tuple[int, int, int]:
 async def v2_dedupe_imports(project_id: str, payload: DedupeIn):
     """Find (and optionally remove) duplicate imports.
 
-    `strategy=exact` groups by SHA256 of the on-disk bytes — catches
+    `strategy=exact` groups by SHA256 of the on-disk bytes - catches
     literal repeat uploads of the same file. Fast but misses JPEG
     re-encodes of the same image.
 
@@ -5886,7 +5886,7 @@ async def v2_dedupe_imports(project_id: str, payload: DedupeIn):
     case where the bytes differ but the pixels are visually the same.
 
     Each group's keeper is the import with the most edited boxes,
-    then most accepted detections, then anything with a filename — so
+    then most accepted detections, then anything with a filename - so
     we never throw away the labelled copy.
 
     `mode=preview` returns the groups without touching anything. The
@@ -6063,7 +6063,7 @@ async def v2_dedupe_imports(project_id: str, payload: DedupeIn):
             "total_imports": len(imports),
         }
 
-    # commit path — drop everyone in `drop` lists. Use the same write-
+    # commit path - drop everyone in `drop` lists. Use the same write-
     # lock + cover-rescue dance as the bulk-delete endpoint so we
     # don't reinvent the wheel.
     drop_ids = {d["id"] for g in groups for d in g["drop"] if d.get("id")}
@@ -6131,7 +6131,7 @@ async def v2_dedupe_imports(project_id: str, payload: DedupeIn):
 
 class IgnoreDupsIn(BaseModel):
     """Body for /imports/dedupe/ignore. `ids` are import IDs the user
-    accepts as duplicates but wants to keep — the near-duplicate
+    accepts as duplicates but wants to keep - the near-duplicate
     detection skips them going forward so the stats card stops
     reporting them and the dedupe review modal no longer surfaces
     them as candidates for deletion."""
@@ -6254,7 +6254,7 @@ async def v2_serve_import(project_id: str, filename: str, w: int = 0):
 # GPU-accelerated preview pipeline used by the Augmentations tab.
 # Loads a single image, applies the requested camera/sensor effects
 # in-place on a torch tensor, and returns a JPEG. Nothing is
-# persisted — the FE drives this live as the user moves the dials
+# persisted - the FE drives this live as the user moves the dials
 # so the preview reflects the chain immediately.
 
 
@@ -6263,7 +6263,7 @@ class AugmentPreviewIn(BaseModel):
     # project's /references/ or /imports/ subdir respectively.
     source: str
     filename: str
-    # Camera / sensor dials, 0..10 each (floats — the FE picks
+    # Camera / sensor dials, 0..10 each (floats - the FE picks
     # step 0.1 for finer control). 0 = identity. We map the 0..10
     # range onto perceptually-sensible strengths inside the kernel
     # so the FE can stay simple.
@@ -6281,7 +6281,7 @@ class AugmentPreviewIn(BaseModel):
     pixelation: float = 0
     low_resolution: float = 0
     lens_glare: float = 0
-    # Distortion category — geometric warps applied before the
+    # Distortion category - geometric warps applied before the
     # sensor chain. Perspective_warp is a 0..10 strength dial.
     # scale_min/max + rot_min/max define a range and the backend
     # samples one (scale, rotation) per render using the seed so
@@ -6292,7 +6292,7 @@ class AugmentPreviewIn(BaseModel):
     rot_min: float = 0.0
     rot_max: float = 0.0
     # Random block occlusion. Boxes are placed INSIDE the detection
-    # polygons of the chosen import (no effect on references — they
+    # polygons of the chosen import (no effect on references - they
     # don't carry detections). The dial controls how large each box
     # is, as a fraction of the per-detection bounding box.
     block_size: float = 0
@@ -6318,12 +6318,12 @@ class AugmentPreviewIn(BaseModel):
     # replaces everything outside with one of the supplied
     # backgrounds (picked at random by the seed).
     background_ids: list[str] | None = None
-    # Lighting variation — simulates time-of-day-style scene
+    # Lighting variation - simulates time-of-day-style scene
     # lighting shifts. 0..10 strength dial; the direction
     # (brighten / darken, warm / cool) is sampled by the seed so
     # different rolls land on different illuminations.
     lighting_strength: float = 0
-    # Hue shift — rotates colour hue by a seed-sampled offset
+    # Hue shift - rotates colour hue by a seed-sampled offset
     # proportional to strength. Sits under Distortion in the FE.
     hue_shift: float = 0
     # Optional: seed so the noise pattern is stable across slider
@@ -6336,7 +6336,7 @@ _AUG_DEVICE: "torch.device | None" = None
 # Dedicated single-thread executor for the augment runner. asyncio's
 # default ThreadPoolExecutor hops between many threads which makes
 # the CUDA context initialise per-thread the first time torch.cuda is
-# touched — that re-init takes hundreds of ms and starves the kernel
+# touched - that re-init takes hundreds of ms and starves the kernel
 # of warm caching across images. Pinning all augment work to ONE
 # dedicated thread keeps CUDA + the PyTorch caching allocator hot for
 # the full duration of a 941-image run while the event loop stays
@@ -6404,11 +6404,11 @@ def _aug_apply(
       → lens glare (baked-in optical flare overlaid last so it
                     isn't dimmed by the bit-depth quantisation).
 
-    Six of the dials have their effective max capped below 10 — the
+    Six of the dials have their effective max capped below 10 - the
     UI dial still goes 0..10 (so the user gets fine-grained control)
     but the value handed to each kernel is scaled by (cap / 10), so
     a UI value of 10 hits the new cap rather than the old 10. Caps
-    were chosen after empirically testing the dial range — past the
+    were chosen after empirically testing the dial range - past the
     cap each effect stopped looking like the real-world artefact and
     started looking destructive."""
     import torch.nn.functional as TF
@@ -6431,12 +6431,12 @@ def _aug_apply(
     # warp resamples via a polynomial radial map so straight lines
     # near the edges curve outward, matching what a cheap action-cam
     # lens does. Implemented with grid_sample on a normalised radial
-    # field — no Python loops, runs on the same device as x.
+    # field - no Python loops, runs on the same device as x.
     if lens_distortion > 0:
         _, H, W = x.shape
         # Wide-angle / fisheye barrel only. The dial used to be
         # bidirectional (negative = pincushion), but pincushion
-        # fundamentally needs source content beyond the frame —
+        # fundamentally needs source content beyond the frame -
         # without it, the negative side either painted black
         # corners or read as a near no-op even under normalisation.
         # The user wanted the dial to be primarily fisheye, so
@@ -6444,7 +6444,7 @@ def _aug_apply(
         # the UI clamps to 0..+10.
         # Strength 0..+10 → barrel coefficient 0..0.55. Output
         # corner factor = 1 - 2·k1 → 0.45 at full deflection, so
-        # the corner pixel samples from source r≈0.45 — a clear,
+        # the corner pixel samples from source r≈0.45 - a clear,
         # action-cam-style bulge.
         k1 = float(lens_distortion) / 10.0 * 0.55
         ys = torch.linspace(-1.0, 1.0, H, device=x.device, dtype=x.dtype)
@@ -6485,19 +6485,19 @@ def _aug_apply(
         b_jit = float(1.0 + (torch.rand(1, generator=g).item() - 0.5) * strength * 0.6)
         c_jit = float(1.0 + (torch.rand(1, generator=g).item() - 0.5) * strength * 0.6)
         s_jit = float(1.0 + (torch.rand(1, generator=g).item() - 0.5) * strength * 1.0)
-        # Brightness — scalar multiply, clamped.
+        # Brightness - scalar multiply, clamped.
         x = (x * b_jit).clamp(0.0, 1.0)
-        # Contrast — pull values toward / away from grey at 0.5.
+        # Contrast - pull values toward / away from grey at 0.5.
         mean = x.mean(dim=(1, 2), keepdim=True)
         x = ((x - mean) * c_jit + mean).clamp(0.0, 1.0)
-        # Saturation — pull toward / away from luminance grey.
+        # Saturation - pull toward / away from luminance grey.
         # Rec. 709 luma weights.
         luma = (0.2126 * x[0] + 0.7152 * x[1] + 0.0722 * x[2]).unsqueeze(0)
         x = (luma + (x - luma) * s_jit).clamp(0.0, 1.0)
 
     # ── Motion blur ──
     # Depthwise convolution with a horizontal line kernel. Kernel
-    # length scales smoothly with the float dial — strength 0
+    # length scales smoothly with the float dial - strength 0
     # short-circuits, strength 10 ends at a 21-px kernel.
     if motion_blur > 0:
         k = 1 + 2 * int(round(float(motion_blur)))
@@ -6513,7 +6513,7 @@ def _aug_apply(
 
     # ── Sensor noise ──
     # Additive Gaussian noise. Seeded so a steady slider yields a
-    # steady grain pattern — otherwise every preview render
+    # steady grain pattern - otherwise every preview render
     # twinkles, which looks unstable.
     if noise > 0:
         sigma = (float(noise) / 10.0) * 0.15  # 0..0.15
@@ -6605,7 +6605,7 @@ def _aug_apply(
         _, H, W = x.shape
         s = float(lens_glare) / 10.0  # 0..1
         gen = torch.Generator(device="cpu").manual_seed(seed ^ 0x91A1E)
-        # Two glares — primary bright, secondary smaller and dimmer.
+        # Two glares - primary bright, secondary smaller and dimmer.
         # Both placed off-axis (avoid centre) so they read as flare,
         # not a vignette.
         ys = torch.linspace(-1.0, 1.0, H, device=x.device, dtype=x.dtype)
@@ -6620,7 +6620,7 @@ def _aug_apply(
         sigma1 = 0.25 + s * 0.35  # halo size grows with strength
         d2_1 = (gx - cx1) ** 2 + (gy - cy1) ** 2
         accum = accum + torch.exp(-d2_1 / (2.0 * sigma1 * sigma1))
-        # Secondary glare — opposite-ish side, smaller, dimmer.
+        # Secondary glare - opposite-ish side, smaller, dimmer.
         ang2 = ang1 + 3.1415926 + (float(torch.rand(1, generator=gen).item()) - 0.5) * 1.2
         rad2 = 0.3 + float(torch.rand(1, generator=gen).item()) * 0.3
         cx2 = float(rad2 * torch.cos(torch.tensor(ang2)).item())
@@ -6649,7 +6649,7 @@ def _aug_apply_lighting(
 ) -> "torch.Tensor":
     """Time-of-day-style lighting variation. strength is 0..10;
     the kernel samples one brightness direction, one warmth shift
-    and one contrast scale per render from the seed — so different
+    and one contrast scale per render from the seed - so different
     rolls land darker / cooler vs brighter / warmer. Pure tensor
     arithmetic on the input tensor's device."""
     if strength <= 0:
@@ -6661,7 +6661,7 @@ def _aug_apply_lighting(
     b = 1.0 + (rs[0] - 0.5) * 2.0 * 0.6 * s
     # Contrast scale in [1 - 0.4s, 1 + 0.4s].
     c = 1.0 + (rs[1] - 0.5) * 2.0 * 0.4 * s
-    # Warmth shift — pushes R up and B down (or vice versa) by
+    # Warmth shift - pushes R up and B down (or vice versa) by
     # up to ±0.10. Independent of brightness so dark+warm and
     # dark+cool are both reachable.
     w = (rs[2] - 0.5) * 2.0 * 0.10 * s
@@ -6698,7 +6698,7 @@ def _aug_apply_hue_shift(
 
 # ─── Geometric warp helpers ─────────────────────────────────────
 # Shared math used by both the live preview kernels and the
-# augment_generate runner — the runner needs the same matrices the
+# augment_generate runner - the runner needs the same matrices the
 # kernels apply so it can warp detection polygons in lock-step
 # with the image and save them next to each augmentation copy.
 
@@ -6731,7 +6731,7 @@ def _perspective_corner_pairs(
 def _solve_homography(
     startpoints: list[list[float]], endpoints: list[list[float]],
 ) -> "list[list[float]]":
-    """Direct linear transform — solve the 8x8 system for the 8
+    """Direct linear transform - solve the 8x8 system for the 8
     parameters of a 3x3 homography (last entry fixed at 1) that
     maps each `startpoint` to its matching `endpoint`."""
     import numpy as _np
@@ -6776,7 +6776,7 @@ def _scale_rotation_matrix(
     s: float, r_deg: float, W: int, H: int,
 ) -> "list[list[float]]":
     """Forward affine matrix matching torchvision.transforms.
-    functional.affine(image, angle=r, scale=s) — torchvision's
+    functional.affine(image, angle=r, scale=s) - torchvision's
     `angle` is "clockwise direction" on screen, so in y-down image
     coordinates the rotation matrix is [[cos, -sin], [sin, cos]]
     (a point at (x,0) rotates to (cos·x, sin·x), which moves
@@ -6898,7 +6898,7 @@ def _aug_apply_scale_rotation(
 ) -> "torch.Tensor":
     """Sample one scale in [scale_min, scale_max] and one rotation
     in [rot_min, rot_max] (degrees), apply via torchvision's
-    affine() — runs on the input tensor's device."""
+    affine() - runs on the input tensor's device."""
     if scale_min == 1.0 and scale_max == 1.0 and rot_min == 0.0 and rot_max == 0.0:
         return img
     from torchvision.transforms.functional import affine as _tv_affine
@@ -6966,7 +6966,7 @@ def _aug_apply_block_occlusion(
 
     Every polygon's coverage is a hard ceiling. After placement
     each candidate zap is filtered against EVERY other polygon's
-    remaining headroom — so when polygons overlap (a small
+    remaining headroom - so when polygons overlap (a small
     segmentation inside a big one, or two siblings that share
     pixels), no polygon can be pushed past its own pct cap by a
     block placed for a different one. Pixels removed during the
@@ -7002,7 +7002,7 @@ def _aug_apply_block_occlusion(
     )
     zap_mask = torch.zeros((H, W), device=img.device, dtype=img.dtype)
 
-    # Placement pass — one rectangle per polygon, smallest first.
+    # Placement pass - one rectangle per polygon, smallest first.
     # Cross-polygon cap enforcement happens in a single batched
     # post-pass below (was previously an N² inner loop with a
     # `.item()` sync on every iteration, which is what was
@@ -7046,11 +7046,11 @@ def _aug_apply_block_occlusion(
             poly_mask[ay:ay2, ax:ax2],
         )
 
-    # Post-pass — enforce per-polygon caps in one vectorised sweep.
+    # Post-pass - enforce per-polygon caps in one vectorised sweep.
     # Counts every polygon at once, identifies the ones over budget,
     # randomly trims excess pixels from each over-budget polygon's
     # zap. Inner sampling still needs CPU random indices, but each
-    # polygon only takes one trim step — way fewer syncs than the
+    # polygon only takes one trim step - way fewer syncs than the
     # old per-detection × per-polygon inner loop.
     counts = (poly_stack * zap_mask.unsqueeze(0)).sum(dim=(1, 2))  # (N,)
     excesses = (counts - targets_t).clamp(min=0)
@@ -7138,7 +7138,7 @@ def _aug_apply_object_overlay(
     overlay's silhouette never covers more than 50% of any existing
     detection polygon.
 
-    Anchor search is vectorised — K candidates are gathered into a
+    Anchor search is vectorised - K candidates are gathered into a
     single (N, K, oh, ow) window stack via advanced indexing on
     GPU, overlaps computed in one tensor op, the best (zero-breach
     or min-breach) anchor picked. Previously each anchor sliced +
@@ -7170,7 +7170,7 @@ def _aug_apply_object_overlay(
         overlay_pil = overlay_pil.resize((new_w, new_h), PILImage.LANCZOS)
     ow, oh = overlay_pil.size
     if ow > W or oh > H:
-        # Overlay larger than the canvas — clamp to canvas and pin
+        # Overlay larger than the canvas - clamp to canvas and pin
         # to origin (no anchor search possible).
         ow = min(ow, W)
         oh = min(oh, H)
@@ -7203,7 +7203,7 @@ def _aug_apply_object_overlay(
         if occupied is not None:
             cap -= float((occupied * m).sum().item())
         if cap < 1.0:
-            # No room left under this polygon — but we still need to
+            # No room left under this polygon - but we still need to
             # include it in the constraint set so we don't allow ANY
             # new alpha here.
             cap = 0.0
@@ -7217,7 +7217,7 @@ def _aug_apply_object_overlay(
     if max_x <= 0 and max_y <= 0:
         ax, ay = 0, 0
     elif not poly_masks:
-        # No constraints — pick a random anchor in one shot.
+        # No constraints - pick a random anchor in one shot.
         ax = int(torch.randint(0, max(1, max_x + 1), (1,), generator=g).item())
         ay = int(torch.randint(0, max(1, max_y + 1), (1,), generator=g).item())
     else:
@@ -7309,7 +7309,7 @@ async def v2_augment_background_upload(
     image: UploadFile = File(...),
 ):
     """Persist an uploaded background image under
-    augment_backgrounds/<uuid>.jpg. No segmentation — backgrounds
+    augment_backgrounds/<uuid>.jpg. No segmentation - backgrounds
     are used whole, just resized to the target canvas at preview
     time."""
     if not project_dir(project_id).exists():
@@ -7317,7 +7317,7 @@ async def v2_augment_background_upload(
     raw = await image.read()
     if not raw:
         raise HTTPException(400, "empty image upload")
-    # NSFW gate — backgrounds get composited into the augmentations
+    # NSFW gate - backgrounds get composited into the augmentations
     # pipeline, so they need the same content-safety screen the
     # main /imports/raw endpoint applies.
     _enforce_nsfw_or_451(raw, label="v2-augment-background-upload")
@@ -7548,7 +7548,7 @@ async def v2_augment_object_overlay_segment(
 # existing JobManager so the FE can poll progress + cancel like
 # any other batch task. Outputs live under
 # <project>/augmentations/<import_id>/<idx>.jpg and are SEPARATE
-# from the dataset itself — they're surfaced through the per-tile
+# from the dataset itself - they're surfaced through the per-tile
 # Augmentations viewer but don't enter the labelling pipeline.
 
 
@@ -7568,13 +7568,13 @@ def _maybe_auto_augment_after_edit(project_id: str, import_id: str | None = None
         the user is mid-edit)
 
     When `import_id` is supplied the regen is scoped to that one
-    image — wiping + re-running only its augmentation dir — so a
+    image - wiping + re-running only its augmentation dir - so a
     single bbox tweak doesn't fan out into a re-augment of the
     whole project. Callers that genuinely want a project-wide
     regen pass `import_id=None`.
     """
     try:
-        # copy=False — read-only check of augmentationConfig + owner.
+        # copy=False - read-only check of augmentationConfig + owner.
         # Called from PUT /imports/{id}, hot on every box drag, used
         # to pay a 300-500ms deepcopy on big projects.
         manifest = load_manifest(project_id, copy=False) or {}
@@ -7585,7 +7585,7 @@ def _maybe_auto_augment_after_edit(project_id: str, import_id: str | None = None
             return
         if per_image_mode in ("off", "0"):
             return
-        # In-flight guard — don't pile up generate jobs while one's
+        # In-flight guard - don't pile up generate jobs while one's
         # already running. Once the active one drains, the next edit
         # will queue a fresh one.
         for j in state["jobs"].jobs.values():
@@ -7595,7 +7595,7 @@ def _maybe_auto_augment_after_edit(project_id: str, import_id: str | None = None
                 return
         # Wipe the affected images' augmentation dirs so the new run
         # starts from a clean slate. Scoped to a single import when
-        # the caller supplied one — leaving every other image's
+        # the caller supplied one - leaving every other image's
         # augmentations untouched.
         try:
             aug_root = _augmentations_dir(project_id)
@@ -7610,7 +7610,7 @@ def _maybe_auto_augment_after_edit(project_id: str, import_id: str | None = None
         except Exception as e:
             print(f"[auto-augment-after-edit] wipe failed for {project_id}: {e}")
         try:
-            # copy=False + cache_by_ref — we mutate-then-save the
+            # copy=False + cache_by_ref - we mutate-then-save the
             # same dict we just read, no concurrent writer in the
             # hot path.
             m_aug = load_manifest(project_id, copy=False) or {}
@@ -7628,7 +7628,7 @@ def _maybe_auto_augment_after_edit(project_id: str, import_id: str | None = None
         try:
             # Attribute the regen to the project owner so the terminal
             # feed shows the user's handle, not @system. Fire-and-
-            # forget hook fired from /imports PUT — we don't have a
+            # forget hook fired from /imports PUT - we don't have a
             # session here, so the manifest's owner is the best
             # available signal.
             owner = (
@@ -7676,7 +7676,7 @@ def _image_embedding_path(project_id: str, import_id: str) -> "Path":
 def _compute_and_store_image_embedding(project_id: str, import_id: str, raw_bytes: bytes) -> bool:
     """Embed one imported image and write the resulting float32 vector
     to its sidecar. Returns True when bytes landed on disk. No-op
-    when DINOv2 isn't loaded yet — the stats endpoint retries on
+    when DINOv2 isn't loaded yet - the stats endpoint retries on
     demand if the sidecar is missing."""
     try:
         import v2_dinov2 as _v2d
@@ -7691,7 +7691,7 @@ def _compute_and_store_image_embedding(project_id: str, import_id: str, raw_byte
         out_dir = _image_embeddings_dir(project_id)
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = _image_embedding_path(project_id, import_id)
-        # Write atomically — write to temp + rename so a half-baked
+        # Write atomically - write to temp + rename so a half-baked
         # file never gets read by a concurrent stats request.
         tmp = out_path.with_suffix(".bin.tmp")
         tmp.write_bytes(vec.astype("float32", copy=False).tobytes())
@@ -7704,7 +7704,7 @@ def _compute_and_store_image_embedding(project_id: str, import_id: str, raw_byte
 
 def _load_image_embedding(project_id: str, import_id: str) -> "np.ndarray | None":
     """Read an import's embedding sidecar back into a (D,) float32
-    numpy array. Returns None when the file's missing or unreadable —
+    numpy array. Returns None when the file's missing or unreadable -
     the caller treats missing == needs backfill."""
     p = _image_embedding_path(project_id, import_id)
     if not p.exists():
@@ -7760,7 +7760,7 @@ def _pca_project_2d(vectors: "np.ndarray") -> "list[list[float]]":
     try:
         X = vectors.astype(_np.float32, copy=False)
         X = X - X.mean(axis=0, keepdims=True)
-        # Thin SVD — full_matrices=False so we get just the
+        # Thin SVD - full_matrices=False so we get just the
         # min(N, D) singular values without paying for the full
         # right-singular-vector matrix.
         U, S, Vt = _np.linalg.svd(X, full_matrices=False)
@@ -7845,7 +7845,7 @@ def _compute_dataset_stats_v2(project_id: str, lite: bool = False) -> dict:
     aug_count = 0
     for imp in imports:
         # An explicit empty editedBoxes (user cleared all boxes, with
-        # editedBoxesSet) means zero boxes — don't fall back to the auto
+        # editedBoxesSet) means zero boxes - don't fall back to the auto
         # detections, or the counts + label distribution resurrect the
         # deleted boxes. An empty editedBoxes WITHOUT the flag is a legacy
         # upload seed and still falls back.
@@ -7888,7 +7888,7 @@ def _compute_dataset_stats_v2(project_id: str, lite: bool = False) -> dict:
     if not lite:
         # Backfill missing embeddings (cheap if everything's already on
         # disk, ~30 ms/image when DINOv2 needs to fill a gap). Skipped
-        # in lite mode — the variation plot + uniqueness signal don't
+        # in lite mode - the variation plot + uniqueness signal don't
         # apply there.
         _backfill_missing_embeddings(project_id, imports, limit=32)
 
@@ -7944,7 +7944,7 @@ def _compute_dataset_stats_v2(project_id: str, lite: bool = False) -> dict:
             # source image's PCA coord with a small Gaussian offset
             # so they cluster softly around the parent. Cheaper than
             # embedding every augmentation JPEG (would scale poorly)
-            # and visually accurate — augmentations sit near their
+            # and visually accurate - augmentations sit near their
             # source in feature space by construction.
             #
             # Source of truth is the augmentations directory on disk
@@ -7974,7 +7974,7 @@ def _compute_dataset_stats_v2(project_id: str, lite: bool = False) -> dict:
                     })
         dup_pairs = _near_duplicate_pairs(mat, embed_ids, threshold=0.95)
         # Filter out pairs that the user has explicitly ignored via the
-        # dedupe review modal — once they confirm "these aren't
+        # dedupe review modal - once they confirm "these aren't
         # duplicates", we stop counting them and stop reporting them
         # to the stats card.
         ignored = set(manifest.get("ignored_near_dups") or [])
@@ -7985,7 +7985,7 @@ def _compute_dataset_stats_v2(project_id: str, lite: bool = False) -> dict:
             near_dup_ids.add(b)
 
     total_imports = len(imports)
-    # Health sub-scores — each in [0, 1]. Coverage handles the empty-
+    # Health sub-scores - each in [0, 1]. Coverage handles the empty-
     # dataset case (zero divisions) by returning a neutral 1.0 so the
     # score isn't permanently anchored at 0.
     if total_imports == 0:
@@ -8002,7 +8002,7 @@ def _compute_dataset_stats_v2(project_id: str, lite: bool = False) -> dict:
                 cv = float(counts.std() / max(counts.mean(), 1e-6))
                 score_balance = max(0.0, 1.0 - min(cv, 1.0))
             else:
-                # One label or no labels — trivially balanced.
+                # One label or no labels - trivially balanced.
                 score_balance = 1.0
         else:
             score_balance = 0.5  # no labels yet, neutral
@@ -8016,7 +8016,7 @@ def _compute_dataset_stats_v2(project_id: str, lite: bool = False) -> dict:
     # 20 % so a well-labelled, balanced dataset still rates well
     # without near-perfect uniqueness. In lite mode the uniqueness
     # signal isn't available (no embeddings) so we redistribute its
-    # weight across the remaining three sub-scores — the badge is
+    # weight across the remaining three sub-scores - the badge is
     # still meaningful while the FE waits for the full payload.
     if lite:
         health = int(round(
@@ -8078,7 +8078,7 @@ async def v2_dataset_stats(project_id: str, lite: bool = False):
     pass. Counts, label distribution and a 3-factor health score
     return in milliseconds; the FE fetches the full payload after the
     summary row has painted. The full call's embeddings are read
-    from disk sidecars, with backfill for any missing — sub-second for
+    from disk sidecars, with backfill for any missing - sub-second for
     typical dataset sizes but multi-second on a 900-image first-touch.
 
     Wrapped in asyncio.to_thread so the FastAPI event loop stays
@@ -8132,7 +8132,7 @@ def _read_dataset_stats_sidecar(
 ) -> tuple[dict | None, bool]:
     """Return (payload, fresh). The payload comes back regardless of
     freshness so the caller can serve a stale snapshot immediately
-    and kick a background recompute — better than making the user
+    and kick a background recompute - better than making the user
     wait several seconds for the first request after a manifest write."""
     p = _stats_sidecar_path(project_id, lite)
     if not p.exists():
@@ -8150,13 +8150,13 @@ def _read_dataset_stats_sidecar(
 def _persist_dataset_stats(project_id: str, lite: bool) -> dict:
     """Compute the stats payload + write it to disk so the next process
     start / cold cache hit serves instantly from the sidecar. Errors on
-    the write side don't bubble — the in-memory cache still has the
+    the write side don't bubble - the in-memory cache still has the
     payload, and the next request will retry the disk write."""
     payload = _compute_dataset_stats_v2(project_id, lite)
     try:
         p = _stats_sidecar_path(project_id, lite)
         p.parent.mkdir(parents=True, exist_ok=True)
-        # Write atomically — temp file + rename so a crash mid-write
+        # Write atomically - temp file + rename so a crash mid-write
         # can't leave half a stats file on disk that the next read
         # would then parse-fail on.
         tmp = p.with_suffix(".json.tmp")
@@ -8190,7 +8190,7 @@ def _aug_should_apply(frequency: str, copy_idx: int, total: int, g: "torch.Gener
         return False
     if frequency == "all":
         return True
-    # random — flip a coin per copy
+    # random - flip a coin per copy
     return bool(torch.rand(1, generator=g).item() > 0.5)
 
 
@@ -8207,7 +8207,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
     cfg = (job.params or {}).get("config") or {}
     per_image_mode = str((job.params or {}).get("perImageMode") or "1")
     if per_image_mode in ("off", "0"):
-        raise RuntimeError("perImage is off — nothing to generate")
+        raise RuntimeError("perImage is off - nothing to generate")
 
     # Optional scope filter. The auto-augment hooks pass a list of
     # import_ids so a regen triggered by labelling 1 image doesn't
@@ -8219,7 +8219,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
         target_set = {str(t) for t in raw_targets if t}
         if not target_set:
             await emit("progress", {"index": 0, "total": 0, "image": "", "phase": "augmenting"})
-            print(f"[augment_generate] {job.project}: empty target list — nothing to augment")
+            print(f"[augment_generate] {job.project}: empty target list - nothing to augment")
             return
         imports = [imp for imp in imports if imp.get("id") in target_set]
         if not imports:
@@ -8244,7 +8244,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
         "cd": float(cam.get("colourDistortion") or 0),
         "ca": float(cam.get("chromaticAberration") or 0),
         "bd": float(cam.get("bitDepth") or 0),
-        # Newer dials — same 0..10 scale. Older configs that
+        # Newer dials - same 0..10 scale. Older configs that
         # predate these keys default to 0 (identity).
         "ld": float(cam.get("lensDistortion") or 0),
         "px": float(cam.get("pixelation") or 0),
@@ -8254,7 +8254,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
     occ_random_block = (occ.get("randomBlock") or {})
     occ_block_enabled = bool(occ.get("enabled")) and bool(occ_random_block.get("enabled"))
     occ_block_freq = str(occ_random_block.get("frequency") or "all")
-    # Clamp to 40% — matches the slider cap; older saved configs that
+    # Clamp to 40% - matches the slider cap; older saved configs that
     # carried higher values get pulled down to the new ceiling.
     occ_block_size = max(0.0, min(40.0, float(occ_random_block.get("size") or 0)))
 
@@ -8266,7 +8266,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
     dist_pw_strength = float(dist_pw.get("strength") or 0)
     dist_sr_enabled = bool(dist.get("enabled")) and bool(dist_sr.get("enabled"))
     dist_sr_freq = str(dist_sr.get("frequency") or "all")
-    # Scale range clamped to 0.7..1.3 — matches the slider bounds and
+    # Scale range clamped to 0.7..1.3 - matches the slider bounds and
     # pulls older saved configs back into the new band before they
     # drive the augmentation kernel.
     dist_sr = {
@@ -8316,7 +8316,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
     estimated_total_augmentations = len(imports) * _estimate_per_image()
     # Warm CUDA in the augment thread BEFORE the loop starts so the
     # first image doesn't pay the context-init cost. Also re-confirm
-    # the device choice — if torch.cuda.is_available() lied at module-
+    # the device choice - if torch.cuda.is_available() lied at module-
     # load time (cuda lazily initialising), this is our chance to
     # catch it and at least surface the fact in the logs.
     def _warm_cuda_in_thread():
@@ -8339,7 +8339,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
     # than stuck on "starting…" until the first image completes (on
     # a 941-image dataset that's a 1-2 s wait the user can see).
     # `total` is the ESTIMATED augmentation count, not the image
-    # count — the user's progress card must always read in
+    # count - the user's progress card must always read in
     # augmentations, never falling back to images.
     job.progress = {
         "index": 0,
@@ -8352,7 +8352,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
     # called via asyncio.to_thread so the event loop stays free
     # while torch + PIL + JPEG-save are running. Without this the
     # runner monopolised the loop for the full duration of every
-    # image (~0.5-2 s of dense compute) — every other handler
+    # image (~0.5-2 s of dense compute) - every other handler
     # (image fetches, /api/projects poll, click-to-detect) was
     # queued behind it. The user reported "the server completely
     # blocks while augmenting".
@@ -8363,7 +8363,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
             return 0
         src_path = proj / "images" / filename
         if not src_path.exists():
-            print(f"[augment_generate] src missing for {filename} ({import_id}) — skipping")
+            print(f"[augment_generate] src missing for {filename} ({import_id}) - skipping")
             return 0
         out_dir = aug_root / import_id
         if out_dir.exists():
@@ -8385,7 +8385,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
                 src_W, src_H = im.size
                 longest = max(src_W, src_H)
                 # Resize on the way in so the working tensor never
-                # exceeds 1024 px longest edge — matches the upload
+                # exceeds 1024 px longest edge - matches the upload
                 # ceiling so we don't bloat the dataset with an
                 # augmentation that's bigger than its source.
                 if longest > 1024:
@@ -8524,7 +8524,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
                             saved_ok = True
                             break
                     # If we exhausted the ladder and still oversize,
-                    # last attempt sits on disk at quality=28 — the
+                    # last attempt sits on disk at quality=28 - the
                     # cap is a target, not a hard wall, so we don't
                     # drop the augmentation entirely just because it's
                     # 520 KB.
@@ -8545,7 +8545,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
             print(f"[augment_generate] annotations.json write for {import_id} failed: {e}")
         # Mirror the augmented copies + annotations to R2 so a remote
         # training rig (no access to this box's disk) can pull them as
-        # extra training samples — see training.collect_augmentation_items.
+        # extra training samples - see training.collect_augmentation_items.
         # Done FIRE-AND-FORGET on the background executor so these uploads
         # never block image generation or the progress counter (this was
         # making generation crawl + stick at 0/XXX). Disk stays the source
@@ -8581,7 +8581,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
             except Exception as e:
                 print(f"[augment_generate] R2 upload submit failed for {import_id}: {e}")
         # Surface progress on the job object so the FE's
-        # /augment/job/active poll picks it up — assigning here means
+        # /augment/job/active poll picks it up - assigning here means
         # the counter updates in the same tick the thread finishes,
         # no extra await round-trip needed.
         job.progress = {
@@ -8592,7 +8592,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
         }
         return saved_count
 
-    # Manifest writes are batched — load+rewrite of a multi-MB
+    # Manifest writes are batched - load+rewrite of a multi-MB
     # manifest 941 times was the real reason the runner was slow.
     # Per-image we just stash {id: saved_count} in this dict; every
     # 25 images (and on completion) we flush all stashed updates in
@@ -8600,13 +8600,13 @@ async def _run_augment_generate_job(job, emit, cancel_event):
     n_aug_updates: dict[str, int] = {}
     FLUSH_EVERY = 25
     # Running total of augmentations saved so far. Drives the FE
-    # progress bar — user asked for the counter to track per-
+    # progress bar - user asked for the counter to track per-
     # augmentation rather than per-image since a single image can
     # produce 1-3 augmented copies.
     saved_total = 0
 
     def _flush_n_aug_updates_sync() -> None:
-        # Sync inner — caller holds the per-project manifest write
+        # Sync inner - caller holds the per-project manifest write
         # lock so this read-modify-write can't race a concurrent
         # label_charlie save (now that multiple runners can be in
         # flight at once).
@@ -8645,7 +8645,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
         # classify_box, …) already holds while it works. Acquiring
         # it PER IMAGE rather than for the whole job means a click-
         # to-detect or add-box request from any other user / tab
-        # slides in between augment images — at most one image's
+        # slides in between augment images - at most one image's
         # latency (~0.5-2 s) of wait instead of the full run.
         async with state["gpu_lock"]:
             saved = await loop.run_in_executor(_AUG_EXECUTOR, _augment_one_image, i, imp)
@@ -8716,7 +8716,7 @@ async def v2_augment_generate(project_id: str, payload: AugmentGenerateIn):
             m["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             save_manifest(project_id, m)
     except Exception:
-        # Not fatal — the job still runs with the payload's config.
+        # Not fatal - the job still runs with the payload's config.
         pass
 
     # Wipe any prior augmentation outputs so the user always sees
@@ -8774,7 +8774,7 @@ async def v2_augment_generate(project_id: str, payload: AugmentGenerateIn):
 async def v2_augment_get_config(project_id: str):
     """Return the augmentation config last persisted by Update. Empty
     dict when nothing's saved yet so the FE can default-fill its
-    state. No auth gate beyond project existence — config is non-
+    state. No auth gate beyond project existence - config is non-
     sensitive and matches the visibility of the rest of /overview."""
     if not project_dir(project_id).exists():
         raise HTTPException(404, "project not found")
@@ -8847,7 +8847,7 @@ async def v2_augment_serve(project_id: str, import_id: str, filename: str):
     if not project_dir(project_id).exists():
         raise HTTPException(404)
     safe_id = "".join(c for c in import_id if c.isalnum())
-    # Filename sanitised — alphanumeric, dot, dash, underscore.
+    # Filename sanitised - alphanumeric, dot, dash, underscore.
     safe_fn = "".join(c for c in filename if c.isalnum() or c in "._-")
     if not safe_id or not safe_fn:
         raise HTTPException(400)
@@ -8870,7 +8870,7 @@ async def v2_augment_delete(project_id: str, import_id: str, filename: str):
     """Delete one generated augmentation JPEG and prune its entry
     from the per-import annotations.json. Decrements the import's
     n_augmentations so the dataset gallery icon hides when the last
-    copy is removed. Idempotent — re-deleting a missing file 200s."""
+    copy is removed. Idempotent - re-deleting a missing file 200s."""
     if not project_dir(project_id).exists():
         raise HTTPException(404, "project not found")
     safe_id = "".join(c for c in import_id if c.isalnum())
@@ -8950,7 +8950,7 @@ async def v2_augment_overlay_get(project_id: str, overlay_id: str):
 )
 async def v2_augment_preview(project_id: str, payload: AugmentPreviewIn):
     """Render a single image through the camera/sensor augmentation
-    chain and return JPEG bytes. Pure compute — nothing persisted."""
+    chain and return JPEG bytes. Pure compute - nothing persisted."""
     proj = project_dir(project_id)
     if not proj.exists():
         raise HTTPException(404, "project not found")
@@ -9051,7 +9051,7 @@ async def v2_augment_preview(project_id: str, payload: AugmentPreviewIn):
                 background_paths.append(cand)
     seed = int(payload.seed) if payload.seed is not None else 1234
 
-    # Detections for the named import — loaded whenever the
+    # Detections for the named import - loaded whenever the
     # request touches a feature that needs the polygon set.
     # Previously this was gated on bs > 0 / show_outlines only,
     # which meant a background-only preview (no occlusion, no
@@ -9097,7 +9097,7 @@ async def v2_augment_preview(project_id: str, payload: AugmentPreviewIn):
                 scale = 720.0 / longest
                 im = im.resize((int(src_W * scale), int(src_H * scale)), PILImage.LANCZOS)
         work_W, work_H = im.size
-        # Pixel-space scale for detection coordinates — they live in
+        # Pixel-space scale for detection coordinates - they live in
         # the SOURCE image's coordinate system; we shrink them to the
         # working preview size.
         sx = work_W / float(src_W) if src_W > 0 else 1.0
@@ -9107,12 +9107,12 @@ async def v2_augment_preview(project_id: str, payload: AugmentPreviewIn):
         import numpy as _np
         arr = _np.asarray(im, dtype=_np.float32) / 255.0  # HWC
         t = torch.from_numpy(arr).permute(2, 0, 1).contiguous().to(device)
-        # Wrap the whole GPU pipeline in no_grad — block occlusion,
+        # Wrap the whole GPU pipeline in no_grad - block occlusion,
         # overlays, and outline rendering all create tensors that
         # otherwise carry an autograd graph for nothing. ~10–30 ms
         # saved on big detection sets.
         with torch.no_grad():
-            # Pipeline order — every step builds on the previous so a
+            # Pipeline order - every step builds on the previous so a
             # later distortion can't misalign with a polygon mask
             # baked in earlier. Detection-dependent ops (background
             # swap, block occlusion, object overlay, outlines) run
@@ -9139,13 +9139,13 @@ async def v2_augment_preview(project_id: str, payload: AugmentPreviewIn):
                 out = _aug_apply_perspective_warp(out, pw, seed)
             if not (sr_smin == 1.0 and sr_smax == 1.0 and sr_rmin == 0.0 and sr_rmax == 0.0):
                 out = _aug_apply_scale_rotation(out, sr_smin, sr_smax, sr_rmin, sr_rmax, seed)
-            # Colour shifts — applied on the warped composite so
+            # Colour shifts - applied on the warped composite so
             # they land on the deformed geometry.
             if hu > 0:
                 out = _aug_apply_hue_shift(out, hu, seed)
             if lt > 0:
                 out = _aug_apply_lighting(out, lt, seed)
-            # Sensor chain — final step, the camera "captures" the
+            # Sensor chain - final step, the camera "captures" the
             # scene that's already been edited above.
             out = _aug_apply(
                 out, mb, ns, cd, ca, bd, seed,
@@ -9179,7 +9179,7 @@ async def v2_serve_labelled_preview(project_id: str, import_id: str):
     objects bright + per-label colour-tinted. Cached to disk under
     `imports/<id>__lp_v1.jpg` so repeat reads are pure file serves.
 
-    Render-on-first-request keeps /imports/process snappy — we don't
+    Render-on-first-request keeps /imports/process snappy - we don't
     block the user's drop-zone progress indicator on a PIL render
     that the FE can pull lazily once it scrolls into view.
     """
@@ -9188,11 +9188,11 @@ async def v2_serve_labelled_preview(project_id: str, import_id: str):
         raise HTTPException(404, "project not found")
     cached_path = _labelled_preview_path(project_id, import_id)
 
-    # Fast path — preview already on disk.
+    # Fast path - preview already on disk.
     if cached_path.exists():
         return await _serve_cached_image(project_id, "imports", cached_path.name, cached_path)
 
-    # O(1) lookup via the import index — avoids a full manifest deepcopy
+    # O(1) lookup via the import index - avoids a full manifest deepcopy
     # (200-500 ms on large projects) and an O(n) linear scan. Ensures
     # the cache is warm first so the index is populated; copy=False is
     # safe because we only read fields here, never mutate.
@@ -9214,7 +9214,7 @@ async def v2_serve_labelled_preview(project_id: str, import_id: str):
         _cached_m = _MANIFEST_CACHE.get(project_id) or {}
     project_labels = list(_cached_m.get("tags") or [])
 
-    # Edited boxes (with masks) win over the raw GD detections — that
+    # Edited boxes (with masks) win over the raw GD detections - that
     # mirrors what the user sees in the gallery thumb (kept boxes
     # only). Falls back to detections when no edits have been made.
     edited = imp.get("editedBoxes")
@@ -9246,7 +9246,7 @@ async def v2_serve_labelled_preview(project_id: str, import_id: str):
     # cost, and one's rename can clobber the other half-written.
     lock = _thumb_render_lock(project_id, f"labelled_preview:{import_id}")
     async with lock:
-        # Re-check after acquiring — the previous holder may have
+        # Re-check after acquiring - the previous holder may have
         # done the render already.
         if cached_path.exists():
             return await _serve_cached_image(project_id, "imports", cached_path.name, cached_path)
@@ -9254,7 +9254,7 @@ async def v2_serve_labelled_preview(project_id: str, import_id: str):
             await loop.run_in_executor(None, _render)
         except Exception as e:
             print(f"[labelled-preview] render failed for {project_id}/{import_id}: {e}")
-            # Render failed — fall back to the original full-size image
+            # Render failed - fall back to the original full-size image
             # so the gallery isn't broken, just slower for this one entry.
             return await _serve_cached_image(project_id, "imports", fn, src_path)
 
@@ -9334,7 +9334,7 @@ def _upscale_cover_if_small(im, floor: int):
     """Enlarge a small cover so a full-width hero (or a retina card) never
     browser-upscales a tiny source into a blocky mess. Cheap, CPU-only: LANCZOS
     resample up to `floor` on the longest edge + a light unsharp mask to restore
-    crispness. It does NOT invent detail (that needs ML super-resolution) — it
+    crispness. It does NOT invent detail (that needs ML super-resolution) - it
     just makes a small image read clean as a background behind a scrim/title.
     No-op when the image already meets `floor`. Returns the (possibly new) image."""
     from PIL import ImageFilter
@@ -9360,7 +9360,7 @@ async def serve_cover_thumb(project_id: str, w: int = 480, ai: int = 0):
     cover file's mtime changes (cover swap, re-upload).
 
     Works for both V1 (cover lives in imports/) and V2 (cover lives
-    in references/, occasionally imports/) projects — the cached
+    in references/, occasionally imports/) projects - the cached
     filename keeps the project_id only so a cover swap blows the same
     cache entry away regardless of source subdir.
     """
@@ -9406,7 +9406,7 @@ async def serve_cover_thumb(project_id: str, w: int = 480, ai: int = 0):
     # on a FRESH cache slot instead of trying to mtime-compare against
     # the previous cover's bake. Without this key, the old thumb could
     # serve indefinitely if its mtime happened to be later than the
-    # new src's mtime — which is exactly how the "cover went white
+    # new src's mtime - which is exactly how the "cover went white
     # after viewing a project" bug surfaced.
     # Target longest-edge size. Cards request the default ~480 px; the dataset
     # hero requests a larger variant (e.g. 1280) so the full-width banner stays
@@ -9429,7 +9429,7 @@ async def serve_cover_thumb(project_id: str, w: int = 480, ai: int = 0):
         src_mtime = 0.0
 
     # Re-render when the cached thumb is missing or older than the
-    # source — covers the cover re-upload case (same filename, fresher
+    # source - covers the cover re-upload case (same filename, fresher
     # bytes).
     needs_render = True
     if cached_path.exists():
@@ -9472,7 +9472,7 @@ async def serve_cover_thumb(project_id: str, w: int = 480, ai: int = 0):
 
         # Per-project render lock so two parallel first-requests don't
         # both PIL-render the same cover and stomp on each other's
-        # tmp file. The lock also serialises within a single worker —
+        # tmp file. The lock also serialises within a single worker -
         # the second request just waits for the first's bake to land,
         # then reads the cached file. Across workers the same project
         # could still double-render once at startup, but tmp suffixes
@@ -9535,18 +9535,18 @@ async def v2_embed_crops(
 ):
     """Crop each box from `image` and embed each crop with DINOv2-base
     (matches `detect_and_crop.py` in the repo root). Embeddings are
-    computed in a single batched forward pass — typical 5–20× speedup
+    computed in a single batched forward pass - typical 5–20× speedup
     vs encoding one box at a time.
 
     Request: multipart with the image file + a JSON list of
     `[x0, y0, x1, y1]` boxes in pixel coords. `return_crop=true` to
-    also receive a base64 JPEG of each crop (default off — the V2
+    also receive a base64 JPEG of each crop (default off - the V2
     reference flow doesn't display crops anymore, so encoding them
     is wasted CPU + bandwidth).
 
     Response: `{ crops: [{ index, box, embedding: float[D], crop_jpg_b64? }] }`
     where D is the active DINOv2 model's hidden size (1024 for large,
-    768 for base — see v2_dinov2.EMBEDDING_DIM).
+    768 for base - see v2_dinov2.EMBEDDING_DIM).
     """
     import base64
     import v2_dinov2
@@ -9583,14 +9583,14 @@ async def v2_embed_crops(
         for i, bb in enumerate(bbs):
             try:
                 if not (isinstance(bb, list) and len(bb) == 4):
-                    print(f"[v2-embed] box {i} skipped — not a 4-tuple: {bb!r}")
+                    print(f"[v2-embed] box {i} skipped - not a 4-tuple: {bb!r}")
                     continue
                 x0 = max(0, int(round(float(bb[0]))))
                 y0 = max(0, int(round(float(bb[1]))))
                 x1 = min(W, int(round(float(bb[2]))))
                 y1 = min(H, int(round(float(bb[3]))))
                 if x1 - x0 < 4 or y1 - y0 < 4:
-                    print(f"[v2-embed] box {i} skipped — too small after clip: {bb!r} → ({x0},{y0},{x1},{y1}) on {W}x{H}")
+                    print(f"[v2-embed] box {i} skipped - too small after clip: {bb!r} → ({x0},{y0},{x1},{y1}) on {W}x{H}")
                     continue
                 crop = image_pil.crop((x0, y0, x1, y1))
                 square = v2_dinov2.center_square_crop(crop)
@@ -9611,7 +9611,7 @@ async def v2_embed_crops(
                 "box": list(xyxy),
                 "embedding": [round(float(x), 6) for x in vecs[k].tolist()] if vecs is not None else [],
                 # Stamp the version so callers can persist it next to
-                # the embedding — centroid-build invalidates anything
+                # the embedding - centroid-build invalidates anything
                 # that doesn't match the current EMBED_VERSION.
                 "embed_version": v2_dinov2.EMBED_VERSION,
             }
@@ -9624,7 +9624,7 @@ async def v2_embed_crops(
         return results
 
     try:
-        # Interactive priority — embed_crops is fired by the
+        # Interactive priority - embed_crops is fired by the
         # references editor when the user drops in fresh boxes.
         # Holding behind a background job would feel like the
         # editor froze.
@@ -9668,13 +9668,13 @@ def _v2_load_or_backfill_reference_embeddings(project_id: str) -> tuple[dict, di
     Returns:
         (by_label_dino, by_label_siglip, dirty)
 
-        by_label_dino   — {label_lower: list[np.ndarray]} of DINOv2 vecs
-        by_label_siglip — {label_lower: list[np.ndarray]} of SigLIP vecs
+        by_label_dino   - {label_lower: list[np.ndarray]} of DINOv2 vecs
+        by_label_siglip - {label_lower: list[np.ndarray]} of SigLIP vecs
                           (empty dict if SigLIP isn't loaded / disabled)
-        dirty           — whether the manifest was rewritten
+        dirty           - whether the manifest was rewritten
 
     Each detection ends up with up to two stored embeddings:
-      - "embedding" + "embed_version" (DINOv2 — legacy field name)
+      - "embedding" + "embed_version" (DINOv2 - legacy field name)
       - "siglip_embedding" + "siglip_version" (SigLIP2)
     so the resolver can score against either independently.
     """
@@ -9684,7 +9684,7 @@ def _v2_load_or_backfill_reference_embeddings(project_id: str) -> tuple[dict, di
     # Steady-state fast path: the function's full body iterates every
     # reference's every detection on every call, which on a 1000-image
     # project with hundreds of refs was the dominant cost for click-
-    # to-detect / add-box. Cache the result by manifest mtime — any
+    # to-detect / add-box. Cache the result by manifest mtime - any
     # write to the manifest bumps mtime via save_manifest, busting the
     # cache automatically. Siglip loaded-state is part of the key so
     # the cache also self-recovers when the encoder warms up mid-
@@ -9716,7 +9716,7 @@ def _v2_load_or_backfill_reference_embeddings(project_id: str) -> tuple[dict, di
     # First pass: classify each detection as DINOv2-fresh / DINOv2-stale
     # and SigLIP-fresh / SigLIP-stale. Fresh embeddings go straight
     # into the by_label dicts. Stale or missing ones are queued for
-    # the backfill pass below — keyed by ref so we only decode each
+    # the backfill pass below - keyed by ref so we only decode each
     # source image once even when both encoders need a refresh.
     pending_by_ref: dict[int, list[tuple[int, str, list[float], list | None, bool, bool]]] = {}
     for ri, ref in enumerate(refs):
@@ -9737,7 +9737,7 @@ def _v2_load_or_backfill_reference_embeddings(project_id: str) -> tuple[dict, di
                 by_label_dino.setdefault(key, []).append(_np.asarray(d_emb, dtype=_np.float32))
 
             # SigLIP freshness check (only relevant when the encoder
-            # is loaded — otherwise we treat it as "fresh" so we
+            # is loaded - otherwise we treat it as "fresh" so we
             # don't queue pointless backfill work).
             if siglip_active:
                 s_emb = d.get("siglip_embedding")
@@ -9768,10 +9768,10 @@ def _v2_load_or_backfill_reference_embeddings(project_id: str) -> tuple[dict, di
 
     if pending_by_ref:
         if not _v2d.is_loaded():
-            # Not loaded yet — skip backfill, work with what we've
+            # Not loaded yet - skip backfill, work with what we've
             # already got. The next import after the model finishes
             # warming will pick these up.
-            print("[v2-centroids] DINOv2 not loaded — backfill deferred")
+            print("[v2-centroids] DINOv2 not loaded - backfill deferred")
         else:
             for ri, items in pending_by_ref.items():
                 ref = refs[ri]
@@ -9802,7 +9802,7 @@ def _v2_load_or_backfill_reference_embeddings(project_id: str) -> tuple[dict, di
                 if not squares:
                     continue
                 # DINOv2 batched re-encode for any detection that
-                # needed a refresh OR that needed SigLIP only — we
+                # needed a refresh OR that needed SigLIP only - we
                 # also store the DINOv2 vector unconditionally since
                 # we already have the crop and it's cheap to embed.
                 d_vecs = _v2d.encode_images_batch(squares)
@@ -9842,7 +9842,7 @@ def _v2_load_or_backfill_reference_embeddings(project_id: str) -> tuple[dict, di
     # Diagnostic: summarise what we ended up with so a "only one
     # class scored" symptom in the FE popup is traceable to the
     # actual ref-bucket counts. Also surface any detections that
-    # had blank labels — those are silently skipped above and could
+    # had blank labels - those are silently skipped above and could
     # explain a missing class.
     blank_label_count = 0
     for ref in refs:
@@ -9918,7 +9918,7 @@ def _v2_save_patch_store(project_id: str, store: dict[str, "np.ndarray"]) -> Non
 
     The temp filename ends with `.npz` because np.savez_compressed
     silently appends `.npz` to any path that doesn't already have
-    that suffix — without this, the written file lives at
+    that suffix - without this, the written file lives at
     `<tmp>.npz` while we try to rename `<tmp>` (which doesn't
     exist), and the FileNotFoundError bubbles up and torpedoes
     the entire reference loading path.
@@ -9947,11 +9947,11 @@ def _v2_load_or_backfill_patch_tokens(
     Both encoders share the same per-project NPZ; DINOv2 keys are
     `<ref_id>__<det_idx>__tokens` / `__fg`, SigLIP keys are
     `<ref_id>__<det_idx>__siglip_tokens` / `__siglip_fg`. Mixed
-    is fine — older NPZs without SigLIP keys backfill SigLIP only
+    is fine - older NPZs without SigLIP keys backfill SigLIP only
     on the next call without re-running DINOv2 encoding.
 
     Returns ({}, {}) when V2_PATCH_MATCH is off or DINOv2 isn't
-    loaded — callers fall back to pooled scoring.
+    loaded - callers fall back to pooled scoring.
     """
     import numpy as _np
     if not _v2_patch_match_enabled():
@@ -10088,8 +10088,8 @@ def _v2_score_labels_patchwise(
     weak ones diluting the score.
 
     Args:
-      q_tokens: (P_q, D) — query patches, L2-normalised
-      q_fg:     (P_q,) bool — query foreground mask
+      q_tokens: (P_q, D) - query patches, L2-normalised
+      q_fg:     (P_q,) bool - query foreground mask
       refs_by_label_patches: {label_lower: [(tokens, fg), ...]}
       top_k_query: how many of the strongest query-patch best-matches
                    to mean. Higher = smoother score, lower = more
@@ -10117,7 +10117,7 @@ def _v2_score_labels_patchwise(
             r_fg_bool = r_fg.astype(bool) if r_fg.dtype != bool else r_fg
             sel = r_tokens[r_fg_bool] if bool(r_fg_bool.any()) else r_tokens
             if sel.shape[0] > 0:
-                # Cast to float32 for the matmul — patch tokens may
+                # Cast to float32 for the matmul - patch tokens may
                 # be stored as float16 to halve disk.
                 ref_chunks.append(sel.astype(_np.float32, copy=False))
         if not ref_chunks:
@@ -10153,7 +10153,7 @@ def _v2_score_labels_patchwise(
 # alpaca/llama gets neck-shape dims boosted. Same idea as classical
 # Fisher LDA but works for the 2-class case (where Fisher LDA
 # collapses to a single 1-D direction and loses most of the
-# original embedding's expressiveness). Diagonal-only — ignores
+# original embedding's expressiveness). Diagonal-only - ignores
 # cross-dimension correlations, which is fine because DINOv2 features
 # are roughly decorrelated by training already.
 #
@@ -10167,7 +10167,7 @@ def _v2_fisher_cache_key(by_label_arr: dict, project_id: str | None = None) -> s
     """Fingerprint of a per-label ref stack so we can detect when a
     project's reference set changed and recompute the Fisher weights.
     Hashes the per-label sample counts plus the first vector of each
-    label — cheap, sufficient to invalidate when refs are added /
+    label - cheap, sufficient to invalidate when refs are added /
     removed / re-embedded."""
     import hashlib
     h = hashlib.blake2b(digest_size=16)
@@ -10179,7 +10179,7 @@ def _v2_fisher_cache_key(by_label_arr: dict, project_id: str | None = None) -> s
             continue
         h.update(label.encode())
         h.update(str(arr.shape).encode())
-        # First row's first 32 floats — captures any re-embedding.
+        # First row's first 32 floats - captures any re-embedding.
         h.update(arr[0, :32].tobytes())
     return h.hexdigest()
 
@@ -10278,7 +10278,7 @@ def _v2_get_fisher_weights(
         return cached
     w = _v2_compute_fisher_weights(by_label_arr)
     if w is not None:
-        # Cap cache size at 256 entries — projects rarely change refs
+        # Cap cache size at 256 entries - projects rarely change refs
         # more than a handful of times so this should never fill up.
         if len(_FISHER_CACHE) > 256:
             _FISHER_CACHE.clear()
@@ -10328,17 +10328,17 @@ def _v2_compute_class_thresholds(
         threshold = max(floor, min(cap, mean - sigma_mult * std))
 
     Notably the cap == the global fallback (0.40). The threshold
-    can only go DOWN from the default, never up — a tightly-
+    can only go DOWN from the default, never up - a tightly-
     clustered class keeps the global 0.40 instead of jumping to
     0.70+. The first version inverted this and ended up rejecting
     every legitimate query because the LOO distribution is in-
     sample optimistic: refs are far closer to their own class's
     centroid than out-of-sample queries are, so a threshold tuned
     to the LOO band rejects normal queries that should pass.
-    Loosely-clustered classes (refs span varied poses — "horse":
+    Loosely-clustered classes (refs span varied poses - "horse":
     mean ≈ 0.55, std ≈ 0.10) drop the threshold to ~0.25 so the
-    model isn't punishing legitimate variety. That asymmetry —
-    relax for loose, hold the line for tight — is the actual win.
+    model isn't punishing legitimate variety. That asymmetry -
+    relax for loose, hold the line for tight - is the actual win.
 
     Classes with <3 refs get `fallback` directly; the LOO
     distribution isn't reliable from 1-2 samples.
@@ -10375,16 +10375,16 @@ def _v2_compute_reference_quality(refs: list[dict], by_label_arr: dict) -> dict:
     """Per-detection reference-quality scores via leave-one-out
     cross-validation. For each labelled detection we ask:
 
-      * `self_score`  — cosine sim to the centroid of OTHER refs with
+      * `self_score`  - cosine sim to the centroid of OTHER refs with
                         the same label. High = this ref looks like the
                         rest of its class. Low = outlier.
-      * `other_score` — max cosine sim to the centroids of OTHER labels.
+      * `other_score` - max cosine sim to the centroids of OTHER labels.
                         High means the ref looks more like a different
                         class than its assigned one.
-      * `quality`     — `self_score - other_score`. Above ~0.05 is
+      * `quality`     - `self_score - other_score`. Above ~0.05 is
                         cleanly separable; near zero or negative means
                         this ref is hurting the centroid.
-      * `warning`     — short string when the ref is suspicious:
+      * `warning`     - short string when the ref is suspicious:
           - "outlier" when self_score < 0.5 (doesn't even look like
             its own class).
           - "looks like other class" when other_score >= self_score
@@ -10412,7 +10412,7 @@ def _v2_compute_reference_quality(refs: list[dict], by_label_arr: dict) -> dict:
         label_sum[lab] = arr.sum(axis=0)
         label_count[lab] = int(arr.shape[0])
 
-    # Full centroids (used for the other-class scoring side — those
+    # Full centroids (used for the other-class scoring side - those
     # don't change per detection, so no leave-one-out needed).
     label_centroid: dict[str, _np.ndarray] = {}
     for lab, arr in by_label_arr.items():
@@ -10532,7 +10532,7 @@ def _v2_compute_label_centroids(by_label: dict) -> dict[str, list[float]]:
     dot product downstream. Returns {label_lower: vec_list}.
 
     NOTE: superseded by `_v2_score_labels_knn` for the actual resolve
-    path — the resolver no longer reduces a label's references to a
+    path - the resolver no longer reduces a label's references to a
     single centroid because that loses multimodal structure (e.g. a
     "horse standing" label with side-view AND front-view references
     has its centroid land between the two clusters and underscores
@@ -10554,8 +10554,8 @@ def _v2_compute_label_centroids(by_label: dict) -> dict[str, list[float]]:
 # Top-K nearest-neighbour scoring is the V2 default. For each label
 # we score the query against every reference embedding and average
 # the K highest dot products. This handles multimodal label
-# distributions — references that cluster into 2-3 visually distinct
-# modes (different poses, angles, scales) — without forcing a single
+# distributions - references that cluster into 2-3 visually distinct
+# modes (different poses, angles, scales) - without forcing a single
 # averaged centroid that sits between modes.
 #
 # Fewer than K references → all of them are used (equivalent to
@@ -10587,10 +10587,10 @@ def _v2_score_labels_knn(
     where score is the mean of the K highest cosine sims between q
     and that label's references. Both q and the references are
     L2-normalised in v2_dinov2.encode_*, so the dot product `refs @ q`
-    here IS cosine similarity — no extra normalisation needed.
+    here IS cosine similarity - no extra normalisation needed.
 
     Cosine is the right metric for high-dim DINOv2 embeddings (1024d
-    here) — L2 distance suffers from the curse of dimensionality
+    here) - L2 distance suffers from the curse of dimensionality
     (all points become roughly equidistant) but cosine just measures
     angle, which is what we care about for L2-normalised features.
 
@@ -10615,7 +10615,7 @@ def _v2_score_labels_knn(
 
 # Tiny floor on cosine distance so the inverse-distance weight stays
 # finite when a query is essentially identical to a reference. 1e-3
-# means a perfect match (sim=1.0, d=0) gets capped at weight=1000 —
+# means a perfect match (sim=1.0, d=0) gets capped at weight=1000 -
 # more than enough to dominate over vague matches without blowing up
 # the arithmetic on rounding noise.
 _KNN_DIST_EPS = 1e-3
@@ -10689,7 +10689,7 @@ def _v2_filename_labels(filename: str | None, project_labels: list[str]) -> set[
 # Margin tolerance for the filename tiebreak. When the gap between
 # the top two label sims is smaller than this, the filename's
 # explicit mention of one of them gets to nudge that label up by an
-# equal amount — enough for a fence-tied second-place to leapfrog
+# equal amount - enough for a fence-tied second-place to leapfrog
 # first place, but small enough that confident decisions are
 # untouched.
 FILENAME_HINT_TOLERANCE = 0.05
@@ -10736,7 +10736,7 @@ def _v2_score_labels_centroid(
     """Centroid scoring: reduce each label's references to a single
     L2-normalised mean, then dot the query against it. Sharper
     contrast than kNN for unimodal label distributions (general
-    datasets — PPE, vehicles, signage) where every reference for a
+    datasets - PPE, vehicles, signage) where every reference for a
     label looks visually similar; the centroid acts as a denoiser
     and produces a clear peak-vs-valley between the right label and
     the wrong ones. Used for general datasets while kNN serves the
@@ -10766,7 +10766,7 @@ def _v2_resolve_label(
     gd_score: float | None = None,
     # VLM is informational by default; only consulted on ambiguous
     # cases as a tiebreaker / corroborating signal for relabels.
-    # Plain VLM "votes" are NOT aggregated into the decision — the
+    # Plain VLM "votes" are NOT aggregated into the decision - the
     # model has been observed picking visually salient occluders
     # over the actual labeled object often enough that we treat its
     # output as a discriminator, not a primary vote.
@@ -10787,7 +10787,7 @@ def _v2_resolve_label(
     # as overwhelming visual evidence.
     embed_very_strong_min: float = 0.8,
     # GD-confident lock (rule 0b): GD scoring at or above this
-    # threshold is decisive on its own — accept GD's label outright
+    # threshold is decisive on its own - accept GD's label outright
     # with no VLM, no embed checks. Catches the "person wearing
     # high-vis vest" case where embed confidently picks vest from
     # the contaminated centroid but GD correctly identified the
@@ -10795,7 +10795,7 @@ def _v2_resolve_label(
     gd_confident_min: float = 0.50,
     # GD-moderate lock (rule 0b'): GD in [gd_moderate_min,
     # gd_confident_min) is accepted ONLY when VLM corroborates
-    # GD's label. The soft-accept zone — GD alone isn't decisive
+    # GD's label. The soft-accept zone - GD alone isn't decisive
     # but a VLM second opinion locks it in.
     gd_moderate_min: float = 0.40,
     # Confusion reject ceiling (rule 0d): when GD is above the
@@ -10810,20 +10810,20 @@ def _v2_resolve_label(
     # Relabel rule (stricter than the previous "best_sim > gd_sim").
     # All four must hold:
     #   1. best_sim >= relabel_class_min (absolute floor, per-class
-    #      knob exposed for future tuning — 0.5 default for now)
+    #      knob exposed for future tuning - 0.5 default for now)
     #   2. embed_margin >= relabel_embed_margin (top1 - top2 >= 0.05
     #      so two near-equal centroids don't trigger a flip)
     #   3. best_sim - sim_for_gd_label >= relabel_gd_embed_margin
     #      (top1 must clearly beat GD's centroid by 0.05)
     #   4. gd_score < relabel_gd_low_max  OR  vlm corroborates
     #      (either GD itself wasn't confident, or the VLM agrees
-    #      with the embedding's pick — pure embedding override
+    #      with the embedding's pick - pure embedding override
     #      isn't allowed when GD is strong AND VLM disagrees.)
-    # relabel_gd_low_max aligns with ambiguous_gd_max (0.30) — any
+    # relabel_gd_low_max aligns with ambiguous_gd_max (0.30) - any
     # GD score below the ambiguity threshold is by definition not
     # confident enough to block an embed override. Margins were
     # halved (0.08→0.05 and 0.10→0.05) after a high-vis at embed
-    # 0.603 failed to relabel — face_mask's centroid sim sat close
+    # 0.603 failed to relabel - face_mask's centroid sim sat close
     # enough to high_vis that the older 0.10 gap couldn't open up.
     relabel_class_min: float = 0.5,
     relabel_embed_margin: float = 0.05,
@@ -10842,26 +10842,26 @@ def _v2_resolve_label(
     exact thresholds):
 
       0c. Very-strong embed override: embed nearest sim ≥
-         embed_very_strong_min (0.80) — accept embed outright,
+         embed_very_strong_min (0.80) - accept embed outright,
          beats even a confident GD.
       0d. Confusion reject: gd_score ≥ gd_moderate_min (0.40) AND
          embed-nearest is a DIFFERENT label with sim <
          confusion_embed_max (0.50). Neither signal is firmly
          committed; reject rather than commit to GD's pick.
-      0b. GD-confident lock: gd_score ≥ gd_confident_min (0.50) —
+      0b. GD-confident lock: gd_score ≥ gd_confident_min (0.50) -
          accept GD's label outright. No VLM, no embed checks.
       0b'. GD-moderate lock: gd_score in [gd_moderate_min (0.40),
-         gd_confident_min (0.50)) AND VLM agrees with GD — accept
+         gd_confident_min (0.50)) AND VLM agrees with GD - accept
          GD. The soft zone where GD alone isn't decisive.
       0a. Three-way disagreement reject: GD, embed-nearest, and VLM
          each picked a different label AND gd_score is below
-         gd_moderate_min (0.40) — no signal corroborates any other
+         gd_moderate_min (0.40) - no signal corroborates any other
          and GD couldn't defend itself, so reject rather than
          coin-flip. A moderately-confident GD is allowed to keep
          its label even with full disagreement (PPE-wearing
          people: each signal locks onto a different visible item).
       0. Strong-embed override: embed nearest sim ≥ embed_strong_min
-         (default 0.7) AND GD < gd_moderate_min (0.40) — trust the
+         (default 0.7) AND GD < gd_moderate_min (0.40) - trust the
          embedding when GD couldn't defend its own label. Defers
          when GD sits in the moderate zone so rule 0b' gets a shot.
       1. Rescue: gd very low + embedding very confident → accept
@@ -10902,7 +10902,7 @@ def _v2_resolve_label(
     sorted_sims_desc = sorted(sims.values(), reverse=True)
     # Margin is top1 - top2. With <2 labels in sims (e.g. only one
     # label has references uploaded yet) there's no second-best to
-    # subtract from, so the margin is undefined — return 0.0 rather
+    # subtract from, so the margin is undefined - return 0.0 rather
     # than the top1 sim itself, which was misleading the FE into
     # rendering a single sim's value as if it were the margin.
     embed_margin = (
@@ -10923,7 +10923,7 @@ def _v2_resolve_label(
     pred_source: str | None = "gd" if gd_label else None
     pred_key = gd_key
 
-    # Ambiguity flag — exposed on the response and used to gate the
+    # Ambiguity flag - exposed on the response and used to gate the
     # VLM tiebreaker.
     ambiguous = False
     if gd_score is not None and gd_score < ambiguous_gd_max:
@@ -10966,7 +10966,7 @@ def _v2_resolve_label(
     # Rule 0d: confusion reject. GD scored above gd_moderate_min
     # (0.40) but embed picked a DIFFERENT label and even its best
     # centroid sim is below confusion_embed_max (0.50). Neither
-    # signal is firmly committed — GD recognised something at
+    # signal is firmly committed - GD recognised something at
     # moderate confidence, embed couldn't match it cleanly to any
     # of the project's labels. Better to reject than commit.
     if (
@@ -10979,7 +10979,7 @@ def _v2_resolve_label(
         return _make("confusion", rejected=True, vlm_action="confusion-reject")
 
     # Rule 0b: GD-confident lock. gd_score ≥ gd_confident_min
-    # (default 0.50) — accept GD's label outright. No VLM, no embed
+    # (default 0.50) - accept GD's label outright. No VLM, no embed
     # checks. Catches the "person wearing high-vis vest" case where
     # embed confidently picks vest from a contaminated centroid but
     # GD correctly identified the person at 0.5+.
@@ -10991,7 +10991,7 @@ def _v2_resolve_label(
         return _make(None, rejected=False)
 
     # Rule 0b': GD-moderate lock with VLM agreement. gd_score in
-    # [gd_moderate_min, gd_confident_min) is the soft-accept zone —
+    # [gd_moderate_min, gd_confident_min) is the soft-accept zone -
     # GD alone isn't decisive, but a VLM second opinion locks it in.
     # Won't fire on the preliminary resolve (no VLM yet) so the box
     # stays ambiguous and the lazy-VLM gate calls Qwen-VL; the
@@ -11005,14 +11005,14 @@ def _v2_resolve_label(
         ambiguous = False
         return _make(None, rejected=False, vlm_action="confirm")
 
-    # No embedding info — fall back to GD-only gating.
+    # No embedding info - fall back to GD-only gating.
     if not sims:
         rejected_gd = gd_score is not None and gd_score < reject_gd_threshold
         return _make("gd" if rejected_gd else None, rejected=rejected_gd)
 
     # Rule 0a: three-way disagreement reject. When GD, the nearest
     # centroid, AND the VLM each picked a DIFFERENT label, no signal
-    # has corroborating support — committing to any one is a coin
+    # has corroborating support - committing to any one is a coin
     # flip. Reject outright.
     #
     # Gated to gd_score < gd_moderate_min (0.40): a moderately
@@ -11032,7 +11032,7 @@ def _v2_resolve_label(
     # Rule 0: strong-embed override (between embed_strong_min and
     # embed_very_strong_min). Fires when (a) GD already agrees, or
     # (b) GD is uncertain (< gd_moderate_min). When GD sits in the
-    # moderate zone we DEFER — leave ambiguous=True so the lazy-VLM
+    # moderate zone we DEFER - leave ambiguous=True so the lazy-VLM
     # gate runs and rule 0b' on the second pass can lock GD's call
     # if VLM corroborates.
     if best_key is not None and best_sim is not None and best_sim >= embed_strong_min:
@@ -11047,7 +11047,7 @@ def _v2_resolve_label(
             return _make(None, rejected=False)
         # else: defer to VLM-aware rules below.
 
-    # Rule 1: rescue — gd very low + very confident embedding.
+    # Rule 1: rescue - gd very low + very confident embedding.
     if (
         gd_score is not None and gd_score < reject_gd_threshold
         and best_key is not None and best_sim is not None
@@ -11071,12 +11071,12 @@ def _v2_resolve_label(
 
     # Rule 4: strict relabel. All conditions must hold for the
     # embedding to override GD's label. Pure "best_sim > gd_sim" is
-    # NOT enough — the margins guard against near-equal-centroid
+    # NOT enough - the margins guard against near-equal-centroid
     # flips, and the VLM-or-low-GD clause requires external
     # corroboration when GD itself was confident.
     #
     # Hard block: when VLM corroborates GD's label, that GD+VLM
-    # consensus overrides any embed-driven relabel attempt — even
+    # consensus overrides any embed-driven relabel attempt - even
     # if gd_score is below relabel_gd_low_max. Without this block
     # the resolver would happily flip a "gd glove + vlm glove"
     # detection to embed's "safety helmet" pick just because gd
@@ -11112,7 +11112,7 @@ def _v2_resolve_label(
         return _make("embed", rejected=True, vlm_action=relabel_action)
 
     # Rule 6: VLM tiebreaker on still-ambiguous cases. VLM only
-    # tiebreaks BETWEEN gd's label and embed's nearest label —
+    # tiebreaks BETWEEN gd's label and embed's nearest label -
     # picking a third unrelated label is treated as "VLM disagrees,
     # noted but ignored".
     vlm_action = relabel_action
@@ -11200,7 +11200,7 @@ def _v2_resolve_label_specific(
     Specific datasets (hare vs rabbit; horse standing vs lying; chess
     pieces; plate countries) are fine-grained variants of one base
     concept. GD's open-vocabulary detector can't reliably tell them
-    apart from the prompt — its score barely moves between sibling
+    apart from the prompt - its score barely moves between sibling
     labels, AND it carries a strong pretraining bias toward whichever
     label is more common in its training data (rabbits >> hares,
     cats >> servals, etc). The user's reference embeddings are the
@@ -11211,7 +11211,7 @@ def _v2_resolve_label_specific(
     margin was small ("tie-break"). That's been removed: the user
     found GD's pretraining prior was always wrong on the cases where
     embedding margins are thin, so any GD intervention hurts more
-    than it helps. The reference embeddings always win — even
+    than it helps. The reference embeddings always win - even
     razor-thin margins.
 
     Decision tree (first match wins):
@@ -11293,7 +11293,7 @@ def _v2_resolve_label_specific(
     # per label. Falls back to DINOv2-only when SigLIP isn't loaded
     # or has no refs for any label. When SigLIP patch tokens are
     # available, the patch top-K replaces the pooled cosine for
-    # any label that has both — same fallback shape as the DINOv2
+    # any label that has both - same fallback shape as the DINOv2
     # patch path above.
     use_siglip = (
         (embedding_siglip is not None and refs_by_label_siglip)
@@ -11312,7 +11312,7 @@ def _v2_resolve_label_specific(
                 merged_siglip[k] = sims_patch_siglip.get(k, sims_siglip.get(k, 0.0))
             sims_siglip = merged_siglip
         # Combine label-by-label. A label only gets a combined score
-        # when both encoders have a sim for it — half-empty pairs
+        # when both encoders have a sim for it - half-empty pairs
         # fall back to the encoder that does have data, weighted at
         # 1.0 so the half-data label isn't artificially dragged toward
         # zero.
@@ -11335,7 +11335,7 @@ def _v2_resolve_label_specific(
     sorted_sims_desc = sorted(sims.values(), reverse=True)
     # Margin is top1 - top2. With <2 labels in sims (e.g. only one
     # label has references uploaded yet) there's no second-best to
-    # subtract from, so the margin is undefined — return 0.0 rather
+    # subtract from, so the margin is undefined - return 0.0 rather
     # than the top1 sim itself, which was misleading the FE into
     # rendering a single sim's value as if it were the margin.
     embed_margin = (
@@ -11347,7 +11347,7 @@ def _v2_resolve_label_specific(
     best_sim = sims[best_key] if best_key else None
 
     # Seed the prediction from EMBEDDING'S top label, not GD's.
-    # GD's label is intentionally ignored at the label-choice step —
+    # GD's label is intentionally ignored at the label-choice step -
     # see the docstring above for why.
     pred_key = best_key
     pred_label = label_display.get(best_key, best_key) if best_key else None
@@ -11357,11 +11357,11 @@ def _v2_resolve_label_specific(
     # is within `_ambiguous_margin` of the runner-up the decision is
     # essentially a coin flip and the FE should surface the detection
     # in the "unsure" tray rather than the verified one. The resolver
-    # itself still commits to embed_best — this is purely a UI signal
+    # itself still commits to embed_best - this is purely a UI signal
     # so the user can review borderline calls. Threshold tunable via
     # V2_AMBIGUOUS_MARGIN. Computed inside _make so it can also
     # respect the rejected flag (rejected detections already get a
-    # red pill — adding "unsure" on top is noisy).
+    # red pill - adding "unsure" on top is noisy).
     _ambiguous_margin = (
         float(ambiguous_margin)
         if ambiguous_margin is not None
@@ -11370,7 +11370,7 @@ def _v2_resolve_label_specific(
 
     def _make(reject_reason: str | None, *, rejected: bool) -> dict:
         final_sim = sims.get(pred_key) if pred_key else None
-        # Only flag ambiguous on KEPT detections — rejected ones
+        # Only flag ambiguous on KEPT detections - rejected ones
         # already get the "rejected" pill in the FE; doubling up
         # on "unsure" + "rejected" is noisy.
         ambiguous = (
@@ -11391,7 +11391,7 @@ def _v2_resolve_label_specific(
             "vlm_action": None,
             "sims": {label_display.get(k, k): round(float(v), 4) for k, v in sims.items()},
             # Per-encoder breakdown for the popup. Lets the user see
-            # which encoder's signal carried each detection — handy
+            # which encoder's signal carried each detection - handy
             # when DINOv2 and SigLIP disagree on a fine-grained pair.
             "sims_dino": {label_display.get(k, k): round(float(v), 4) for k, v in sims_dino.items()},
             "sims_siglip": {label_display.get(k, k): round(float(v), 4) for k, v in sims_siglip.items()},
@@ -11415,7 +11415,7 @@ def _v2_resolve_label_specific(
         return _make("gd" if rejected_gd else None, rejected=rejected_gd)
 
     # Rule 2: GD-low rescue. GD almost dropped this detection but
-    # embed is confident — keep the box, label it from embed.
+    # embed is confident - keep the box, label it from embed.
     if (
         gd_score is not None and gd_score < reject_gd_threshold
         and best_sim is not None
@@ -11423,7 +11423,7 @@ def _v2_resolve_label_specific(
     ):
         return _make(None, rejected=False)
 
-    # Rule 3: GD very low alone — reject.
+    # Rule 3: GD very low alone - reject.
     if gd_score is not None and gd_score < reject_gd_threshold:
         return _make("gd", rejected=True)
 
@@ -11436,7 +11436,7 @@ def _v2_resolve_label_specific(
 
     # Rule 5: final-label embed-low reject. The prediction is the
     # embed top label; reject if its absolute similarity is too low
-    # to be meaningful. (GD tie-break removed — the user found GD's
+    # to be meaningful. (GD tie-break removed - the user found GD's
     # pretraining prior was always wrong on the cases where embed
     # margins were thin, so it dragged decisions in the wrong
     # direction more often than it tied them correctly.)
@@ -11456,7 +11456,7 @@ def _v2_resolve_label_specific(
 
     # Diagnostic: print the sims so we can see what's actually
     # driving each decision when the user reports "rabbits look
-    # like hares". One log line per detection — cheap, parsable.
+    # like hares". One log line per detection - cheap, parsable.
     try:
         sims_str = ", ".join(
             f"{label_display.get(k, k)}={v:.3f}"
@@ -11487,13 +11487,13 @@ def _v2_apply_containment(
     share a label, the bigger box is suspect. Two distinct patterns,
     each with a different fix:
 
-    1. **Duplicate detection** — the bigger box is a looser version
+    1. **Duplicate detection** - the bigger box is a looser version
        of the smaller one (same object detected twice). Detected by
        SIGNAL AGREEMENT: GD's label, embedding-nearest centroid, AND
        (if it ran) VLM all picked the same label as the smaller's.
        Action: REJECT the bigger; keep the tighter inner box.
 
-    2. **Compositional mislabel** — the bigger box is genuinely a
+    2. **Compositional mislabel** - the bigger box is genuinely a
        different object (e.g., a person whose bbox embeds close to
        the high-vis vest centroid because the centroid is biased).
        Detected by DISAGREEMENT: at least one of GD / embed-nearest
@@ -11501,7 +11501,7 @@ def _v2_apply_containment(
        bigger box to its next-best centroid that ISN'T the smaller's
        label; reject if no alternative clears the embed floor.
 
-    Different-label pairs are left alone — those are the legitimate
+    Different-label pairs are left alone - those are the legitimate
     "vest inside person" detections we want to keep.
 
     Containment is computed per-pair as
@@ -11566,7 +11566,7 @@ def _v2_apply_containment(
             #     Bigger is the more confident one in that case.
             # Confidence here = gd_score + embed_sim_for_label. We
             # reject whichever side has the lower combined score.
-            # (`small_key` was never assigned in the SaaS build — a latent
+            # (`small_key` was never assigned in the SaaS build - a latent
             # NameError on this path; the intended value is the smaller
             # box's normalised label, mirroring the sibling NMS pass.)
             small_key = str(small_label).strip().lower()
@@ -11643,14 +11643,14 @@ def _v2_apply_containment(
                 fixes.append(f"{prev_label}→reject(low-alt {best_alt_sim:.2f})")
                 break
     if fixes:
-        print(f"[v2-import] containment fixes: {len(fixes)} — {', '.join(fixes)}")
+        print(f"[v2-import] containment fixes: {len(fixes)} - {', '.join(fixes)}")
 
 
 def _v2_polygon_components(mask_obj: dict | None, *, secondary_frac: float = 0.10) -> int:
     """Count meaningful disconnected regions in a SAM mask payload.
 
     SAM's segmentation pipeline already filters polygons under
-    MIN_CONTOUR_AREA_FRAC (0.5% of box area) — anything that survives
+    MIN_CONTOUR_AREA_FRAC (0.5% of box area) - anything that survives
     is non-trivial. Within that, we treat polygons whose area is
     below `secondary_frac` of the largest as residual noise that
     shouldn't count toward the component total. So:
@@ -11694,7 +11694,7 @@ def _v2_apply_same_label_overlap(
 ) -> None:
     """Same-label overlap pass: prefer the cleaner / more confident peer.
 
-    When two same-label boxes overlap (IoU ≥ overlap_iou_min — set
+    When two same-label boxes overlap (IoU ≥ overlap_iou_min - set
     permissively so a small tolerance still triggers), we drop the
     weaker box. Two-tier discrimination:
 
@@ -11706,14 +11706,14 @@ def _v2_apply_same_label_overlap(
        (both single or both multi), reject the box with the lower
        combined confidence (gd_score + embed_sim_for_label). This
        catches the user's "person wearing high-vis with a hand
-       covering half" case — the partial annotation lands lower on
+       covering half" case - the partial annotation lands lower on
        both signals than the full one.
 
     Occlusion guard: before either tier runs, we compute the
     Euclidean distance between the two bbox centres normalised by
     the average box side length. When that ratio is >=
     occlusion_separation_min the boxes are at meaningfully
-    different positions despite the bbox overlap — likely separate
+    different positions despite the bbox overlap - likely separate
     objects partially occluding each other (a row of people half
     behind one another) rather than two detections of the same
     object. Skip rejection in that case.
@@ -11840,14 +11840,14 @@ def _v2_apply_same_label_overlap(
                 fixes.append(f"{b_label}{note}")
                 # don't break: i may pair with another j
     if fixes:
-        print(f"[v2-import] same-label overlap fixes: {len(fixes)} — {', '.join(fixes)}")
+        print(f"[v2-import] same-label overlap fixes: {len(fixes)} - {', '.join(fixes)}")
 
 
 # ─── Dataset-type classifier (general vs specific) ───────────────
 # Distinguishes "general" datasets (visually-distinct categories
-# like person/car/pothole — detector dominates the decision) from
+# like person/car/pothole - detector dominates the decision) from
 # "specific" datasets (fine-grained variants like hare vs rabbit
-# or horse-standing vs horse-lying — embeddings against per-label
+# or horse-standing vs horse-lying - embeddings against per-label
 # centroids do the heavy lifting). Surfaced in the UI so the user
 # knows what the pipeline is leaning on, and useful as a tuning
 # hook for future per-mode threshold profiles.
@@ -11897,7 +11897,7 @@ def _write_dataset_type_sidecar(project_id: str, data: dict) -> None:
 def _classify_dataset_type_cached(project_id: str, tags: list[str]) -> dict:
     """Portable build: no user choice, no external APIs. A dataset is "specific"
     exactly when it has reference images (the embedding resolver can then
-    use them) and "general" otherwise — labels alone always just work,
+    use them) and "general" otherwise - labels alone always just work,
     references are an optional upgrade added any time."""
     sig = _labels_signature(tags)
     try:
@@ -11948,7 +11948,7 @@ def _clear_dataset_type_override(project_id: str) -> None:
 def _apply_reference_dataset_flip(project_id: str) -> None:
     """Adding reference images is a strong signal the dataset is
     SPECIFIC (references only matter when classes look alike). Flip the
-    project to specific via a sticky override — but never stomp a choice
+    project to specific via a sticky override - but never stomp a choice
     the user made by hand, so someone who deliberately set "general" and
     then uploads a reference keeps their setting."""
     existing = _read_dataset_type_sidecar(project_id)
@@ -12017,7 +12017,7 @@ class DatasetTypeOverrideIn(BaseModel):
 async def v2_set_dataset_type(project_id: str, payload: DatasetTypeOverrideIn):
     """Let the project owner override the general/specific verdict (or
     reset it to the classifier). The override is sticky and feeds the
-    label pipeline — not just the badge — so centroid-vs-kNN scoring
+    label pipeline - not just the badge - so centroid-vs-kNN scoring
     follows the user's choice. Returns the freshly-resolved verdict."""
     choice = (payload.type or "").strip().lower()
     if choice not in ("general", "specific", "auto"):
@@ -12044,7 +12044,7 @@ class DatasetTypePreviewBody(BaseModel):
 async def openverse_search(q: str, count: int = 5, commercial: bool = False):
     """Search Openverse for `q` and return up to `count` (capped 250)
     Creative-Commons-licensed image results. Used by the "Don't have
-    images?" panel — small counts (~5) to preview candidates, larger
+    images?" panel - small counts (~5) to preview candidates, larger
     counts (up to 250) when the user has confirmed and is pulling the
     full corpus.
 
@@ -12068,7 +12068,7 @@ async def openverse_search(q: str, count: int = 5, commercial: bool = False):
     # thumbnails sometimes still fire onload), so we add a parallel
     # HEAD-probe pass here that filters out 404s, HTML error pages,
     # and tiny placeholder bytes BEFORE the search response leaves
-    # the backend. Runs in a thread pool — typically <2s for a
+    # the backend. Runs in a thread pool - typically <2s for a
     # 50-result page on a healthy network.
     try:
         validated = await loop.run_in_executor(
@@ -12086,13 +12086,13 @@ def collect_tags(manifest: dict) -> list[str]:
     """Union of prompt tags and labels actually present on the
     project's data. Sources, in order of authority:
 
-      1. manifest['tags'] — the explicit project label list (what
+      1. manifest['tags'] - the explicit project label list (what
          the FE label editor writes via PUT /api/projects/{id}).
-      2. V1 editedBoxes (manifest['editedBoxes']) — boxes the user
+      2. V1 editedBoxes (manifest['editedBoxes']) - boxes the user
          drew/relabelled on V1 imports.
-      3. V2 references' detections — boxes on uploaded reference
+      3. V2 references' detections - boxes on uploaded reference
          images with assigned labels (added in the V2 editor).
-      4. V2 imports' detections — labels the resolver picked +
+      4. V2 imports' detections - labels the resolver picked +
          user-confirmed boxes on dataset images.
 
     The 3rd and 4th are recovery paths for older projects that
@@ -12131,7 +12131,7 @@ def collect_tags(manifest: dict) -> list[str]:
                 if p:
                     extra_labels.add(p)
 
-    # V2 references' detections — recovery path for label-save bug.
+    # V2 references' detections - recovery path for label-save bug.
     for ref in manifest.get("references", []) or []:
         if not isinstance(ref, dict):
             continue
@@ -12142,7 +12142,7 @@ def collect_tags(manifest: dict) -> list[str]:
             if label and label != "new":
                 extra_labels.add(label)
 
-    # V2 imports' detections — same idea.
+    # V2 imports' detections - same idea.
     for imp in manifest.get("imports", []) or []:
         if not isinstance(imp, dict):
             continue
@@ -12172,7 +12172,7 @@ def collect_tags(manifest: dict) -> list[str]:
 # seconds so the FE's 4-second poll cycle doesn't redo the entire
 # project-directory walk + manifest load every time. Cache also
 # stat-watches every project's manifest mtime so it self-invalidates
-# the moment any project changes (upload, edit, delete) — no risk of
+# the moment any project changes (upload, edit, delete) - no risk of
 # returning stale data to the FE for more than the resolution of the
 # stat sweep.
 
@@ -12192,7 +12192,7 @@ def _projects_response_cache_get(key: tuple) -> object | None:
         age = _t.time() - entry["ts"]
         if age > _PROJECTS_RESPONSE_TTL_S:
             return None
-        # mtime sanity check — a manifest write between the cache
+        # mtime sanity check - a manifest write between the cache
         # populating and now invalidates immediately, regardless of
         # the TTL. Cheap: stat is microseconds per project.
         for pid, mtime in entry["mtimes"].items():
@@ -12205,7 +12205,7 @@ def _projects_response_cache_put(key: tuple, body: object, mtimes: dict[str, flo
     import time as _t
     with _PROJECTS_RESPONSE_LOCK:
         # Cap the cache so it doesn't grow unbounded as users hit
-        # different (offset, limit) tuples — most usage is the same
+        # different (offset, limit) tuples - most usage is the same
         # few keys but a hostile caller could blow it up.
         if len(_PROJECTS_RESPONSE_CACHE) > 64:
             _PROJECTS_RESPONSE_CACHE.clear()
@@ -12219,7 +12219,7 @@ def _projects_response_cache_put(key: tuple, body: object, mtimes: dict[str, flo
 # In-memory cache for cover blurhashes. Keyed by (project_id, cover_filename)
 # so a cover swap on the same project invalidates correctly. Survives until
 # restart; ~30 chars per entry so 10K projects = 300 KB. Computed lazily on
-# first list_projects call that returns each project — no manifest write,
+# first list_projects call that returns each project - no manifest write,
 # no pre-bake step needed.
 _BLURHASH_CACHE: dict[tuple[str, str], str] = {}
 
@@ -12312,7 +12312,7 @@ async def _serve_cached_image(project_id: str, subdir: str, filename: str, full_
     Sets Cache-Control + Last-Modified + ETag so the browser keeps
     bytes around across navigations. References + imports are
     content-addressed by UUID/hash filename, so the same URL never
-    changes its bytes — safe to allow long-lived browser caching.
+    changes its bytes - safe to allow long-lived browser caching.
     The cover-thumb endpoint and labelled-preview endpoint set
     `immutable` via the ?v=<updatedAt> cachebuster the FE appends,
     which is fine: the URL changes when the bytes change.
@@ -12330,7 +12330,7 @@ async def _serve_cached_image(project_id: str, subdir: str, filename: str, full_
         disk_mtime = st.st_mtime
     except OSError:
         disk_mtime = 0.0
-    # ETag built from mtime + size — cheap, stable, changes on edit.
+    # ETag built from mtime + size - cheap, stable, changes on edit.
     etag = f'W/"{int(disk_mtime)}-{st.st_size}"' if disk_mtime else None
     extra_headers = {
         # 1 hour in shared caches, 1 day in the user's browser.
@@ -12347,7 +12347,7 @@ async def _serve_cached_image(project_id: str, subdir: str, filename: str, full_
     if hit is not None:
         data, cached_ctype = hit
         return Response(content=data, media_type=cached_ctype or ctype, headers=extra_headers)
-    # Cache miss — read off-loop so concurrent thumbnail loads don't
+    # Cache miss - read off-loop so concurrent thumbnail loads don't
     # block each other while one disk read is in flight. The default
     # executor has multiple threads so dozens of reads can run in
     # parallel without choking the event loop.
@@ -12360,7 +12360,7 @@ async def _serve_cached_image(project_id: str, subdir: str, filename: str, full_
     return Response(content=data, media_type=ctype, headers=extra_headers)
 
 
-# Same hex palette as frontend/app/v2/OnboardLabelsV2.tsx — keeps
+# Same hex palette as frontend/app/v2/OnboardLabelsV2.tsx - keeps
 # the labelled-preview tints visually consistent with the chips
 # the user sees in the UI. Order matches LABEL_COLOURS exactly so
 # `colour_for_label` reproduces the FE's index-based assignment.
@@ -12378,7 +12378,7 @@ _LABEL_RGB: list[tuple[int, int, int]] = [
 
 def _label_rgb(label: str, project_labels: list[str]) -> tuple[int, int, int]:
     """Pick the RGB tuple a given label should render in. Mirrors
-    `colourForLabel` from OnboardLabelsV2.tsx — labels present in the
+    `colourForLabel` from OnboardLabelsV2.tsx - labels present in the
     project's tag list use the index-into-tags slot; unknown labels
     hash-fall back so they still pick a stable colour."""
     if not label:
@@ -12408,7 +12408,7 @@ def _vary_label_rgb(
     same shade across re-renders.
 
     Defaults stay small enough that the user still reads the family
-    colour at a glance — a hare next to another hare looks like
+    colour at a glance - a hare next to another hare looks like
     "two hares", not "two random objects".
     """
     import colorsys
@@ -12486,7 +12486,7 @@ def _size_ranked_rgb(rank: int, total: int) -> tuple[int, int, int]:
 def _random_rgb_from_seed(seed: int) -> tuple[int, int, int]:
     """Pick a saturated, value-high RGB tuple from a seed integer.
     Used by the labelled preview to give each segmentation a distinct
-    instance colour, irrespective of label — the colour is just a
+    instance colour, irrespective of label - the colour is just a
     visual separator, not a class indicator. Deterministic for a
     given seed so re-renders match (no flicker between cached and
     fresh previews)."""
@@ -12627,7 +12627,7 @@ def _render_labelled_preview(
     darkened + softly blurred. Returns an RGB PIL image suitable for
     JPEG encoding.
 
-    Detections without a polygon mask are skipped — there's nothing to
+    Detections without a polygon mask are skipped - there's nothing to
     composite. Rejected detections are skipped too so the cutouts only
     reflect labels the user kept.
 
@@ -12668,7 +12668,7 @@ def _render_labelled_preview(
 
     # Darken, lightly desaturate, and softly blur the background so
     # the eye locks onto the bright cutouts. Desaturate FIRST (mix
-    # toward greyscale) then darken+blur — keeps the colour pull on
+    # toward greyscale) then darken+blur - keeps the colour pull on
     # the foreground without making the bg feel washed out. The
     # foreground composite uses the original `base` so the kept
     # objects stay full-saturation regardless of what we do here.
@@ -12690,7 +12690,7 @@ def _render_labelled_preview(
     # its label's project-palette colour so the baked preview
     # matches the chips the user sees on the workspace card +
     # project view. Falls back to a neutral grey when a detection
-    # has no label (rare — pre-resolver / SAM-only crops). Old
+    # has no label (rare - pre-resolver / SAM-only crops). Old
     # cached previews are not re-baked; the new colour scheme only
     # applies to fresh bakes (cache file path version stays at v3).
     if tint_strength > 0:
@@ -12755,7 +12755,7 @@ def _thumb_render_lock(project_id: str, kind: str) -> asyncio.Lock:
 
 
 def _unique_tmp_suffix() -> str:
-    """Per-call tmp suffix — pid alone collides when the same worker
+    """Per-call tmp suffix - pid alone collides when the same worker
     process fields two simultaneous first-renders of the same thumb,
     overwriting each other's bytes. _uuid + pid keeps the suffix
     stable per call AND unique."""
@@ -12770,11 +12770,11 @@ def _bake_labelled_preview_sync(
     project_labels: list[str],
 ) -> None:
     """Render the labelled preview JPEG and persist it to disk. Runs
-    off the request thread (loop.run_in_executor). Never raises —
+    off the request thread (loop.run_in_executor). Never raises -
     bake failures fall back to the lazy GET path automatically.
 
     Called eagerly after upload + edit so the first /labelled_preview
-    request is a pure file serve with no per-pixel work — the user's
+    request is a pure file serve with no per-pixel work - the user's
     drop-zone progress indicator gets to update at network speed.
     """
     cached_path = _labelled_preview_path(project_id, import_id)
@@ -12819,7 +12819,7 @@ def _encode_blurhash_from_path(path: "Path") -> str | None:
 def _blurhash_backfill_async(project_id: str, items: list[tuple[str, str]]) -> None:
     """Encode missing blurhashes off the request thread and persist
     them back to the manifest. Items is a list of (subdir, filename)
-    tuples — we walk them, encode each via the on-disk path, write
+    tuples - we walk them, encode each via the on-disk path, write
     results to the in-memory cache and the manifest. Never raises;
     logs failures so the next read just re-tries.
 
@@ -12843,7 +12843,7 @@ def _blurhash_backfill_async(project_id: str, items: list[tuple[str, str]]) -> N
         return
     # Persist to manifest under the per-project write lock so a
     # concurrent reference / import POST doesn't get clobbered.
-    # _manifest_write_lock returns an asyncio.Lock — but we're on a
+    # _manifest_write_lock returns an asyncio.Lock - but we're on a
     # worker thread here. Use the sync lock pattern: load → mutate →
     # save in a tight critical section, treating concurrent edits
     # as best-effort (worst case the next backfill round picks up
@@ -12863,7 +12863,7 @@ def _blurhash_backfill_async(project_id: str, items: list[tuple[str, str]]) -> N
 
 def _cached_blurhash(project_id: str, filename: str, subdir: str) -> str | None:
     """Return a cached blurhash for `<project_id>/<subdir>/<filename>`,
-    encoding it on first miss. Used for references and imports — same
+    encoding it on first miss. Used for references and imports - same
     cache as the cover hash so a file used as both gets a single
     encode. Cache key namespaces by subdir so file names that
     collide between references/ and imports/ don't share entries."""
@@ -12885,12 +12885,12 @@ def _compute_cover_blurhash(project_id: str, cover_filename: str, *, is_v2: bool
 
     BlurHash (https://blurha.sh) packs a 30-ish-char string that the FE
     decodes into a small color gradient. Renders instantly while the
-    real cover image streams over the network — same trick Wolt /
+    real cover image streams over the network - same trick Wolt /
     Unsplash use to avoid blank tiles on slow connections.
 
     Cached in `_BLURHASH_CACHE` so subsequent /api/projects polls don't
     re-encode. Returns None when the cover file is missing or the
-    encoder fails — caller treats None as "no placeholder, fall back to
+    encoder fails - caller treats None as "no placeholder, fall back to
     plain background".
     """
     if not cover_filename:
@@ -12910,7 +12910,7 @@ def _compute_cover_blurhash(project_id: str, cover_filename: str, *, is_v2: bool
         from PIL import Image as _PIL
         with _PIL.open(img_path) as im:
             im = im.convert("RGB")
-            # Encode at low resolution — blurhash stretches a few
+            # Encode at low resolution - blurhash stretches a few
             # components into a smooth gradient, so feeding it a
             # 64-px thumbnail is more than enough and keeps the
             # encode under ~5 ms per image.
@@ -12956,7 +12956,7 @@ async def list_projects(
 
     Pagination: pass `?limit=N&offset=K` and the response shape changes
     from `list[item]` to `{total: int, items: list[item], offset, limit}`
-    — the public projects page uses this so the first 12 cards render
+    - the public projects page uses this so the first 12 cards render
     instantly while the rest stream in via infinite scroll. Without
     `limit` the response stays a plain list (back-compat with the
     workspace's existing 4-second poll).
@@ -12965,7 +12965,7 @@ async def list_projects(
     and the cover file is on disk. The FE decodes it client-side
     into a small colour gradient that fills the card slot
     immediately, then crossfades the real image in once it loads."""
-    # Response cache check — the FE polls this every 4 s and the
+    # Response cache check - the FE polls this every 4 s and the
     # answer rarely changes within that window. The cache also
     # stat-watches every contributing manifest so an upload / edit
     # invalidates immediately, keeping staleness within the
@@ -12978,7 +12978,7 @@ async def list_projects(
 
     # Snapshot the JobManager once so we can flag projects with a job
     # currently queued or running. Used by the frontend to render the
-    # "In progress" badge — independent of whether some images are
+    # "In progress" badge - independent of whether some images are
     # already labelled (the "Partial" / "Unlabelled" badges).
     running_projects: set[str] = set()
     try:
@@ -13013,7 +13013,7 @@ async def list_projects(
         cache_mtimes[_pid] = manifest_mtime
         # Fast path: the per-project card sidecar carries all the
         # static-per-write card fields. Skips the multi-MB manifest
-        # read entirely when it's fresh — the workspace's 4 s poll
+        # read entirely when it's fresh - the workspace's 4 s poll
         # used to hit `load_manifest` 33+ times on every tick.
         card = _read_workspace_card_sidecar(_pid)
         if card is not None:
@@ -13043,12 +13043,12 @@ async def list_projects(
                 continue
         # Slow path: sidecar missing or stale, fall back to a full
         # manifest read. Same loop body as before. Kick an async
-        # rebuild so the next request hits the fast path — bulk-
+        # rebuild so the next request hits the fast path - bulk-
         # warming via _kick_sidecar_refresh would also write
         # overview + initial sidecars we don't need here, so do the
         # workspace-card one directly. Dedup via a per-project guard.
         _kick_workspace_card_refresh(_pid)
-        # Read-only consumer — skip the deepcopy. The async sidecar
+        # Read-only consumer - skip the deepcopy. The async sidecar
         # write (kicked above) is the only mutation downstream and it
         # works from its own load_manifest call.
         manifest = load_manifest(_pid, copy=False)
@@ -13070,7 +13070,7 @@ async def list_projects(
         # so the workspace card's "Images" count reads zero on V2
         # without this. For V2 we also derive labelled / unlabelled
         # from each entry's explicit `labelled` flag (set by the
-        # label_charlie job) — falling back to whether the entry
+        # label_charlie job) - falling back to whether the entry
         # has any detections for older imports that pre-date the flag.
         if manifest.get("v2"):
             v2_imports = manifest.get("imports") or []
@@ -13115,7 +13115,7 @@ async def list_projects(
             # rather than always showing the first uploaded image.
             # Seed the random pick on `proj_id` so the same project
             # gets the SAME cover across calls (and across pagination
-            # pages) — without that, the workspace card thumbnail
+            # pages) - without that, the workspace card thumbnail
             # would shuffle every 4 s poll and look broken.
             #
             # Priority: V2 references first (the user's curated set);
@@ -13161,12 +13161,12 @@ async def list_projects(
             "n_references": len(v2_refs) if manifest.get("v2") else 0,
             "tags": collect_tags(manifest),
             # Display alias map (canonical_lower → renamed display)
-            # — surfaced so the workspace + public cards can render
+            # - surfaced so the workspace + public cards can render
             # a label rename instantly without each one having to
             # fetch the full manifest. Empty dict if the user hasn't
             # renamed any labels yet.
             "label_aliases": dict(manifest.get("label_aliases") or {}),
-            # Per-label colour overrides — surfaced on the list so the
+            # Per-label colour overrides - surfaced on the list so the
             # workspace + public cards can paint chips in the user's
             # chosen colours without each card fetching the full
             # manifest. Empty dict when no overrides set.
@@ -13207,7 +13207,7 @@ async def list_projects(
         info = _ds_container.get(str(it.get("id")))
         it["container"] = {"id": info["id"], "name": info["name"]} if info else None
 
-    # Search filter — applied before sort + pagination so `total`
+    # Search filter - applied before sort + pagination so `total`
     # reflects matching count and infinite-scroll pages stay stable.
     # Matches as a case-insensitive substring across name, owner /
     # createdBy, raw tags, and the renamed display values from
@@ -13229,7 +13229,7 @@ async def list_projects(
             return any(q_norm in h for h in haystack)
         items = [it for it in items if _matches(it)]
 
-    # Sort modes — server-side so pagination boundaries stay stable
+    # Sort modes - server-side so pagination boundaries stay stable
     # as the user scrolls. Python's sort is stable, so we layer the
     # sorts: first by the primary criterion, then a final pass that
     # pins viewer's favourites to the head. Without server-side
@@ -13259,7 +13259,7 @@ async def list_projects(
 
     # Encode blurhash only for the slice the caller is about to render.
     # 5-10 ms per project on first encode, then cached in
-    # _BLURHASH_CACHE for the rest of the process lifetime — so the
+    # _BLURHASH_CACHE for the rest of the process lifetime - so the
     # 4-second workspace poll only pays the encode cost once per
     # cover-image change.
     for it in page:
@@ -13270,7 +13270,7 @@ async def list_projects(
                 it["cover_blurhash"] = _cached_blurhash(it["id"], cover, subdir)
             except Exception as e:
                 print(f"[list_projects] blurhash skipped for {it['id']}: {e}")
-    # Strip internal-only fields before serialising — _cover_subdir
+    # Strip internal-only fields before serialising - _cover_subdir
     # was just to route the blurhash lookup, FE doesn't need it.
     for it in page:
         it.pop("_cover_subdir", None)
@@ -13279,7 +13279,7 @@ async def list_projects(
         body = {"total": total, "items": page, "offset": off, "limit": lim}
     else:
         body = page
-    # Stash for the next caller — TTL plus mtime watch keeps it
+    # Stash for the next caller - TTL plus mtime watch keeps it
     # both fast and correct.
     _projects_response_cache_put(_cache_key, body, cache_mtimes)
     return body
@@ -13294,8 +13294,8 @@ class CreateProjectIn(BaseModel):
 async def create_project(payload: CreateProjectIn, user: str = Depends(current_user)):
     """Mint a fresh UUID for the project's identity (folder name + R2 prefix).
     The user-supplied name is stored in the manifest as a freeform display
-    label — duplicate names across users (or even within one user) are fine.
-    Owner is forced to the authenticated user — clients can't spoof the
+    label - duplicate names across users (or even within one user) are fine.
+    Owner is forced to the authenticated user - clients can't spoof the
     `owner` field by sending someone else's username in the payload."""
     from profanity import assert_clean
 
@@ -13372,7 +13372,7 @@ def _container_detail(c: dict, username: str | None) -> dict:
             "n_images": len(m.get("imports") or m.get("results") or []),
             "hasModel": bool((m.get("model") or {}).get("weights")),
             "updated": m.get("updated"),
-            # Creator handle — drives the FE's per-dataset delete permissions
+            # Creator handle - drives the FE's per-dataset delete permissions
             # (only the creator can destroy; the Project owner can detach).
             "owner": (m.get("owner") or ""),
             # True when this dataset is a derived (cropped child) of another, so
@@ -13547,7 +13547,7 @@ async def container_add_dataset(container_id: str, dataset_id: str, user: str = 
     c = containers.load_container(container_id)
     if not c:
         raise HTTPException(404, "project not found")
-    # Any editor (or owner) of the Project can add a dataset — but only one they
+    # Any editor (or owner) of the Project can add a dataset - but only one they
     # own (you can't pull someone else's dataset into a Project).
     if not containers.can_write(c, user):
         raise HTTPException(403, "requires editor")
@@ -13564,7 +13564,7 @@ async def container_add_dataset(container_id: str, dataset_id: str, user: str = 
         c.setdefault("dataset_ids", []).append(dataset_id)
         containers.save_container(c)
     # Keep the workspace tree mirroring the logical nesting: the dataset
-    # folder physically moves into the project's folder (cosmetic only —
+    # folder physically moves into the project's folder (cosmetic only -
     # identity lives in the JSONs, so a failed move is harmless).
     try:
         store.move_dataset(dataset_id, container_id)
@@ -13583,7 +13583,7 @@ async def container_remove_dataset(container_id: str, dataset_id: str, user: str
     ds_owner = (m.get("owner") or "").strip().lower() if m else ""
     # Detach is non-destructive (the dataset survives as standalone), so the
     # Project owner may remove any dataset to organise the Project, and an editor
-    # may remove their OWN dataset — but an editor can't pull out someone else's.
+    # may remove their OWN dataset - but an editor can't pull out someone else's.
     if not (containers.can_manage(c, user) or (ds_owner and ds_owner == (user or "").strip().lower())):
         raise HTTPException(403, "requires the Project owner or the dataset's creator")
     if m and (m.get("container_id") or "") == container_id:
@@ -13685,7 +13685,7 @@ async def container_activity(container_id: str, request: Request, authorization:
 
 def _compute_dataset_health(manifest: dict) -> dict:
     """Backend-canonical dataset health so the FE doesn't have to
-    recompute it from labels + refs after both have loaded — that
+    recompute it from labels + refs after both have loaded - that
     looked janky because the badge would change from "Bad" to
     "Okay" to "Good" as data trickled in. Same logic the FE used
     to run, lifted here so the value lands on first paint.
@@ -13696,7 +13696,7 @@ def _compute_dataset_health(manifest: dict) -> dict:
         return {
             "level": "bad",
             "label": "Bad",
-            "reason": "No labels defined — add labels so the model knows what to detect.",
+            "reason": "No labels defined - add labels so the model knows what to detect.",
         }
     if not refs:
         return {
@@ -13715,18 +13715,18 @@ def _compute_dataset_health(manifest: dict) -> dict:
 # ─── Lightweight overview / annotations split ────────────────────────────────
 # The single-manifest GET used to bundle metadata + every detection's mask
 # polygon + every detection's 1024-dim DINOv2 + SigLIP embedding. On a
-# moderate project that's a multi-MB JSON payload — devastating over a
+# moderate project that's a multi-MB JSON payload - devastating over a
 # tunnel or slow link, regardless of how fast the backend renders it.
 #
 # These two endpoints split the response by what the FE actually needs at
 # each phase:
 #
-#   /overview     — render-critical only: project metadata, per-tile
+#   /overview     - render-critical only: project metadata, per-tile
 #                   { id, filename, blurhash, w, h, n_detections,
 #                     label_set }. Loads in tens of milliseconds. Drives
 #                   the gallery placeholder grid + chip rail.
-#   /annotations  — detections + editedBoxes, embeddings stripped (the
-#                   resolver never sends them to the FE — they're for
+#   /annotations  - detections + editedBoxes, embeddings stripped (the
+#                   resolver never sends them to the FE - they're for
 #                   server-side scoring only). Pulled lazily after the
 #                   overview has painted.
 #
@@ -13763,7 +13763,7 @@ def _kick_blurhash_backfill(project_id: str, m: dict) -> None:
     if needs:
         # _build_overview_payload runs in asyncio.to_thread (no running loop),
         # so get_running_loop() raises there. Guard it: an entry missing a
-        # blurhash (e.g. a derived-project crop) must not 500 the overview —
+        # blurhash (e.g. a derived-project crop) must not 500 the overview -
         # just skip the async backfill when there's no loop to schedule on.
         try:
             loop = asyncio.get_running_loop()
@@ -13777,7 +13777,7 @@ def _sort_imports_desc(entries: list[dict]) -> list[dict]:
     """Return entries sorted by createdAt DESC, with missing-createdAt
     entries sinking to the bottom. Matches the FE's
     compareImportedMediaDesc so the first-batch slice the FE renders
-    is already in final paint order — fixes the "gallery rearranges
+    is already in final paint order - fixes the "gallery rearranges
     while loading then settles" flicker on big projects."""
     def key(e: dict) -> tuple[int, float, str]:
         # (has_no_ts, -ms_for_desc, id_for_stable_tiebreak).
@@ -13819,7 +13819,7 @@ def _tile_overview(entries: list[dict]) -> list[dict]:
         edited = e.get("editedBoxes") if isinstance(e.get("editedBoxes"), list) else None
         edited_set = bool(e.get("editedBoxesSet"))
         # editedBoxes wins for the chip count when the user has touched
-        # them — including the explicit empty case (delete-all). Without
+        # them - including the explicit empty case (delete-all). Without
         # the editedBoxesSet branch a user who deletes every box on a
         # previously auto-labelled tile would still see the auto chips,
         # which looks like the delete didn't take.
@@ -13857,7 +13857,7 @@ def _tile_overview(entries: list[dict]) -> list[dict]:
             labels.append(lab)
         # source carries the origin metadata for URL-imported entries
         # (kind="openverse", url=...). The FE uses it to filter the
-        # Openverse search results — anything already in the project
+        # Openverse search results - anything already in the project
         # gets dropped from the preview so users don't accidentally
         # re-add. None for drag-dropped entries.
         src = e.get("source") if isinstance(e.get("source"), dict) else None
@@ -13894,7 +13894,7 @@ def _tile_overview(entries: list[dict]) -> list[dict]:
             # surfaced here: the FE-only Date.now() it used to set was
             # lost on cold re-open, so the preview URL fell back to the
             # bare path and the browser served the stale BLANK preview
-            # cached before the image was labelled — the "segmented
+            # cached before the image was labelled - the "segmented
             # cover vanishes when you reopen the project" bug.
             "labelledAt": e.get("labelledAt"),
             # Number of augmentation copies persisted for this
@@ -13922,7 +13922,7 @@ _EMBEDDING_FIELDS = (
     "siglip_version",
 )
 
-# Fields that are heavy (mask polygons are the worst — hundreds of
+# Fields that are heavy (mask polygons are the worst - hundreds of
 # (x, y) pairs per detection; base64-encoded crops are ~15 KB each)
 # AND not needed for gallery-tile rendering. /annotations strips
 # these by default; the per-image /annotations/{import_id} endpoint
@@ -13932,12 +13932,12 @@ _HEAVY_DETECTION_FIELDS = (
     "polygons",
     # Base64-encoded JPEG crop of the detection's bounding region.
     # Used by the pipeline popup to show "what the model saw" tiles.
-    # ~15 KB per detection — by far the largest contributor to wire
+    # ~15 KB per detection - by far the largest contributor to wire
     # size in /annotations on big projects (a 9000-detection project
     # was shipping 130 MB of base64 crops alone).
     "crop_jpg_b64",
     # The per-label sim dicts can each carry one float per project
-    # label — for a 10-label project that's still 10× more bytes per
+    # label - for a 10-label project that's still 10× more bytes per
     # detection than the predLabel itself. Pipeline popup needs them
     # but the gallery doesn't.
     "embed_sims",
@@ -13973,7 +13973,7 @@ def _strip_embedding_and_heavy(d: dict) -> dict:
 def _strip_edited_box(b: dict) -> dict:
     """editedBoxes carry their own mask polygons (the user-drawn or
     backend-segmented outline for each box). The gallery doesn't need
-    them — only the viewer does, and the viewer fetches the per-image
+    them - only the viewer does, and the viewer fetches the per-image
     /annotations/{import_id} which doesn't go through this strip."""
     slim = dict(b)
     slim.pop("mask", None)
@@ -13985,7 +13985,7 @@ def _detection_annotations(entries: list[dict], *, include_edits: bool, include_
     """Strip embeddings out of every detection so the annotations payload
     is ~10× smaller than the raw manifest. Keeps mask polygons by default
     (the FE needs them to render box outlines + the labelled-preview
-    overlay) — set include_heavy=False to also strip masks +
+    overlay) - set include_heavy=False to also strip masks +
     per-label similarity dicts on detections AND editedBoxes for the
     bulk gallery-hydration endpoint."""
     strip = _strip_embedding if include_heavy else _strip_embedding_and_heavy
@@ -14033,7 +14033,7 @@ def _build_overview_payload(
     FastAPI event loop when a labelling job is also in flight.
 
     `imports_limit` slices the imports list before _tile_overview
-    iterates — the per-tile reduction (n_detections + label_set) is
+    iterates - the per-tile reduction (n_detections + label_set) is
     the dominant cost on a 963-image project (~600 ms). With a limit
     of 20 the slice cost drops to ~12 ms, so the FE can paint the
     first viewport almost instantly and fetch the rest in the
@@ -14042,7 +14042,7 @@ def _build_overview_payload(
     _kick_blurhash_backfill(project_id, m)
     # Sort by createdAt DESC so the first-batch slice matches the FE's
     # gallery order. Without this the FE shows the first 100 manifest-
-    # order entries, then re-sorts when the remainder lands —
+    # order entries, then re-sorts when the remainder lands -
     # producing the visible "rearrange then settle" flicker the user
     # reported. With the sort moved here every slice is already in
     # final paint order.
@@ -14096,7 +14096,7 @@ def _build_overview_payload(
         # Cached general/specific verdict (LLM-free resolve) so the hero badge
         # paints in the same frame as the rest of /overview instead of popping
         # in 100-1000 ms later after a separate /dataset-type round-trip. Null
-        # when a classification could not be derived locally — the FE then
+        # when a classification could not be derived locally - the FE then
         # falls back to its own /dataset-type fetch.
         "dataset_type": _resolve_dataset_type_cached_only(
             project_id, list(m.get("tags") or [])
@@ -14166,14 +14166,14 @@ async def get_project_initial(
     response: Response,
     n: int = _INITIAL_PAYLOAD_LIMIT,
 ):
-    """Single-round-trip first-paint payload — project meta, first-N
+    """Single-round-trip first-paint payload - project meta, first-N
     import tiles (covers + chips + box counts) and the lite stats card
     data, all in one document.
 
     Served straight from the on-disk initial_first20.json sidecar that
     save_manifest's _kick_sidecar_refresh writes after every change.
     Zero compute, zero manifest parse on the request thread, and only
-    one HTTP round-trip from the FE — so the gallery + chip rail + stats
+    one HTTP round-trip from the FE - so the gallery + chip rail + stats
     badge all render in one paint instead of three staggered fetches.
 
     If the sidecar is missing (first-touch / cold deploy) we synthesise
@@ -14185,7 +14185,7 @@ async def get_project_initial(
         raise HTTPException(404)
     # Bypass the browser's HTTP cache. After a destructive action
     # (dedupe commit, ignore, manual delete) the FE hits
-    # window.location.reload() — which respects the disk cache by
+    # window.location.reload() - which respects the disk cache by
     # default, and without this header the browser handed back the
     # pre-delete /initial response on the very first paint, so the
     # stats card + gallery rendered with stale numbers until the
@@ -14212,18 +14212,18 @@ async def get_project_initial(
             sidecar_mtime = None
         manifest_mtime = _manifest_disk_mtime(project_id)
         if sidecar_mtime is not None and sidecar_mtime >= manifest_mtime:
-            # Fresh enough — serve it AND kick a background refresh so
+            # Fresh enough - serve it AND kick a background refresh so
             # any out-of-band changes (label fallback rules, format
             # tweaks) propagate by the next visit.
             _kick_sidecar_refresh(project_id)
             imps = (side.get("imports") or [])[:n]
             return {**side, "imports": imps}
-        # Stale sidecar — fall through to the inline compute below so
+        # Stale sidecar - fall through to the inline compute below so
         # the user doesn't see a one-version-old snapshot.
     # Cold path: no sidecar on disk yet. Build it inline so the first
     # visit still gets data, AND kick the async refresh so subsequent
     # visits hit the fast path. This is the same cost as /overview +
-    # /dataset-stats?lite combined, so we're not regressing — just not
+    # /dataset-stats?lite combined, so we're not regressing - just not
     # winning until the sidecar lands.
     _kick_sidecar_refresh(project_id)
     m = await asyncio.to_thread(load_manifest, project_id, False)
@@ -14233,7 +14233,7 @@ async def get_project_initial(
         _build_overview_payload, project_id, m,
         _FAST_OVERVIEW_LIMIT, 0,
     )
-    # Best-effort lite stats — same compute the /dataset-stats?lite=true
+    # Best-effort lite stats - same compute the /dataset-stats?lite=true
     # endpoint runs. Returns counts + label distribution + 3-factor
     # health, fast on small projects, sub-second on big ones.
     stats_payload: dict | None
@@ -14291,7 +14291,7 @@ async def get_project_overview(
     requests aren't queued behind each other on the event loop when a
     labelling job is hogging GPU + CPU.
 
-    Reads through the shared cache without deepcopying — _kick_blurhash_backfill
+    Reads through the shared cache without deepcopying - _kick_blurhash_backfill
     writes a missing blurhash back on the cached dict (idempotent), the
     rest is pure read. Built payloads are cached by manifest mtime so
     repeat polls inside an unchanged window are sub-millisecond.
@@ -14304,7 +14304,7 @@ async def get_project_overview(
     if not project_dir(project_id).exists():
         raise HTTPException(404)
     # Fast path: the FE's first-batch request matches the persisted
-    # sidecar exactly, so we serve it straight from disk — zero
+    # sidecar exactly, so we serve it straight from disk - zero
     # compute, zero manifest parse on the request thread. Allow-stale
     # because the sidecar gets rebuilt by save_manifest's async hook
     # after each write; serving the previous batch's numbers for a
@@ -14329,7 +14329,7 @@ async def get_project_overview(
                 sidecar_mtime = None
             manifest_mtime = _manifest_disk_mtime(project_id)
             if sidecar_mtime is not None and sidecar_mtime >= manifest_mtime:
-                # Fresh — serve it AND kick an async refresh so
+                # Fresh - serve it AND kick an async refresh so
                 # out-of-band changes (label fallback rules, schema
                 # tweaks) land by the next visit.
                 _kick_sidecar_refresh(project_id)
@@ -14337,11 +14337,11 @@ async def get_project_overview(
                 # limit so a request for 20 doesn't get back 100 entries.
                 imps = (side.get("imports") or [])[:imports_limit]
                 return {**side, "imports": imps, "imports_offset": 0}
-            # Stale — fall through to inline compute so this request
+            # Stale - fall through to inline compute so this request
             # gets fresh data, and kick a refresh for future visits.
             _kick_sidecar_refresh(project_id)
         else:
-            # Sidecar missing — kick a build and fall through to the
+            # Sidecar missing - kick a build and fall through to the
             # synchronous compute below so the FIRST visit still works.
             _kick_sidecar_refresh(project_id)
     disk_mtime = _manifest_disk_mtime(project_id)
@@ -14380,7 +14380,7 @@ async def get_project_overview(
 
 
 def _build_annotations_payload(m: dict) -> dict:
-    """Bulk gallery-hydration payload — heavy mask polygons + per-label
+    """Bulk gallery-hydration payload - heavy mask polygons + per-label
     sim dicts are stripped here so the wire size stays manageable on a
     963-image / 9000-detection project. The viewer fetches the full
     record per-image via /annotations/{import_id} when the user opens
@@ -14402,7 +14402,7 @@ def _build_annotations_payload(m: dict) -> dict:
 async def v3_viewport_batch(project_id: str, ids: str = "", request: Request = None):  # type: ignore[assignment]
     """Batched per-image annotations for a comma-separated list of
     import ids. Replaces N parallel /annotations/{import_id} calls
-    from the viewer's neighbour-prefetch with a single round-trip —
+    from the viewer's neighbour-prefetch with a single round-trip -
     cycling between gallery tiles paints from the cached batch
     instead of hitting the network per arrow press.
 
@@ -14485,7 +14485,7 @@ async def v3_dedupe_imports(project_id: str, apply: bool = False):
 
     Built specifically to clean up duplicates created by the
     upload-retry-without-idempotency-key race the FE fixed
-    elsewhere — that fix prevents future dupes; this scrubber
+    elsewhere - that fix prevents future dupes; this scrubber
     cleans up the ones already on disk.
     """
     import hashlib
@@ -14621,7 +14621,7 @@ async def v3_dedupe_imports(project_id: str, apply: bool = False):
 async def get_project_annotation_for_import(project_id: str, import_id: str):
     """Full detection record for a single import (mask polygons + per-
     label sim dicts included). Fetched by the viewer when the user
-    opens a tile — bulk /annotations skips these heavy fields to keep
+    opens a tile - bulk /annotations skips these heavy fields to keep
     its wire size down. Bypasses the payload cache: per-image data is
     tiny enough that the cache layer doesn't pay off, and the viewer
     expects fresh data after any in-flight edit."""
@@ -14652,7 +14652,7 @@ async def get_project_annotation_for_import(project_id: str, import_id: str):
 def _build_annotations_payload_scoped(m: dict, scope: str) -> dict:
     """Same as _build_annotations_payload but lets the caller drop the
     refs or imports half. `scope=refs` is the gallery's preferred call
-    — the imports' real geometry isn't needed for the chip rail (the
+    - the imports' real geometry isn't needed for the chip rail (the
     placeholder synth from /overview is correct) and the viewer reads
     the per-image endpoint for full geometry on demand."""
     out: dict = {}
@@ -14679,10 +14679,10 @@ def _build_annotations_payload_scoped(m: dict, scope: str) -> dict:
 async def get_project_annotations(project_id: str, scope: str = "all"):
     """Per-image detections + editedBoxes WITHOUT embeddings. Pulled by
     the FE after the overview has painted; powers the BoxEditor + the
-    pipeline popup. Embeddings are server-side only — the resolver
+    pipeline popup. Embeddings are server-side only - the resolver
     reads them off the on-disk manifest, the FE never sees them.
 
-    `scope=refs` returns ONLY the references' detection geometry — the
+    `scope=refs` returns ONLY the references' detection geometry - the
     gallery uses placeholder detections synthesised from /overview's
     n_detections + label_set, so the bulk imports payload (~270 KB on
     a 9000-detection project) is dead weight there. The viewer fetches
@@ -14707,7 +14707,7 @@ async def get_project_annotations(project_id: str, scope: str = "all"):
             return _build_annotations_payload_scoped(m2, scope_norm) if m2 else {}
         asyncio.create_task(_payload_revalidate(project_id, cache_key, _build_scoped))
         return cached
-    # Read-only — pass copy=False to skip the manifest deepcopy. The
+    # Read-only - pass copy=False to skip the manifest deepcopy. The
     # builder only reads from m to produce a brand-new payload dict.
     m = await asyncio.to_thread(load_manifest, project_id, False)
     if not m:
@@ -14729,7 +14729,7 @@ async def get_project(project_id: str):
         return m
     # Surface any blurhashes already in the in-memory cache without
     # re-encoding from disk (which is what made the GET handler slow
-    # — 50 encodes × ~10 ms ≈ 500 ms blocking the response). Cache
+    # - 50 encodes × ~10 ms ≈ 500 ms blocking the response). Cache
     # hits are O(1); misses fall through and get scheduled for a
     # background backfill below.
     needs_backfill: list[tuple[str, str, dict]] = []
@@ -14757,7 +14757,7 @@ async def get_project(project_id: str):
     # Schedule any missing encodes to run on the executor pool so the
     # GET response returns IMMEDIATELY with whatever's already cached.
     # Next manifest read (the user re-opens the project, or a poll
-    # tick) picks up the freshly encoded hashes — meanwhile the FE
+    # tick) picks up the freshly encoded hashes - meanwhile the FE
     # falls back to its animated gradient placeholder, no blank tiles.
     if needs_backfill:
         loop = asyncio.get_running_loop()
@@ -14797,13 +14797,13 @@ class UpdateProjectIn(BaseModel):
     private: bool | None = None
     # Display-only aliases for canonical labels: {canonical_lower:
     # display_name}. Backend stores + serves them through; nothing on
-    # the server consumes the alias for scoring / persistence — the
+    # the server consumes the alias for scoring / persistence - the
     # canonical key remains the source of truth on every detection,
     # ref, and import. Lets the UI rename a label without rewriting
     # every box. None means "leave existing aliases untouched".
     label_aliases: dict[str, str] | None = None
     # Per-label colour overrides, keyed by canonical-lower label →
-    # #rrggbb. Same store-and-forward shape as label_aliases — the
+    # #rrggbb. Same store-and-forward shape as label_aliases - the
     # backend doesn't render these, the FE composes them on top of
     # the stable hash-based palette. None = leave existing untouched.
     labelColours: dict[str, str] | None = None
@@ -14854,7 +14854,7 @@ async def update_project(project_id: str, payload: UpdateProjectIn):
         # only the deltas (e.g. when a user edits a single label).
         merged = dict(manifest.get("labelColours") or {})
         merged.update(clean)
-        # An explicit empty string would clear an override — strip
+        # An explicit empty string would clear an override - strip
         # any keys with an empty value out of the merged map.
         for k, v in list(clean.items()):
             if v == "" or v == "#":
@@ -14891,7 +14891,7 @@ async def update_project(project_id: str, payload: UpdateProjectIn):
 
     # Re-bake the preview JPEG for each affected image, off the request
     # thread so the PUT returns fast. Failures are logged but don't fail
-    # the save — the preview can always be regenerated later.
+    # the save - the preview can always be regenerated later.
     if rebake_images and R2 is not None:
         loop = asyncio.get_running_loop()
         loop.run_in_executor(None, _rebake_previews_sync, project_id, rebake_images)
@@ -14948,7 +14948,7 @@ def _rebake_previews_sync(project: str, image_names: list[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Per-segmentation embeddings — DINOv2 features for similar-label discovery.
+# Per-segmentation embeddings - DINOv2 features for similar-label discovery.
 # ---------------------------------------------------------------------------
 
 def _collect_segmentation_inputs(manifest: dict, *, image_names: set[str] | None = None):
@@ -14982,7 +14982,7 @@ def _collect_segmentation_inputs(manifest: dict, *, image_names: set[str] | None
                 polys,
             )
 
-    # Don't yield detections for images that already have editedBoxes —
+    # Don't yield detections for images that already have editedBoxes -
     # editedBoxes are the user-facing source of truth and the embedding
     # store would otherwise carry a duplicate row per physical box.
     images_with_edits = {img for img, boxes in edited_all.items() if boxes}
@@ -15050,14 +15050,14 @@ def _refresh_embeddings_sync(project_id: str, image_names: list[str] | None = No
             targets.append(tup)
 
         # Match against the existing store. Skip rows that match
-        # exactly — same box_id, same label, same box geometry, same
-        # polygon vertex count — so unchanged boxes don't trigger an
+        # exactly - same box_id, same label, same box geometry, same
+        # polygon vertex count - so unchanged boxes don't trigger an
         # encoder pass.
         existing_arr, existing_meta = _emb.load_store(proj_dir)
         existing_by_id = {str(m.get("box_id")): (i, m) for i, m in enumerate(existing_meta)}
 
         rows_to_upsert: list[tuple[dict, "np.ndarray"]] = []
-        # Lazy image loader — one PIL.Image per image, decoded once
+        # Lazy image loader - one PIL.Image per image, decoded once
         # even if there are many boxes on it.
         image_cache: dict[str, "PILImage.Image"] = {}
 
@@ -15076,11 +15076,11 @@ def _refresh_embeddings_sync(project_id: str, image_names: list[str] | None = No
                 # Encoder version gate: when the encode pipeline
                 # changes (e.g. dropping the grey-background mask
                 # isolation in v2), every legacy row needs to be
-                # re-encoded under the new transform — otherwise
+                # re-encoded under the new transform - otherwise
                 # similarity search compares apples to oranges.
                 same_encoder = m.get("encoder_version") == _ENCODER_VERSION
                 if same_box and same_poly and same_label and has_size and same_encoder:
-                    continue  # unchanged — skip the encode
+                    continue  # unchanged - skip the encode
 
             image_pil = image_cache.get(img_name)
             if image_pil is None:
@@ -15095,7 +15095,7 @@ def _refresh_embeddings_sync(project_id: str, image_names: list[str] | None = No
                 continue
             # Record the box's size relative to the image so the
             # similarity search can weight by scale as well as
-            # appearance — two genuinely-similar objects at very
+            # appearance - two genuinely-similar objects at very
             # different scales used to score below threshold and
             # never appear; the combined score in find_similar
             # handles that.
@@ -15168,7 +15168,7 @@ async def delete_project(project_id: str):
     try:
         # Cancel any in-flight or queued jobs for this project before nuking
         # the folder. Without this, a stuck/hung runner that didn't honour the
-        # earlier cancel keeps the job in the JobManager as running/queued —
+        # earlier cancel keeps the job in the JobManager as running/queued -
         # later /jobs/active probes for this id (or a re-created project that
         # somehow shares the id) can re-attach to it.
         for j in list(state["jobs"].jobs.values()):
@@ -15206,7 +15206,7 @@ class DuplicateProjectIn(BaseModel):
 @app.post(
     "/api/projects/{project_id}/duplicate",
     # Owner-gated: you duplicate your OWN datasets (the workspace card action).
-    # Same gate as rename/settings — not the stricter creator-only delete gate.
+    # Same gate as rename/settings - not the stricter creator-only delete gate.
     dependencies=[Depends(require_project_owner)],
 )
 async def duplicate_project(
@@ -15222,7 +15222,7 @@ async def duplicate_project(
     output bytes. We byte-copy both, then rewrite the new manifest's identity
     fields. Every filename inside the manifest is relative to those dirs, and
     per-image/per-reference ids are project-scoped, so nothing else needs
-    rewriting. The copy is a standalone dataset — it does not inherit the
+    rewriting. The copy is a standalone dataset - it does not inherit the
     source's Project (container) membership or derived-parent linkage."""
     src = project_dir(project_id)
     if not src.exists() or not manifest_path(project_id).exists():
@@ -15298,7 +15298,7 @@ async def duplicate_project(
     m["updatedAt"] = now
     m["likedBy"] = []
     m["favouritedBy"] = []
-    # Standalone copy — not part of the source's Project, not a derived child.
+    # Standalone copy - not part of the source's Project, not a derived child.
     m.pop("container_id", None)
     m.pop("derived", None)
     save_manifest(new_id, m)
@@ -15319,7 +15319,7 @@ class RenameIn(BaseModel):
 )
 async def rename_project(project_id: str, payload: RenameIn):
     """Update the manifest's display name. The folder + R2 prefix stay
-    addressed by the project's UUID, so renames cost only a manifest write —
+    addressed by the project's UUID, so renames cost only a manifest write -
     no R2 moves, no broken links, two users can have the same display name."""
     from profanity import assert_clean
 
@@ -15349,7 +15349,7 @@ async def add_images(project_id: str, images: list[UploadFile] = File(...), user
     """Two-phase upload: file receive → NSFW gate → R2 put + manifest.
 
     Phase 1 (`upload` job): per-file dedup + image validation, then stage
-    raw bytes to a temp folder on disk. Fast — no GPU, no R2.
+    raw bytes to a temp folder on disk. Fast - no GPU, no R2.
 
     Phase 2 (`nsfw_check` job): NSFW classifier on each staged file. If it
     passes, push to R2 + add to manifest as pending. If it fails, log the
@@ -15375,7 +15375,7 @@ async def add_images(project_id: str, images: list[UploadFile] = File(...), user
             f"too many files in one upload ({len(images)} > {MAX_FILES_PER_UPLOAD_BATCH})",
         )
 
-    # Read all uploaded bytes upfront — UploadFile streams are tied to the
+    # Read all uploaded bytes upfront - UploadFile streams are tied to the
     # request lifetime, so we capture them before run_inline kicks off.
     file_blobs: list[tuple[str, bytes, str | None]] = []
     for f in images:
@@ -15474,7 +15474,7 @@ async def add_images(project_id: str, images: list[UploadFile] = File(...), user
             loop = asyncio.get_running_loop()
 
             # Sync per-file work pushed to a worker thread. NSFW classifier
-            # is GPU-bound and R2 PUT is network-bound — both block the
+            # is GPU-bound and R2 PUT is network-bound - both block the
             # asyncio loop if run inline. We still write the manifest from
             # the async side to avoid concurrent writers stepping on it.
             def check_and_upload(fn: str, sha: str, tmp_path: Path, ctype: str | None):
@@ -15535,7 +15535,7 @@ async def add_images(project_id: str, images: list[UploadFile] = File(...), user
                     added.append(fn_)
                     await emit("result", {"index": i, "result": new_result})
                 finally:
-                    # Clean up the temp file no matter what — we don't
+                    # Clean up the temp file no matter what - we don't
                     # want NSFW-blocked content sitting on disk either.
                     try:
                         tmp_path.unlink(missing_ok=True)
@@ -15587,7 +15587,7 @@ class ImagesFromUrlsRequest(BaseModel):
 )
 async def add_images_from_urls(project_id: str, body: ImagesFromUrlsRequest, user: str | None = None):
     """Pull a list of image URLs (typically from an Openverse search)
-    straight into the project. Single-phase, single job — no NSFW gate
+    straight into the project. Single-phase, single job - no NSFW gate
     (these come from a curated CC-licensed source) and no GroundingDINO
     pre-pass (the user already vetted each thumbnail by hand).
 
@@ -15612,7 +15612,7 @@ async def add_images_from_urls(project_id: str, body: ImagesFromUrlsRequest, use
         raise HTTPException(400, "too many urls, max 100 per request")
     if not raw_urls:
         raise HTTPException(400, "no urls")
-    # Dedupe within the batch — Openverse pagination occasionally
+    # Dedupe within the batch - Openverse pagination occasionally
     # surfaces the same URL on multiple pages, and a client-side bug
     # could double-submit. First-occurrence wins so order is stable.
     seen_in_batch: set[str] = set()
@@ -15651,7 +15651,7 @@ async def add_images_from_urls(project_id: str, body: ImagesFromUrlsRequest, use
         results = manifest.get("results", []) or []
         existing_names: set[str] = {r.get("image") for r in results if r.get("image")}
         existing_hashes: dict[str, str] = {}
-        # Set of URLs already imported into this project — driven by
+        # Set of URLs already imported into this project - driven by
         # the `source.url` field stamped onto each manifest entry by
         # this same handler. Lets us reject re-import attempts before
         # we even hit the network, both for the request-level cache
@@ -15698,8 +15698,8 @@ async def add_images_from_urls(project_id: str, body: ImagesFromUrlsRequest, use
             if not ext:
                 ext = ".jpg"
             # Loop until we land on a non-colliding name. Practically
-            # one shot — 48 bits of entropy means even at 100 imports
-            # the collision odds are sub-billionth — but keep the loop
+            # one shot - 48 bits of entropy means even at 100 imports
+            # the collision odds are sub-billionth - but keep the loop
             # in case someone retries the same URL set repeatedly.
             while True:
                 suffix = _uuid.uuid4().hex[:12]
@@ -15736,7 +15736,7 @@ async def add_images_from_urls(project_id: str, body: ImagesFromUrlsRequest, use
 
             # Reject blank / placeholder / 1×1-pixel images at the
             # source. Provider URLs sometimes round-trip a tiny stub
-            # or a uniform black tile with a 200 OK — `img.verify()`
+            # or a uniform black tile with a 200 OK - `img.verify()`
             # passes them, but they're useless to label and clutter
             # the project. Frontend probe catches most thumbnails;
             # this catches what the full-resolution URL serves up.
@@ -15822,7 +15822,7 @@ async def add_images_from_urls(project_id: str, body: ImagesFromUrlsRequest, use
     return {"added": added, "skipped": skipped, "rejected": rejected}
 
 
-# Every field that can carry a label name on a box/detection record —
+# Every field that can carry a label name on a box/detection record -
 # matches _box_label's resolution order so a rename never leaves a
 # stale synonym behind in a different key.
 _LABEL_KEYS = ("label", "predLabel", "pred_label", "gdLabel", "gd_label", "gd_variant")
@@ -15878,7 +15878,7 @@ def _rename_label_fields(manifest: dict, old: str, new: str) -> int:
         _boxes(imp.get("detections"))
         _boxes(imp.get("editedBoxes"))
     # Reference crops are the label source of truth for specific-mode
-    # resolving — left un-renamed they'd resurrect the old label on the
+    # resolving - left un-renamed they'd resurrect the old label on the
     # next labelling run.
     for ref in manifest.get("references", []) or []:
         if not isinstance(ref, dict):
@@ -15930,7 +15930,7 @@ async def rename_label(project_id: str, body: RenameLabelRequest):
     assert_clean(new, field="label")
     if old == new:
         # Exact same name. (Case-only changes like cat→Cat are real
-        # renames and fall through — they used to be rejected here,
+        # renames and fall through - they used to be rejected here,
         # which made fixing a label's casing impossible.)
         return {"ok": True, "renamed": 0}
 
@@ -16007,7 +16007,7 @@ async def container_rename_label(container_id: str, body: RenameLabelRequest):
 
     assert_clean(new, field="label")
     if old == new:
-        # Exact same name only — case-only renames are legitimate.
+        # Exact same name only - case-only renames are legitimate.
         return {"ok": True, "renamed": 0, "datasetsTouched": 0}
 
     ds_ids = list(c.get("dataset_ids") or [])
@@ -16040,7 +16040,7 @@ async def container_rename_label(container_id: str, body: RenameLabelRequest):
     dependencies=[Depends(require_project_owner)],
 )
 async def clear_image_labels(project_id: str, filename: str):
-    """Reset a single image to its unlabelled state — drops all
+    """Reset a single image to its unlabelled state - drops all
     detections + edited boxes, removes the rendered annotated preview
     from R2, clears the verdict, and flips pending=True so the image
     rejoins the auto-label queue. Other images aren't affected."""
@@ -16062,7 +16062,7 @@ async def clear_image_labels(project_id: str, filename: str):
     if target is None:
         raise HTTPException(404, f"image {fn} not in manifest")
 
-    # Annotated preview — delete the R2 object so the file doesn't
+    # Annotated preview - delete the R2 object so the file doesn't
     # linger orphaned. Best-effort: a stale preview is recoverable
     # from the manifest reset; a failed delete shouldn't block the
     # state change.
@@ -16077,7 +16077,7 @@ async def clear_image_labels(project_id: str, filename: str):
     target["annotated"] = None
     target["pending"] = True
     # Drop any stored validation/verdict-on-detection data on the
-    # image too — those were tied to the old detections.
+    # image too - those were tied to the old detections.
     target.pop("missingObjects", None)
     target.pop("missingReason", None)
 
@@ -16103,7 +16103,7 @@ async def clear_all_annotations(project_id: str):
     """Wipe every detection + editedBoxes off every import in the
     project, drop the labelled-preview JPEGs, flip pending=True so
     everything re-enters the auto-label queue. Project-level tags /
-    labelColours / label_aliases are preserved — only the per-image
+    labelColours / label_aliases are preserved - only the per-image
     annotation data is reset."""
     proj = project_dir(project_id)
     if not proj.exists():
@@ -16134,7 +16134,7 @@ async def clear_all_annotations(project_id: str):
                 except Exception:
                     pass
                 cleared += 1
-        # v1-era project-level dicts keyed by filename — wipe in full.
+        # v1-era project-level dicts keyed by filename - wipe in full.
         if "editedBoxes" in manifest:
             manifest["editedBoxes"] = {}
         if "verdicts" in manifest:
@@ -16191,7 +16191,7 @@ async def schedule_job(
     user: str = Depends(current_user),
 ):
     """Queue a job. Returns the job id; subscribe to /api/jobs/{id}/events
-    for live progress. Requires WRITE access to the target project — the
+    for live progress. Requires WRITE access to the target project - the
     dataset's own creator, OR (for a dataset in a Project) any editor/owner of
     that Project, so a Project editor can run auto-labelling / training on a
     dataset a teammate created."""
@@ -16200,7 +16200,7 @@ async def schedule_job(
     proj = project_dir(payload.project)
     if not proj.exists():
         raise HTTPException(404, "project not found")
-    # copy=False — we only read owner + counts here. Deepcopying a
+    # copy=False - we only read owner + counts here. Deepcopying a
     # 30MB manifest just to schedule a job was ~300-500ms of dead
     # weight before the label_charlie job runner even picks up.
     project_manifest = load_manifest(payload.project, copy=False) or {}
@@ -16223,7 +16223,7 @@ async def schedule_job(
 
     n_images = 0
     # Reuse `project_manifest` (already loaded copy=False above) for
-    # every n_images count — no second deepcopy of the same dict.
+    # every n_images count - no second deepcopy of the same dict.
     if payload.kind == "label":
         manifest = project_manifest
         n_images = sum(1 for r in (manifest.get("results", []) or []) if r.get("pending"))
@@ -16244,12 +16244,12 @@ async def schedule_job(
         edited = manifest.get("editedBoxes") or {}
         n_images = sum(1 for v in edited.values() if isinstance(v, list) and v)
         if n_images == 0:
-            raise HTTPException(400, "no labelled images yet — label some first")
+            raise HTTPException(400, "no labelled images yet - label some first")
     elif payload.kind == "label_charlie":
         manifest = project_manifest
         force_relabel = bool((payload.params or {}).get("force_relabel"))
         if force_relabel:
-            # Re-label everything — counts every import.
+            # Re-label everything - counts every import.
             n_images = sum(
                 1 for e in (manifest.get("imports") or []) if isinstance(e, dict)
             )
@@ -16257,7 +16257,7 @@ async def schedule_job(
             # Mirror the runner's unlabelled filter (see
             # _run_label_charlie_job around line 3275). Counts
             # editedBoxesSet=True with empty editedBoxes as
-            # unlabelled too — fixes a bug where "Clear all" on a
+            # unlabelled too - fixes a bug where "Clear all" on a
             # tile left labelled=True and the schedule endpoint
             # 400'd "no unlabelled images" even though the user had
             # just emptied one.
@@ -16277,7 +16277,7 @@ async def schedule_job(
         if n_images == 0:
             raise HTTPException(
                 400,
-                "no images to process — drop some onto the dataset first"
+                "no images to process - drop some onto the dataset first"
                 if force_relabel
                 else "no unlabelled images to process",
             )
@@ -16391,7 +16391,7 @@ async def get_project_job(project_id: str, job_id: str):
     dependencies=[Depends(require_project_owner)],
 )
 async def cancel_project_job(project_id: str, job_id: str):
-    """Cancel a running or queued job — scoped to this project so the action
+    """Cancel a running or queued job - scoped to this project so the action
     can't escape into another project's queue."""
     job = state["jobs"].jobs.get(job_id)
     if not job:
@@ -16407,7 +16407,7 @@ async def cancel_project_job(project_id: str, job_id: str):
     dependencies=[Depends(require_project_read_access)],
 )
 async def project_original(project_id: str, filename: str):
-    """302 to a short-lived R2 presigned URL — bytes flow browser ↔ R2,
+    """302 to a short-lived R2 presigned URL - bytes flow browser ↔ R2,
     backend just serves the redirect header. URL is cached for ~50 min so
     repeat hits are CPU-free; the response carries Cache-Control so the
     browser stops asking entirely for 5 min and serves stale up to 55."""
@@ -16427,7 +16427,7 @@ async def project_annotated(project_id: str, filename: str):
 # ---- Dataset export -----------------------------------------------------
 # One endpoint, format chosen via query string. Always returns a downloadable
 # response with a sensible filename. Annotations are read from manifest.editedBoxes
-# (the source of truth for labelled state — manual edits + auto detections);
+# (the source of truth for labelled state - manual edits + auto detections);
 # detections-only exports would miss the user's corrections.
 
 def _safe_slug(s: str) -> str:
@@ -16483,7 +16483,7 @@ def _image_index(manifest: dict) -> dict[str, dict]:
             slot["width"] = w
         if h and not slot["height"]:
             slot["height"] = h
-        # Boxes: editedBoxes wins when explicitly set (even if empty —
+        # Boxes: editedBoxes wins when explicitly set (even if empty -
         # editedBoxesSet=True means "user blanked it deliberately"),
         # otherwise fall back to auto detections. The detections path
         # drops anything the resolver flagged `rejected` so confidence-
@@ -16518,7 +16518,7 @@ def _image_names_list(manifest: dict) -> list[str]:
     return list(_image_index(manifest).keys())
 
 
-# Box size classification — matches the frontend exactly (BOX_FAIL_PX=12,
+# Box size classification - matches the frontend exactly (BOX_FAIL_PX=12,
 # BOX_WARN_PX=24). Letterbox scaling: same factor on both axes, so the
 # box's worst-side bottleneck is preserved.
 _BOX_FAIL_PX = 12
@@ -16605,12 +16605,12 @@ def _iter_augmentations(project_id: str, manifest: dict):
             if not isinstance(dets, list):
                 continue
             # Strip the `.jpg` and rebuild as `aug_<orig_stem>_<k>.jpg`
-            # — the `k` index is the leading zero-padded number the
+            # - the `k` index is the leading zero-padded number the
             # generator already chose.
             k = Path(copy_name).stem
             export_name = f"aug_{parent_stem}_{k}.jpg"
             # Confirm the JPEG exists on disk before yielding annotations
-            # that reference it — drops half-written copies.
+            # that reference it - drops half-written copies.
             jpeg_path = aug_root / import_id / copy_name
             if not jpeg_path.exists():
                 continue
@@ -16687,7 +16687,7 @@ def _build_readme(manifest: dict) -> str:
         f"Created by: {owner}\n"
         f"Exported at: {now_iso} (UTC)\n"
         "\n"
-        "Built with PixelKit — https://pixelkit.ai\n"
+        "Built with PixelKit - https://pixelkit.ai\n"
     )
 
 
@@ -16720,15 +16720,15 @@ def _box_label(b: dict) -> str:
 
     Fallback order, matching what the FE viewer does
     (predLabel || gdLabel):
-      • `label` — set on editedBoxes and augmentation entries.
-      • `predLabel` / `pred_label` — set on V2 auto detections after
+      • `label` - set on editedBoxes and augmentation entries.
+      • `predLabel` / `pred_label` - set on V2 auto detections after
         the specific-dataset embedding resolver runs.
-      • `gd_label` / `gdLabel` / `gd_variant` — set on V2 auto
+      • `gd_label` / `gdLabel` / `gd_variant` - set on V2 auto
         detections that *don't* go through the resolver (general
         datasets skip it entirely and trust SAM 3's text-prompt
         assignment). Missing this fallback was why general-dataset
         YOLO/COCO exports came back with zero label files even
-        after the box-shape fix landed — every detection had a box,
+        after the box-shape fix landed - every detection had a box,
         but `_box_label` resolved to "" so the category lookup
         silently skipped every one."""
     for key in (
@@ -16766,7 +16766,7 @@ def _categories(manifest: dict) -> list[str]:
 def _load_image_bytes(project_id: str, img_name: str) -> bytes | None:
     """Resolve an original image's bytes. V2 projects keep imports on the
     local filesystem; V1 projects keep them in R2. Try the cheap local
-    path first and fall back to R2 — silently returns None if neither
+    path first and fall back to R2 - silently returns None if neither
     has the file so the caller can skip the entry."""
     local_path = project_dir(project_id) / "images" / img_name
     if local_path.exists():
@@ -16788,7 +16788,7 @@ def _zip_image_entry(zf, arcname: str, data: bytes) -> None:
 def _split_for(parent_name: str, train_split: float) -> str:
     """Stable train/val assignment for an image. Augmentations pass the
     parent image's filename so every copy of one source lands in the
-    same split — avoids val leakage from augmentations of a train image.
+    same split - avoids val leakage from augmentations of a train image.
 
     train_split is the fraction that goes to train; the rest goes to val.
     sha1(filename)/0xFFFFFFFF gives a uniform [0,1) bucket independent
@@ -17029,7 +17029,7 @@ def _build_voc_xml(
     input_shape: str,
 ) -> str:
     """Pascal VOC 2012-style annotation XML. VOC is bbox-only (no polygon
-    spec), so segmentations are silently ignored here — the include_seg
+    spec), so segmentations are silently ignored here - the include_seg
     toggle on the FE doesn't change VOC output."""
     in_w, in_h = _parse_input_shape(input_shape)
     obj_blocks = []
@@ -17140,7 +17140,7 @@ async def export_project(
     readme = _build_readme(manifest)
 
     def _write_images(zf, *, train_subdir: str, val_subdir: str) -> None:
-        # Originals — try local disk first (V2 layout), then R2 (V1). Skip
+        # Originals - try local disk first (V2 layout), then R2 (V1). Skip
         # silently if neither has the bytes.
         for img_name in image_names:
             data = _load_image_bytes(project_id, img_name)
@@ -17200,7 +17200,7 @@ async def export_project(
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
             zf.writestr("README.txt", readme)
             zf.writestr("classes.txt", "\n".join(cats) + "\n")
-            # data.yaml in the Ultralytics shape — `path` is the dataset
+            # data.yaml in the Ultralytics shape - `path` is the dataset
             # root (the zip's contents once extracted), train/val point
             # at the two image subdirs. The YOLO loader looks for a
             # parallel labels/ tree by replacing `images/` with `labels/`
@@ -17248,7 +17248,7 @@ async def export_project(
                 )
                 zf.writestr("annotations.xml", xml)
                 if include_images:
-                    # CVAT matches images by bare filename — flat images/.
+                    # CVAT matches images by bare filename - flat images/.
                     _write_images(zf, train_subdir="images", val_subdir="images")
             elif format == "labelstudio":
                 tasks = _build_labelstudio(
@@ -17271,7 +17271,7 @@ async def export_project(
                 if include_images:
                     _write_images(zf, train_subdir="images", val_subdir="images")
             else:  # masks
-                import cv2  # lazy — headless OpenCV, only this format needs it here
+                import cv2  # lazy - headless OpenCV, only this format needs it here
 
                 class_idx = {c: i + 1 for i, c in enumerate(cats)}
                 zf.writestr(
@@ -17279,8 +17279,8 @@ async def export_project(
                     "0 background\n"
                     + "".join(f"{i} {name}\n" for name, i in class_idx.items()),
                 )
-                # Every shipped image gets a mask — all-zero (background)
-                # when nothing is annotated — so trainers pairing
+                # Every shipped image gets a mask - all-zero (background)
+                # when nothing is annotated - so trainers pairing
                 # images/ with masks/ never hit a missing file.
                 for row in rows:
                     mask = np.zeros((row["height"], row["width"]), dtype=np.uint8)
@@ -17397,7 +17397,7 @@ def _export_rows(
             if export_name in seen:
                 continue
             seen.add(export_name)
-            if not cw or not ch:  # dim-less legacy aug records — skip like originals
+            if not cw or not ch:  # dim-less legacy aug records - skip like originals
                 continue
             _reg(export_name, cw, ch, _split_for(parent, train_split))
 
@@ -17501,7 +17501,7 @@ def _build_labelstudio(
 ) -> list[dict]:
     """Label Studio task list (percent coordinates). Assumes the standard
     object-detection labeling config with from_name="label" and
-    to_name="image" — documented in the export README."""
+    to_name="image" - documented in the export README."""
     tasks: list[dict] = []
     for row in rows:
         W, H = row["width"], row["height"]
@@ -17578,11 +17578,11 @@ def _aug_parent_lookup(project_id: str, manifest: dict) -> dict[str, str]:
 
 
 # ───────────────────────────────────────────────────────────────────────
-# Pipeline Charlie endpoints — drop-in shape compatible with the V2
+# Pipeline Charlie endpoints - drop-in shape compatible with the V2
 # /api/v2/imports/* routes so the FE can target the new pipeline by
 # changing the URL prefix only. Charlie is SAM3-only for now: no
 # GroundingDINO, no SAM2, no VLM, no DINOv2/SigLIP. Reference flows
-# (/api/v2/references/*) intentionally have no Charlie counterpart —
+# (/api/v2/references/*) intentionally have no Charlie counterpart -
 # Charlie's resolver pipeline isn't built yet.
 # ───────────────────────────────────────────────────────────────────────
 
@@ -17695,7 +17695,7 @@ async def _charlie_load_image_pil(
         proj = project_dir(project_id)
         if not proj.exists():
             raise HTTPException(404, "project not found")
-        # copy=False — we only read filename + scan for one entry.
+        # copy=False - we only read filename + scan for one entry.
         # Deepcopying the full 30MB manifest just to find one ID was
         # the single biggest per-call hit on big projects (200-500ms
         # PER click-to-detect / add-box / segment_box / classify_box
@@ -17730,7 +17730,7 @@ async def _charlie_load_image_pil(
     raw = await image.read()
     if not raw:
         print(
-            f"[{endpoint_tag}] 400 empty upload — filename={image.filename!r} "
+            f"[{endpoint_tag}] 400 empty upload - filename={image.filename!r} "
             f"content_type={image.content_type!r}"
         )
         raise HTTPException(400, "empty image upload")
@@ -17739,7 +17739,7 @@ async def _charlie_load_image_pil(
             return ImageOps.exif_transpose(im).convert("RGB")
     except Exception as e:
         print(
-            f"[{endpoint_tag}] 400 decode failed — "
+            f"[{endpoint_tag}] 400 decode failed - "
             f"filename={image.filename!r} size_bytes={len(raw)} "
             f"head_hex={raw[:16].hex()} err={type(e).__name__}: {e}"
         )
@@ -17776,7 +17776,7 @@ async def _detect_point_unified(
 
     Returns the charlie-shaped envelope.
     """
-    # Portable build: SAM2 is gone — SAM3 is both the concept detector and
+    # Portable build: SAM2 is gone - SAM3 is both the concept detector and
     # the interactive floor. 503 only when nothing is loaded at all.
     if state.get("charlie") is None and state.get("segmenter") is None:
         raise HTTPException(503, "segmentation model not loaded")
@@ -17786,7 +17786,7 @@ async def _detect_point_unified(
     py = min(max(float(point_xy[1]), 0.0), float(H - 1))
     labels = [str(t).strip() for t in (candidate_labels or []) if str(t).strip()]
 
-    # STAGE 1 — SAM3 text-concept first try (eligible tiles only).
+    # STAGE 1 - SAM3 text-concept first try (eligible tiles only).
     if allow_sam3 and labels and state.get("charlie") is not None and not is_labelled:
         charlie = state["charlie"]
 
@@ -17796,7 +17796,7 @@ async def _detect_point_unified(
         try:
             async with state["gpu_lock"].interactive():
                 detection, sam3_timings = await loop.run_in_executor(None, _run_sam3)
-        except Exception as exc:  # noqa: BLE001 — any SAM3 failure falls back to SAM2
+        except Exception as exc:  # noqa: BLE001 - any SAM3 failure falls back to SAM2
             print(f"[detect_point/sam3] error, falling back to SAM2: {exc}")
             detection, sam3_timings = None, {}
         if detection is not None:
@@ -17818,7 +17818,7 @@ async def _detect_point_unified(
                 "rejected": False, "reject_reason": None,
             }
 
-    # STAGE 2 — SAM2 floor removed in the portable build. When SAM3 found
+    # STAGE 2 - SAM2 floor removed in the portable build. When SAM3 found
     # nothing above, there is no universal-segmenter fallback: report a
     # clean miss instead of NameError'ing into a 500.
     if state.get("segmenter") is None:
@@ -17853,7 +17853,7 @@ async def _detect_point_unified(
             "rejected": rejected, "reject_reason": reject_reason,
         }
 
-    # STAGE 3 — label the SAM2 mask. Load references for the project (if any).
+    # STAGE 3 - label the SAM2 mask. Load references for the project (if any).
     refs_by_label_arr = None
     refs_by_label_siglip_arr = None
     proj_tags = []
@@ -17876,7 +17876,7 @@ async def _detect_point_unified(
 
     embed_reject = False
 
-    # TIER A — reference-embedding resolver (projects with references).
+    # TIER A - reference-embedding resolver (projects with references).
     if refs_present:
         try:
             import v2_dinov2
@@ -17933,10 +17933,10 @@ async def _detect_point_unified(
                         embed_reject = True
                     elif verdict.get("pred_label"):
                         return _env(verdict.get("pred_label"), verdict.get("embed_sim_for_label"), "sam2+embed")
-        except Exception as e:  # noqa: BLE001 — embed failure degrades to the VLM
+        except Exception as e:  # noqa: BLE001 - embed failure degrades to the VLM
             print(f"[detect_point] embed resolve failed, falling back to VLM: {e}")
 
-    # TIER B — VLM labeller (always passes the SAM mask so background is suppressed).
+    # TIER B - VLM labeller (always passes the SAM mask so background is suppressed).
     if labels:
         v_label = v_score = None
         t1 = time.perf_counter()
@@ -17951,7 +17951,7 @@ async def _detect_point_unified(
         if v_label:
             return _env(v_label, float(v_score) if v_score is not None else None, "sam2+vlm", vlm_ms=vlm_ms)
 
-    # STAGE 4 — terminal (never 422).
+    # STAGE 4 - terminal (never 422).
     if allow_reject and embed_reject:
         return _env(None, None, "sam2+embed", rejected=True, reject_reason="embed")
     if labels:
@@ -17990,7 +17990,7 @@ async def charlie_imports_detect_point(
             raise ValueError("point must be [x, y]")
         px, py = float(pt[0]), float(pt[1])
     except Exception as e:
-        print(f"[charlie/detect_point] 400 invalid point — raw={point!r} err={e}")
+        print(f"[charlie/detect_point] 400 invalid point - raw={point!r} err={e}")
         raise HTTPException(400, f"invalid point payload: {e}")
 
     candidate_labels: list[str] = []
@@ -18040,7 +18040,7 @@ async def charlie_imports_detect_point(
     loop = asyncio.get_running_loop()
 
     # SPECIFIC projects: SAM2 point (label-agnostic mask) + reference
-    # resolver — the same basis as the batch job, and the only click-to-
+    # resolver - the same basis as the batch job, and the only click-to-
     # detect path that labels objects whose word SAM3 can't text-match
     # (e.g. "orangutan", a made-up label). For these projects the
     # references are the label source of truth, so we use this regardless
@@ -18095,7 +18095,7 @@ async def charlie_imports_detect_point(
             # else fall through to the SAM3 / VLM routing below.
 
     if use_sam2_vlm:
-        # SAM2 point prompt — label-agnostic mask under the click.
+        # SAM2 point prompt - label-agnostic mask under the click.
         # Cheap (~80-300ms on GPU), runs inside the interactive gate
         # so it doesn't queue behind the label-charlie batch job.
         if state.get("segmenter") is None:
@@ -18171,7 +18171,7 @@ async def charlie_imports_detect_point(
 
     # SAM3 path: unlabelled tiles, or labelled tiles where SAM2 was
     # unavailable. (`charlie` was never bound in this handler in the SaaS
-    # build — a latent NameError on this route, fixed here.)
+    # build - a latent NameError on this route, fixed here.)
     charlie = state.get("charlie")
     if charlie is None:
         raise HTTPException(503, "SAM3 not loaded")
@@ -18191,7 +18191,7 @@ async def charlie_imports_detect_point(
         raise HTTPException(500, f"charlie detect_point error: {exc}")
 
     if detection is None:
-        # SAM3 found no concept under the click — fall back to the SAM2
+        # SAM3 found no concept under the click - fall back to the SAM2
         # floor (+ reference/VLM label) so the click still places a box
         # instead of dead-ending with a 422.
         return await _detect_point_unified(
@@ -18246,7 +18246,7 @@ async def charlie_imports_segment_box(
     """
     charlie = state.get("charlie")
     if charlie is None:
-        raise HTTPException(503, "SAM3 not loaded — segment_box unavailable")
+        raise HTTPException(503, "SAM3 not loaded - segment_box unavailable")
     try:
         coords = json.loads(box)
         if not (isinstance(coords, list) and len(coords) == 4):
@@ -18286,7 +18286,7 @@ async def charlie_imports_segment_box(
         return detection, ms
 
     try:
-        # Interactive — Charlie pipeline's add-box / drag-box. User
+        # Interactive - Charlie pipeline's add-box / drag-box. User
         # is in the BoxEditor waiting on the mask render.
         async with state["gpu_lock"].interactive():
             detection, sam3_ms = await loop.run_in_executor(None, _infer)
@@ -18328,7 +18328,7 @@ async def charlie_imports_classify_box(
     (skips the FE-side fetch entirely); falls back to an `image`
     upload for unsaved imports.
 
-    Returns {label, score, verdict} — same shape as detect_point
+    Returns {label, score, verdict} - same shape as detect_point
     so the FE pipeline popup renders the same way.
     """
     import v2_dinov2 as _v2d
@@ -18353,7 +18353,7 @@ async def charlie_imports_classify_box(
         return {
             "pipeline": "charlie",
             "label": None, "score": None,
-            "reason": "project_id missing — no reference centroids to resolve against",
+            "reason": "project_id missing - no reference centroids to resolve against",
         }
 
     image_pil = await _charlie_load_image_pil(
@@ -18381,7 +18381,7 @@ async def charlie_imports_classify_box(
         return ((detection or {}).get("mask") or None), ms
 
     try:
-        # Interactive — Charlie pipeline's classify_box (called from
+        # Interactive - Charlie pipeline's classify_box (called from
         # the BoxEditor's relabel + add-box flows).
         async with state["gpu_lock"].interactive():
             mask_payload, sam2_ms = await loop.run_in_executor(None, _segment)
@@ -18408,7 +18408,7 @@ async def charlie_imports_classify_box(
         dataset_type = "general"
     try:
         if dataset_type == "specific":
-            # Same classify_box request — interactive throughout.
+            # Same classify_box request - interactive throughout.
             async with state["gpu_lock"].interactive():
                 verdict, embed_timings = await loop.run_in_executor(
                     None,
@@ -18429,7 +18429,7 @@ async def charlie_imports_classify_box(
         traceback.print_exc()
         raise HTTPException(500, f"charlie classify_box error: {exc}")
 
-    # VLM tiebreak on ambiguous detections (specific only — the
+    # VLM tiebreak on ambiguous detections (specific only - the
     # resolver only sets `ambiguous` when it was called with the
     # specific path's threshold).
     if (
@@ -18463,7 +18463,7 @@ async def charlie_imports_segment_and_classify_box(
     project_id: str = Form(""),
     import_id: str = Form(""),
 ):
-    """One-shot add-box — pure SAM3.
+    """One-shot add-box - pure SAM3.
 
     Single SAM3 round-trip with cached vision: one vision encode +
     N text-only forwards (one per candidate label). The label whose
@@ -18476,12 +18476,12 @@ async def charlie_imports_segment_and_classify_box(
     That's still what the batch labelling job uses; the interactive
     add-box gesture just needs a label fast.
 
-    Returns box_xyxy, mask, label, score — same shape BoxEditor's
+    Returns box_xyxy, mask, label, score - same shape BoxEditor's
     onAddBoxDetect handler expects.
     """
     charlie = state.get("charlie")
     if charlie is None:
-        raise HTTPException(503, "SAM3 not loaded — add-box unavailable")
+        raise HTTPException(503, "SAM3 not loaded - add-box unavailable")
 
     try:
         coords = json.loads(box)
@@ -18507,7 +18507,7 @@ async def charlie_imports_segment_and_classify_box(
     loop = asyncio.get_running_loop()
 
     # SPECIFIC projects: SAM2 box-prompt (label-agnostic geometry) + the
-    # reference resolver — same basis as the batch job. This is the only
+    # reference resolver - same basis as the batch job. This is the only
     # add-box path that labels a box around an object whose label SAM3
     # can't text-match (e.g. "orangutan", a made-up label). SAM3's
     # text-IoU shortcut below (general projects) returns 422 for those.
@@ -18589,7 +18589,7 @@ async def charlie_imports_segment_and_classify_box(
 @app.get("/api/jobs/active")
 async def jobs_active():
     """Lightweight global list of queued/running jobs for the status-bar
-    progress segment — survives page navigation, not process restarts
+    progress segment - survives page navigation, not process restarts
     (the queue is in-memory)."""
     jm = state["jobs"]
     out = [
@@ -18602,7 +18602,7 @@ async def jobs_active():
 
 @app.get("/api/jobs/{job_id}")
 async def job_get(job_id: str):
-    """One job, any status — the headless CLI polls /active until a job
+    """One job, any status - the headless CLI polls /active until a job
     disappears, then needs THIS to learn whether it finished or failed
     (both vanish from /active identically)."""
     for j in state["jobs"].list(limit=500):
@@ -18623,7 +18623,7 @@ async def models_download(name: str):
     if name == "sam3" and not models_mgr.hf_token():
         raise HTTPException(
             400,
-            "facebook/sam3 is license-gated — set a Hugging Face token first "
+            "facebook/sam3 is license-gated - set a Hugging Face token first "
             "(POST /api/settings/hf-token)",
         )
     rec = await asyncio.to_thread(models_mgr.start_download, name)
@@ -18750,7 +18750,7 @@ class WorkspaceIn(BaseModel):
 
 @app.post("/api/settings/workspace")
 async def set_workspace_path(payload: WorkspaceIn):
-    """Persist a new workspace location. Takes effect on next start —
+    """Persist a new workspace location. Takes effect on next start -
     re-pointing a live process would orphan open jobs and caches."""
     p = (payload.path or "").strip()
     if not p:
@@ -18767,7 +18767,7 @@ class DeviceIn(BaseModel):
 @app.post("/api/settings/device")
 async def set_device_preference(payload: DeviceIn):
     """Persist the compute-device choice (Settings picker). Takes effect on
-    next start — models are loaded onto a device at boot, same restart
+    next start - models are loaded onto a device at boot, same restart
     contract as the workspace setting. PK_DEVICE env still wins at boot."""
     want = (payload.device or "").strip().lower()
     if want not in ("auto", "cuda", "mps", "cpu") and not re.fullmatch(r"cuda:\d+", want):
@@ -18789,7 +18789,7 @@ class LegacyImportIn(BaseModel):
 @app.post("/api/import-legacy")
 async def import_legacy_endpoint(payload: LegacyImportIn):
     """Convert SaaS-era data (backup zip or old backend dir) into the
-    workspace. Runs import_legacy.py's run() in a worker thread — the
+    workspace. Runs import_legacy.py's run() in a worker thread - the
     desktop menu waits on this request (localhost, no timeout)."""
     src = Path((payload.path or "").strip()).expanduser()
     if not str(src):
@@ -18821,7 +18821,7 @@ async def import_legacy_endpoint(payload: LegacyImportIn):
 # ── Dataset snapshots ─────────────────────────────────────────────────────────
 # Point-in-time copies of the annotation state (dataset.json + one JSON
 # per image) as zips under <dataset>/snapshots/. Images are immutable
-# originals and are deliberately NOT included — a snapshot is cheap and
+# originals and are deliberately NOT included - a snapshot is cheap and
 # captures exactly what editing can lose. Restores are guarded by an
 # automatic safety snapshot of the current state.
 
@@ -18929,10 +18929,10 @@ async def snapshots_restore(project_id: str, snapshot_id: str):
     if not path.exists():
         raise HTTPException(404, "snapshot not found")
     # A running labelling/augment job holds a loaded manifest it will
-    # flush later — restoring underneath it would interleave two
+    # flush later - restoring underneath it would interleave two
     # timelines. Refuse instead of corrupting.
     if _project_job_active(project_id):
-        raise HTTPException(409, "a job is running on this dataset — wait for it to finish before restoring")
+        raise HTTPException(409, "a job is running on this dataset - wait for it to finish before restoring")
 
     def _do() -> dict:
         with zipfile.ZipFile(path) as zf:
@@ -18941,7 +18941,7 @@ async def snapshots_restore(project_id: str, snapshot_id: str):
                 raise HTTPException(400, "corrupt snapshot: no dataset.json")
             new_manifest = zf.read("dataset.json")
             anns = {
-                Path(n).name: zf.read(n)  # basename only — no zip-slip
+                Path(n).name: zf.read(n)  # basename only - no zip-slip
                 for n in names
                 if n.startswith("annotations/") and n.endswith(".json") and n.count("/") == 1
             }
@@ -18961,7 +18961,7 @@ async def snapshots_restore(project_id: str, snapshot_id: str):
         # stamp, so the cached copy self-invalidates on the next load.
         os.replace(tmp, d / "dataset.json")
         # The files changed behind store.save()'s digest cache and the
-        # manifest RAM cache — drop both so no writer trusts stale state.
+        # manifest RAM cache - drop both so no writer trusts stale state.
         store.forget(project_id)
         invalidate_manifest_cache(project_id)
         return {"ok": True, "restored": snapshot_id, "safetySnapshot": safety["id"]}
@@ -19112,7 +19112,7 @@ async def v2_reference_detect_point(
 # The packaged app serves the exported UI (ui/out) from this process, so one
 # port serves everything and the SPA's deep links (/app/<id>) fall back to
 # app.html. Registered LAST so every API route wins first. In dev (`next
-# dev` on :3000) the dir may be absent — the catch-all then 404s harmlessly.
+# dev` on :3000) the dir may be absent - the catch-all then 404s harmlessly.
 
 def _ui_dir() -> Path | None:
     env = (os.environ.get("PIXELKIT_UI_DIR") or "").strip()

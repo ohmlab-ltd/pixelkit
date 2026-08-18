@@ -1,6 +1,6 @@
 """In-memory job queue with N concurrent async workers.
 
-Replaces the fire-and-forget `asyncio.create_task(...)` model — every long-
+Replaces the fire-and-forget `asyncio.create_task(...)` model - every long-
 running ML pass (auto-label, backfill segmentation) goes through here so:
   - GPU access is arbitrated by the priority gate (not by the queue), so
     multiple runners can interleave image-by-image instead of one job
@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
-# Cost model. Flat hourly cloud spend in USD — replaces the older
+# Cost model. Flat hourly cloud spend in USD - replaces the older
 # power-draw × kWh estimate. The terminal still receives the value
 # through the legacy `costPence` JSON field (its name is wire-shape
 # compatible) but the units are now USD cents: 100 cents = $1.
@@ -63,7 +63,7 @@ class Job:
     # Filled in once the job completes.
     cost_pence: float = 0.0
 
-    # Internal — wall-clock start used for live elapsed/cost while running.
+    # Internal - wall-clock start used for live elapsed/cost while running.
     _start_monotonic: float | None = None
 
     def to_public(self) -> dict:
@@ -114,7 +114,7 @@ class JobManager:
         self.listeners: dict[str, list[asyncio.Queue]] = {}
         self.cancel_events: dict[str, asyncio.Event] = {}
         # N concurrent worker tasks. Each pulls jobs off the same
-        # asyncio.Queue — multi-consumer-safe — so several runners can
+        # asyncio.Queue - multi-consumer-safe - so several runners can
         # be in flight at once. The GPU gate (`state["gpu_lock"]`)
         # arbitrates actual CUDA access, letting augment + label
         # interleave image-by-image instead of one blocking the other
@@ -142,7 +142,7 @@ class JobManager:
             print(f"[jobs] on_finish hook failed for {job.id} ({job.kind}): {type(e).__name__}: {e}\n{tb}")
 
     def start_worker(self, n: int = 3) -> None:
-        """Ensure N live worker tasks. Idempotent — restarts only the
+        """Ensure N live worker tasks. Idempotent - restarts only the
         slots whose task died. Multiple workers let augment +
         label_charlie + image-processing run concurrently; the GPU
         gate keeps actual inference serialised, but the inter-image
@@ -155,7 +155,7 @@ class JobManager:
 
     @property
     def worker_task(self) -> asyncio.Task | None:
-        """Back-compat shim — callers (e.g. the server-side watchdog)
+        """Back-compat shim - callers (e.g. the server-side watchdog)
         used to inspect a single `worker_task`. Return the first live
         slot so a `t.done()` check still tells them whether at least
         one worker is alive."""
@@ -272,7 +272,7 @@ class JobManager:
                 continue
             status = e.get("status") or "done"
             # Anything not at a terminal state when audit was written is
-            # treated as interrupted — the previous process died mid-job.
+            # treated as interrupted - the previous process died mid-job.
             if status not in ("done", "failed", "cancelled", "interrupted"):
                 status = "interrupted"
             # `job_kind` is the audit blob field (renamed from `kind` to
@@ -348,7 +348,7 @@ class JobManager:
                 await self._process_one()
             except asyncio.CancelledError:
                 # Cancellation is the intended way to stop the worker
-                # (e.g. on shutdown) — let it propagate.
+                # (e.g. on shutdown) - let it propagate.
                 raise
             except Exception as e:  # noqa: BLE001
                 print(f"[jobs] worker recovered from unexpected error: {e}")

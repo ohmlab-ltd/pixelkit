@@ -3,7 +3,7 @@
 A child project's dataset is per-detection CROPS of a PARENT project: one crop
 image per detection, exactly one label each, for a user-selected set of labels.
 A person-with-PPE parent image becomes (in the child) one "person" crop, one
-"glove" crop, one "helmet" crop, … — one image, one box, one label.
+"glove" crop, one "helmet" crop, … - one image, one box, one label.
 
 Linking is ONE-WAY (parent → child):
   - the parent's current detections drive the child (re-sync = a diff),
@@ -27,7 +27,7 @@ from pathlib import Path
 
 def _det_key(filename: str, label: str, xyxy) -> str:
     """Stable identity for a parent detection (V2 boxes carry no id). A moved
-    box becomes a new key (old crop removed, new one added) — acceptable."""
+    box becomes a new key (old crop removed, new one added) - acceptable."""
     s = (f"{filename}|{label.strip().lower()}|"
          f"{round(xyxy[0])},{round(xyxy[1])},{round(xyxy[2])},{round(xyxy[3])}")
     return hashlib.sha1(s.encode("utf-8")).hexdigest()[:16]
@@ -59,7 +59,7 @@ def _crop_box(xyxy, w: int, h: int, padding: float, square: bool = False):
     clamped to the image.
 
     When `square` (ROI mode): the rect is forced to a 1:1 square centred on the
-    box — side = the longer padded edge, capped to the image's shorter side and
+    box - side = the longer padded edge, capped to the image's shorter side and
     shifted inward so it always stays fully inside the image. The output crop is
     therefore exactly square (no letterboxing needed), so derived crops are
     square ROIs rather than long thin slivers."""
@@ -134,7 +134,7 @@ def resync(child_manifest: dict, parent_manifest: dict,
             # "new" crops are a blank ROI canvas. A fresh one (no detections) or
             # one the user has already drawn/labelled is up-to-date and kept
             # as-is. A crop from before this behaviour existed still carries the
-            # inherited box (label-less, no user edits) — treat THAT as stale so
+            # inherited box (label-less, no user edits) - treat THAT as stale so
             # a re-sync re-derives it back to blank, deleting the unwanted
             # box/mask/segmented cover without touching real user work.
             has_user_work = bool(entry.get("editedBoxes")) or any(
@@ -148,7 +148,7 @@ def resync(child_manifest: dict, parent_manifest: dict,
             up_to_date = bool(dets0) and isinstance(dets0[0], dict) and isinstance(dets0[0].get("box"), list)
         if k and k in specs and k not in have and up_to_date:
             have.add(k)
-            keep.append(entry)            # still valid + current shape — keep as-is
+            keep.append(entry)            # still valid + current shape - keep as-is
         else:                              # orphaned / dup / deselected / outdated → drop + delete file
             fn = entry.get("filename")
             if fn:
@@ -194,7 +194,7 @@ def resync(child_manifest: dict, parent_manifest: dict,
         except Exception:
             continue
         # In "new" label mode the crop is a BLANK ROI canvas: no inherited box,
-        # mask, segmented cover or label is copied across — the user draws and
+        # mask, segmented cover or label is copied across - the user draws and
         # labels everything from scratch. Only derivedFrom.label is kept, purely
         # as the muted reference the UI shows. In "inherit" mode we carry the
         # parent box + label + segmentation onto the crop as before.
@@ -243,11 +243,11 @@ def resync(child_manifest: dict, parent_manifest: dict,
             # EditableBox (x0/y0) shape, not the box_xyxy detection shape, so
             # setting them hid the boxes+labels. The gallery + editor + trainer
             # all fall back to `detections`, which carries box_xyxy + label + mask.
-            # In "new" mode this is [] — a blank ROI image with nothing on it.
+            # In "new" mode this is [] - a blank ROI image with nothing on it.
             "detections": dets,
             # "new" mode crops are unlabelled until the user assigns a label.
             "labelled": not new_labels,
-            # derivedFrom.label is ALWAYS the original parent label — the source
+            # derivedFrom.label is ALWAYS the original parent label - the source
             # of truth the UI surfaces as a reference, even in "new" mode where
             # the active crop label is blank.
             "derivedFrom": {"parentFilename": s["filename"], "detKey": key, "label": s["label"]},

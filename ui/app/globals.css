@@ -3,7 +3,7 @@
 @tailwind utilities;
 
 /* ------------------------------------------------------------------ */
-/* PixelKit — studio design language.                                  */
+/* PixelKit - studio design language.                                  */
 /*                                                                     */
 /* Dark is the primary/brand look: a near-black neutral surface, flat  */
 /* panels (rgba white 0.02), hairline borders from a three-step line   */
@@ -177,14 +177,14 @@ body {
 }
 
 /* Text controls opt OUT of the outline ring above: their focus voice
-   is the hairline border (var(--line)) stepping up to the accent —
+   is the hairline border (var(--line)) stepping up to the accent -
    ring + accent border together read as two concentric orange lines.
    Buttons, links and every other focusable keep the ring.
    Tick/slider/file inputs are excluded (their border isn't a visible
    focus cue, so they keep the ring for accessibility). The :is()
    wrapper adopts the specificity of its most specific argument
    (the :not() chain), so `border-color` here also beats Tailwind
-   border utilities — including hover:/focus: variants — without
+   border utilities - including hover:/focus: variants - without
    needing !important. */
 :is(
   input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
@@ -245,7 +245,7 @@ html.theme-changing [data-theme-fade] *::after {
   font-variant-numeric: tabular-nums;
 }
 
-/* Small uppercase eyebrow above a section or title — now the same
+/* Small uppercase eyebrow above a section or title - now the same
    mono micro-label voice as the rest of the chrome. */
 .pk-eyebrow {
   font-family: var(--font-geist-mono), ui-monospace, monospace;
@@ -285,7 +285,7 @@ html.theme-changing [data-theme-fade] *::after {
 
 /* Flat panel card: hairline border + the faint tonal step. No
    elevation. Hover (via .pk-card-hover) firms the hairline and deepens
-   the step — accent stays reserved for active/selected states. */
+   the step - accent stays reserved for active/selected states. */
 .pk-card {
   border: 1px solid var(--line);
   background: var(--panel);
@@ -385,7 +385,7 @@ html.theme-changing [data-theme-fade] *::after {
   }
 }
 
-/* Tab/panel entrance — things rise in once. */
+/* Tab/panel entrance - things rise in once. */
 @keyframes pkUp {
   from { opacity: 0; transform: translateY(10px); }
   to   { opacity: 1; transform: none; }

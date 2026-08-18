@@ -1,13 +1,13 @@
 """Import SaaS-era PixelKit data into a portable workspace.
 
-Converts the old backend layout —
+Converts the old backend layout -
 
     <src>/containers/<id>/project.json
     <src>/projects/<uuid>/manifest.json
     <src>/projects/<uuid>/imports/            (original images, V2)
     <src>/projects/<uuid>/references|augmentations|image_embeddings/
 
-— into the workspace schema (per-project folders, dataset.json +
+- into the workspace schema (per-project folders, dataset.json +
 annotations/ split, originals under images/). Also accepts the nightly
 backup zips (which contain a projects/ tree).
 
@@ -18,7 +18,7 @@ Notes:
   - dataset/container ids are preserved, so derived-dataset links and
     container membership survive.
   - V1 datasets whose image bytes lived only in R2 can't be pulled from
-    here — copy those images into <src>/projects/<id>/images/ first.
+    here - copy those images into <src>/projects/<id>/images/ first.
 """
 from __future__ import annotations
 

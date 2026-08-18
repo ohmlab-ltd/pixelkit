@@ -2,7 +2,7 @@
 
 // Collapsible 260px side bar hosting the Explorer pane (the single
 // workspace tree: Projects → datasets → dataset sections). The Models
-// pane is gone — models are engine-managed plumbing with a passive
+// pane is gone - models are engine-managed plumbing with a passive
 // status readout in Settings.
 
 import { ExplorerPane, type ExplorerDataset, type DatasetSection } from "./ExplorerPane";
@@ -21,7 +21,7 @@ export function SideBar({
 }: {
   username: string;
   selectedDatasetId: string | null;
-  /** Active section of the open dataset — highlights the matching
+  /** Active section of the open dataset - highlights the matching
    *  third-level tree row. */
   activeSection: DatasetSection | null;
   onOpenDataset: (ds: ExplorerDataset) => void;

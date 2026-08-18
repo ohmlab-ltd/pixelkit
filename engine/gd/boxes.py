@@ -1,6 +1,6 @@
 """Box/label resolution helpers shared by derived datasets and export.
 
-Extracted from the deleted training module — pure dict utilities, the
+Extracted from the deleted training module - pure dict utilities, the
 canonical per-image view across V1 (results/editedBoxes) and V2 (imports)
 manifest shapes."""
 from __future__ import annotations
@@ -46,7 +46,7 @@ def _vlm_rejected(b: dict) -> bool:
     return isinstance(v, dict) and v.get("match") is False
 
 def _box_label(b: dict) -> str:
-    """Resolve a box's label across every naming convention in play — matches
+    """Resolve a box's label across every naming convention in play - matches
     the export's `_box_label` (and the FE viewer's predLabel||gdLabel). V2 auto
     detections carry the label under predLabel/gd_label, NOT `label`."""
     for key in ("label", "predLabel", "pred_label", "gd_label", "gdLabel", "gd_variant"):
@@ -62,7 +62,7 @@ def _image_index(manifest: dict) -> dict[str, dict]:
     """Unified per-image view across V1 (results[] + top-level editedBoxes) and
     V2 (imports[] with per-entry width/height/editedBoxes/detections). Returns
     {filename: {"width", "height", "boxes"}}. This is the SAME resolution the
-    export uses, so training sees exactly the labels the user sees — for V2,
+    export uses, so training sees exactly the labels the user sees - for V2,
     `editedBoxes` wins when set, else auto `detections` (minus rejected)."""
     out: dict[str, dict] = {}
     for r in (manifest.get("results") or []):

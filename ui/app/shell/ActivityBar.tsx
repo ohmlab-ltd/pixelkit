@@ -4,7 +4,7 @@
 // edge. Explorer / Guide at the top, Settings gear pinned to the
 // bottom. The active item shows a 2px left accent and renders at
 // full opacity; inactive items sit at 55% and lift to 85% on hover.
-// (Models is invisible plumbing now — the engine downloads and loads
+// (Models is invisible plumbing now - the engine downloads and loads
 // everything itself, so there is no Models activity.)
 
 import type { ReactNode } from "react";
@@ -91,7 +91,7 @@ export function ActivityBar({
 }: {
   activity: ActivityKey;
   /** Fired for the view icons. Explorer always navigates back to the
-   *  workspace (and re-expands a collapsed side bar — collapsing lives
+   *  workspace (and re-expands a collapsed side bar - collapsing lives
    *  on the Explorer pane header); Guide switches to the guide view. */
   onSelect: (key: ActivityKey) => void;
   onSettings: () => void;

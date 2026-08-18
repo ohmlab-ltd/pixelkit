@@ -38,7 +38,7 @@ function ContainerCover({ id, name }: { id: string; name: string }) {
   }
   // Load eagerly (projects are few) + a short backed-off retry. The cover GET
   // can transiently 404/5xx right after upload while R2/CDN propagates; without
-  // a retry the card stuck on the monogram until it remounted — the "cover only
+  // a retry the card stuck on the monogram until it remounted - the "cover only
   // appears after I click into the project and back out" bug. The cache-buster
   // (?r=N) forces the retry to actually re-request rather than reuse the failed
   // response. No loading="lazy": deferral was part of why it didn't paint until

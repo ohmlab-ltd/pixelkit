@@ -1,5 +1,5 @@
 // Singleton wrapper around annotations.worker.ts. One persistent
-// worker for the whole tab — workers are expensive to spawn
+// worker for the whole tab - workers are expensive to spawn
 // (~5–10 ms) and pin a few MB of RAM, so a single long-lived
 // instance handling all annotations / labelStats traffic is the
 // right shape. Re-creating per call would lose more than it saves.
@@ -11,7 +11,7 @@
 //   - returns a Promise that resolves when the worker echoes the
 //     same id back.
 //
-// Behind NEXT_PUBLIC_ANNOT_WORKER — when off, ANNOT_WORKER_ENABLED
+// Behind NEXT_PUBLIC_ANNOT_WORKER - when off, ANNOT_WORKER_ENABLED
 // flips false and the call sites stay on their main-thread paths.
 //
 // SSR-safe: getWorker() bails on `typeof window === "undefined"`.
@@ -66,7 +66,7 @@ export type ParsedRow = {
 export const ANNOT_WORKER_ENABLED =
   process.env.NEXT_PUBLIC_ANNOT_WORKER === "1";
 
-// Skip the worker hop for tiny payloads — the postMessage round-
+// Skip the worker hop for tiny payloads - the postMessage round-
 // trip costs more than the inline parse on small JSON.
 export const ANNOT_WORKER_BUFFER_THRESHOLD = 50 * 1024; // 50 KB
 
@@ -82,7 +82,7 @@ function getWorker(): Worker | null {
   if (_worker) return _worker;
   try {
     // Next.js 13+ supports the standard URL+import.meta.url worker
-    // construction — Webpack/Turbopack rewrite the relative URL into
+    // construction - Webpack/Turbopack rewrite the relative URL into
     // a bundled chunk URL at build time.
     _worker = new Worker(
       new URL("./annotations.worker.ts", import.meta.url),

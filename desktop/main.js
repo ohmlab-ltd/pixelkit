@@ -143,7 +143,7 @@ function resolvePython() {
   const b = bundledPaths();
   if (app.isPackaged) {
     if (fs.existsSync(b.python)) return b.python; // fat bundle (macOS dmg)
-    return bootstrap.runtimePython(); // slim install — ensureEngine bootstraps it first
+    return bootstrap.runtimePython(); // slim install - ensureEngine bootstraps it first
   }
   const venvPython =
     process.platform === 'win32'
@@ -173,7 +173,7 @@ function spawnEngine() {
       ...process.env,
       // Piped stdio on Windows defaults Python to the legacy codepage;
       // a log line with ≥/²/→ then raises inside the printing code.
-      // The engine also reconfigures its own streams — this covers
+      // The engine also reconfigures its own streams - this covers
       // interpreter startup and any subprocesses it spawns.
       PYTHONIOENCODING: 'utf-8',
       ...(app.isPackaged && fs.existsSync(bundledPaths().uiDir)
@@ -227,7 +227,7 @@ async function runFirstRunBootstrap() {
         message: 'PixelKit could not finish setting up its runtime.',
         detail:
           `${(err && err.message) || err}\n\nLog: ${logFile}\n\n` +
-          'First run needs an internet connection — the AI runtime is downloaded once.',
+          'First run needs an internet connection - the AI runtime is downloaded once.',
         buttons: ['Retry', 'Quit'],
         defaultId: 0,
         cancelId: 1,
@@ -275,7 +275,7 @@ async function ensureEngine() {
 }
 
 // ---------------------------------------------------------------------------
-// Crash watch — if the engine dies mid-session, restart it (bounded) and
+// Crash watch - if the engine dies mid-session, restart it (bounded) and
 // reload the window; if it won't come back, tell the user instead of
 // leaving a dead page.
 // ---------------------------------------------------------------------------
@@ -286,7 +286,7 @@ const restartTimes = []; // timestamps of recent automatic restarts
 
 async function restartEngine() {
   // Something healthy may already own the port (the user started their
-  // own engine, or ours recovered) — adopt it instead of spawning into
+  // own engine, or ours recovered) - adopt it instead of spawning into
   // a guaranteed bind failure.
   if (await checkHealth()) {
     engine.proc = null;
@@ -434,7 +434,7 @@ function createSplash() {
 }
 
 // Any HTTP response on the engine port (even an error) means something
-// else owns it — checkHealth() already said it isn't a PixelKit engine.
+// else owns it - checkHealth() already said it isn't a PixelKit engine.
 function portOccupied() {
   return new Promise((resolve) => {
     const req = http.get(`${ENGINE_ORIGIN}/`, { timeout: HEALTH_TIMEOUT_MS }, (res) => {

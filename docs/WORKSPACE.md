@@ -2,7 +2,7 @@
 
 Everything PixelKit stores lives in one user-chosen folder (default
 `~/PixelKit`, changeable in Settings; `PIXELKIT_WORKSPACE` overrides).
-It is plain files — safe to back up, sync, or read from your own tools.
+It is plain files - safe to back up, sync, or read from your own tools.
 This document is the public contract; the implementation is
 `engine/gd/store.py` and `engine/gd/workspace.py`.
 
@@ -11,7 +11,7 @@ This document is the public contract; the implementation is
 ```
 <workspace>/
   workspace.json                  # {"app": "pixelkit", "schemaVersion": 1}
-  weights/                        # HF_HOME — model downloads (regenerable)
+  weights/                        # HF_HOME - model downloads (regenerable)
   projects/
     <project-slug>/               # a Project (container of datasets)
       project.json                # container metadata (name, dataset ids…)
@@ -33,7 +33,7 @@ This document is the public contract; the implementation is
 
 Folder names are **cosmetic slugs**; identity is the `"id"` field inside
 `project.json` / `dataset.json`. Renaming a folder (or the slug drifting
-from the display name) breaks nothing — the engine indexes by scanning
+from the display name) breaks nothing - the engine indexes by scanning
 for the JSON files at startup. Derived (crop) datasets link to their
 parent by id, so moves/renames survive.
 
@@ -42,11 +42,11 @@ parent by id, so moves/renames survive.
 The SaaS build kept one monolithic `manifest.json` holding every box of
 every image. The portable schema splits it:
 
-- **`dataset.json`** — everything *except* per-image geometry: dataset
+- **`dataset.json`** - everything *except* per-image geometry: dataset
   name/id, labels + colours, thresholds, augmentation config, dataset
   type, references index, derived-dataset link, and a per-image index
   (filename, dimensions, blurhash, review flags…).
-- **`annotations/<import_id>.json`** — the geometry for one image:
+- **`annotations/<import_id>.json`** - the geometry for one image:
   `{detections, editedBoxes, timings}` (boxes, polygon masks, labels,
   scores, review verdicts).
 
@@ -64,17 +64,17 @@ Consequences you can rely on:
 `dataset.json` + `annotations/` (never images). Created from the
 dataset's settings panel; restoring writes a safety snapshot of the
 current state first, so restores are always undoable. They're plain
-zips — safe to copy out as backups.
+zips - safe to copy out as backups.
 
 ## Caches
 
-`thumbs/` and `weights/` are regenerable — deleting them costs a
+`thumbs/` and `weights/` are regenerable - deleting them costs a
 re-download / re-render, never data. `images/` and `annotations/` are
 the ground truth; treat them as the thing you back up.
 
 ## App config (not in the workspace)
 
-Machine-local settings — workspace path, Hugging Face token, device
-choice — live in the OS config dir (`%APPDATA%\PixelKit`,
+Machine-local settings - workspace path, Hugging Face token, device
+choice - live in the OS config dir (`%APPDATA%\PixelKit`,
 `~/Library/Application Support/PixelKit`, `~/.config/pixelkit`), never
 in the workspace, so a synced/shared workspace never leaks your token.

@@ -12,7 +12,7 @@
 //     fine-grained selector subscriptions, so a tile only re-renders
 //     when its OWN id's record changes.
 //
-// Migration is gated on NEXT_PUBLIC_STORE_V2 — when the flag is off,
+// Migration is gated on NEXT_PUBLIC_STORE_V2 - when the flag is off,
 // nothing is wired into this store and the existing useState path
 // drives everything. When the flag is on, ProjectViewV2Stub mirror-
 // writes every setImports into bulkUpsert here, and DatasetThumb
@@ -26,7 +26,7 @@ import { subscribeWithSelector } from "zustand/middleware";
 // ─── Public shape ────────────────────────────────────────────────────
 
 // Subset of ImportedMedia carried in the store. Stays NARROW on
-// purpose — keeping every transient flag here would defeat the
+// purpose - keeping every transient flag here would defeat the
 // re-render-isolation win. Anything chunky (full polygon arrays,
 // embedding sims) lives off the side in geometryCache.
 export type StoreImport = {
@@ -111,7 +111,7 @@ export const useProjectStore = create<ProjectStoreState>()(
     labelStats: {},
 
     reset: (projectId) => {
-      // Don't bail on identical projectId — callers might call
+      // Don't bail on identical projectId - callers might call
       // reset to clear state mid-session (e.g. error recovery).
       set({
         projectId,
@@ -194,7 +194,7 @@ export const useProjectStore = create<ProjectStoreState>()(
     },
 
     setVisibleIds: (ids) => {
-      // Cheap reference equality check — gallery scroll fires this
+      // Cheap reference equality check - gallery scroll fires this
       // every frame, no point invalidating subscribers when nothing
       // actually changed.
       const cur = get();
@@ -241,7 +241,7 @@ export const useProjectStore = create<ProjectStoreState>()(
 
     setLabelStatsAggregate: (stats) => {
       const cur = get();
-      // Reference-equal when keys + values match — skip the set so
+      // Reference-equal when keys + values match - skip the set so
       // subscribers don't churn. Cheap structural compare given
       // labels are usually <20.
       const a = cur.labelStats;

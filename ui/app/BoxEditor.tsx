@@ -51,7 +51,7 @@ export type EditableBox = {
 // FE-only UI state that must NEVER reach the manifest. The auto-
 // PUT and the /annotations fetches both shuttle EditableBox arrays
 // across the wire, and without this strip a click-to-detect that
-// got auto-PUT'd mid-flight persisted `detecting: true` forever —
+// got auto-PUT'd mid-flight persisted `detecting: true` forever -
 // subsequent fetches returned it and the box was stuck in the
 // pulsing "Detecting…" overlay even after Phase 2 had locally
 // cleared the flag.
@@ -335,12 +335,12 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
   const imgRef = useRef<HTMLImageElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [canvasSize, setCanvasSize] = useState<{ w: number; h: number } | null>(null);
-  // Container box size — lets us absolutely-center the canvas wrapper so it can
+  // Container box size - lets us absolutely-center the canvas wrapper so it can
   // grow with zoom (explicit width/height) instead of CSS scale(), which keeps
   // the SVG overlay (masks / boxes / labels) rendering as crisp vector at any
   // zoom rather than a bitmap-scaled, pixelated layer.
   const [containerSize, setContainerSize] = useState<{ w: number; h: number } | null>(null);
-  // Full-resolution image load state — drives the blurhash preview + spinner so
+  // Full-resolution image load state - drives the blurhash preview + spinner so
   // a large/4K original never shows a blank canvas while it streams in. Reset on
   // every imageUrl change; an already-cached image reports complete at once.
   const [imgLoaded, setImgLoaded] = useState(false);
@@ -425,7 +425,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
       // Trackpad pinch synthesises a wheel event with ctrlKey=true, so
       // this branch covers both "mouse user holding Cmd" and "trackpad
       // user pinching" cleanly. The original wheel-always-zooms
-      // behaviour made two-finger trackpad scroll feel jumpy — every
+      // behaviour made two-finger trackpad scroll feel jumpy - every
       // scroll re-anchored zoom instead of panning the image.
       if (e.ctrlKey || e.metaKey) {
         // Anchor on the canvas's *current* rendered rect so the point under the
@@ -755,7 +755,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
       (async () => {
         // Outer try/catch so a malformed response (missing box_xyxy
         // etc.) or any other unexpected throw drops the placeholder
-        // visually AND surfaces the cause in DevTools — silent
+        // visually AND surfaces the cause in DevTools - silent
         // failures here were what made the "second click vanishes"
         // bug so hard to track.
         try {
@@ -767,7 +767,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
             res = null;
           }
           if (!res) {
-            console.warn("[click-to-detect] no result — removing placeholder", { id });
+            console.warn("[click-to-detect] no result - removing placeholder", { id });
             stateRef.current.onChange(
               stateRef.current.boxes.filter((b) => b.id !== id),
             );
@@ -804,7 +804,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
               };
             }),
           );
-          // Resolver couldn't pick a tag — open the picker so the
+          // Resolver couldn't pick a tag - open the picker so the
           // user types one immediately.
           if (!label) setEditingId(id);
         } catch (err) {
@@ -858,7 +858,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
         } else {
           // Spinner state until the segment + classify result lands.
           // Whether we go through the combined one-shot endpoint
-          // (preferred — one RTT) or the parallel pair (legacy
+          // (preferred - one RTT) or the parallel pair (legacy
           // callers without a combined route), the result merges
           // into a SINGLE state commit below so the canvas never
           // reveals a half-finished box and the auto-PUT can't
@@ -922,7 +922,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
                 return next;
               }),
             );
-            // Classifier couldn't pick a tag — open the picker.
+            // Classifier couldn't pick a tag - open the picker.
             if (!label) setEditingId(id);
           })();
         }
@@ -945,13 +945,13 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
   const startMove = (e: React.PointerEvent, boxId: string) => {
     if (readOnly) return;
     if (drawMode) return;
-    // A pinch / two-finger pan is in progress — never drag a box.
+    // A pinch / two-finger pan is in progress - never drag a box.
     if (touchCountRef.current >= 2) return;
     e.stopPropagation();
     const initial = stateRef.current.boxes.find((b) => b.id === boxId);
     if (!initial) return;
     // Touch: require the box to be SELECTED first. A press on an
-    // unselected box only selects it — you then press the (now selected)
+    // unselected box only selects it - you then press the (now selected)
     // box and drag to move it. This stops a pan/zoom (or a stray tap)
     // from accidentally nudging a box. Mouse keeps press-and-drag.
     if (e.pointerType === "touch" && selectedId !== boxId) {
@@ -1410,7 +1410,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
           </span>
         </div>
       </div>
-      {/* Edge fades (mobile only) — a smooth gradient from the page
+      {/* Edge fades (mobile only) - a smooth gradient from the page
           background to transparent so it's obvious the button strip
           scrolls. Wide + no backdrop-blur so there's no hard edge. */}
       <div aria-hidden className="md:hidden pointer-events-none absolute inset-y-0 left-0 w-14 z-10 bg-gradient-to-r from-[var(--background)] via-[var(--background)]/70 to-transparent" />
@@ -1461,7 +1461,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
             style={{
               // Grow the wrapper to the zoomed size (explicit width/height) and
               // absolutely-center it, instead of CSS scale(zoom). Both the <img>
-              // and the SVG fill it, so they stay perfectly aligned — but the
+              // and the SVG fill it, so they stay perfectly aligned - but the
               // SVG now rasterizes its vector content (masks / boxes / labels)
               // at the TRUE zoomed resolution every frame, so the overlay never
               // pixelates and label text holds its on-screen size. Only the
@@ -2159,7 +2159,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
             </div>
           )}
 
-          {/* Mobile paint bar — thumb-reachable Brush/Eraser + Size +
+          {/* Mobile paint bar - thumb-reachable Brush/Eraser + Size +
               Done/Cancel pinned to the bottom of the canvas. Replaces the
               desktop top-pill + toolbar controls, which are hard to reach
               one-handed and reference keyboard shortcuts that don't exist
@@ -2251,7 +2251,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
                   className="h-3 w-3 rounded-full border-2 border-foreground/15 border-t-foreground/60 animate-spin"
                 />
               )}
-              {/* Mobile-only close — desktop has no dismiss (always shown). */}
+              {/* Mobile-only close - desktop has no dismiss (always shown). */}
               <button
                 type="button"
                 onClick={() => setMobileLabelsOpen(false)}

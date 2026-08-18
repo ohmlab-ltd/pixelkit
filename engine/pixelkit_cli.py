@@ -38,7 +38,7 @@ def doctor() -> int:
     if v >= (3, 11):
         _ok("python", f"{v.major}.{v.minor}.{v.micro}")
     else:
-        _warn("python", f"{v.major}.{v.minor} — need 3.11+")
+        _warn("python", f"{v.major}.{v.minor} - need 3.11+")
         problems += 1
 
     try:
@@ -47,11 +47,11 @@ def doctor() -> int:
         if torch.cuda.is_available():
             name = torch.cuda.get_device_name(0)
             vram = torch.cuda.get_device_properties(0).total_memory / 1e9
-            _ok("device", f"cuda — {name} ({vram:.0f} GB)")
+            _ok("device", f"cuda - {name} ({vram:.0f} GB)")
         elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
-            _ok("device", "mps — Apple GPU (Metal)")
+            _ok("device", "mps - Apple GPU (Metal)")
         else:
-            _warn("device", "cpu only — labelling disabled (PK_DEVICE=cpu to force)")
+            _warn("device", "cpu only - labelling disabled (PK_DEVICE=cpu to force)")
     except Exception as e:
         _warn("torch", f"import failed: {e}")
         problems += 1
@@ -67,7 +67,7 @@ def doctor() -> int:
     if models.hf_token():
         _ok("hf token", "configured")
     else:
-        _warn("hf token", "not set — needed once for the gated SAM3 weights")
+        _warn("hf token", "not set - needed once for the gated SAM3 weights")
     for name in ("sam3", "dinov2"):
         if models.is_downloaded(name):
             _ok(name, "weights downloaded")
@@ -78,7 +78,7 @@ def doctor() -> int:
     if (ui / "index.html").is_file():
         _ok("ui build", str(ui))
     else:
-        _warn("ui build", "missing — run `npm run build` in ui/ (engine API still works)")
+        _warn("ui build", "missing - run `npm run build` in ui/ (engine API still works)")
 
     print()
     return 1 if problems else 0
@@ -205,7 +205,7 @@ def label(args) -> int:
                 print(f"\r  labelling {idx}/{total}", end="", flush=True)
             time.sleep(2)
         # A failed job vanishes from /active exactly like a finished one
-        # — ask for the final status before claiming victory.
+        # - ask for the final status before claiming victory.
         final = client.get(f"/api/jobs/{jid}")
         body = final.json() if final.status_code == 200 else {}
         status = body.get("status", "unknown")

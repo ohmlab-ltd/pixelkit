@@ -1,4 +1,4 @@
-"""Pipeline Charlie — clean restart of the labelling pipeline.
+"""Pipeline Charlie - clean restart of the labelling pipeline.
 
 Charlie is a from-scratch alternative to V2 (GroundingDINO + SAM2 +
 Qwen-VL + DINOv2 + SigLIP). The current step-1 implementation runs
@@ -18,7 +18,7 @@ per forward pass:
 For multi-label requests we loop over the labels and concatenate the
 per-label detections. SAM3 image encoding is heavy (~half the cost
 per call), so a future optimisation can run `model.get_image_embeddings`
-once and reuse the cached embeddings across labels — leaving that for
+once and reuse the cached embeddings across labels - leaving that for
 later iterations.
 
 Future iterations of Charlie will likely add:
@@ -37,7 +37,7 @@ Public surface:
     segment_point(image, [x, y])    -> (detection_or_none, timings_ms)
 
 Gating: facebook/sam3 is gated on Hugging Face. Set HF_TOKEN in .env
-(or the environment) before the first load — transformers picks it
+(or the environment) before the first load - transformers picks it
 up automatically. Override with SAM3_MODEL_ID for community
 repackages or alternate checkpoints.
 """
@@ -56,7 +56,7 @@ from PIL import Image
 SAM3_MODEL_ID = os.environ.get("SAM3_MODEL_ID", "facebook/sam3")
 
 # ─────────────────────────────────────────────────────────────────────
-# LOCKED VALUES — DO NOT CHANGE THESE DEFAULTS WITHOUT EXPLICIT USER
+# LOCKED VALUES - DO NOT CHANGE THESE DEFAULTS WITHOUT EXPLICIT USER
 # REQUEST.  They were tuned together against real PPE / construction
 # images.  Each individual env var below can still be overridden via
 # .env if a specific workflow needs it, but the source-tree defaults
@@ -64,7 +64,7 @@ SAM3_MODEL_ID = os.environ.get("SAM3_MODEL_ID", "facebook/sam3")
 # ─────────────────────────────────────────────────────────────────────
 
 # Model-level confidence cuts. Kept at SAM3's defaults so the model
-# returns its full set of plausible detections — noise rejection is
+# returns its full set of plausible detections - noise rejection is
 # handled in post-processing rather than at the model boundary, so we
 # don't accidentally drop legit small / lower-confidence objects.
 SAM3_THRESHOLD = float(os.environ.get("SAM3_THRESHOLD", "0.5"))           # LOCKED
@@ -82,17 +82,17 @@ SAM3_INTERACTIVE_MASK_THRESHOLD = float(os.environ.get("SAM3_INTERACTIVE_MASK_TH
 # Loose (0.01 % image-relative + 64 px absolute) so genuinely small
 # accessories like gloves and hard hats survive; relative filters do
 # the bulk of noise removal, this one only catches pixel slivers.
-SAM3_MIN_AREA_FRAC = float(os.environ.get("SAM3_MIN_AREA_FRAC", "0.0001"))  # LOCKED — 0.01 %
+SAM3_MIN_AREA_FRAC = float(os.environ.get("SAM3_MIN_AREA_FRAC", "0.0001"))  # LOCKED - 0.01 %
 SAM3_MIN_AREA_PX = int(os.environ.get("SAM3_MIN_AREA_PX", "64"))            # LOCKED
 
 # Within a single label's hits, drop anything whose mask area is below
 # this fraction of that label's largest mask. 5 % keeps partial /
 # occluded siblings while still killing clear same-label noise.
-SAM3_MIN_RELATIVE_AREA = float(os.environ.get("SAM3_MIN_RELATIVE_AREA", "0.05"))  # LOCKED — 5 %
+SAM3_MIN_RELATIVE_AREA = float(os.environ.get("SAM3_MIN_RELATIVE_AREA", "0.05"))  # LOCKED - 5 %
 
 # Cross-label area filter: drop anything whose mask is below this
 # fraction of the IMAGE-WIDE largest detection (across all labels).
-# DISABLED BY DEFAULT — dominant subjects (a person filling the
+# DISABLED BY DEFAULT - dominant subjects (a person filling the
 # frame) make legit small accessories look tiny relative to them, so
 # this filter misclassifies real PPE. Re-enable in .env per workflow
 # only if needed.
@@ -100,7 +100,7 @@ SAM3_MIN_GLOBAL_RELATIVE_AREA = float(os.environ.get("SAM3_MIN_GLOBAL_RELATIVE_A
 
 # Resize incoming images so SAM3 always runs at the same scale
 # (longest edge = SAM3_TARGET_LONGEST_EDGE px). Keeps mask resolution
-# AND polygons consistent across heterogeneous inputs — a 600×400
+# AND polygons consistent across heterogeneous inputs - a 600×400
 # photo and a 4000×3000 photo yield masks with the same vertex
 # density, so jaggy edges on small uploads disappear. 0 disables.
 SAM3_TARGET_LONGEST_EDGE = int(os.environ.get("SAM3_TARGET_LONGEST_EDGE", "1500"))  # LOCKED
@@ -120,7 +120,7 @@ SAM3_POLY_SIMPLIFY_EPS = float(os.environ.get("SAM3_POLY_SIMPLIFY_EPS", "0.0015"
 # sub-polygons whose area is below this fraction of the largest sub-
 # polygon. Targets the case where SAM3 returns one good mask plus a
 # few stray pixel blobs disconnected from the real object. Set
-# generously (5 %) so only clear outliers fall — partial / cropped
+# generously (5 %) so only clear outliers fall - partial / cropped
 # pieces of the same object stay.
 SAM3_SUBMASK_MIN_RELATIVE_AREA = float(os.environ.get("SAM3_SUBMASK_MIN_RELATIVE_AREA", "0.05"))
 
@@ -128,7 +128,7 @@ SAM3_SUBMASK_MIN_RELATIVE_AREA = float(os.environ.get("SAM3_SUBMASK_MIN_RELATIVE
 # mask with a kernel of this size, removing features narrower than
 # the kernel width. SAM3 occasionally emits a thin pixel bridge
 # between two separate blobs of the same concept (e.g. two gloves
-# linked by a 1–3 px line through the body) — cv2.findContours then
+# linked by a 1–3 px line through the body) - cv2.findContours then
 # returns ONE contour walking both regions through the bridge, and
 # the resample pass collapses the bridge into a single straight
 # segment that visually crosses unrelated parts of the image. A 5×5
@@ -149,13 +149,13 @@ SAM3_MASK_SMOOTH_PX = int(os.environ.get("SAM3_MASK_SMOOTH_PX", "0"))
 # After polygon extraction + simplification + outlier removal, run a
 # Catmull-Rom spline through every kept vertex and emit
 # SAM3_POLY_SUBDIVIDE_SAMPLES new points between each consecutive
-# pair. Original vertices are NEVER removed — the curve passes
+# pair. Original vertices are NEVER removed - the curve passes
 # through them exactly. Result: a polygon with (samples+1)× as many
 # vertices, smooth between corners. Set to 0 to disable.
 SAM3_POLY_SUBDIVIDE_SAMPLES = int(os.environ.get("SAM3_POLY_SUBDIVIDE_SAMPLES", "0"))
 
 # Gaussian smoothing on polygon vertices, applied AFTER subdivision.
-# Doesn't change vertex count — each vertex gets replaced with a
+# Doesn't change vertex count - each vertex gets replaced with a
 # Gaussian-weighted mean of itself + its neighbours along the closed
 # loop. Smooths the wiggles that Catmull-Rom inevitably traces
 # through every original control point. Sigma is in vertex-index
@@ -165,14 +165,14 @@ SAM3_POLY_SUBDIVIDE_SAMPLES = int(os.environ.get("SAM3_POLY_SUBDIVIDE_SAMPLES", 
 SAM3_POLY_SMOOTH_SIGMA = float(os.environ.get("SAM3_POLY_SMOOTH_SIGMA", "0"))
 # Number of Gaussian-smoothing passes. Each pass with sigma σ
 # composes to an effective σ_total = σ × √passes (Gaussians
-# multiply additively in variance), so 3 × σ=6 ≈ σ_eff=10.4 — visibly
+# multiply additively in variance), so 3 × σ=6 ≈ σ_eff=10.4 - visibly
 # round curves with no remaining staircase.
 SAM3_POLY_SMOOTH_PASSES = int(os.environ.get("SAM3_POLY_SMOOTH_PASSES", "3"))
 
 # Periodic cubic B-spline approximation, applied AFTER Gaussian
 # smoothing as the final step in _mask_to_polygons. Unlike Catmull-
-# Rom (which interpolates — passes through every control point), a
-# B-spline approximates — the curve is pulled toward control points
+# Rom (which interpolates - passes through every control point), a
+# B-spline approximates - the curve is pulled toward control points
 # but isn't required to touch them. Result: C2 continuity (smooth
 # second derivatives, no kinks in curvature) and any residual
 # staircase in the control polygon is washed out completely.
@@ -181,7 +181,7 @@ SAM3_POLY_SMOOTH_PASSES = int(os.environ.get("SAM3_POLY_SMOOTH_PASSES", "3"))
 SAM3_POLY_SPLINE_SAMPLES = int(os.environ.get("SAM3_POLY_SPLINE_SAMPLES", "0"))
 
 # Final resample step. After all the smoothing the polygon has
-# thousands of vertices clustered in tiny segments — when the FE
+# thousands of vertices clustered in tiny segments - when the FE
 # draws cubic Bezier curves between every consecutive pair, each
 # segment is so short that the aggregate looks like a polyline
 # (visible "bumps" at high zoom). Resample to a fixed-perimeter-
@@ -215,12 +215,12 @@ SAM3_CORNER_WINDOW = int(os.environ.get("SAM3_CORNER_WINDOW", "4"))
 # a hexagon's neighbouring vertices) don't suppress each other.
 SAM3_CORNER_NMS_RADIUS = int(os.environ.get("SAM3_CORNER_NMS_RADIUS", "2"))
 # Polygons with fewer than this many vertices skip corner detection
-# entirely — there's not enough room for the window + NMS to give a
+# entirely - there's not enough room for the window + NMS to give a
 # reliable result, and tiny polygons usually round acceptably anyway.
 SAM3_CORNER_MIN_VERTICES = int(os.environ.get("SAM3_CORNER_MIN_VERTICES", "8"))
 # Maximum distance (in original-image px) a corner is allowed to be
 # from the smoothed polygon and still get re-anchored. If smoothing
-# pulled the polygon further away than this, the corner is "lost" —
+# pulled the polygon further away than this, the corner is "lost" -
 # we leave the smoothed shape alone instead of inserting a thin spike
 # that points to where the corner used to be (the visible artefact in
 # the pothole/glove screenshots).
@@ -233,13 +233,13 @@ SAM3_CORNER_MAX_DIST_PX = float(os.environ.get("SAM3_CORNER_MAX_DIST_PX", "12"))
 SAM3_CORNER_CARVE_RADIUS_PX = float(os.environ.get("SAM3_CORNER_CARVE_RADIUS_PX", "10"))
 
 # ─────────────────────────────────────────────────────────────────────
-# Context-aware smoothing — replaces the multi-step
+# Context-aware smoothing - replaces the multi-step
 # subdivide/Gaussian/B-spline/resample/corner-detect/anchor stack
 # above with a single variable-σ Gaussian. Per-vertex sigma is
 # inversely proportional to local curvature, so sharp corners
 # (high curvature) get σ→0 and don't move, while smooth-section
 # vertices get full σ and average out into a clean curve. There's
-# no binary "is it a corner" decision — sigma is a continuous
+# no binary "is it a corner" decision - sigma is a continuous
 # gradient, so soft real corners no longer vanish and noisy bumps
 # no longer turn into phantom corners.
 # ─────────────────────────────────────────────────────────────────────
@@ -255,8 +255,8 @@ SAM3_CONTEXT_SUBDIVIDE = int(os.environ.get("SAM3_CONTEXT_SUBDIVIDE", "0"))
 SAM3_CONTEXT_SMOOTH_MAX_SIGMA = float(os.environ.get("SAM3_CONTEXT_SMOOTH_MAX_SIGMA", "0"))
 # FLOOR for the corner threshold (degrees) at which sigma reaches 0.
 # Effective threshold per polygon is max(this, avg_turn × sensitivity)
-# so small organic shapes (potholes, gloves) — where every vertex
-# legitimately turns 20–40° — get judged on their OWN curvature
+# so small organic shapes (potholes, gloves) - where every vertex
+# legitimately turns 20–40° - get judged on their OWN curvature
 # distribution, not against a fixed-degree absolute. A vertex is
 # treated as a corner only when its turn substantially exceeds the
 # polygon's typical turn.
@@ -302,7 +302,7 @@ def load_sam3(device: str = "cuda"):
 
     Devices: cuda and mps (Apple Metal) load fp16; cpu loads fp32 and is
     explicitly opt-in upstream (the SAM3 vision transformer runs minutes
-    per image on CPU — the server only requests it when the user forced
+    per image on CPU - the server only requests it when the user forced
     PK_DEVICE=cpu)."""
     global _MODEL, _PROCESSOR
 
@@ -315,7 +315,7 @@ def load_sam3(device: str = "cuda"):
     dtype = torch.float32 if dev == "cpu" else torch.float16
     print(f"[charlie] loading {SAM3_MODEL_ID} on {device} ({dtype})...")
     if dev == "cpu":
-        print("[charlie] WARNING: CPU inference is extremely slow — expect minutes per image.")
+        print("[charlie] WARNING: CPU inference is extremely slow - expect minutes per image.")
     proc = Sam3Processor.from_pretrained(SAM3_MODEL_ID)
     mdl = Sam3Model.from_pretrained(SAM3_MODEL_ID, torch_dtype=dtype)
     mdl = mdl.to(device).eval()
@@ -347,9 +347,9 @@ def _detect_sharp_corners(
     computed at every window size from 1 up to `window`, and the
     SHARPEST result wins. This catches both:
 
-      - Sharp single-vertex corners (90° box edges) — fires at w=1.
+      - Sharp single-vertex corners (90° box edges) - fires at w=1.
       - "Spread" corners where the same total angle is spread across
-        2–4 vertices (typical road / soft panel boundaries) — fires
+        2–4 vertices (typical road / soft panel boundaries) - fires
         at w=3 or w=4.
 
     Per-window definition:
@@ -441,7 +441,7 @@ def _anchor_corners(
 
       1. SKIP if the original corner is more than `max_dist_px` from
          the smoothed polygon. Smoothing has pulled the boundary too
-         far for the corner to be reintroduced cleanly — inserting
+         far for the corner to be reintroduced cleanly - inserting
          it anyway would produce a thin spike pointing out of the
          polygon (the artefact visible in the pothole / vest
          screenshots). The corner stays rounded.
@@ -454,7 +454,7 @@ def _anchor_corners(
          to colinear tangents on each side, producing a true cusp.
 
       3. If no smoothed vertices fall inside the carve radius, fall
-         back to inserting the corner at its closest segment — the
+         back to inserting the corner at its closest segment - the
          smoothed boundary already runs near the corner, so the
          insertion lands flush rather than as a spike.
     """
@@ -478,7 +478,7 @@ def _anchor_corners(
             if d2 < best_seg_d2:
                 best_seg_d2 = d2
                 best_seg = i
-        # Bail if the corner is too far from the smoothed shape —
+        # Bail if the corner is too far from the smoothed shape -
         # don't draw a spike pointing into empty space.
         if best_seg_d2 > max_dist_sq:
             continue
@@ -493,7 +493,7 @@ def _anchor_corners(
 
         c = [round(cx, 1), round(cy, 1)]
         if not within:
-            # No vertex inside the carve radius — corner is right on
+            # No vertex inside the carve radius - corner is right on
             # the boundary between two vertices. Insert into segment.
             poly.insert(best_seg + 1, c)
             poly.insert(best_seg + 2, c)
@@ -547,7 +547,7 @@ def _anchor_corners(
             last = target_run[-1]
             new_poly = poly[:first] + [c, c] + poly[last + 1:]
         else:
-            # Wrap-around — easier to filter then prepend the corner pair.
+            # Wrap-around - easier to filter then prepend the corner pair.
             kept = [poly[i] for i in range(n) if i not in run_set]
             # Place corner pair at the wrap boundary.
             new_poly = [c, c] + kept
@@ -603,7 +603,7 @@ def _periodic_cubic_bspline(polygon, samples_per_segment: int):
         B_{1}(t)  = (1 + 3t + 3t² − 3t³)  / 6
         B_{2}(t)  = t³                    / 6
 
-    Unlike Catmull-Rom this is APPROXIMATING — the curve is pulled
+    Unlike Catmull-Rom this is APPROXIMATING - the curve is pulled
     toward the control points but doesn't pass through them, so any
     residual staircase in the control polygon is washed out entirely.
     The resulting curve has C2 continuity along its full length.
@@ -653,7 +653,7 @@ def _context_aware_smooth(
     Vertices whose turn is in line with the polygon's typical
     curvature get σ ≈ max_sigma and smooth out into a clean curve.
     A vertex only counts as a "real corner" when its turn substantially
-    exceeds the polygon's average — at which point σ → 0 and it
+    exceeds the polygon's average - at which point σ → 0 and it
     doesn't move at all.
 
     The adaptive part is the key: a small organic shape where every
@@ -663,7 +663,7 @@ def _context_aware_smooth(
     90° corners still preserves the corners because the average turn
     is low and 90° towers over it.
 
-    Returns FLOAT polygon (1-decimal rounding) — same vertex count
+    Returns FLOAT polygon (1-decimal rounding) - same vertex count
     as input, repositioned in place.
     """
     import math
@@ -697,14 +697,14 @@ def _context_aware_smooth(
     avg_turn = sum(turn_angles) / max(1, len(turn_angles))
     eff_threshold = max(corner_threshold_deg, avg_turn * sensitivity)
 
-    # Per-vertex sigma — linear falloff from max_sigma at 0° to 0 at
+    # Per-vertex sigma - linear falloff from max_sigma at 0° to 0 at
     # eff_threshold.
     sigmas = [
         max(0.0, max_sigma * (1.0 - ta / eff_threshold))
         for ta in turn_angles
     ]
 
-    # Identify "corner-ish" indices — vertices whose turn is at least
+    # Identify "corner-ish" indices - vertices whose turn is at least
     # half the effective threshold. The smoothing kernel for any vertex
     # gets capped so it can't reach past the nearest corner-ish vertex
     # on either side. Without this cap, a midpoint vertex on a straight
@@ -740,15 +740,15 @@ def _context_aware_smooth(
     for i in range(n):
         sigma = sigmas[i]
         if sigma < 0.05:
-            # No smoothing — keep position exactly.
+            # No smoothing - keep position exactly.
             smoothed.append(
                 [round(float(polygon[i][0]), 1), round(float(polygon[i][1]), 1)]
             )
             continue
         radius = max(1, int(round(sigma * 3)))
-        # Cap 1 — never reach the polygon's opposite side on small polys.
+        # Cap 1 - never reach the polygon's opposite side on small polys.
         radius = min(radius, max(1, n // 4))
-        # Cap 2 — never reach across a corner. dist_to_corner is the
+        # Cap 2 - never reach across a corner. dist_to_corner is the
         # number of vertex steps to the nearest corner-ish vertex on
         # either side; halving it gives a kernel that fades to zero
         # before touching the corner, so a straight edge midpoint
@@ -782,7 +782,7 @@ def _duplicate_sharp_vertices(
     on each side, producing a real sharp angle in the rendered curve
     instead of a rounded transition).
 
-    Runs AFTER context-aware smoothing — so we measure turn angle
+    Runs AFTER context-aware smoothing - so we measure turn angle
     on the *smoothed* polygon, and only vertices that survived the
     smoothing pass as sharp end up duplicated."""
     import math
@@ -815,7 +815,7 @@ def _duplicate_sharp_vertices(
 
 def _gaussian_smooth_polygon(polygon, sigma: float):
     """Apply a 1-D Gaussian filter along a closed polygon's vertex
-    list — moves each vertex toward the local mean of its neighbours
+    list - moves each vertex toward the local mean of its neighbours
     so wiggles between control points smooth out, without changing
     the vertex count. The first/last entries wrap around (closed
     loop). Returns FLOAT coordinates (rounded to 1 decimal) so
@@ -902,14 +902,14 @@ def _mask_to_polygons(mask) -> list[list[list[int]]]:
       1. Coerce mask to uint8 binary.
       2. cv2.findContours to extract pixel-walking outlines.
       3. Douglas-Peucker simplify each contour by SAM3_POLY_SIMPLIFY_EPS
-         × perimeter — collapses single-pixel staircases into smooth
+         × perimeter - collapses single-pixel staircases into smooth
          curves while preserving real corners. Skipped when the env
          knob is 0.
       4. Sub-mask outlier filter (negative-only): when a detection
          comes back with multiple disjoint polygons, drop sub-polygons
          whose area is below SAM3_SUBMASK_MIN_RELATIVE_AREA × the
          largest sub-polygon's area. Only smaller outliers are removed
-         — the biggest piece is always kept and never trimmed.
+         - the biggest piece is always kept and never trimmed.
 
     Empty / degenerate (<3 vertex) contours are dropped."""
     import cv2
@@ -927,7 +927,7 @@ def _mask_to_polygons(mask) -> list[list[list[int]]]:
     if m.dtype != np.uint8:
         m = (m > 0).astype(np.uint8)
 
-    # Step -1 — morphological opening. Breaks thin pixel bridges
+    # Step -1 - morphological opening. Breaks thin pixel bridges
     # between disjoint blobs of the same concept BEFORE the contour
     # walker has a chance to trace them as a single contour. The
     # canonical case: a high-vis vest has front + back panels, SAM3
@@ -947,10 +947,10 @@ def _mask_to_polygons(mask) -> list[list[list[int]]]:
         if after_blobs > before_blobs:
             print(
                 f"[charlie] morph-open: split mask into "
-                f"{after_blobs} blobs (was {before_blobs}) — bridge removed"
+                f"{after_blobs} blobs (was {before_blobs}) - bridge removed"
             )
 
-    # Step 0 — pre-contour mask smoothing. Gaussian blur of the
+    # Step 0 - pre-contour mask smoothing. Gaussian blur of the
     # binary mask, then re-threshold at 0.5. Softens the pixel-level
     # staircase along the boundary so the contour walker emits fewer
     # tiny zigzags; downstream Douglas-Peucker then removes the
@@ -977,14 +977,14 @@ def _mask_to_polygons(mask) -> list[list[list[int]]]:
 
     # NOTE: corner detection now lives AFTER the sub-mask outlier
     # filter (step 4 below). Detecting before the filter caused an
-    # index-misalignment bug — if the filter dropped a sub-polygon,
+    # index-misalignment bug - if the filter dropped a sub-polygon,
     # the corner_positions_per_poly list still had its entry, so
     # corners detected on the DROPPED polygon ended up inserted into
     # a SURVIVING polygon, drawing spurious lines from one
     # sub-segmentation to where another used to be.
     corner_positions_per_poly: list[list[tuple[float, float]]] = []
 
-    # Step 4 — negative-outlier sub-mask filter.
+    # Step 4 - negative-outlier sub-mask filter.
     if len(polys) > 1 and SAM3_SUBMASK_MIN_RELATIVE_AREA > 0:
         areas = [_shoelace_area(p) for p in polys]
         max_area = max(areas)
@@ -1002,7 +1002,7 @@ def _mask_to_polygons(mask) -> list[list[list[int]]]:
 
     # Detect sharp corners NOW (post-outlier-filter, pre-smoothing).
     # corner_positions_per_poly[i] aligns with polys[i] from this
-    # point on — every later step (subdivide / smooth / B-spline /
+    # point on - every later step (subdivide / smooth / B-spline /
     # resample / anchor) is per-polygon and preserves count, so the
     # alignment holds.
     if SAM3_CORNER_ANGLE_THRESHOLD_DEG > 0:
@@ -1020,14 +1020,14 @@ def _mask_to_polygons(mask) -> list[list[list[int]]]:
         corner_positions_per_poly = [[] for _ in polys]
 
     # ── Context-aware smoothing pipeline ──────────────────────────
-    # Step 5a — Catmull-Rom subdivision for vertex density. The
+    # Step 5a - Catmull-Rom subdivision for vertex density. The
     # context-aware Gaussian only repositions existing vertices, so
     # the polygon needs a reasonable density before smoothing for the
     # result to look smooth.
     if SAM3_CONTEXT_SUBDIVIDE > 0 and polys:
         polys = [_catmull_rom_subdivide(p, SAM3_CONTEXT_SUBDIVIDE) for p in polys]
 
-    # Step 5b — variable-sigma Gaussian. Per-vertex σ scales inversely
+    # Step 5b - variable-sigma Gaussian. Per-vertex σ scales inversely
     # with local curvature: smooth sections smooth, sharp corners
     # stay put. Single algorithm replaces the old subdivide+Gaussian+
     # B-spline+resample+corner-detect/anchor stack.
@@ -1042,7 +1042,7 @@ def _mask_to_polygons(mask) -> list[list[list[int]]]:
             for p in polys
         ]
 
-    # Step 5c — duplicate vertices that survived smoothing as sharp
+    # Step 5c - duplicate vertices that survived smoothing as sharp
     # so the FE Bezier renderer produces real cusps there.
     if SAM3_CONTEXT_DUPE_DEG > 0 and polys:
         polys = [
@@ -1054,36 +1054,36 @@ def _mask_to_polygons(mask) -> list[list[list[int]]]:
     # ── Legacy multi-step smoothing (disabled by default in v2 of
     #    the pipeline; kept under env knobs for revertability) ─────
 
-    # Step 5 — Catmull-Rom subdivision (additive: every original
+    # Step 5 - Catmull-Rom subdivision (additive: every original
     # vertex is retained exactly, plus N interpolated points between
     # each pair).
     if SAM3_POLY_SUBDIVIDE_SAMPLES > 0 and polys:
         polys = [_catmull_rom_subdivide(p, SAM3_POLY_SUBDIVIDE_SAMPLES) for p in polys]
 
-    # Step 6 — Gaussian smoothing along the now-dense vertex list.
+    # Step 6 - Gaussian smoothing along the now-dense vertex list.
     # Same point count, but each vertex gets replaced with a
     # Gaussian-weighted local mean so the wiggles Catmull-Rom traces
     # through every staircase control point smooth out into a clean
     # curve. Runs after subdivision because more vertices = better
     # local-mean estimate for the same sigma. Multiple passes give
-    # an effective σ_total = σ × √passes — cheaper than running one
+    # an effective σ_total = σ × √passes - cheaper than running one
     # huge kernel and gives a smoother (more "viscous-fluid") result
     # than a single pass.
     if SAM3_POLY_SMOOTH_SIGMA > 0 and polys and SAM3_POLY_SMOOTH_PASSES > 0:
         for _ in range(SAM3_POLY_SMOOTH_PASSES):
             polys = [_gaussian_smooth_polygon(p, SAM3_POLY_SMOOTH_SIGMA) for p in polys]
 
-    # Step 7 — periodic cubic B-spline approximation. Replaces each
+    # Step 7 - periodic cubic B-spline approximation. Replaces each
     # polygon with a smooth curve that's pulled toward the (already-
     # smoothed) control points but not constrained to pass through
-    # them. C2 continuity end-to-end — any residual staircase in the
+    # them. C2 continuity end-to-end - any residual staircase in the
     # control vertices is fully washed out.
     if SAM3_POLY_SPLINE_SAMPLES > 0 and polys:
         polys = [_periodic_cubic_bspline(p, SAM3_POLY_SPLINE_SAMPLES) for p in polys]
 
-    # Step 8 — arc-length resample to a sparse, evenly-spaced control
+    # Step 8 - arc-length resample to a sparse, evenly-spaced control
     # set. The FE renders polygons as cubic Bezier <path>s that pass
-    # through every point — with thousands of clustered vertices each
+    # through every point - with thousands of clustered vertices each
     # Bezier segment is too short to actually curve, so the aggregate
     # reads as a polyline and shows the underlying staircase. Down-
     # sampling to ~one point per 30 px of perimeter (clamped 20–120)
@@ -1105,7 +1105,7 @@ def _mask_to_polygons(mask) -> list[list[list[int]]]:
             resampled.append(_resample_polygon_arc_length(p, target))
         polys = resampled
 
-    # Step 9 — re-anchor sharp corners detected pre-smoothing. Snaps
+    # Step 9 - re-anchor sharp corners detected pre-smoothing. Snaps
     # the nearest smoothed vertex to the exact corner position and
     # inserts a duplicate so the FE Bezier renderer produces a real
     # cusp. Sign edges, building corners, anything truly angular in
@@ -1208,7 +1208,7 @@ def _resize_for_inference(image: Image.Image, target: int | None = None) -> tupl
     px. Returns (image_inf, scale_back) where scale_back multiplies
     inference-space coords back to original-image coords.
 
-    Resizes in BOTH directions — small images upscale, large ones
+    Resizes in BOTH directions - small images upscale, large ones
     downscale, so SAM3 always sees the same input scale and the
     resulting masks have the same effective resolution before being
     scaled back. This is the fix for jaggy edges on small uploads:
@@ -1227,7 +1227,7 @@ def _resize_for_inference(image: Image.Image, target: int | None = None) -> tupl
         return image, 1.0
     inf_scale = (target or SAM3_TARGET_LONGEST_EDGE) / longest
     new_size = (max(1, int(round(W * inf_scale))), max(1, int(round(H * inf_scale))))
-    # LANCZOS works well for both up and down — for upscaling it gives
+    # LANCZOS works well for both up and down - for upscaling it gives
     # smoother interpolation than NEAREST without introducing the
     # ringing that BICUBIC sometimes shows on edges.
     return image.resize(new_size, Image.LANCZOS), 1.0 / inf_scale
@@ -1265,7 +1265,7 @@ def _try_get_image_embeds(image: Image.Image):
     Sam3VisionEncoderOutput suitable for passing back into
     Sam3Model.forward(vision_embeds=...). When this succeeds, every
     subsequent forward for the same image can skip the heavy image
-    encoder — a per-click speedup of ~N× when scanning N labels.
+    encoder - a per-click speedup of ~N× when scanning N labels.
 
     Returns (vision_embeds_or_none, original_sizes_or_none, processed_pixel_values_or_none).
     Falls back to (None, None, None) on any error so callers can do a
@@ -1281,7 +1281,7 @@ def _try_get_image_embeds(image: Image.Image):
     pixel_values = proc_inputs.get("pixel_values")
     original_sizes = proc_inputs.get("original_sizes")
 
-    # Try a few methods exposed by SAM-family transformers — these
+    # Try a few methods exposed by SAM-family transformers - these
     # vary across versions, so we probe in order of preference.
     for attr in ("get_image_embeddings", "get_vision_embeddings", "encode_image"):
         method = getattr(_MODEL, attr, None)
@@ -1295,7 +1295,7 @@ def _try_get_image_embeds(image: Image.Image):
             print(f"[charlie] vision-embed cache: {attr}() raised {type(e).__name__}: {e}")
             continue
 
-    # Last resort — call the vision encoder submodule directly.
+    # Last resort - call the vision encoder submodule directly.
     vision_encoder = getattr(_MODEL, "vision_encoder", None) or getattr(_MODEL, "vision_model", None)
     if vision_encoder is not None:
         try:
@@ -1323,7 +1323,7 @@ def _run_text_with_cached_vision(label: str, vision_embeds, original_sizes, pixe
     if vision_embeds is not None:
         forward_kwargs["vision_embeds"] = vision_embeds
     else:
-        # No cache — caller should have supplied pixel_values.
+        # No cache - caller should have supplied pixel_values.
         if pixel_values is not None:
             forward_kwargs["pixel_values"] = pixel_values
     with torch.inference_mode():
@@ -1347,11 +1347,11 @@ def _segment_one_label(
     filtered out for being below the area threshold.
 
     `threshold` / `mask_threshold` / `min_relative_area` override the
-    SAM3_* module-level defaults for this single call only — used by
+    SAM3_* module-level defaults for this single call only - used by
     the project page's per-run SAM3 knobs.
     """
     if _MODEL is None or _PROCESSOR is None:
-        raise RuntimeError("SAM3 not loaded — call load_sam3() first")
+        raise RuntimeError("SAM3 not loaded - call load_sam3() first")
 
     import numpy as np
 
@@ -1399,7 +1399,7 @@ def _segment_one_label(
         masks_t = results["masks"]
         scores_t = results["scores"]
 
-        # Pass 1 — collect every hit alongside its mask area so the
+        # Pass 1 - collect every hit alongside its mask area so the
         # relative filter can compute the per-label max.
         hits: list[tuple] = []  # (box_list, mask, score, area)
         for i in range(len(boxes_t)):
@@ -1413,13 +1413,13 @@ def _segment_one_label(
                 mask_area = int((np.asarray(mask) > 0).sum())
             hits.append((box_list, mask, score, mask_area))
 
-        # Pass 2a — absolute floor: kill anything below max(floor px,
+        # Pass 2a - absolute floor: kill anything below max(floor px,
         # image-relative fraction). Catches noise on small images.
         kept_floor = [h for h in hits if h[3] >= min_area_px]
         n_dropped_floor = len(hits) - len(kept_floor)
         dropped_tiny += n_dropped_floor
 
-        # Pass 2b — relative-to-max-in-label: anything under
+        # Pass 2b - relative-to-max-in-label: anything under
         # eff_min_relative × the biggest surviving mask is treated as
         # a noise fragment that share-labels with a real object, and
         # dropped. Skipped when the label only fired once (nothing
@@ -1434,7 +1434,7 @@ def _segment_one_label(
             kept_rel = kept_floor
             n_dropped_rel = 0
 
-        # Surface what each pass actually saw / dropped — invaluable
+        # Surface what each pass actually saw / dropped - invaluable
         # when a real label shows up in the SAM3 output but doesn't
         # make it to the FE. min_area_px is logged because it's the
         # main per-image-resolution variable.
@@ -1482,7 +1482,7 @@ def segment_labels(
                          per_label_ms ({label: ms})
     """
     if _MODEL is None or _PROCESSOR is None:
-        raise RuntimeError("SAM3 not loaded — call load_sam3() first")
+        raise RuntimeError("SAM3 not loaded - call load_sam3() first")
 
     t_total = time.perf_counter()
     timings: dict = {
@@ -1545,7 +1545,7 @@ def segment_labels(
                 area = int((np.asarray(mask) > 0).sum())
             all_hits.append((label, box, mask, score, area))
 
-    # Pass 2 — global cross-label area filter. Drops noise specs that
+    # Pass 2 - global cross-label area filter. Drops noise specs that
     # share an image with a much bigger detection of any label
     # (typical failure mode: a tiny "road" sliver alongside a large
     # "person"; per-label filter doesn't see across labels so the
@@ -1579,13 +1579,13 @@ def segment_labels(
 # ── Native-resolution tiled inference ────────────────────────────────
 # segment_labels resizes EVERY image so its longest edge is
 # SAM3_TARGET_LONGEST_EDGE (1500px). On a 4K aerial frame that's a 2.56×
-# downscale — a 27px animal lands at ~10px and its mask area falls under
+# downscale - a 27px animal lands at ~10px and its mask area falls under
 # the absolute area floor, so it never comes back. segment_labels_tiled
 # slices the original image into overlapping native-resolution tiles
 # whose longest edge equals the inference target, so _resize_for_inference
 # is a no-op per tile and small objects keep their pixels. A full-frame
 # pass still runs first to catch objects larger than a tile. Detections
-# are offset back to original coords (pure vertex translation — only
+# are offset back to original coords (pure vertex translation - only
 # polygons leave this module, never bitmaps) and merged with a
 # truncation-aware same-label NMS mirroring run_groundingdino's
 # _merge_tiled_candidates, so an object seen whole in one tile beats its
@@ -1631,17 +1631,17 @@ def _offset_detection(det: dict, ox: int, oy: int) -> dict:
 def _merge_tiled_detections(cands: list[tuple], iou_thr: float = 0.5, contain_frac: float = 0.7) -> list[dict]:
     """Greedy same-label merge of (det, truncated) candidates across the
     full-frame + tile passes. Un-truncated wins over truncated, then
-    score, then area — so the fuller view of an object suppresses the
+    score, then area - so the fuller view of an object suppresses the
     tile-edge-clipped duplicate.
 
     Three guards tuned for small-object aerial frames:
     - containment only dedups boxes of comparable size (≤3×), so a
       full-frame "group blob" can't eat the individuals the tiles resolved;
-    - near-coincident tiny boxes (<48px) dedup by centre distance — IoU is
+    - near-coincident tiny boxes (<48px) dedup by centre distance - IoU is
       unreliable at that scale (cross-tile localisation jitter of a few px
       drops IoU below any sane threshold);
     - post-merge, a kept box that mostly contains ≥2 smaller kept same-
-      label boxes is a phantom cluster around individuals — dropped."""
+      label boxes is a phantom cluster around individuals - dropped."""
     order = sorted(
         cands,
         key=lambda c: (c[1], -float(c[0].get("gd_score") or 0.0), -_det_area(c[0])),
@@ -1686,7 +1686,7 @@ def _merge_tiled_detections(cands: list[tuple], iou_thr: float = 0.5, contain_fr
 
     # Phantom-cluster eviction: a kept box that mostly contains ≥2 clearly
     # smaller kept same-label boxes is a group blob around individuals the
-    # tiles resolved — keep the individuals, drop the blob. Cross-pass
+    # tiles resolved - keep the individuals, drop the blob. Cross-pass
     # mirror of predict()'s _drop_contained rationale.
     if len(kept) > 2:
         drop: set[int] = set()
@@ -1725,7 +1725,7 @@ def _accumulate_timings(total: dict, part: dict) -> None:
             for lbl, ms in v.items():
                 slot[lbl] = slot.get(lbl, 0.0) + float(ms)
         elif k == "scale_back":
-            continue  # ratio, not additive — summed it's meaningless
+            continue  # ratio, not additive - summed it's meaningless
         elif isinstance(v, (int, float)) and not isinstance(v, bool):
             total[k] = total.get(k, 0.0) + float(v)
 
@@ -1747,7 +1747,7 @@ def segment_labels_tiled(
     in original-image pixel coords. Falls back to a single pass when the
     image isn't meaningfully larger than one tile. `tile_size` defaults
     to SAM3_TARGET_LONGEST_EDGE so each crop sails through
-    _resize_for_inference untouched — any other value gets rescaled to
+    _resize_for_inference untouched - any other value gets rescaled to
     the inference target, which defeats the point. `cancel_check`
     (callable -> bool) aborts between tile passes."""
     # Floor the tile size: an unvalidated tiny/negative value from the
@@ -1785,7 +1785,7 @@ def segment_labels_tiled(
                 or (ty1 - b[3] <= edge and ty1 < H)
             )
             # Edge tiles in the short dimension extend past the image and
-            # PIL zero-pads the crop — clamp so a box straddling the real
+            # PIL zero-pads the crop - clamp so a box straddling the real
             # edge can't persist out-of-bounds coords.
             det["box"] = [
                 min(max(int(b[0]), 0), W), min(max(int(b[1]), 0), H),
@@ -1852,7 +1852,7 @@ def _segment_one_label_with_cached_vision(
     from _segment_one_label. Falls back to a plain forward if the
     cache path errors at runtime (vision_embeds rejected, etc).
 
-    `threshold` / `mask_threshold` override the SAM3_* defaults — the
+    `threshold` / `mask_threshold` override the SAM3_* defaults - the
     interactive click-to-detect path uses lower values so a faint
     object still produces a hit instead of a cancelled gesture."""
     import numpy as np
@@ -1945,7 +1945,7 @@ def segment_point(
     """Click-to-detect via SAM3 text prompts.
 
     SAM3 is a Promptable Concept Segmentation model, not a SAM2-style
-    point promptable segmenter — its processor doesn't expose a
+    point promptable segmenter - its processor doesn't expose a
     point-prompt channel and its post-process helper is text-driven.
     So instead of trying to coerce SAM3 into pretending it has point
     prompting, we run it once per candidate label (text-prompt path
@@ -1956,7 +1956,7 @@ def segment_point(
     label is set to whichever candidate produced the matching mask.
     """
     if _MODEL is None or _PROCESSOR is None:
-        raise RuntimeError("SAM3 not loaded — call load_sam3() first")
+        raise RuntimeError("SAM3 not loaded - call load_sam3() first")
 
     import numpy as np
 
@@ -1995,7 +1995,7 @@ def segment_point(
     px_int = max(0, min(W_inf - 1, int(round(px_inf))))
     py_int = max(0, min(H_inf - 1, int(round(py_inf))))
 
-    # Vision-encoder cache — encode the image ONCE so the per-label
+    # Vision-encoder cache - encode the image ONCE so the per-label
     # forwards skip the expensive vision pass. ~N× speedup across N
     # candidate labels. Falls through cleanly to per-label full
     # forwards if the cache path doesn't work on this transformers
@@ -2009,7 +2009,7 @@ def segment_point(
     # Run SAM3 with each candidate label as a text prompt, then keep
     # only detections whose mask actually contains the click pixel.
     # Use the interactive-path thresholds so a low-confidence hit
-    # still counts — the user clicked on something, we'd rather
+    # still counts - the user clicked on something, we'd rather
     # return a faint match than cancel.
     all_hits: list[tuple] = []  # (label, box, mask, score, area, mask_np)
     for label in clean:
@@ -2116,7 +2116,7 @@ def segment_box(
     candidate produced the winning mask.
     """
     if _MODEL is None or _PROCESSOR is None:
-        raise RuntimeError("SAM3 not loaded — call load_sam3() first")
+        raise RuntimeError("SAM3 not loaded - call load_sam3() first")
 
     t_total = time.perf_counter()
     timings: dict = {
@@ -2231,7 +2231,7 @@ def classify_box(
     Returns (label, score, timings_ms). label/score may be None if no
     candidate produced a sufficiently overlapping detection."""
     if _MODEL is None or _PROCESSOR is None:
-        raise RuntimeError("SAM3 not loaded — call load_sam3() first")
+        raise RuntimeError("SAM3 not loaded - call load_sam3() first")
 
     t_total = time.perf_counter()
     timings = {

@@ -90,7 +90,7 @@ function relPath(f: File): string {
 async function collectFromZip(zip: File): Promise<CollectedFile[]> {
   const buf = new Uint8Array(await zip.arrayBuffer());
   const entries = await new Promise<Record<string, Uint8Array>>((resolve, reject) => {
-    // Only inflate the files we care about — images + annotation text —
+    // Only inflate the files we care about - images + annotation text -
     // so a zip that also bundles model weights / videos doesn't balloon
     // memory decompressing bytes we'll throw away.
     unzip(
@@ -159,7 +159,7 @@ export async function parseDataset(
   if (fmt === "voc") return parseVoc(files, onProgress);
   if (fmt === "coco" || fmt === "yolo") {
     throw new Error(
-      `${fmt.toUpperCase()} import isn't supported yet — only Pascal VOC (Annotations/*.xml + images) for now.`,
+      `${fmt.toUpperCase()} import isn't supported yet - only Pascal VOC (Annotations/*.xml + images) for now.`,
     );
   }
   throw new Error(
@@ -186,7 +186,7 @@ async function parseVoc(
     } else if (IMAGE_EXT_RE.test(name)) {
       const stem = stemOf(name).toLowerCase();
       // Two images sharing a basename stem (e.g. img.jpg + img.png) make the
-      // stem an ambiguous pairing key — record it so stem-only resolution
+      // stem an ambiguous pairing key - record it so stem-only resolution
       // skips it rather than silently pairing an annotation to the wrong file.
       if (imageByStem.has(stem)) stemCollisions.add(stem);
       else imageByStem.set(stem, cf);
@@ -212,7 +212,7 @@ async function parseVoc(
     try {
       parsed = parseVocXml(await xf.file.text());
     } catch {
-      unpairedAnnotations++; // unreadable annotation — count + skip
+      unpairedAnnotations++; // unreadable annotation - count + skip
       onProgress?.(++done, total);
       continue;
     }
@@ -269,7 +269,7 @@ async function parseVoc(
     onProgress?.(++done, total);
   }
 
-  // Images with no annotation file become background (negative) frames —
+  // Images with no annotation file become background (negative) frames -
   // valid, intentionally-empty training data. Surfaced in stats so the
   // user can spot a pairing problem (e.g. a renamed folder).
   let unpairedImages = 0;
@@ -295,7 +295,7 @@ async function parseVoc(
   if (stemCollisions.size > 0)
     warnings.push(`${stemCollisions.size} image name(s) were ambiguous (same name, different extension); their annotations may not have paired.`);
   if (items.length === 0)
-    warnings.push("No image/annotation pairs were found — check the folder layout.");
+    warnings.push("No image/annotation pairs were found - check the folder layout.");
 
   return {
     format: "voc",
@@ -352,7 +352,7 @@ function parseVocXml(text: string): VocXml {
 // well-formed datasets), then either downscales to `maxSide` (re-encoding a
 // high-quality JPEG and scaling boxes by the same factor) or preserves the
 // original resolution. Boxes always come out in the EXACT pixel space of the
-// returned File, which is what the backend re-decodes — so coordinates stay
+// returned File, which is what the backend re-decodes - so coordinates stay
 // pixel-accurate end to end.
 export async function prepareItemForUpload(
   item: ImportItem,
@@ -475,7 +475,7 @@ export type UploadProgress = { done: number; total: number; failed: number; drop
 // Upload a parsed dataset to a project via the batched ingest endpoint.
 // Items are prepared (decoded + optionally downscaled, boxes rescaled) at
 // bounded concurrency, accumulated into batches of `batchSize` (well under
-// the backend's 100-file/request cap), and POSTed one batch at a time —
+// the backend's 100-file/request cap), and POSTed one batch at a time -
 // each request is a single manifest write server-side, so a multi-thousand
 // image import stays off the O(n^2) manifest-rewrite cliff. `poster` injects
 // the authed fetch (apiFetch) so this stays decoupled from auth/session.

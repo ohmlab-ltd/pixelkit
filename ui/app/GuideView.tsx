@@ -52,7 +52,7 @@ export function GuideView() {
     else url.searchParams.set("section", key);
     window.history.replaceState(null, "", url.toString());
     // Inside the desktop shell the Guide scrolls within the content
-    // pane ([data-app-scroll]), not the page — scroll that back to the
+    // pane ([data-app-scroll]), not the page - scroll that back to the
     // top. The standalone /guide route still scrolls the window.
     const pane = document.querySelector<HTMLElement>("[data-app-scroll]");
     if (pane) pane.scrollTo({ top: 0, behavior: "smooth" });
@@ -283,7 +283,7 @@ Confirming the labels creates the dataset and opens it straight away.
 Reference images are optional on every dataset. If your labels are
 visually similar or specific to your domain (hare vs rabbit, your
 part A vs your part B), add a few example photos of each from the
-References tab on the dataset page — they help PixelKit tell the
+References tab on the dataset page - they help PixelKit tell the
 classes apart. You can add or remove references at any time.
 
 Project names are display-only; the URL uses a stable identifier.
@@ -470,7 +470,7 @@ Global:
 ==============================================================
 LIMITS
 ==============================================================
-None. PixelKit runs entirely on this machine — the only ceilings
+None. PixelKit runs entirely on this machine - the only ceilings
 are your disk space and compute.
 
 ==============================================================
@@ -983,7 +983,7 @@ function ProjectsSection({ go }: { go: (k: GuideSectionKey) => void }) {
 
       <GuideSection n={2} title="Reference images (optional)">
         <p>
-          Reference images are optional — add examples to improve label
+          Reference images are optional - add examples to improve label
           matching. Each one is a clear photo of the labelled object:
           close-up, well-lit, little background clutter. They matter most
           when your labels are visually similar (hare vs rabbit) or specific
@@ -1687,7 +1687,7 @@ function SettingsSection({ go }: { go: (k: GuideSectionKey) => void }) {
       <GuideSection n={3} title="Your data stays local">
         <Bullets
           items={[
-            "Everything — images, labels, annotations and exports — lives on this machine. Nothing is uploaded to a cloud service.",
+            "Everything - images, labels, annotations and exports - lives on this machine. Nothing is uploaded to a cloud service.",
             "Deleting a project removes its files from disk permanently; there is no remote copy to restore from.",
           ]}
         />
@@ -1848,7 +1848,7 @@ function TeamsSection({ go }: { go: (k: GuideSectionKey) => void }) {
         </p>
         <Callout tone="info">
           <Strong>Merging.</Strong> Renaming onto a label that already
-          exists merges the two — the fix for &ldquo;bolt&rdquo; vs
+          exists merges the two - the fix for &ldquo;bolt&rdquo; vs
           &ldquo;bolts&rdquo; drift between datasets.
         </Callout>
         <Callout tone="info">
@@ -1965,7 +1965,7 @@ function ReferenceSection() {
         title="Reference"
         intro={
           <>
-            Keyboard shortcuts and the other reference tables — the bits
+            Keyboard shortcuts and the other reference tables - the bits
             you reach for sporadically, kept in one place.
           </>
         }
@@ -2015,7 +2015,7 @@ function ReferenceSection() {
 
       <GuideSection n={4} title="Limits">
         <p>
-          There are no plans, quotas or caps — PixelKit runs entirely on
+          There are no plans, quotas or caps - PixelKit runs entirely on
           this machine. Dataset size is bounded only by your disk space,
           and labelling speed by your hardware.
         </p>
@@ -2025,7 +2025,7 @@ function ReferenceSection() {
         <p>
           Openverse imports carry their original CC licence and source URL,
           and both are stamped into exports. Direct uploads carry no licence
-          metadata — you are responsible for your right to use the images,
+          metadata - you are responsible for your right to use the images,
           especially in a redistributable dataset or model.
         </p>
       </GuideSection>

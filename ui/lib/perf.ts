@@ -5,7 +5,7 @@
 //   - long-task spans (PerformanceObserver, entryTypes: ["longtask"])
 //   - fetch marks (callers wrap apiFetch results)
 //   - render marks (callers wrap heavy commits)
-//   - core web vitals (LCP, INP, CLS via PerformanceObserver — no
+//   - core web vitals (LCP, INP, CLS via PerformanceObserver - no
 //     third-party deps; the numbers aren't perfectly Lighthouse-
 //     accurate but match closely enough for trend analysis)
 //
@@ -72,7 +72,7 @@ async function flush(): Promise<void> {
     // because that's the only reliable transport during pagehide.
     const body = JSON.stringify({ events, session: SESSION_ID });
     const path = "/api/perf/log";
-    // Same base logic as lib/apiFetch.ts (not imported — apiFetch
+    // Same base logic as lib/apiFetch.ts (not imported - apiFetch
     // imports this module, so importing back would be circular).
     const apiBase =
       process.env.NEXT_PUBLIC_API_URL ??
@@ -88,7 +88,7 @@ async function flush(): Promise<void> {
       navigator.sendBeacon(url, blob);
       return;
     }
-    // No bearer here — perf endpoint is intentionally anonymous so
+    // No bearer here - perf endpoint is intentionally anonymous so
     // we never miss data from an unauthenticated session.
     await fetch(url, {
       method: "POST",

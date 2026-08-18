@@ -8,7 +8,7 @@ import { LABEL_COLOURS } from "./OnboardLabelsV2";
 import { apiFetch } from "@/lib/apiFetch";
 
 // Full-screen reference image editor wrapping V1's BoxEditor with the
-// stateless V2 reference endpoints — the onboarding mirror of the
+// stateless V2 reference endpoints - the onboarding mirror of the
 // project page's DatasetViewer. The card itself is inset from the
 // edges (smaller than full screen) on a theme-aware blurred backdrop
 // (white-ish in light mode, dark in dark mode via --background-rgb),
@@ -126,7 +126,7 @@ export function ReferenceImageEditor({
   const [hoveredCanvasBoxId, setHoveredCanvasBoxId] = useState<string | null>(null);
   // Manual annotation mode. When ON, drawn boxes / click-to-detect skip
   // the backend ML calls (segment_box, classify_box, detect_point) and
-  // the user gets a raw rectangle + the label picker to type into —
+  // the user gets a raw rectangle + the label picker to type into -
   // same toggle the project page's DatasetViewer exposes.
   const [manualMode, setManualMode] = useState(false);
   const relabelStateRef = useRef({ hoveredCanvasBoxId, labels, boxes });
@@ -206,7 +206,7 @@ export function ReferenceImageEditor({
   return (
     // Contained in the shell's content area (below the title bar,
     // above the status bar, right of the Explorer side bar via
-    // --pk-content-left) — same containment as the dataset image
+    // --pk-content-left) - same containment as the dataset image
     // editor, the app chrome stays visible.
     <div
       className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] z-[400] backdrop-blur-xl flex flex-col"
@@ -261,7 +261,7 @@ export function ReferenceImageEditor({
             <span className="hidden md:inline text-[11px] text-foreground/30">
               ← / → · Esc
             </span>
-            {/* Manual annotation toggle — clone of the project editor's.
+            {/* Manual annotation toggle - clone of the project editor's.
                 When ON, drawn boxes / clicks skip the reference ML
                 endpoints and become hand-drawn rectangles the user
                 labels via the picker. */}
@@ -270,7 +270,7 @@ export function ReferenceImageEditor({
               onClick={() => setManualMode((v) => !v)}
               aria-pressed={manualMode}
               title={manualMode
-                ? "Manual mode ON — drawn boxes skip auto-detect; type the label yourself"
+                ? "Manual mode ON - drawn boxes skip auto-detect; type the label yourself"
                 : "Switch to manual annotation (draw boxes by hand, no auto-detect)"}
               className={[
                 "h-8 inline-flex items-center gap-1.5 rounded-full border px-3 text-[11px] uppercase tracking-wider font-mono transition-colors",

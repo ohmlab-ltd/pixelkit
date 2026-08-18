@@ -58,7 +58,7 @@ import { useIdle } from "../../lib/useIdle";
 // Auto-derived dataset behaviour, mirrored from the engine: a dataset
 // with reference images behaves as "specific" (reference/embedding
 // scoring), without them as "general" (plain text-prompt detection).
-// There is no user-facing dataset-type control any more — this value
+// There is no user-facing dataset-type control any more - this value
 // is read-only UI state that internal code paths still branch on
 // (e.g. suppressing the "No reference embeddings" warning).
 type DatasetTypeValue = {
@@ -158,7 +158,7 @@ const INPUT_SHAPES = [
   "96x96", "128x128", "160x160", "192x192", "224x224", "256x256",
   "320x320", "480x480", "512x512", "640x640",
 ];
-// Dataset view sections. State is OWNED BY THE SHELL (app/page.tsx —
+// Dataset view sections. State is OWNED BY THE SHELL (app/page.tsx -
 // the Explorer tree's third level drives it); this view receives the
 // active section + a setter via props. Exported so the page can type
 // its state; keep in sync with ExplorerPane's DatasetSection.
@@ -251,7 +251,7 @@ export function ProjectViewV2Stub({
   projectId?: string | null;
   username: string;
   /** Project owner's username pulled from the manifest. Never
-      rendered — only compared against `username` to gate the
+      rendered - only compared against `username` to gate the
       owner-only settings affordances. */
   ownerUsername?: string | null;
   /** True when the viewer is NOT the owner and the project is being
@@ -288,7 +288,7 @@ export function ProjectViewV2Stub({
   // dataset can edit its content (not read-only) but are NOT the owner:
   // dataset Settings (rename / cover / delete) stay owner-only. No owner
   // on record → treat as own (the common "open your own dataset" case).
-  // No identity is ever RENDERED in this build — this only gates the
+  // No identity is ever RENDERED in this build - this only gates the
   // settings affordances.
   const isOwnDataset =
     !ownerUsername || ownerUsername.trim().toLowerCase() === (username || "").trim().toLowerCase();
@@ -496,7 +496,7 @@ export function ProjectViewV2Stub({
         if (j.settingsLastRun) {
           const s = j.settingsLastRun;
           // The trio may be absent (run with default sliders) while the
-          // tiling keys are present — guard each read.
+          // tiling keys are present - guard each read.
           const th = typeof s.threshold === "number" ? s.threshold : SAM3_DEFAULTS.threshold;
           const mt = typeof s.mask_threshold === "number" ? s.mask_threshold : SAM3_DEFAULTS.maskThreshold;
           const ma = typeof s.min_relative_area === "number" ? s.min_relative_area : SAM3_DEFAULTS.minRelativeArea;
@@ -1413,7 +1413,7 @@ export function ProjectViewV2Stub({
   // whole drop finishes.
   const [importProgress, setImportProgress] = useState<{ total: number; done: number } | null>(null);
 
-  // Hidden file input behind the header's "Add images" action — same
+  // Hidden file input behind the header's "Add images" action - same
   // handler as the drop zone, so both paths share gating + upload flow.
   const headerFileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -1479,7 +1479,7 @@ export function ProjectViewV2Stub({
       return { ...m, ...patch };
     }));
     // Stable identity: updateImport only touches the setImports setter and
-    // dirtyImportIdsRef (both stable). Memoising it is critical — it's passed
+    // dirtyImportIdsRef (both stable). Memoising it is critical - it's passed
     // as `onMediaChange` into DatasetViewer, whose annotation-hydration effects
     // both depend on AND call it. An unstable ref made those effects re-run →
     // setImports → re-render → new ref → re-run, an infinite render loop that
@@ -1825,7 +1825,7 @@ export function ProjectViewV2Stub({
     scrollToDataset();
 
     // Phase 2: ship the ORIGINAL file bytes in BATCHES to
-    // /imports/raw_batch — no client-side downscaling or re-encoding;
+    // /imports/raw_batch - no client-side downscaling or re-encoding;
     // the engine stores full-resolution originals. One manifest write
     // per batch instead of one per image is the dominant win when
     // importing thousands of images. Gallery order comes from the
@@ -2317,7 +2317,7 @@ export function ProjectViewV2Stub({
             sam3_mask_threshold: sam3MaskThreshold,
             sam3_min_relative_area: sam3MinRelativeArea,
             // Native-resolution tiling for large frames (Downscale vs
-            // Tile control). Tile size is left to the backend default —
+            // Tile control). Tile size is left to the backend default -
             // the inference-native value.
             tile_native: tileNative,
             // When set, backend processes every image (not just the
@@ -3656,7 +3656,7 @@ export function ProjectViewV2Stub({
   // handleImportFiles above; the effect sits here because it gates on
   // derivedInfo, declared just above).
   useEffect(() => {
-    // Derived datasets are auto-cropped from their parent — every other
+    // Derived datasets are auto-cropped from their parent - every other
     // import affordance is hidden for them, so the window-level drop
     // must not offer a back door.
     if (readOnly || derivedInfo) return;
@@ -3682,11 +3682,11 @@ export function ProjectViewV2Stub({
       depth = 0;
       setDropActive(false);
       // A dedicated drop zone (import card, per-label reference grid)
-      // already handled this event — importing here too would double
+      // already handled this event - importing here too would double
       // every file. Their handlers preventDefault; that's the signal.
       if (e.defaultPrevented) return;
       e.preventDefault();
-      // Match the import card's accepted set — images AND videos (the
+      // Match the import card's accepted set - images AND videos (the
       // video queue/frame-extraction path handles the latter).
       const files = Array.from(e.dataTransfer?.files ?? []).filter(
         (f) =>
@@ -4036,7 +4036,7 @@ export function ProjectViewV2Stub({
             } | null)?.settingsLastRun;
             if (slr) {
               // Trio may be absent when the run used default sliders but
-              // pinned tiling — mirror the /initial hydration's guards so
+              // pinned tiling - mirror the /initial hydration's guards so
               // this poll path can't clobber the sliders with undefined.
               const th = typeof slr.threshold === "number" ? slr.threshold : SAM3_DEFAULTS.threshold;
               const mt = typeof slr.mask_threshold === "number" ? slr.mask_threshold : SAM3_DEFAULTS.maskThreshold;
@@ -4105,7 +4105,7 @@ export function ProjectViewV2Stub({
   // Refresh the seed stats whenever a stats-changing action fires (the same
   // signal the DatasetStatsCard listens to). The hero stat strip reads
   // detections / augmentations / health off seedStats, which is otherwise only
-  // set once from /initial — without this its numbers would lag behind the
+  // set once from /initial - without this its numbers would lag behind the
   // OverviewPanel's live figures until a reload. Skipped on first mount
   // (signal 0) since /initial already seeded it.
   useEffect(() => {
@@ -4648,7 +4648,7 @@ export function ProjectViewV2Stub({
   );
   // Swapping sections always returns to the top of the page. The
   // dataset view scrolls inside the shell's content-area overlay
-  // (data-dataset-scroll), not the window — fall back to the window
+  // (data-dataset-scroll), not the window - fall back to the window
   // for any standalone mount.
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -4676,7 +4676,7 @@ export function ProjectViewV2Stub({
   }, [tab]);
 
   const [inputSize, setInputSize] = useState<string>("256x256");
-  // Detection settings live behind a default-collapsed disclosure —
+  // Detection settings live behind a default-collapsed disclosure -
   // they're occasional knobs, not part of the drop → label → review flow.
   const [detectionSettingsOpen, setDetectionSettingsOpen] = useState(false);
   // Always starts collapsed on project load. User explicitly
@@ -4697,7 +4697,7 @@ export function ProjectViewV2Stub({
   const [sam3MaskThreshold, setSam3MaskThreshold] = useState<number>(SAM3_DEFAULTS.maskThreshold);
   const [sam3MinRelativeArea, setSam3MinRelativeArea] = useState<number>(SAM3_DEFAULTS.minRelativeArea);
   // Native-resolution tiling for large images. Off = classic single pass
-  // (SAM3 downscales every frame to its 1500px inference size — small
+  // (SAM3 downscales every frame to its 1500px inference size - small
   // objects on 4K frames shrink below detectability). On = the backend
   // slices big frames into native-resolution tiles and merges. Heavier,
   // so it's an explicit opt-in; tile size stays at the backend's native
@@ -4746,7 +4746,7 @@ export function ProjectViewV2Stub({
   // Auto-derived dataset behaviour, computed and cached server-side in
   // projects/<id>/dataset_type.json (references present → "specific",
   // none → "general"). The label pipeline consumes it (centroid vs kNN
-  // scoring); the UI only reads it to steer internal branches — there
+  // scoring); the UI only reads it to steer internal branches - there
   // is no user-facing control or badge for it any more.
   const [datasetType, setDatasetType] = useState<DatasetTypeValue | null>(() => {
     // Seed from cache so the value is present on first paint instead
@@ -4904,7 +4904,7 @@ export function ProjectViewV2Stub({
   // project that already has refs counts as specific immediately.
   const isSpecific = datasetType?.type === "specific" || refs.length > 0;
 
-  // The view has NO nav column of its own any more — the shell's
+  // The view has NO nav column of its own any more - the shell's
   // Explorer tree owns section navigation (third-level rows). Only the
   // mount loader's bail-out button still needs the "Back to …" copy.
   const backTo = backToProjectId
@@ -4919,7 +4919,7 @@ export function ProjectViewV2Stub({
       {showFullscreenLoader && (
         // Mount loader covers the CONTENT AREA only (below the 36px
         // title bar, above the 24px status bar, right of the shell
-        // side bar via --pk-content-left) — the tree stays reachable
+        // side bar via --pk-content-left) - the tree stays reachable
         // while a cold load spins.
         <div
           className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] z-[900] grid place-items-center"
@@ -4952,12 +4952,12 @@ export function ProjectViewV2Stub({
           <PixelKitLoader size={120} message="Loading project…" />
         </div>
       )}
-      {/* Content block. Full width — section navigation lives in the
+      {/* Content block. Full width - section navigation lives in the
           shell's Explorer tree, so the old fixed nav column (and its
           mobile drawer) are gone and the content reclaims the space. */}
       <div className="w-full min-w-0 max-w-[2000px]">
       {/* Compact tool header: dataset name + right-aligned flat actions,
-          then one thin meta line. No cover hero, no visibility chrome —
+          then one thin meta line. No cover hero, no visibility chrome -
           this is a local tool, not a profile page. */}
       <section className="px-6 lg:px-10 pt-5" style={fade()}>
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -4991,7 +4991,7 @@ export function ProjectViewV2Stub({
               <a
                 href={derivedInfo.parentProjectId ? `/app/${derivedInfo.parentProjectId}` : undefined}
                 className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md border border-[var(--line)] px-2 font-mono text-[11px] uppercase tracking-wider text-[var(--fg-dim)] transition-colors hover:border-[var(--line-strong)] hover:text-[var(--fg-soft)]"
-                title={derivedInfo.parentName ? `Derived from ${derivedInfo.parentName} — open parent` : "A cropped child dataset derived from a parent project"}
+                title={derivedInfo.parentName ? `Derived from ${derivedInfo.parentName} - open parent` : "A cropped child dataset derived from a parent project"}
               >
                 <span className="h-1.5 w-1.5 rounded-full bg-current opacity-70" aria-hidden />
                 Derived
@@ -5126,7 +5126,7 @@ export function ProjectViewV2Stub({
         </div>
       </section>
 
-      {/* Stat strip — the single dataset-stats row, in the Project-page card
+      {/* Stat strip - the single dataset-stats row, in the Project-page card
           style. Carries the richer counts (detections / augmentations / a
           clickable health score) that used to live in a second, differently
           styled grid inside OverviewPanel; that duplicate is gone. Numbers come
@@ -5163,7 +5163,7 @@ export function ProjectViewV2Stub({
                 className="bg-[var(--panel-solid)] px-4 py-3 text-left outline-none transition-colors hover:bg-[var(--surface-2)] focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[var(--focus-ring)]"
               >
                 <div className="text-[20px] font-medium leading-none tracking-tight tabular-nums text-[var(--foreground)]">
-                  {typeof score === "number" ? Math.round(score) : "—"}
+                  {typeof score === "number" ? Math.round(score) : "-"}
                 </div>
                 <div className="pk-micro mt-1.5">{healthTone ? `Health · ${healthTone}` : "Health"}</div>
               </button>
@@ -5318,7 +5318,7 @@ export function ProjectViewV2Stub({
           <div>
             <div>
               <p className="mt-2 text-[13px] text-foreground/65 leading-relaxed">
-                Reference images (optional) — add examples to improve label
+                Reference images (optional) - add examples to improve label
                 matching, especially when classes look similar.
               </p>
               <p className="mt-1 text-[13px] text-foreground/55">
@@ -5615,13 +5615,13 @@ export function ProjectViewV2Stub({
               {/* Resolution: classic single pass (the model downscales every
                   frame to its fixed inference size, shrinking small objects
                   on big frames below detectability) vs native-resolution
-                  tiling. One model pass per tile — explicit opt-in. */}
+                  tiling. One model pass per tile - explicit opt-in. */}
               <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-[var(--line-soft)] pt-4">
                 <div className="min-w-0 flex-1">
                   <div className="text-[12px] font-medium text-[var(--foreground)]">Resolution</div>
                   <p className="mt-0.5 text-[11px] leading-relaxed text-foreground/45">
                     {tileNative
-                      ? "Large images are sliced into native-resolution tiles (a 4K frame ≈ 7 model passes instead of 1). Catches small objects — slower, uses more compute."
+                      ? "Large images are sliced into native-resolution tiles (a 4K frame ≈ 7 model passes instead of 1). Catches small objects - slower, uses more compute."
                       : "One pass per image. Large frames are downscaled for the model, so very small objects can be missed."}
                   </p>
                 </div>
@@ -5964,7 +5964,7 @@ export function ProjectViewV2Stub({
 
       {/* Drag-and-drop target overlay: shown while files are dragged
           over the window (listeners live in the drop effect above).
-          Pointer-events none — the drop lands on window. */}
+          Pointer-events none - the drop lands on window. */}
       {dropActive && typeof window !== "undefined" &&
         createPortal(
           <div className="pointer-events-none fixed inset-0 z-[1400] grid place-items-center bg-[var(--background)]/70 backdrop-blur-[2px]">
@@ -6109,7 +6109,7 @@ export function ProjectViewV2Stub({
           onRenamed={(next) => {
             setProjectTitle(next);
             if (projectId) patchProjectMeta(projectId, { name: next });
-            // The rename POST has resolved inside the settings modal —
+            // The rename POST has resolved inside the settings modal -
             // update the Explorer tree's label right away.
             requestExplorerRefresh();
           }}
@@ -6118,7 +6118,7 @@ export function ProjectViewV2Stub({
             if (projectId) patchProjectMeta(projectId, { labelColours: next });
           }}
           onCoverChange={() => {
-            // The cover only surfaces on workspace cards now — poke the
+            // The cover only surfaces on workspace cards now - poke the
             // meta cache so they refresh their thumb.
             if (projectId) patchProjectMeta(projectId, {});
           }}
@@ -7022,7 +7022,7 @@ function ImportMediaSection({
 
       <div
         className="flex shrink-0 items-center gap-2"
-        // The action cluster manages its own clicks — don't let them
+        // The action cluster manages its own clicks - don't let them
         // bubble into the panel's click-to-browse.
         onClick={(e) => e.stopPropagation()}
       >
@@ -7508,7 +7508,7 @@ function DatasetGallery({
   items: ImportedMedia[];
   /** The dataset view's active section. The gallery stays mounted
       (hidden) while other sections show, but its viewer modals are
-      portalled to <body> — so when the section changes they must be
+      portalled to <body> - so when the section changes they must be
       force-closed or they'd keep covering the newly-chosen section. */
   activeSection?: ProjectTab;
   /** Fired with the currently-open import id whenever the viewer
@@ -8580,7 +8580,7 @@ function AugmentationsViewer({
     window.addEventListener("pixelkit-augmentations-generated", onChanged);
     return () => window.removeEventListener("pixelkit-augmentations-generated", onChanged);
   }, [projectId]);
-  // Augmentation JPEGs whose GET 404'd — an interrupted generation
+  // Augmentation JPEGs whose GET 404'd - an interrupted generation
   // left the manifest listing copies whose bytes never landed. Those
   // tiles render a quiet "Not generated" placeholder instead of a
   // broken image, and the header offers a Resume affordance.
@@ -8588,7 +8588,7 @@ function AugmentationsViewer({
   useEffect(() => { setMissing(new Set()); }, [importId, cacheBuster]);
   const [resuming, setResuming] = useState(false);
   // Re-run generation with the last-saved config (the same payload the
-  // Augmentations tab's Update button sends — GET /augment/config feeds
+  // Augmentations tab's Update button sends - GET /augment/config feeds
   // POST /augment/generate).
   const resumeGeneration = async () => {
     if (resuming) return;
@@ -8736,7 +8736,7 @@ function AugmentationsViewer({
     // In-content PAGE, not an overlay: fills the shell's content area
     // (title bar / status bar / Explorer side bar stay visible and
     // interactive) with an opaque ground and its own scroll. No
-    // backdrop, no click-outside dismissal — the back button (or the
+    // backdrop, no click-outside dismissal - the back button (or the
     // section changing underneath) is the way out.
     <div className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] z-[700] overflow-auto bg-[var(--background)]">
       <div className="px-6 lg:px-10 py-6 relative">
@@ -8866,7 +8866,7 @@ function AugmentationTile({
       augmentations they don't want. */
   onDelete?: () => void;
   /** Fired when the JPEG request fails (404 from an interrupted
-      generation) — the tile flips to a "Not generated" placeholder
+      generation) - the tile flips to a "Not generated" placeholder
       and the parent can offer a resume affordance. */
   onLoadError?: () => void;
 }) {
@@ -9880,7 +9880,7 @@ function DatasetViewer({
   );
   const annotationsHydratedRef = useRef<Set<string>>(new Set());
   // When the manifest version changes (re-label, box edits elsewhere), let
-  // already-hydrated ids re-apply with the fresh data — otherwise the
+  // already-hydrated ids re-apply with the fresh data - otherwise the
   // hydrate-once guard in apply* would pin stale annotations.
   useEffect(() => { annotationsHydratedRef.current.clear(); }, [manifestUpdatedAt]);
 
@@ -9905,7 +9905,7 @@ function DatasetViewer({
   ) => {
     if (!onMediaChange) return;
     // Already hydrated this id for the current manifest version. Re-applying
-    // identical server data just churns setImports — and for mask-less rows
+    // identical server data just churns setImports - and for mask-less rows
     // (whose "already has masks" short-circuit in fetchPerImageAnnotation never
     // trips) it spins an infinite render loop while the viewer is open. The
     // hydrated set is cleared on manifest-version change and on mask-strip, so

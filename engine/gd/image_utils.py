@@ -26,7 +26,7 @@ def crop_border(
 ) -> PILImage.Image:
     """Crop a uniform border off an image.
 
-    O(h*w) — one numpy diff and two axis reductions, no Python loops.
+    O(h*w) - one numpy diff and two axis reductions, no Python loops.
     Bails out fast if the four corners disagree on colour (which they
     will for borderless images), so the common case is just a corner-
     sample plus a variance check.
@@ -38,14 +38,14 @@ def crop_border(
         return img
 
     # Convert in RGB so we don't have to special-case L/P/RGBA. We
-    # don't need alpha for the border test — the border check is on
+    # don't need alpha for the border test - the border check is on
     # colour, and most "bordered" images are RGB anyway.
     rgb = img if img.mode == "RGB" else img.convert("RGB")
     arr = np.asarray(rgb, dtype=np.int16)  # int16 so abs(diff) won't overflow uint8
     h, w = arr.shape[:2]
 
     # Sample all four corners and take the median per channel. Robust
-    # to one corner being noise — only fails if 3+ corners disagree,
+    # to one corner being noise - only fails if 3+ corners disagree,
     # which means the image probably doesn't have a uniform border at
     # all and we want to bail.
     corners = np.stack([
@@ -69,7 +69,7 @@ def crop_border(
     row_content = row_frac < min_match_frac
     col_content = col_frac < min_match_frac
     if not row_content.any() or not col_content.any():
-        # Whole image is border-coloured — nothing to crop to.
+        # Whole image is border-coloured - nothing to crop to.
         return img
 
     top = int(np.argmax(row_content))
@@ -82,7 +82,7 @@ def crop_border(
 
     new_w = right - left + 1
     new_h = bottom - top + 1
-    # Don't crop down to a sliver — if our detection collapsed the
+    # Don't crop down to a sliver - if our detection collapsed the
     # image to <10% of either side, something went wrong (probably a
     # photo with a uniform sky and a tiny subject) and the safer
     # default is to keep the original.
@@ -94,7 +94,7 @@ def crop_border(
 
 def is_blank_image_bytes(data: bytes, *, min_dim: int = 96, min_stdev: float = 6.0) -> tuple[bool, str | None]:
     """True when the bytes decode to something the user won't be able
-    to label — too small, all transparent, or a uniform block colour.
+    to label - too small, all transparent, or a uniform block colour.
 
     `min_stdev` is the floor on the per-channel standard deviation
     measured over a 32×32 downsample. Real photos clear this trivially
@@ -103,7 +103,7 @@ def is_blank_image_bytes(data: bytes, *, min_dim: int = 96, min_stdev: float = 6
     below it.
 
     Used at import time so we don't write a blank into the project
-    bucket. Returns (is_blank, reason_or_none) — the reason string is
+    bucket. Returns (is_blank, reason_or_none) - the reason string is
     surfaced in the rejection summary the UI shows the user.
     """
     try:
@@ -111,7 +111,7 @@ def is_blank_image_bytes(data: bytes, *, min_dim: int = 96, min_stdev: float = 6
             img.load()
             if img.width < min_dim or img.height < min_dim:
                 return True, f"tiny ({img.width}x{img.height})"
-            # Cheap variance probe on a 32×32 downsample — keeps the
+            # Cheap variance probe on a 32×32 downsample - keeps the
             # cost bounded regardless of source resolution. RGBA is
             # flattened onto a checkerboard so a fully-transparent
             # PNG collapses to a uniform image and gets caught.
@@ -131,7 +131,7 @@ def maybe_crop_border_bytes(data: bytes, ctype: str | None) -> tuple[bytes, dict
     """Convenience wrapper for the URL-import flow.
 
     Decodes once, runs `crop_border`, and either returns the original
-    bytes unchanged (no border found — no re-encode needed) or the
+    bytes unchanged (no border found - no re-encode needed) or the
     cropped image re-encoded in its source format. Returns
     (bytes, {width, height}).
     """
@@ -148,7 +148,7 @@ def maybe_crop_border_bytes(data: bytes, ctype: str | None) -> tuple[bytes, dict
         if fmt in ("JPEG", "JPG"):
             save_kwargs["quality"] = 95
             save_kwargs["optimize"] = True
-            # JPEG can't carry alpha — flatten just in case the
+            # JPEG can't carry alpha - flatten just in case the
             # cropped image somehow ended up with a mode mismatch.
             if cropped.mode != "RGB":
                 cropped = cropped.convert("RGB")

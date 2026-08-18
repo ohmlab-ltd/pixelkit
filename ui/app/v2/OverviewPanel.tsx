@@ -82,7 +82,7 @@ function Card({ title, action, children }: { title: string; action?: React.React
 }
 
 // Quiet tool-style section header: 11px uppercase mono, optional count,
-// optional right-aligned action. No accent decoration — the accent is
+// optional right-aligned action. No accent decoration - the accent is
 // reserved for the primary action / active states.
 function SectionHeader({ children, count, action }: { children: React.ReactNode; count?: number; action?: React.ReactNode }) {
   return (
@@ -112,7 +112,7 @@ function HeaderLink({ onClick, children }: { onClick?: () => void; children: Rea
 
 function InsightCard({ tone, title, desc, onClick }: { tone: "warn" | "good" | "info"; title: string; desc: string; onClick?: () => void }) {
   // Tone drives the icon colour + its chip wash so a warning reads at a glance
-  // without a loud full-card tint — amber = attention, emerald = healthy,
+  // without a loud full-card tint - amber = attention, emerald = healthy,
   // neutral = still computing.
   const palette =
     tone === "warn"
@@ -152,7 +152,7 @@ export function OverviewPanel({
   imports,
   importsTotal,
   // `labels` (the label names) is still accepted by callers but the panel no
-  // longer renders a Labels count — that moved to the hero stat strip — so it's
+  // longer renders a Labels count - that moved to the hero stat strip - so it's
   // intentionally not destructured here.
   labelColours,
   projectId,
@@ -172,7 +172,7 @@ export function OverviewPanel({
   projectId: string | null | undefined;
   refreshSignal?: number;
   refs?: RefImage[];
-  /** Hidden for derived datasets — they don't manage their own
+  /** Hidden for derived datasets - they don't manage their own
       references. Everywhere else the section shows (references are
       optional on any dataset). */
   showReferences?: boolean;
@@ -261,7 +261,7 @@ export function OverviewPanel({
 
   return (
     <section className="space-y-7 px-6 pt-5 pb-12 lg:px-10">
-      {/* Insights — fast rule-based signals. */}
+      {/* Insights - fast rule-based signals. */}
       <div>
         <SectionHeader>Insights</SectionHeader>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -289,7 +289,7 @@ export function OverviewPanel({
         </div>
       </div>
 
-      {/* Dataset health — the focal panel: big score + radar + factor bars. */}
+      {/* Dataset health - the focal panel: big score + radar + factor bars. */}
       <div>
         <SectionHeader action={<HeaderLink onClick={onOpenHealth}>Open health →</HeaderLink>}>Dataset health</SectionHeader>
         <button
@@ -332,14 +332,14 @@ export function OverviewPanel({
         </button>
       </div>
 
-      {/* References — optional on every dataset (hidden only for derived
+      {/* References - optional on every dataset (hidden only for derived
           datasets, which don't manage their own). */}
       {showReferences && (
         <div>
           <SectionHeader count={refs.length} action={onOpenReferences ? <HeaderLink onClick={onOpenReferences}>View all →</HeaderLink> : undefined}>References</SectionHeader>
           <div className="pk-card rounded-md p-4">
             {refs.length === 0 ? (
-              <p className="text-[13px] text-foreground/55">No reference images yet — optional, but a few clear examples per label improve label matching.</p>
+              <p className="text-[13px] text-foreground/55">No reference images yet - optional, but a few clear examples per label improve label matching.</p>
             ) : (
               <div className="grid grid-cols-4 gap-2.5 sm:grid-cols-6 lg:grid-cols-10">
                 {refs.slice(0, 10).map((r, i) => (
@@ -361,7 +361,7 @@ export function OverviewPanel({
         </div>
       )}
 
-      {/* Composition — how the dataset breaks down across labels + visual variety. */}
+      {/* Composition - how the dataset breaks down across labels + visual variety. */}
       <div>
         <SectionHeader>Composition</SectionHeader>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -402,7 +402,7 @@ export function OverviewPanel({
         </div>
       </div>
 
-      {/* Recent — newest images + the activity feed. */}
+      {/* Recent - newest images + the activity feed. */}
       <div>
         <SectionHeader action={onOpenDataset ? <HeaderLink onClick={onOpenDataset}>View all →</HeaderLink> : undefined}>Recent</SectionHeader>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">

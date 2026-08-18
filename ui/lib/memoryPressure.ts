@@ -1,7 +1,7 @@
 // Polls performance.memory and fires a callback when the heap
 // crosses a configurable fraction of its limit. Used by the V2
 // project view to evict in-RAM mask polygons from imports that
-// aren't currently visible — the existing 30 s TTL strips them
+// aren't currently visible - the existing 30 s TTL strips them
 // based on user navigation, this is the proactive complement
 // driven by actual pressure.
 //
@@ -42,7 +42,7 @@ export const MEM_PRESSURE_ENABLED =
   process.env.NEXT_PUBLIC_MEM_PRESSURE === "1";
 
 const POLL_MS = 5000;
-// Cool-down between consecutive fires — a single eviction pass
+// Cool-down between consecutive fires - a single eviction pass
 // can take a beat to land back into state; firing again 5 s later
 // while the heap hasn't moved yet would do nothing useful.
 const COOLDOWN_MS = 20000;

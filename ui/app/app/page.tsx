@@ -29,7 +29,7 @@ type V2Result = {
   // @handle in the project chrome (not the viewer's).
   owner?: string | null;
   // The caller's effective WRITE access, resolved from /access. True for the
-  // dataset's creator AND for any editor/owner of the Project it belongs to —
+  // dataset's creator AND for any editor/owner of the Project it belongs to -
   // so a Project editor can edit a dataset another member created. Undefined
   // until resolved (read-only is the safe default meanwhile).
   writable?: boolean;
@@ -110,14 +110,14 @@ export default function Page() {
     v2 = true,
     fromProjectId?: string,
   ) => {
-    // Every dataset opens in the V2 view now — the engine normalises
+    // Every dataset opens in the V2 view now - the engine normalises
     // v2=true on load, so the flag callers pass is historical.
     void v2;
     setProjectOriginTab(activity === "guide" ? "guide" : "workspaces");
     setNotFoundProjectId(null);
     // Every open lands on Overview. Callers that want a specific
     // section (the tree's section rows) call setDatasetSection right
-    // after — the later update wins within the same batch.
+    // after - the later update wins within the same batch.
     setDatasetSection("overview");
     syncUrl(id);
     {
@@ -186,12 +186,12 @@ export default function Page() {
             cur && cur.projectId === id ? { ...cur, writable: !!a.writable } : cur,
           );
         })
-        .catch(() => { /* silent — owner check still grants the creator access */ });
+        .catch(() => { /* silent - owner check still grants the creator access */ });
       return;
     }
   };
 
-  // Portable build: no accounts. Everything renders as the local user —
+  // Portable build: no accounts. Everything renders as the local user -
   // there is no logged-out state (the /login route doesn't exist).
   const loggedIn = true;
 
@@ -216,7 +216,7 @@ export default function Page() {
   }, []);
 
   // First-run setup: ask the engine once whether the model weights are in
-  // place. Engine may be down / restarting — swallow the error and skip the
+  // place. Engine may be down / restarting - swallow the error and skip the
   // wizard (Settings can always reach it later).
   useEffect(() => {
     let cancelled = false;
@@ -231,7 +231,7 @@ export default function Page() {
           setSetupOpen(true);
         }
       } catch {
-        /* engine unreachable — no wizard */
+        /* engine unreachable - no wizard */
       }
     })();
     return () => {
@@ -292,7 +292,7 @@ export default function Page() {
             .then(async (r) => {
               if (r.status === 404) {
                 // Only surface the 404 if THIS project is still the open
-                // one — a slow response must not unmount whatever the
+                // one - a slow response must not unmount whatever the
                 // user navigated to meanwhile.
                 if (openIdRef.current === idFromUrl) {
                   setNotFoundProjectId(idFromUrl);
@@ -353,7 +353,7 @@ export default function Page() {
 
   // Activity-bar click. The Explorer icon ALWAYS navigates to the
   // workspace: it closes any open dataset or Project view, and expands
-  // the side bar if it was collapsed — it never collapses it (that
+  // the side bar if it was collapsed - it never collapses it (that
   // moved to the Explorer pane header's chevron button). Guide keeps
   // its old behaviour: switch views, no side-bar involvement.
   const handleActivitySelect = (key: ActivityKey) => {
@@ -361,7 +361,7 @@ export default function Page() {
       if (activity === "guide") return;
       setActivity("guide");
       setProfileOpen(false);
-      // Guide replaces the content pane — close any dataset overlay so
+      // Guide replaces the content pane - close any dataset overlay so
       // the user actually sees it (mirrors the old tab-switch flow).
       setOpenV2Project(null);
       setNotFoundProjectId(null);
@@ -377,7 +377,7 @@ export default function Page() {
   };
 
   // Explorer tree: clicking a Project (container) ROW opens its
-  // Project page — the same ProjectPage that HomeView's workspace
+  // Project page - the same ProjectPage that HomeView's workspace
   // cards open, via the ?project deep-link HomeView already owns.
   // The synthetic popstate closes any open dataset view first.
   const handleOpenProjectPage = (containerId: string) => {
@@ -388,7 +388,7 @@ export default function Page() {
 
   // Side-bar "+": make the workspace visible again, then hand off to
   // HomeView's existing onboarding entry (the CreateDatasetModal) via
-  // the appNav event bus — HomeView stays mounted for every
+  // the appNav event bus - HomeView stays mounted for every
   // non-guide activity, so the listener is guaranteed to be attached.
   const handleNewDataset = () => {
     setActivity("explorer");
@@ -404,7 +404,7 @@ export default function Page() {
 
   // ONE tree, ALWAYS visible: the Explorer side bar stays up while a
   // dataset is open (the dataset view has no internal nav column any
-  // more — the tree's third-level section rows are the navigation).
+  // more - the tree's third-level section rows are the navigation).
   // Only the Guide view and an explicit collapse (the Explorer pane
   // header's chevron button) hide it.
   const sidebarVisible = sidebarOpen && activity !== "guide";
@@ -462,7 +462,7 @@ export default function Page() {
               setProfileOpen(false);
               if (openDatasetId !== ds.id) {
                 // Open the dataset first (resets the section to
-                // "overview"), then activate the requested section —
+                // "overview"), then activate the requested section -
                 // the later state update wins within the batch.
                 openProj(ds.id, ds.owner, ds.name, ds.v2, ds.containerId ?? undefined);
               }
@@ -494,7 +494,7 @@ export default function Page() {
                   // Reflect the freshly-created project in the address bar
                   // (/app/<id>) right away. Without this the URL stayed /app
                   // until the user navigated off and re-opened the project
-                  // via openProj (which calls syncUrl) — so a reload or
+                  // via openProj (which calls syncUrl) - so a reload or
                   // share-link mid-session lost the project.
                   if (projectId) syncUrl(projectId);
                   // Fresh dataset always lands on Overview.
@@ -516,7 +516,7 @@ export default function Page() {
                 username={user.username}
                 loggedIn={loggedIn}
               />
-              {/* Back-to-top inside the workspace too — it finds the
+              {/* Back-to-top inside the workspace too - it finds the
                   content pane as its scroll container. The `hidden`
                   parent eats the button when an overlay is up. */}
               <ScrollToTop />
@@ -530,7 +530,7 @@ export default function Page() {
       {notFoundProjectId ? (
         // Deep-link to a project the backend doesn't know about.
         // The shell chrome stays up; centre a quiet message in the
-        // content region. No retry / back button — the Explorer tree
+        // content region. No retry / back button - the Explorer tree
         // and activity bar remain reachable.
         <div className={overlayCls}>
           <main className="grid h-full place-items-center px-6">

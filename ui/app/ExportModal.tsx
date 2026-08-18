@@ -49,7 +49,7 @@ const EXPORT_FORMATS: ExportFormat[] = [
   {
     id: "cvat",
     name: "CVAT",
-    blurb: "CVAT images-1.1 XML — re-import your labels into a CVAT instance for team review.",
+    blurb: "CVAT images-1.1 XML - re-import your labels into a CVAT instance for team review.",
     supportsSegmentation: true,
   },
   {

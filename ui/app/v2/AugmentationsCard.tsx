@@ -3037,7 +3037,7 @@ function BigDial({
   // Active when the dial is off its rest position. Most dials are
   // unidirectional with rest=min=0, but the lens-distortion dial is
   // bidirectional (-10..+10, rest = 0). Comparing to 0 directly
-  // works for both — value > min and value !== 0 coincide when
+  // works for both - value > min and value !== 0 coincide when
   // min === 0.
   const active = draft !== 0;
   const decimals = step < 1 ? Math.min(2, Math.ceil(-Math.log10(step))) : 0;

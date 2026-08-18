@@ -1,6 +1,6 @@
 "use client";
 
-// Site-wide theme management — permanently DARK in this build.
+// Site-wide theme management - permanently DARK in this build.
 //
 //   • The `.dark` class on <html> is still the single source of truth
 //     for all Tailwind `dark:` variants + CSS custom properties in
@@ -48,7 +48,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 }
 
 export function useTheme(): Ctx {
-  // Dark everywhere — components outside the provider get the same
+  // Dark everywhere - components outside the provider get the same
   // pinned context, so nothing can flip the theme.
   return useContext(ThemeContext) ?? PINNED;
 }

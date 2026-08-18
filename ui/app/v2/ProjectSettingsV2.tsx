@@ -51,7 +51,7 @@ export function ProjectSettingsV2({
   labelColours: Record<string, string>;
   references: { filename: string; preview: string }[];
   imports: { filename: string; preview: string }[];
-  /** Target input shape (e.g. "256x256") — the square tensor size the
+  /** Target input shape (e.g. "256x256") - the square tensor size the
       export flow warns against. Lives in the dataset view's state; the
       section only renders when the trio of props is provided. */
   inputShape?: string;
@@ -395,7 +395,7 @@ export function ProjectSettingsV2({
           {renameError && <div className="text-xs text-[var(--bad)]">{renameError}</div>}
         </section>
 
-        {/* Target input shape — feeds the export flow's box-size warnings.
+        {/* Target input shape - feeds the export flow's box-size warnings.
             Session-scoped view state owned by the dataset view. */}
         {inputShape != null && inputShapeOptions && onInputShapeChange && (
           <section className="px-6 py-5 border-b border-foreground/10 grid gap-3">
@@ -422,7 +422,7 @@ export function ProjectSettingsV2({
             <p className="max-w-lg text-[11px] leading-relaxed text-foreground/45">
               The square tensor size your detector will resize images to before
               running. Pick the shape that matches the runtime you&rsquo;re
-              targeting — the editor and export flow use it to flag boxes that
+              targeting - the editor and export flow use it to flag boxes that
               would shrink below the model&rsquo;s detection floor.
             </p>
           </section>
@@ -490,7 +490,7 @@ export function ProjectSettingsV2({
             className="hidden"
             onChange={(e) => uploadCover(e.target.files)}
           />
-          {/* Current uploaded cover preview — sits above the pick-from-images
+          {/* Current uploaded cover preview - sits above the pick-from-images
               grid so the user can see (and replace) it. */}
           {coverUploaded && (
             <div className="flex items-center gap-3 rounded-md border border-[var(--line)] bg-[var(--panel)] p-2.5">
@@ -754,7 +754,7 @@ function SnapshotsSection({ projectId }: { projectId: string }) {
       const r = await apiFetch(`/api/v2/projects/${projectId}/snapshots`);
       if (r.ok) setSnaps(((await r.json()) as { snapshots: Snapshot[] }).snapshots);
     } catch {
-      /* engine unreachable — section just shows nothing */
+      /* engine unreachable - section just shows nothing */
     }
   }, [projectId]);
   useEffect(() => {
@@ -792,7 +792,7 @@ function SnapshotsSection({ projectId }: { projectId: string }) {
         method: "POST",
       });
       if (!r.ok) throw new Error(`restore failed (${r.status})`);
-      setNote("Restored — reloading…");
+      setNote("Restored - reloading…");
       // Annotations changed under every open view; a reload is the
       // honest way to resync the whole dataset page.
       window.setTimeout(() => window.location.reload(), 600);
@@ -821,7 +821,7 @@ function SnapshotsSection({ projectId }: { projectId: string }) {
         </button>
       </div>
       <p className="text-xs text-foreground/50">
-        Labels and annotations only — images aren&rsquo;t duplicated. Restoring
+        Labels and annotations only - images aren&rsquo;t duplicated. Restoring
         snapshots the current state first, so it&rsquo;s always undoable.
       </p>
       {(note || error) && (

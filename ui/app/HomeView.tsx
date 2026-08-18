@@ -48,7 +48,7 @@ export type ProjectSummary = {
   favouritedByMe: boolean;
   certified: boolean;
   private?: boolean;
-  // Set on derived ("child") projects — cropped, one-label-per-image clones of
+  // Set on derived ("child") projects - cropped, one-label-per-image clones of
   // a parent. Drives the derived badge on the card.
   derived?: { parentProjectId?: string; parentName?: string } | null;
   running?: boolean;
@@ -117,7 +117,7 @@ function projectsEqual(a: ProjectSummary[] | null, b: ProjectSummary[]): boolean
 }
 
 
-// Branch glyph flagging a derived (cropped child) project on the cards —
+// Branch glyph flagging a derived (cropped child) project on the cards -
 // quiet neutral icon tone so it doesn't compete with the status chips.
 export function DerivedBadge({ parentName }: { parentName?: string | null }) {
   return (
@@ -156,7 +156,7 @@ const SORT_OPTIONS: { key: SortMode; label: string }[] = [
 
 // Status chip set for a project card (Labelled / Partial / Unlabelled
 // / In progress, plus Model). Rendered as neutral hairline chips with
-// a small colour dot — tone comes from the dot only, never the chip
+// a small colour dot - tone comes from the dot only, never the chip
 // surface, so the cards stay flat in both themes.
 export function projectStatusBadges(
   project: ProjectSummary,
@@ -298,7 +298,7 @@ export function HomeView({
       inline V2 flow (name + labels). The parent mounts the
       post-onboarding view from this callback. When the prop is
       undefined the V2 button stays hidden and only the V1 path is
-      reachable. References are always empty at creation time — they
+      reachable. References are always empty at creation time - they
       can be added later from the dataset view. */
   onV2Begin?: (
     name: string,
@@ -377,7 +377,7 @@ export function HomeView({
   const [projectViewId, setProjectViewId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ProjectSummary | null>(null);
   // Id of the dataset currently being duplicated (a few seconds for big
-  // datasets) — disables the card's Duplicate action so it can't double-fire.
+  // datasets) - disables the card's Duplicate action so it can't double-fire.
   const [duplicatingId, setDuplicatingId] = useState<string | null>(null);
 
   // Deep-link Projects via `?project=<id>` so each Project has a unique,
@@ -466,7 +466,7 @@ export function HomeView({
 
   // Desktop shell: the Explorer side bar's "+" button fires a
   // new-dataset request on the appNav bus. React exactly like the
-  // workspace toolbar's "+ Add Dataset" button — workspace-scoped
+  // workspace toolbar's "+ Add Dataset" button - workspace-scoped
   // (never attached to a Project), same CreateDatasetModal entry.
   // If onboarding is already underway the request is a no-op rather
   // than a cancel, "+" should never destroy in-progress work.
@@ -667,7 +667,7 @@ export function HomeView({
       const pid = data.project_id;
       setV2ProjectId(pid);
       v2ProjectIdRef.current = pid;
-      // The Explorer tree polls its listing on a 10 s cycle — nudge it
+      // The Explorer tree polls its listing on a 10 s cycle - nudge it
       // now so the fresh dataset appears immediately.
       requestExplorerRefresh();
       capture("project_create", { labels: labels.length });
@@ -704,7 +704,7 @@ export function HomeView({
       const zip = arr.length === 1 && /\.zip$/i.test(arr[0].name) ? arr[0] : null;
       if (zip && zip.size > ZIP_SOFT_LIMIT_BYTES) {
         throw new Error(
-          "That .zip is very large — unzipping it in the browser may run out of memory. Use the folder picker for big datasets.",
+          "That .zip is very large - unzipping it in the browser may run out of memory. Use the folder picker for big datasets.",
         );
       }
       const collected = await collectInput(arr);
@@ -734,7 +734,7 @@ export function HomeView({
       if (!projectId) throw new Error("Couldn't create the project.");
       const result = await uploadDataset(
         parsed.items,
-        // Full resolution always — no client-side downscale on import.
+        // Full resolution always - no client-side downscale on import.
         { maxSide: null },
         (form) =>
           apiFetch(`/api/v2/projects/${projectId}/imports/raw_batch`, { method: "POST", body: form }),
@@ -1368,7 +1368,7 @@ export function HomeView({
     );
   }
 
-  // (Logged-out marketing view removed — the portable build has no accounts.)
+  // (Logged-out marketing view removed - the portable build has no accounts.)
 
   return (
     <main className="min-h-full bg-[var(--background)] overflow-x-hidden">
@@ -1428,7 +1428,7 @@ export function HomeView({
                   : "opacity-100 translate-y-0 delay-150",
               ].join(" ")}
             >
-              Label data. Augment it. Export training-ready datasets - all on this machine.
+              Label data. Augment it. Export training-ready datasets. All on this machine.
             </p>
             <div
               aria-hidden={!v2Active}
@@ -1439,7 +1439,7 @@ export function HomeView({
                   : "opacity-0 translate-y-3 pointer-events-none select-none",
               ].join(" ")}
             >
-              {/* No identity in this build — just the creation-date
+              {/* No identity in this build - just the creation-date
                   stamp. */}
               <span className="tabular-nums">Created {v2DateLabel}</span>
             </div>
@@ -1447,7 +1447,7 @@ export function HomeView({
         </div>
       </section>
 
-      {/* Workspace "+ Add Dataset" name popup — the exact same modal the
+      {/* Workspace "+ Add Dataset" name popup - the exact same modal the
           Project page uses. On continue we jump straight to the labels stage
           (no Project to attach to, so the parked container + return id are
           cleared). */}
@@ -1592,7 +1592,7 @@ export function HomeView({
                 />
               </div>
 
-              {/* Inline validation (e.g. the profanity guard) — the V1
+              {/* Inline validation (e.g. the profanity guard) - the V1
                   error strip below is hidden while this stage is up. */}
               {error && <p className="mt-3 text-sm text-[var(--bad)]">{error}</p>}
 
@@ -1671,14 +1671,14 @@ export function HomeView({
                 Import a labelled dataset
               </h2>
               <p className="mt-3 text-sm text-foreground/50 leading-relaxed">
-                Pascal VOC — an <span className="font-mono">Annotations/</span> folder of XML next
-                to your images — as a folder or a <span className="font-mono">.zip</span>. Every
+                Pascal VOC - an <span className="font-mono">Annotations/</span> folder of XML next
+                to your images - as a folder or a <span className="font-mono">.zip</span>. Every
                 image and box comes in fully editable.
               </p>
 
               {error && <p className="mt-4 text-sm text-[var(--bad)]">{error}</p>}
 
-              {/* Picker — folder or zip. Hidden once a dataset is parsed. */}
+              {/* Picker - folder or zip. Hidden once a dataset is parsed. */}
               {!v2ImportParsed && (
                 <div className="mt-8 flex flex-wrap items-center gap-3">
                   <label className="pk-btn cursor-pointer">
@@ -1710,7 +1710,7 @@ export function HomeView({
                       <span className="inline-block h-3 w-3 rounded-full border-2 border-foreground/50 border-t-transparent animate-spin" />
                       Reading dataset
                       {v2ImportParseProgress
-                        ? ` — ${v2ImportParseProgress.done}/${v2ImportParseProgress.total}`
+                        ? ` - ${v2ImportParseProgress.done}/${v2ImportParseProgress.total}`
                         : "…"}
                     </span>
                   )}

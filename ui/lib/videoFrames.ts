@@ -17,7 +17,7 @@ export type VideoExtractParams = {
 // extracted frames never balloon past what the upload pipeline allows
 // downstream. Encoding under the cap inline (rather than at full
 // quality then re-compressing in handleImportFiles) keeps a long
-// extraction's peak memory bounded — a 1000-frame, 4K video at q=0.92
+// extraction's peak memory bounded - a 1000-frame, 4K video at q=0.92
 // is ~2 GB of intermediate Blobs.
 const FRAME_MAX_BYTES = 50 * 1024;
 const FRAME_MAX_EDGE = 1500;
@@ -78,7 +78,7 @@ export async function extractVideoFrames(
       video.addEventListener("error", onErr);
     });
 
-    // Downscale to FRAME_MAX_EDGE on the long side BEFORE encoding —
+    // Downscale to FRAME_MAX_EDGE on the long side BEFORE encoding -
     // a 4K source frame at full res would never hit the 50 KB cap
     // without falling through to the quality-floor pass, so cap once
     // up front and the quality ladder has a fighting chance on

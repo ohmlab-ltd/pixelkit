@@ -1,7 +1,7 @@
 // Lightweight update check (v1: notify, don't self-update).
 //
 // One GitHub API call after launch; if a newer release exists, a native
-// dialog offers the download page. No downloads, no background service —
+// dialog offers the download page. No downloads, no background service -
 // unsigned builds can't safely self-update anyway. "Skip this version"
 // is remembered in userData/update-check.json. Silent on any failure.
 // Opt-out: PIXELKIT_NO_UPDATE_CHECK=1.
@@ -81,7 +81,7 @@ async function checkForUpdates(parentWindow) {
   try {
     release = await fetchLatestRelease();
   } catch {
-    return; // offline / rate-limited / repo missing — never bother the user
+    return; // offline / rate-limited / repo missing - never bother the user
   }
 
   const latest = parseVersion(release.tag_name);

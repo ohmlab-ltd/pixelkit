@@ -4,7 +4,7 @@ Companion to `v2_dinov2.py`. We score queries against reference
 centroids using BOTH encoders and combine the per-label sims with
 a configurable weight. SigLIP2 is text-aligned (multimodal
 contrastive pretraining), so it carries semantic priors DINOv2
-doesn't have — it knows what "hare" means as a concept, not just
+doesn't have - it knows what "hare" means as a concept, not just
 how a hare's pixels look. Together they cover each other's blind
 spots on fine-grained pairs (hare/rabbit, horse standing/lying)
 where one model alone is borderline.
@@ -15,12 +15,12 @@ interchangeably: `encode_image`, `encode_images_batch(tta=True)`,
 
 Differences from DINOv2:
   - Uses the HuggingFace AutoProcessor pair (image + text), but we
-    only call the image side — text encoder is unused at inference.
+    only call the image side - text encoder is unused at inference.
   - SigLIP2's vision tower is a ViT-L/16 by default (16 px patches,
     not 14), so INPUT_SIDE must be a multiple of 16. 384 is the
     upstream pretraining resolution (24×16 = 384, 24×24 = 576
     patch tokens).
-  - No foreground-only patch_mean here for simplicity — SigLIP's
+  - No foreground-only patch_mean here for simplicity - SigLIP's
     image encoder uses GAP-on-patch-tokens by default and the
     fine-grained signal we want is already in the global vector.
     If we revisit, the same masking trick from DINOv2 ports over.
@@ -37,7 +37,7 @@ from PIL import Image as PILImage, ImageOps
 
 SIGLIP_MODEL_ID = os.environ.get("V2_SIGLIP_MODEL", "google/siglip2-large-patch16-384")
 
-# Embedding dim by model — SigLIP2 large is 1152, base is 768,
+# Embedding dim by model - SigLIP2 large is 1152, base is 768,
 # so400m is 1152. Inferred at load time; constant below is the
 # fallback used before the model is loaded.
 _DIM_BY_MODEL = {
@@ -56,13 +56,13 @@ EMBEDDING_DIM = _DIM_BY_MODEL.get(SIGLIP_MODEL_ID, 1152)
 INPUT_SIDE = int(os.environ.get("V2_SIGLIP_INPUT_SIDE", "384"))
 
 # Bumped whenever the encode procedure changes. Mirrors EMBED_VERSION
-# semantics in v2_dinov2 — references at older versions get re-
+# semantics in v2_dinov2 - references at older versions get re-
 # encoded by the centroid backfill on first load.
 #
 # v1: SigLIP2 large at 384, GAP pooling, 3-view TTA matching DINOv2
 EMBED_VERSION = 1
 
-# TTA view count — keep in sync with `_tta_views`. Same 3 views as
+# TTA view count - keep in sync with `_tta_views`. Same 3 views as
 # DINOv2 so the two encoders see the same crop variants and the
 # combined score is comparable view-by-view.
 EMBED_TTA_VIEWS = 3
@@ -82,7 +82,7 @@ def is_loaded() -> bool:
 
 def load(device: str = "cpu"):
     """Idempotent loader. Caches the model + processor in module
-    globals. fp16 on CUDA — same rationale as DINOv2: SigLIP was
+    globals. fp16 on CUDA - same rationale as DINOv2: SigLIP was
     pretrained at fp16 upstream and the downstream cosine match runs
     on fp32 numpy, so no precision loss propagates.
 
@@ -93,7 +93,7 @@ def load(device: str = "cpu"):
     """
     global _MODEL, _PROCESSOR, _DEVICE
     if os.environ.get("V2_SIGLIP_DISABLED", "").lower() in ("1", "true", "on"):
-        print("[v2-siglip] V2_SIGLIP_DISABLED set — skipping load.")
+        print("[v2-siglip] V2_SIGLIP_DISABLED set - skipping load.")
         return None, None
     with _LOAD_LOCK:
         if is_loaded() and _DEVICE == device:
@@ -163,7 +163,7 @@ def _get_image_features(pixel_values: torch.Tensor) -> torch.Tensor:
     HF SigLIP variants are inconsistent here:
       - SigLIP v1: `get_image_features` returns a tensor.
       - SigLIP v2 (some checkpoints): `get_image_features` returns a
-        `BaseModelOutputWithPooling`, NOT a tensor — calling .float()
+        `BaseModelOutputWithPooling`, NOT a tensor - calling .float()
         on it throws.
       - Older models: no `get_image_features`, so call `vision_model`
         and read `pooler_output` / fall back to mean-of-tokens.
@@ -174,7 +174,7 @@ def _get_image_features(pixel_values: torch.Tensor) -> torch.Tensor:
         # Already a tensor? done.
         if isinstance(x, torch.Tensor):
             return x
-        # ModelOutput-like dataclass — pick the right field.
+        # ModelOutput-like dataclass - pick the right field.
         if hasattr(x, "image_embeds") and x.image_embeds is not None:
             return x.image_embeds
         if hasattr(x, "pooler_output") and x.pooler_output is not None:
@@ -192,7 +192,7 @@ def _get_image_features(pixel_values: torch.Tensor) -> torch.Tensor:
 
 
 def _tta_views(img: PILImage.Image) -> list[PILImage.Image]:
-    """Three identity-preserving views — original, h-flip, +10%
+    """Three identity-preserving views - original, h-flip, +10%
     zoom-out with black pad. Same as DINOv2 so both encoders see
     matched crop variants and the combined score is comparable
     view-by-view."""
@@ -206,7 +206,7 @@ def _tta_views(img: PILImage.Image) -> list[PILImage.Image]:
     return views
 
 
-# SigLIP2 ViT-L/16 — patches are 16 px square. INPUT_SIDE=384
+# SigLIP2 ViT-L/16 - patches are 16 px square. INPUT_SIDE=384
 # yields 24×24 = 576 patch tokens per crop. Same fg-mask logic
 # as DINOv2 (count non-black pixels per patch) but at a different
 # patch size, so it lives here as a parallel constant.
@@ -238,12 +238,12 @@ def encode_image_patches(pil: PILImage.Image) -> tuple[np.ndarray, np.ndarray]:
     where tokens is (P, D) L2-normalised float32 and fg_mask is (P,)
     bool over patches that overlap the SAM-masked foreground.
 
-    SigLIP doesn't use a CLS token the same way DINOv2 does — its
+    SigLIP doesn't use a CLS token the same way DINOv2 does - its
     vision tower's `last_hidden_state` already corresponds 1:1 to
     the patch grid (no separate CLS prepended), so we keep the
     full sequence as patches.
 
-    No TTA — patches encode position-specific detail; averaging
+    No TTA - patches encode position-specific detail; averaging
     across views washes out the spatial signal patch matching uses.
     """
     n_patches = (INPUT_SIDE // _PATCH_SIZE) ** 2
@@ -299,7 +299,7 @@ def encode_image(pil: PILImage.Image) -> np.ndarray:
 def encode_images_batch(pils: list[PILImage.Image], *, tta: bool = True) -> np.ndarray:
     """Encode N PIL images → (N, EMBEDDING_DIM) L2-normalised float32.
 
-    Same TTA scheme as DINOv2 — 3 views per image, batched into one
+    Same TTA scheme as DINOv2 - 3 views per image, batched into one
     forward pass, per-view L2 → mean over views → re-L2.
     """
     n = len(pils)

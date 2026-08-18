@@ -1,6 +1,6 @@
 "use client";
 
-// Settings — replaces the SaaS ProfileView. Full-screen overlay in the
+// Settings - replaces the SaaS ProfileView. Full-screen overlay in the
 // profile slot: workspace, compute device, Hugging Face access, models.
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -20,7 +20,7 @@ import {
 } from "@/lib/models";
 
 // Passive one-line model status: name + state (ready / downloading
-// NN% with a thin progress bar / waiting for token). No buttons — the
+// NN% with a thin progress bar / waiting for token). No buttons - the
 // engine auto-downloads and auto-loads everything once the HF token
 // exists. Shared with the first-run SetupWizard.
 export function ModelStatusRow({
@@ -115,15 +115,15 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
       ? settings.gpus[Number(settings.device.split(":")[1] ?? 0)] ?? settings.gpus[0]
       : null;
   const deviceLabel = settings?.device.startsWith("cuda")
-    ? `NVIDIA GPU (CUDA${activeGpu ? ` — ${activeGpu.name}` : ""})`
+    ? `NVIDIA GPU (CUDA${activeGpu ? ` - ${activeGpu.name}` : ""})`
     : settings?.device === "mps"
     ? "Apple GPU (Metal)"
     : cpuForced
-    ? "CPU (labelling runs on the CPU — very slow)"
-    : "CPU (no GPU detected — labelling unavailable)";
+    ? "CPU (labelling runs on the CPU - very slow)"
+    : "CPU (no GPU detected - labelling unavailable)";
   // A bare cuda/mps preference means "use the GPU" and collapses onto
   // Automatic; cuda:<n> keeps its own row only while several GPUs exist
-  // (with one/none, the row isn't rendered — fall back to highlighting
+  // (with one/none, the row isn't rendered - fall back to highlighting
   // Automatic rather than leaving nothing selected).
   const pickedDevice: string =
     settings?.devicePreference === "cpu"
@@ -169,7 +169,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
                   const r = await setWorkspacePath(wsPath.trim());
                   setWsNote(
                     r.restartRequired
-                      ? "Saved — restart PixelKit to switch to the new workspace."
+                      ? "Saved - restart PixelKit to switch to the new workspace."
                       : "Saved.",
                   );
                 })
@@ -213,14 +213,14 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
                     ...(settings.gpus.length > 1
                       ? settings.gpus.map((g) => ({
                           value: `cuda:${g.index}`,
-                          title: `GPU ${g.index} — ${g.name}`,
+                          title: `GPU ${g.index} - ${g.name}`,
                           desc: `${g.vramGb} GB VRAM. Pin all labelling to this card.`,
                         }))
                       : []),
                     {
                       value: "cpu",
                       title: "CPU",
-                      desc: "Run labelling on the CPU. Works on any machine, but is very slow — expect minutes per image.",
+                      desc: "Run labelling on the CPU. Works on any machine, but is very slow - expect minutes per image.",
                     },
                   ].map((opt) => {
                     const selected = pickedDevice === opt.value;
@@ -232,7 +232,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
                           act(async () => {
                             await setDevicePreference(opt.value as DevicePreference);
                             setDevNote(
-                              "Saved — restart PixelKit to switch compute device.",
+                              "Saved - restart PixelKit to switch compute device.",
                             );
                           });
                         }}
@@ -289,7 +289,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
                   setToken("");
                   if (r.sam3Access === false)
                     throw new Error(
-                      "Token valid, but SAM 3 access is missing — accept the license at huggingface.co/facebook/sam3.",
+                      "Token valid, but SAM 3 access is missing - accept the license at huggingface.co/facebook/sam3.",
                     );
                 }, "Token validated and saved.")
               }
@@ -309,7 +309,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
           </div>
         </section>
 
-        {/* Models — passive status only. The engine downloads and
+        {/* Models - passive status only. The engine downloads and
             loads everything itself once the HF token exists; there is
             nothing for the user to click here. */}
         <section className="mt-4 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-5">

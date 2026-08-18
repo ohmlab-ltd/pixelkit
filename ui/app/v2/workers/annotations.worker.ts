@@ -1,15 +1,15 @@
 // Dedicated annotations worker. Owns the three jobs that used to
 // pile up on the main thread during heavy gallery / viewer activity:
 //
-//   1. parseViewport — JSON-parse a /v3/viewport response body and
+//   1. parseViewport - JSON-parse a /v3/viewport response body and
 //      unwrap each WireDetection into the ImportDetection shape the
 //      FE actually reads. On a 9000-detection project this is the
 //      slowest single piece of mid-flight work (10–30 ms blocking
 //      the main thread per batch fetch).
-//   2. parseSingle — same, for the legacy per-image /annotations/{id}
+//   2. parseSingle - same, for the legacy per-image /annotations/{id}
 //      endpoint. Used by the flag-off path so we get the worker
 //      win without changing /v3 vs /v2 wire format.
-//   3. labelStats — sum per-id labelStats into a project-wide
+//   3. labelStats - sum per-id labelStats into a project-wide
 //      aggregate. The store's mirror-writes effect runs after every
 //      setImports; pushing this off-thread keeps a labelling-job
 //      progress poll (which fires setImports at 5 Hz on a 900-image
@@ -23,7 +23,7 @@
 // pay any parse cost regardless of wire format.
 import { unpack as msgpackUnpack } from "msgpackr";
 
-// No imports from the app bundle — the worker is a separate
+// No imports from the app bundle - the worker is a separate
 // compilation unit. The minimal logic the worker needs
 // (unwrapWireDetection, stripTransientBoxFlags) is inlined below.
 

@@ -17,7 +17,7 @@ import { readProjectMeta } from "@/lib/projectMetaCache";
 const VERSION_FALLBACK = "v0.2.1";
 
 // Queued/running engine jobs, from GET /api/jobs/active (see gd/jobs.py
-// Job.to_public — progress is {index, total, image, phase}).
+// Job.to_public - progress is {index, total, image, phase}).
 type ActiveJob = {
   id: string;
   kind: string;
@@ -121,7 +121,7 @@ export function StatusBar() {
           next = Array.isArray(d.jobs) ? d.jobs : [];
         }
       } catch {
-        next = []; // engine down — the health dot already says so
+        next = []; // engine down - the health dot already says so
       }
       if (cancelled) return;
       setJobs(next);
@@ -209,7 +209,7 @@ export function StatusBar() {
           return (
             <Segment
               title={jobs
-                .map((j) => `${jobVerb(j.kind)} ${jobProjectName(j.project)} — ${j.status}`)
+                .map((j) => `${jobVerb(j.kind)} ${jobProjectName(j.project)} - ${j.status}`)
                 .join("\n")}
             >
               <span

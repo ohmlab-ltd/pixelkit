@@ -8,8 +8,8 @@
 // (content pane / dataset overlay), not the window, so on mount this
 // walks up from its own DOM position to the nearest scrollable
 // ancestor (overflow-y auto/scroll) and listens there. When none is
-// found — e.g. the standalone /guide route where the page itself
-// scrolls — it falls back to the window, preserving the old
+// found - e.g. the standalone /guide route where the page itself
+// scrolls - it falls back to the window, preserving the old
 // behaviour.
 //
 // Render this component ONLY from the place that knows it should be

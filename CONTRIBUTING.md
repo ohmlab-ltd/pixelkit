@@ -6,11 +6,11 @@ honestly-described changes are easy to merge.
 ## Dev setup
 
 ```bash
-# engine — Python 3.12; CUDA torch optional (CPU works for all non-ML APIs)
+# engine - Python 3.12; CUDA torch optional (CPU works for all non-ML APIs)
 cd engine && pip install -r requirements.txt && python gd/server.py
 # → http://127.0.0.1:8001
 
-# ui — Next.js static export, served by the engine after a build
+# ui - Next.js static export, served by the engine after a build
 cd ui && npm ci && npm run build     # or `npm run dev` on :3000
 
 # desktop shell (optional in dev)
@@ -36,16 +36,16 @@ transformers releases breaking the SAM 3 classes.
 - **Workspace format is a public contract** (`docs/WORKSPACE.md`):
   changes to what's written on disk need a doc update and a migration
   story in the same PR.
-- The engine must keep working with `PK_DISABLE_MODELS=1` — every
+- The engine must keep working with `PK_DISABLE_MODELS=1` - every
   dataset/annotation/export API stays model-free.
 - Match the code around you (the UI's design tokens are documented in
   `docs/DESKTOP-UI.md`); keep comments for the *why*, not the what.
-- Add a regression test when you fix a bug — the suite is small and
+- Add a regression test when you fix a bug - the suite is small and
   fast on purpose.
 
 ## Releases
 
 Maintainers: bump the version stamps in `desktop/package.json`,
 `engine/gd/server.py` (`PK_VERSION`), `engine/pyproject.toml`, and
-`ui/app/shell/StatusBar.tsx`, then push a `vX.Y.Z` tag — the release
+`ui/app/shell/StatusBar.tsx`, then push a `vX.Y.Z` tag - the release
 workflow builds and publishes both installers.

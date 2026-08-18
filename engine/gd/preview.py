@@ -1,9 +1,9 @@
 """Labelled-preview renderer (pure PIL). Extracted from the deleted
-GroundingDINO module — no model dependencies."""
+GroundingDINO module - no model dependencies."""
 from PIL import Image, ImageDraw, ImageFilter
 
 PREVIEW_MAX_SIDE = 480   # longest edge of the baked preview JPEG
-PREVIEW_QUALITY = 72     # JPEG quality — tuned for small file size
+PREVIEW_QUALITY = 72     # JPEG quality - tuned for small file size
 PREVIEW_DIM_FACTOR = 0.6  # 0 = pitch black background, 1 = no dim
 
 
@@ -16,7 +16,7 @@ def draw_preview(image_pil, mask_payloads):
     `mask_payloads` is a list of {"polygons": [[[x,y], ...], ...]} dicts.
     Entries that are None or have no polygons are skipped.
 
-    Images with no masks at all return the downsized original unmodified —
+    Images with no masks at all return the downsized original unmodified -
     we don't dim the whole frame just because nothing's been segmented yet.
     """
     W, H = image_pil.size
@@ -60,7 +60,7 @@ def draw_preview(image_pil, mask_payloads):
 
     # White outline along each polygon so the cutout edge reads cleanly
     # against any background. Stroke width scales with the rendered preview
-    # — 1px on tiny crops, 2px on larger ones.
+    # - 1px on tiny crops, 2px on larger ones.
     outline_w = max(1, min(base.size) // 240)
     drw_out = ImageDraw.Draw(result)
     for pts in scaled_polygons:

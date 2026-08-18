@@ -1,7 +1,7 @@
 """Qwen 2.5-VL 7B validation pass over MM-GD-L detections.
 
 Loads the model directly via Hugging Face Transformers (4-bit NF4 quant
-via bitsandbytes) and runs in-process — no separate Ollama daemon, no
+via bitsandbytes) and runs in-process - no separate Ollama daemon, no
 HTTP, no shared-VRAM probing problems with PyTorch's allocator.
 
 For each auto-labelled box we crop the region, send it to Qwen, and
@@ -9,7 +9,7 @@ parse a YES/NO answer. Failures (model unloaded, OOM, etc.) come back
 as `match=true, confidence=0` so the auto-label pipeline keeps moving;
 the frontend renders these as un-verified rather than rejected.
 
-Manual boxes skip this entirely — they're presumed valid because the
+Manual boxes skip this entirely - they're presumed valid because the
 user drew them on purpose.
 """
 from __future__ import annotations
@@ -20,7 +20,7 @@ from pathlib import Path
 
 from PIL import Image
 
-# Portable build default: the 2B Instruct model in fp16 — fits the 12 GB
+# Portable build default: the 2B Instruct model in fp16 - fits the 12 GB
 # budget alongside SAM3 and needs no CUDA-only quant libraries (works on
 # MPS once the device phase lands). Override with VLM_MODEL / VLM_QUANT.
 VLM_MODEL = os.environ.get("VLM_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
@@ -38,7 +38,7 @@ os.environ.setdefault("HF_HOME", str(VLM_CACHE_DIR))
 os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(VLM_CACHE_DIR / "hub"))
 os.environ.setdefault("TRANSFORMERS_CACHE", str(VLM_CACHE_DIR / "transformers"))
 
-# Padding as a fraction of the box's own dimensions — gives the VLM real
+# Padding as a fraction of the box's own dimensions - gives the VLM real
 # scene context. A tight car-grille crop with no padding looks like an
 # abstract pattern; with 30% padding it's clearly the front of a car.
 CROP_PADDING_FRAC = 0.3
@@ -49,10 +49,10 @@ CROP_MIN_SIZE = 384
 # Largest crop side. A 4K image with a small box can produce 1500+px
 # crops which (a) blow peak VRAM during generate and (b) force the
 # allocator to keep handing out new big buffers every call. Cap at
-# 896 — well above what Qwen 2.5-VL actually uses internally
+# 896 - well above what Qwen 2.5-VL actually uses internally
 # (~1024px after its own resize) and small enough that consecutive
 # generates can reuse the same allocator slabs.
-# Capped at 448 (was 896) — Qwen3-VL's vision tower tokenises
+# Capped at 448 (was 896) - Qwen3-VL's vision tower tokenises
 # at 14 px patches, so 896×896 = 64×64 = 4096 vision tokens just
 # for the image. Per-call latency was dominated by prefill on
 # those tokens. 448×448 = 32×32 = 1024 tokens is plenty for the
@@ -86,7 +86,7 @@ def is_loaded() -> bool:
 
 def load_vlm(device: str = "cuda"):
     """Load the configured VLM onto the given CUDA device. Strict
-    GPU-only — refuses CPU fallback.
+    GPU-only - refuses CPU fallback.
 
     Default model: Qwen3-VL-8B-Instruct-AWQ (pre-quantised). AWQ
     weights ship at ~5 GB on disk, load directly without runtime
@@ -106,9 +106,9 @@ def load_vlm(device: str = "cuda"):
     # the rest of the stack (V2 GD/SAM/embeddings, V3 SAM3) has full
     # VRAM to itself. Both vlm_classify and validate_box already short-
     # circuit when _MODEL is None, so the V2 endpoints continue to work
-    # — they just produce no VLM output.
+    # - they just produce no VLM output.
     if os.environ.get("VLM_DISABLED", "").lower() in ("1", "true", "yes", "on"):
-        print("[vlm] VLM_DISABLED set — skipping VLM load (frees ~10 GB VRAM).")
+        print("[vlm] VLM_DISABLED set - skipping VLM load (frees ~10 GB VRAM).")
         return None, None
 
     import torch
@@ -128,7 +128,7 @@ def load_vlm(device: str = "cuda"):
     is_prequant = "-awq" in model_id_lower or "-gptq" in model_id_lower or "-int4" in model_id_lower
     if raw_quant_mode == "auto":
         # Pre-quantised checkpoints carry their own kernels via
-        # autoawq / auto_gptq registered with transformers — we just
+        # autoawq / auto_gptq registered with transformers - we just
         # load them in fp16 and the dequant happens internally.
         quant_mode = "awq" if is_prequant else "4bit"
     else:
@@ -170,7 +170,7 @@ def load_vlm(device: str = "cuda"):
         from transformers import BitsAndBytesConfig
         load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
     else:
-        # awq / gptq / fp16 — fp16 dtype, no extra config. The
+        # awq / gptq / fp16 - fp16 dtype, no extra config. The
         # pre-quantised kernels (autoawq / auto_gptq) plug
         # themselves into transformers at import time and take
         # over the matmul layers internally.
@@ -233,7 +233,7 @@ def _highlight_mask_region(
 
     Replaces the older _draw_mask_outline approach (which drew a
     yellow polygon outline). VLMs were spending tokens describing
-    the highlighter rather than the object — modulating the source
+    the highlighter rather than the object - modulating the source
     pixels directly conveys the same "this is what to focus on"
     signal without injecting an obviously synthetic UI element.
 
@@ -241,13 +241,13 @@ def _highlight_mask_region(
     `_crop` produced (padded, possibly resized to CROP_MIN_SIZE /
     CROP_MAX_SIZE). We replicate `_crop`'s padding maths to compute
     the offset (pad_x0, pad_y0), then derive the resize scale from
-    the natural padded-crop size vs the actual crop size — that gives
+    the natural padded-crop size vs the actual crop size - that gives
     the affine to map polygon points into crop space.
 
     Multipliers:
       * fg_brighten=1.18 raises the masked pixels' luminance by ~18%
         without driving everything to pure white (clamped at 255).
-      * bg_darken=0.45 cuts background luminance to ~45% — still
+      * bg_darken=0.45 cuts background luminance to ~45% - still
         readable for context (so the VLM can place the object in
         scene) but unmistakably dimmer than the foreground.
     Both clamp to [0, 255] after the multiply.
@@ -306,7 +306,7 @@ def _highlight_mask_region(
     # Tighten the silhouette: a small close removes pixel-level
     # holes and a single dilate keeps the boundary slightly outside
     # the polygon under-shoot so the highlighted region covers the
-    # full object — same idea as the DINOv2 inpaint mask cleanup.
+    # full object - same idea as the DINOv2 inpaint mask cleanup.
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
     mask = cv2.dilate(mask, kernel, iterations=1)
@@ -319,13 +319,13 @@ def _highlight_mask_region(
 
 
 # Back-compat alias so any caller that still imports the old name
-# keeps working — the new highlight is a strict superset of the
+# keeps working - the new highlight is a strict superset of the
 # outline behaviour (more attention-steering, no UI artefacts).
 _draw_mask_outline = _highlight_mask_region
 
 
 def validate_box(image: Image.Image, box: list[float], label: str) -> dict:
-    """Run the VLM on one cropped box. Always returns a dict — on any
+    """Run the VLM on one cropped box. Always returns a dict - on any
     error we fall back to `match=true, confidence=0` so the pipeline
     keeps moving; the frontend shows it as un-verified, not rejected."""
     if _MODEL is None or _PROCESSOR is None:
@@ -352,7 +352,7 @@ def validate_box(image: Image.Image, box: list[float], label: str) -> dict:
         "Answer with a single word: YES or NO."
     )
     # Simpler retry prompt for degenerate-output cases. Less context,
-    # less prompt depth — gets the model out of stuck-token loops.
+    # less prompt depth - gets the model out of stuck-token loops.
     retry_prompt = f"Does this image show a {clean}? YES or NO."
 
     def _generate(prompt: str) -> str | None:
@@ -415,7 +415,7 @@ def validate_box(image: Image.Image, box: list[float], label: str) -> dict:
     # If the primary prompt produced degenerate output, retry once with
     # a simpler prompt before giving up.
     if _is_garbage(response):
-        print(f"[vlm] {clean!r} primary garbage ({response[:40]!r}) — retrying simpler prompt")
+        print(f"[vlm] {clean!r} primary garbage ({response[:40]!r}) - retrying simpler prompt")
         retry_raw = _generate(retry_prompt)
         if retry_raw is not None:
             retry_response = retry_raw.strip().lower()
@@ -433,7 +433,7 @@ def validate_box(image: Image.Image, box: list[float], label: str) -> dict:
         }
     # If we're still stuck on garbage output even after the retry, mark
     # as a low-confidence match so a badge still renders. Keeps the FE
-    # consistent — every box shows SOME validation state.
+    # consistent - every box shows SOME validation state.
     if _is_garbage(response):
         return {
             "match": True,
@@ -468,7 +468,7 @@ def validate_box(image: Image.Image, box: list[float], label: str) -> dict:
             "source": "auto",
         }
     if has_yes and has_no:
-        # Mixed wording ("yes but..." / "no, actually yes") — first hit
+        # Mixed wording ("yes but..." / "no, actually yes") - first hit
         # wins, lower confidence so the user knows it's hedged.
         first_yes = re.search(yes_pat, response)
         first_no = re.search(no_pat, response)
@@ -476,7 +476,7 @@ def validate_box(image: Image.Image, box: list[float], label: str) -> dict:
             if first_yes.start() < first_no.start():
                 return {"match": True, "confidence": 0.55, "reason": response[:240], "model": VLM_MODEL, "source": "auto"}
             return {"match": False, "confidence": 0.55, "reason": response[:240], "model": VLM_MODEL, "source": "auto"}
-    # Truly ambiguous — default to "verified, low confidence" so the
+    # Truly ambiguous - default to "verified, low confidence" so the
     # badge still shows. Better to overclaim a match than render a
     # blank slot the user can't tell from a not-checked box.
     return {
@@ -497,11 +497,11 @@ def _vlm_classify_remote(
     """Forward a classify_box call to the VLM worker over HTTP.
 
     Encodes the source image as JPEG once per call (typical sizes ~30-100
-    KB on LAN — negligible vs the per-box VLM compute). The worker does
+    KB on LAN - negligible vs the per-box VLM compute). The worker does
     its own padded crop server-side, so we send the full source image
     rather than the crop, matching the local `vlm_classify` semantics.
 
-    Returns (None, None) on any failure — the upstream callers already
+    Returns (None, None) on any failure - the upstream callers already
     treat that as "VLM declined" and fall back to embedding match or
     GD label, so a worker outage degrades gracefully.
     """
@@ -514,7 +514,7 @@ def _vlm_classify_remote(
     except ImportError:
         # Extremely unlikely (transformers depends on it) but bail with
         # a clear message rather than a NameError.
-        print("[vlm-remote] requests not installed — falling back to local")
+        print("[vlm-remote] requests not installed - falling back to local")
         return None, None
     import requests
 
@@ -540,17 +540,17 @@ def _vlm_classify_remote(
 
     # Pass mask polygons through so the worker can draw the outline
     # using the same logic as the local path. Empty / null masks are
-    # OK — worker treats absence as "no outline available".
+    # OK - worker treats absence as "no outline available".
     data = {"box": _json.dumps(list(box)), "labels": _json.dumps(list(options))}
     if mask_polygons:
         data["mask_polygons"] = _json.dumps(mask_polygons)
 
     # Detailed timing so we can pinpoint where the wall clock goes
     # when the user reports a hang. The total split is:
-    #   pre   — main backend prep (image encode, JSON serialise)
-    #   wait  — full HTTP round-trip (includes the worker's prep,
+    #   pre   - main backend prep (image encode, JSON serialise)
+    #   wait  - full HTTP round-trip (includes the worker's prep,
     #           prefill, decode, response serialise + transit)
-    #   post  — main backend post-processing (parse JSON)
+    #   post  - main backend post-processing (parse JSON)
     # Compare `wait` here with the worker's own [vlm-classify] line
     # to separate network latency from worker compute.
     import time as _t
@@ -568,10 +568,10 @@ def _vlm_classify_remote(
         )
         wait_ms = (_t.perf_counter() - t_send) * 1000.0
     except requests.exceptions.Timeout:
-        print(f"[vlm-remote] worker timeout after {timeout}s — falling back to local")
+        print(f"[vlm-remote] worker timeout after {timeout}s - falling back to local")
         return None, None
     except Exception as e:
-        print(f"[vlm-remote] worker request failed: {e} — falling back to local")
+        print(f"[vlm-remote] worker request failed: {e} - falling back to local")
         return None, None
 
     if r.status_code != 200:
@@ -609,7 +609,7 @@ def vlm_classify(
     coords), the function draws a coloured outline of the detection
     region on the crop before passing it to the VLM. This is the
     single biggest accuracy lift for the "people in front of a road"
-    class of failures — without the outline the VLM picks whichever
+    class of failures - without the outline the VLM picks whichever
     object is most visually salient (the people), but with it the
     model can scope its answer to the highlighted region.
 
@@ -644,7 +644,7 @@ def vlm_classify(
     # If we have a SAM mask, draw it onto the crop so the VLM can see
     # exactly which region is in question. The prompt also changes to
     # explicitly reference "the outlined object" when an outline was
-    # drawn — clearer instruction than "the main object".
+    # drawn - clearer instruction than "the main object".
     has_outline = False
     if mask_polygons:
         try:
@@ -693,7 +693,7 @@ def vlm_classify(
         with torch.inference_mode():
             outputs = _MODEL.generate(
                 **inputs,
-                # 8 is enough for any single label word — Qwen tokenises
+                # 8 is enough for any single label word - Qwen tokenises
                 # most short class names into 1-3 tokens. Generating up
                 # to 16 was wasted decoding when the model wanted to
                 # stop after the label but had no EOS yet.
@@ -708,7 +708,7 @@ def vlm_classify(
         print(f"[vlm-classify] error: {e}")
         return None, None
     finally:
-        # See note in validate_box._generate finally block — release
+        # See note in validate_box._generate finally block - release
         # CUDA tensors so KV cache + activations don't accumulate.
         del inputs, outputs, new_tokens
         if torch.cuda.is_available():
@@ -738,5 +738,5 @@ def vlm_classify(
 
 
 def manual_validation() -> dict:
-    """Marker stamped on user-drawn boxes — no VLM call, presumed correct."""
+    """Marker stamped on user-drawn boxes - no VLM call, presumed correct."""
     return {"match": True, "confidence": 1.0, "reason": "manual", "model": None, "source": "manual"}

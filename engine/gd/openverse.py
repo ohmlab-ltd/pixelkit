@@ -2,7 +2,7 @@
 
 Openverse aggregates Creative Commons-licensed images from sources like
 Flickr, Wikimedia, and various stock libraries. The free API needs no
-auth for basic queries — we just hit it with the user's word and pull
+auth for basic queries - we just hit it with the user's word and pull
 back the first N results, surfacing the URL, thumbnail, and licence
 metadata so the frontend can show previews + attribution.
 
@@ -29,7 +29,7 @@ OPENVERSE_UA = "PixelKit/1.0 (+https://pixel.kit)"
 #   1. Require https
 #   2. Resolve the hostname and reject any non-global IP
 # That blocks 127.0.0.1, 10/8, 172.16/12, 192.168/16, 169.254.169.254
-# (cloud metadata), ::1, fc00::/7, fe80::/10 — i.e. everything an
+# (cloud metadata), ::1, fc00::/7, fe80::/10 - i.e. everything an
 # attacker would need to pivot to internal services if Openverse ever
 # returned a malicious URL.
 def _url_is_safe_to_fetch(url: str) -> bool:
@@ -79,7 +79,7 @@ def search_images(query: str, count: int = 5, commercial: bool = False) -> list[
 
     Openverse caps `page_size` at 20 per request, so for `count > 20`
     we paginate and concatenate. Stops early if a page comes back
-    empty or short — both signal we've hit the end of what the
+    empty or short - both signal we've hit the end of what the
     upstream sources have for this query.
 
     `commercial=True` adds Openverse's `license_type=commercial` filter,
@@ -107,7 +107,7 @@ def search_images(query: str, count: int = 5, commercial: bool = False) -> list[
 
         batch = payload.get("results", []) or []
         if not batch:
-            # No more results upstream — return what we've got.
+            # No more results upstream - return what we've got.
             break
 
         for item in batch:
@@ -140,7 +140,7 @@ def search_images(query: str, count: int = 5, commercial: bool = False) -> list[
 def _probe_thumbnail(url: str, timeout: float = 2.5) -> bool:
     """Lightweight reachability check for one thumbnail URL.
 
-    Tries HEAD first. If that succeeds we trust the headers — image
+    Tries HEAD first. If that succeeds we trust the headers - image
     MIME and Content-Length above a small floor (1.5 KB; anything
     smaller is almost certainly a placeholder, not a real photo).
     Some upstream hosts reject HEAD with 405, in which case we fall
@@ -173,7 +173,7 @@ def _probe_thumbnail(url: str, timeout: float = 2.5) -> bool:
         if e.code not in (405, 403):
             return False
     except Exception:
-        # Connection error, DNS failure, timeout — fall through to GET.
+        # Connection error, DNS failure, timeout - fall through to GET.
         pass
     try:
         req = urllib.request.Request(url, headers=headers)
@@ -193,7 +193,7 @@ def _probe_thumbnail(url: str, timeout: float = 2.5) -> bool:
 
 def validate_thumbnails(items: list[dict], max_workers: int = 32) -> list[dict]:
     """Filter `items` to those whose thumbnail URL responds with a
-    real image. Order is preserved. Items are probed in parallel —
+    real image. Order is preserved. Items are probed in parallel -
     on a typical 50-item search this completes in under 3 s.
 
     The probe runs server-side so we don't depend on the user's
@@ -242,7 +242,7 @@ def _download_image(url: str, timeout: float = 15.0, max_side: int = 800) -> PIL
 
 
 def download_images(urls: list[str], max_workers: int = 5) -> list[PILImage.Image | None]:
-    """Concurrent download — 5 images come back in ~1s on a normal
+    """Concurrent download - 5 images come back in ~1s on a normal
     connection vs 3-4s sequential. Returns a list aligned with `urls`
     so callers can map URL → image directly."""
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -250,7 +250,7 @@ def download_images(urls: list[str], max_workers: int = 5) -> list[PILImage.Imag
 
 
 def _download_bytes(url: str, timeout: float = 30.0, max_bytes: int = 25_000_000) -> tuple[bytes | None, str | None]:
-    """Pull raw image bytes for dataset import — full resolution, no
+    """Pull raw image bytes for dataset import - full resolution, no
     PIL roundtrip. Returns (data, content_type) or (None, None) on
     failure. `max_bytes` caps the largest image we'll store so a bad
     URL can't drop a 200 MB blob in the project bucket."""

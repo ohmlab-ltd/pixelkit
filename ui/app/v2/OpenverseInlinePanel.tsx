@@ -369,7 +369,7 @@ export function OpenverseInlinePanel({
                   <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="text-[var(--ok)]">
                     <path d="M5 13l4 4L19 7" />
                   </svg>
-                  Sourced from Openverse — Creative Commons licensed, free for commercial use.
+                  Sourced from Openverse - Creative Commons licensed, free for commercial use.
                 </span>
                 {rejectedUrls.size > 0 && (
                   <button

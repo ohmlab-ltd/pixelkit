@@ -270,7 +270,7 @@ export function ProjectPage({
       <header className="relative mb-6 overflow-hidden rounded-3xl border border-foreground/10">
         <div className="pk-cover relative h-52 w-full sm:h-72">
           {/* Keyed/versioned on cover_updated (not detail.updated) so the hero
-              only reloads when the cover image actually changes — editing the
+              only reloads when the cover image actually changes - editing the
               name / privacy / members no longer flickers the photo. */}
           <HeroCover key={detail.cover_updated ?? "cover"} id={detail.id} updated={detail.cover_updated} monogram={monogram} />
           <div
@@ -468,7 +468,7 @@ export function ProjectPage({
       </div>
 
       {/* Delete a dataset: choose remove-from-project (detach) vs delete-entirely
-          (destroy). Destroy is creator-only — even the Project owner can only
+          (destroy). Destroy is creator-only - even the Project owner can only
           detach someone else's dataset, never permanently delete it. */}
       <GlassDialog
         open={!!deleteTarget}
@@ -583,7 +583,7 @@ function LabelsCard({ containerId }: { containerId: string }) {
       const r = await apiFetch(`/api/containers/${containerId}/labels`);
       if (r.ok) setRows(((await r.json()) as { labels: LabelUsage[] }).labels);
     } catch {
-      /* engine unreachable — card shows nothing */
+      /* engine unreachable - card shows nothing */
     }
   }, [containerId]);
   useEffect(() => {
@@ -623,7 +623,7 @@ function LabelsCard({ containerId }: { containerId: string }) {
     <section className="pk-card rounded-2xl p-5">
       <h2 className="pk-eyebrow mb-1.5">Labels</h2>
       <p className="mb-4 text-xs text-foreground/45">
-        Across every dataset in this project. Rename to fix drift —
+        Across every dataset in this project. Rename to fix drift -
         renaming onto an existing label merges them.
       </p>
       {error && <p className="mb-2 text-xs text-[var(--bad)]">{error}</p>}

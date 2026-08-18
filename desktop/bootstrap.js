@@ -272,18 +272,18 @@ async function ensureWindowsRuntime({ requirementsPath, onStatus, log }) {
   // 2. PyTorch (the big one) ------------------------------------------------
   const cuda = hasNvidiaGpu();
   const flavour = cuda ? 'CUDA' : 'CPU';
-  status(`Installing PyTorch (${flavour}${cuda ? ', ~3.5 GB' : ''} — one time)…`);
+  status(`Installing PyTorch (${flavour}${cuda ? ', ~3.5 GB' : ''} - one time)…`);
   const pipBase = ['-m', 'pip', 'install', '--no-warn-script-location', '--disable-pip-version-check'];
   await run(py, [...pipBase, 'torch', 'torchvision', '--index-url', cuda ? TORCH_CUDA_INDEX : TORCH_CPU_INDEX], {
     log,
-    onLine: (l) => status(`Installing PyTorch (${flavour}) — ${l.slice(0, 80)}`),
+    onLine: (l) => status(`Installing PyTorch (${flavour}) - ${l.slice(0, 80)}`),
   });
 
   // 3. Engine dependencies --------------------------------------------------
   status('Installing engine dependencies…');
   await run(py, [...pipBase, '-r', requirementsPath], {
     log,
-    onLine: (l) => status(`Installing engine dependencies — ${l.slice(0, 80)}`),
+    onLine: (l) => status(`Installing engine dependencies - ${l.slice(0, 80)}`),
   });
 
   // 4. Sanity + marker ------------------------------------------------------

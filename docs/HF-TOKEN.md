@@ -21,19 +21,19 @@ PixelKit. Roughly two minutes.
    then downloads the weights (~1.7 GB) into your workspace's `weights/`
    folder.
 
-The token is stored in the app config directory on your machine —
+The token is stored in the app config directory on your machine -
 never inside the workspace, so backups and synced workspaces don't
 contain it. PixelKit uses it only to download weights from Hugging Face.
 
 ## If validation fails
 
-- **"Token invalid"** — the value didn't authenticate: re-copy it
+- **"Token invalid"** - the value didn't authenticate: re-copy it
   (tokens start with `hf_`), or it may have been revoked.
-- **"Token OK but no SAM 3 access"** — the token works but step 2 was
+- **"Token OK but no SAM 3 access"** - the token works but step 2 was
   skipped or done with a different account: open the
   [facebook/sam3](https://huggingface.co/facebook/sam3) page with the
   same account the token belongs to and accept the license.
-- **Corporate networks** — downloads come from `huggingface.co` /
+- **Corporate networks** - downloads come from `huggingface.co` /
   `cdn-lfs.huggingface.co`; proxies that block them will fail the
   download step, not the token check.
 
@@ -46,4 +46,4 @@ is `facebook/sam3`.
 ## DINOv2
 
 The second model PixelKit uses, `facebook/dinov2-large` (~0.6 GB), is
-not gated — it downloads automatically without any token.
+not gated - it downloads automatically without any token.

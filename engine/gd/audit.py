@@ -1,10 +1,10 @@
-"""Local SQLite event log — job history + project activity.
+"""Local SQLite event log - job history + project activity.
 
 The portable build keeps this for two things only: rehydrating finished-job
 history across restarts (JobManager.hydrate_from_audit) and the per-project
 activity feed. The SaaS billing/demo/telemetry rollups are gone.
 
-The DB lives in the workspace (events.db). SQLite is stdlib — no extra
+The DB lives in the workspace (events.db). SQLite is stdlib - no extra
 dependency.
 """
 from __future__ import annotations

@@ -82,7 +82,7 @@ export interface ActivityItem {
 
 const JSON_HEADERS = { "Content-Type": "application/json" } as const;
 
-/** Public URL for a Project cover (an <img src> — authenticates via the pk_auth
+/** Public URL for a Project cover (an <img src> - authenticates via the pk_auth
  *  cookie for private Projects). */
 export function containerCoverUrl(id: string): string {
   return `${API}/api/containers/${encodeURIComponent(id)}/cover`;
@@ -116,7 +116,7 @@ export async function searchUsers(q: string): Promise<UserHit[]> {
 
 /** Returns the user's Project cards, or `null` when the request FAILED (e.g.
  *  a 401 from an expired bearer, or a network/5xx blip). The null vs [] split
- *  matters: a failure must NOT be shown as "you have no projects" — callers
+ *  matters: a failure must NOT be shown as "you have no projects" - callers
  *  keep their last-known row instead of clobbering it with an empty state. */
 export async function listContainers(): Promise<ContainerCard[] | null> {
   try {
@@ -208,7 +208,7 @@ export async function removeDataset(id: string, datasetId: string): Promise<bool
   return r.ok;
 }
 
-/** Permanently delete a dataset (destroy — not just detach from the Project).
+/** Permanently delete a dataset (destroy - not just detach from the Project).
  *  The backend allows this only for the dataset's own creator. */
 export async function deleteDataset(datasetId: string): Promise<boolean> {
   const r = await apiFetch(`/api/projects/${encodeURIComponent(datasetId)}`, { method: "DELETE" });

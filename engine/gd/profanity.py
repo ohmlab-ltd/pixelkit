@@ -1,4 +1,4 @@
-"""Profanity gate — stubbed out in the portable build.
+"""Profanity gate - stubbed out in the portable build.
 
 The SaaS build rejected profane project/label names before they landed
 in shared, public-facing storage. The portable app is a single local

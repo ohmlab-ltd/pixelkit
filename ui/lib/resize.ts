@@ -1,5 +1,5 @@
 // Image-file detection helper. The client-side downscale/quality ladder
-// that used to live here is gone — PixelKit uploads ORIGINAL file bytes
+// that used to live here is gone - PixelKit uploads ORIGINAL file bytes
 // at full resolution and the engine stores them as-is.
 
 // Sniff whether a File is an image we want to route through the

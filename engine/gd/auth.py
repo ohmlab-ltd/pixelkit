@@ -1,4 +1,4 @@
-"""Auth stubs for the portable build — single local user, no accounts.
+"""Auth stubs for the portable build - single local user, no accounts.
 
 The SaaS build verified HS256 bearer tokens minted by NextAuth and enforced
 container roles per route. The portable engine binds to 127.0.0.1 and serves

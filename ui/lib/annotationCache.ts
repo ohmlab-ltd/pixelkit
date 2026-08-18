@@ -10,7 +10,7 @@
 //   1. It NEVER caches the imports list itself, only per-id
 //      geometry. /overview remains the source of truth for which
 //      imports exist.
-//   2. Every read is gated on `manifestUpdatedAt` — the BE updates
+//   2. Every read is gated on `manifestUpdatedAt` - the BE updates
 //      this on every write to the manifest, so a stale entry never
 //      lands in state. We compare against the value the FE currently
 //      knows (set from the latest /overview response) and treat a
@@ -288,7 +288,7 @@ async function evictLruNow(): Promise<void> {
         const toDrop = n - MAX_ROWS;
         // Scan all rows in insertion order (== key order on the
         // compound [projectId, importId]). That's not strict LRU
-        // by access time, but close enough — drop the first `toDrop`
+        // by access time, but close enough - drop the first `toDrop`
         // rows we see whose fetchedAt is the oldest.
         const fetchedTimes: { key: IDBValidKey; t: number }[] = [];
         const cursorReq = store.openCursor();

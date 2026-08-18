@@ -1,4 +1,4 @@
-"""Filesystem dataset store — the portable build's database.
+"""Filesystem dataset store - the portable build's database.
 
 On-disk layout (all under <workspace>/projects/):
 
@@ -15,15 +15,15 @@ On-disk layout (all under <workspace>/projects/):
 
 The SaaS build kept one giant manifest.json per dataset holding every box of
 every image. Here that splits into:
-  - dataset.json  — everything EXCEPT per-image geometry. Each record in
+  - dataset.json  - everything EXCEPT per-image geometry. Each record in
     manifest["imports"] keeps its metadata (filename, dims, blurhash,
     labelled flags, ...) but loses the heavy keys.
-  - annotations/<import_id>.json — the geometry: {detections, editedBoxes,
+  - annotations/<import_id>.json - the geometry: {detections, editedBoxes,
     timings} exactly as they sat in the import record.
 
 load() recomposes the exact in-memory manifest shape the rest of the engine
 expects, so 20k lines of callers don't change. save() decomposes, writing
-only annotation files whose content actually changed (digest cache) —
+only annotation files whose content actually changed (digest cache) -
 labelling jobs save after every image, so a full rewrite of N files per save
 would be O(N^2) over a job.
 
@@ -192,7 +192,7 @@ def create_dataset_dir(pid: str, name: str, container_id: str | None = None) -> 
 
 
 def reserve_dataset_dir(pid: str, name: str, container_id: str | None = None) -> Path:
-    """Register a dataset folder path WITHOUT creating it — for flows like
+    """Register a dataset folder path WITHOUT creating it - for flows like
     duplicate that need shutil.copytree (dst must not pre-exist)."""
     _ensure_scanned()
     with _LOCK:
@@ -215,7 +215,7 @@ def delete_dataset(pid: str) -> None:
 
 def move_dataset(pid: str, container_id: str | None) -> Path:
     """Physically move a dataset folder into (or out of) a project folder.
-    Folder location is cosmetic — the logical link stays in the JSONs."""
+    Folder location is cosmetic - the logical link stays in the JSONs."""
     _ensure_scanned()
     with _LOCK:
         d = dataset_dir(pid)
@@ -302,7 +302,7 @@ def load(pid: str) -> dict | None:
 
 
 def save(pid: str, manifest: dict) -> None:
-    d = dataset_dir(pid)  # KeyError for unknown ids — callers create first
+    d = dataset_dir(pid)  # KeyError for unknown ids - callers create first
     ann_dir = _annotations_dir(d)
     with _LOCK:
         digests = _ANN_DIGESTS.setdefault(pid, {})
@@ -329,7 +329,7 @@ def save(pid: str, manifest: dict) -> None:
                     _atomic_write(ann_dir / f"{_safe_id(iid)}.json", payload)
                     digests[iid] = digest
             elif iid in digests:
-                # geometry got dropped from the record — remove the file
+                # geometry got dropped from the record - remove the file
                 (ann_dir / f"{_safe_id(iid)}.json").unlink(missing_ok=True)
                 digests.pop(iid, None)
         slim["imports"] = slim_imports
@@ -381,7 +381,7 @@ def create_container_dir(cid: str, name: str) -> Path:
 
 
 def delete_container_dir(cid: str) -> None:
-    """Delete a container folder. Datasets inside move up to unfiled first —
+    """Delete a container folder. Datasets inside move up to unfiled first -
     deleting a project must not silently destroy its datasets (the caller
     deletes datasets explicitly when that's intended)."""
     _ensure_scanned()

@@ -1,4 +1,4 @@
-"""Projects (containers of datasets) — portable build.
+"""Projects (containers of datasets) - portable build.
 
 A "Project" (user-facing term) is a CONTAINER that holds many datasets. It is
 distinct from the legacy code-level "project", which is actually a single
@@ -7,7 +7,7 @@ build has one local user, so every access check passes. The role/member
 function shapes are kept so server.py routes and stored JSON stay compatible.
 
 Storage: <workspace>/projects/<project-slug>/project.json (folder resolution
-lives in store.py — folder names are cosmetic slugs, identity is the JSON id).
+lives in store.py - folder names are cosmetic slugs, identity is the JSON id).
 """
 from __future__ import annotations
 

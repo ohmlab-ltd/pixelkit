@@ -28,7 +28,7 @@ export function onAppNavigate(handler: (tab: AppTab) => void): () => void {
 // references) is owned entirely by HomeView. Rather than prop-drilling
 // a begin-callback out of HomeView, the shell fires this event and
 // HomeView (which stays mounted under the workspace view) reacts by
-// opening its existing CreateDatasetModal — the exact same entry the
+// opening its existing CreateDatasetModal - the exact same entry the
 // "+ Add Dataset" toolbar button uses.
 const NEW_DATASET_EVENT = "pixelkit:new-dataset";
 

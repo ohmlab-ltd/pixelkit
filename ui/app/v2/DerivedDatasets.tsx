@@ -7,7 +7,7 @@ import { apiFetch } from "../../lib/apiFetch";
 import { requestExplorerRefresh } from "../../lib/appNav";
 
 // SPA navigation to another dataset: push the deep-link URL and fire a
-// synthetic popstate — app/app/page.tsx's popstate handler swaps the
+// synthetic popstate - app/app/page.tsx's popstate handler swaps the
 // open dataset view in place (same mechanism as the Explorer tree).
 // No full page load.
 function openDatasetSpa(projectId: string) {
@@ -240,7 +240,7 @@ function DeriveModal({ projectId, labels, parentName, onClose }: { projectId: st
         throw new Error(d.detail || `http ${r.status}`);
       }
       const d = await r.json() as { project_id: string };
-      // New child (and possibly a new wrapping Project) exists — refresh
+      // New child (and possibly a new wrapping Project) exists - refresh
       // the Explorer tree, close the dialog, and open the child in-app.
       requestExplorerRefresh();
       onClose();
@@ -274,7 +274,7 @@ function DeriveModal({ projectId, labels, parentName, onClose }: { projectId: st
           <div className="mt-1.5 grid grid-cols-2 gap-1.5">
             {([
               { key: "inherit", title: "Keep parent labels", desc: "Crops carry the parent's label." },
-              { key: "new", title: "Create new labels", desc: "Start fresh — crops come in unlabelled." },
+              { key: "new", title: "Create new labels", desc: "Start fresh - crops come in unlabelled." },
             ] as const).map((opt) => {
               const on = labelMode === opt.key;
               return (
@@ -312,7 +312,7 @@ function DeriveModal({ projectId, labels, parentName, onClose }: { projectId: st
 
         <div className="mt-4 flex items-center justify-between gap-3">
           <span className="min-w-0">
-            <span className="block text-[12px] font-medium text-foreground/70">ROI mode — square crops</span>
+            <span className="block text-[12px] font-medium text-foreground/70">ROI mode - square crops</span>
             <span className="mt-0.5 block text-[11px] leading-snug text-foreground/40">Force every crop to an exact 1:1 square (centred on the object) so long, thin objects aren&apos;t cropped to slivers.</span>
           </span>
           <button

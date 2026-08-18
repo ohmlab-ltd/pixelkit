@@ -20,7 +20,7 @@ const SITE_URL = (
 ).replace(/\/+$/, "");
 
 const SITE_DESCRIPTION =
-  "Pixel Kit auto-labels images, generates augmentations, and exports training-ready datasets for computer vision AI — entirely on your own machine.";
+  "Pixel Kit auto-labels images, generates augmentations, and exports training-ready datasets for computer vision AI - entirely on your own machine.";
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
@@ -112,7 +112,7 @@ const SOFTWARE_LD = {
 };
 
 // Inline pre-hydration script: the app is permanently dark, so apply
-// the `.dark` class unconditionally before React mounts — any stored
+// the `.dark` class unconditionally before React mounts - any stored
 // 'pixelkit-theme' preference from older builds is ignored. The
 // class-based mechanism itself stays (globals.css keys everything off
 // `.dark`), only the choice is pinned.

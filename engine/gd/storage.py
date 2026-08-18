@@ -1,8 +1,8 @@
 """Local filesystem storage for the portable build.
 
 Drop-in replacement for the SaaS build's R2Storage (Cloudflare R2 via boto3).
-The engine still talks in R2-style keys — ``projects/{pid}/images/{fn}``,
-``projects/{pid}/outputs/{fn}``, ... — and this class resolves them onto the
+The engine still talks in R2-style keys - ``projects/{pid}/images/{fn}``,
+``projects/{pid}/outputs/{fn}``, ... - and this class resolves them onto the
 workspace's per-dataset folders via the store index, so call sites don't
 change. Bytes are read/written directly; "presigned URLs" no longer exist
 (the API serves files itself with FileResponse).

@@ -8,7 +8,7 @@ Mirrors the standalone `detect_and_crop.py` script in the repo root:
 Kept separate from `embeddings.py` because that one is pinned to
 SigLIP 2 for Label Cascade and has its own crop / centre-weighting
 pipeline. The V2 onboarding flow wants a plain DINOv2-base embedding
-on raw bbox crops with no masking — what the user is already used to
+on raw bbox crops with no masking - what the user is already used to
 from the script.
 """
 from __future__ import annotations
@@ -24,7 +24,7 @@ from PIL import Image as PILImage, ImageOps
 DINO_MODEL_ID = os.environ.get("V2_DINO_MODEL", "facebook/dinov2-large")
 DINO_POOLING = os.environ.get("V2_DINO_POOLING", "patch_mean")  # patch_mean | cls | cls_patch
 
-# Embedding dimension follows the model — base/small=768, large=1024,
+# Embedding dimension follows the model - base/small=768, large=1024,
 # giant=1536. Inferred from the loaded model at runtime; the constant
 # below is the fallback used before the model is loaded (e.g. for
 # backfill returns when DINOv2 hasn't warmed yet).
@@ -44,11 +44,11 @@ EMBEDDING_DIM = _DIM_BY_MODEL.get(DINO_MODEL_ID, 1024)
 # helps fine-grained discrimination (hare vs rabbit, lying horse vs
 # standing horse) at the cost of ~5× more tokens per crop. The
 # pretrained model handles the size change via positional-embedding
-# interpolation — DINOv2 was trained with that capability.
+# interpolation - DINOv2 was trained with that capability.
 INPUT_SIDE = int(os.environ.get("V2_DINO_INPUT_SIDE", "518"))
 if INPUT_SIDE % 14 != 0:
     raise RuntimeError(
-        f"V2_DINO_INPUT_SIDE={INPUT_SIDE} is not a multiple of 14 — ViT-L/14 patches won't align"
+        f"V2_DINO_INPUT_SIDE={INPUT_SIDE} is not a multiple of 14 - ViT-L/14 patches won't align"
     )
 
 # Bumped whenever the embedding procedure changes (preprocessing,
@@ -62,12 +62,12 @@ if INPUT_SIDE % 14 != 0:
 # v4: 518×518 bicubic input (37×37 patch grid, 5× more tokens vs 224)
 # v5: black fill (was grey) + close+dilate mask cleanup for cleaner silhouettes
 # v6: TTA reduced to 3 views (orig, h-flip, +10% zoom-out) with black pad
-# v7: foreground-only patch_mean — pool drops black-bg patches so the
+# v7: foreground-only patch_mean - pool drops black-bg patches so the
 #     embedding is built from object patches only (sharper margin on
 #     fine-grained pairs like hare vs rabbit)
 EMBED_VERSION = 7
 
-# TTA view count — keep in sync with `_tta_views`.
+# TTA view count - keep in sync with `_tta_views`.
 EMBED_TTA_VIEWS = 3
 
 _DEFAULT_CACHE = Path(__file__).resolve().parent.parent / "models_cache"
@@ -86,7 +86,7 @@ def is_loaded() -> bool:
 def load(device: str = "cpu"):
     """Idempotent loader. Caches the model + processor in module
     globals so subsequent calls are no-ops. Uses fp16 on CUDA for a
-    free 2× throughput win — DINOv2 features are extremely robust to
+    free 2× throughput win - DINOv2 features are extremely robust to
     half precision (the pretrained checkpoint was trained at fp16
     upstream) and the downstream cosine-similarity match is computed
     on the cpu/fp32 numpy array, so no precision loss propagates."""
@@ -104,7 +104,7 @@ def load(device: str = "cpu"):
         # to 224, which (a) wastes most of the crop and (b) gives only
         # 16×16 patch tokens. Setting size + crop_size to the same
         # value with do_center_crop=False makes the resize the only
-        # spatial transform — the entire crop is rescaled into the
+        # spatial transform - the entire crop is rescaled into the
         # 518×518 frame and patchified directly.
         processor.size = {"height": INPUT_SIDE, "width": INPUT_SIDE}
         if hasattr(processor, "crop_size"):
@@ -130,7 +130,7 @@ def warmup() -> None:
         return
     try:
         encode_image(PILImage.new("RGB", (224, 224), color=(127, 127, 127)))
-        # Prime the batched path too — the cuDNN benchmark cache
+        # Prime the batched path too - the cuDNN benchmark cache
         # picks different kernels for batch>1, so warming both
         # avoids a cold-start hiccup on the first multi-box request.
         # Warm the TTA path too since it expands batch size 5×.
@@ -146,7 +146,7 @@ def _pool(tokens: torch.Tensor, fg_mask: torch.Tensor | None = None) -> torch.Te
     """Pool DINOv2 token sequence → (..., D) per the configured strategy.
 
     `fg_mask` (optional, (B, P) bool) gates patch_mean to foreground
-    patches only — patches whose 14×14 input region overlaps the SAM
+    patches only - patches whose 14×14 input region overlaps the SAM
     silhouette. Without it the mean over all 1369 patches is dominated
     by background tokens (every black patch produces approximately the
     same token, dragging crops toward a fixed point in feature space
@@ -166,7 +166,7 @@ def _pool(tokens: torch.Tensor, fg_mask: torch.Tensor | None = None) -> torch.Te
     if fg_mask is not None:
         # Weighted mean over foreground patches. If a row of fg_mask is
         # all-False (no foreground), fall back to the full mean for
-        # that row only — vectorised so we don't loop per image.
+        # that row only - vectorised so we don't loop per image.
         fg = fg_mask.to(patch_t.dtype).unsqueeze(-1)  # (B, P, 1)
         denom = fg.sum(dim=1)                         # (B, 1)
         masked_mean = (patch_t * fg).sum(dim=1) / denom.clamp(min=1.0)
@@ -223,13 +223,13 @@ def encode_image_patches(pil: PILImage.Image) -> tuple[np.ndarray, np.ndarray]:
 
     Returns (patch_tokens, fg_mask) where:
       - patch_tokens: (P, D) float32, L2-normalised per row
-      - fg_mask: (P,) bool — True where the patch overlaps the
+      - fg_mask: (P,) bool - True where the patch overlaps the
         SAM-masked foreground (per `_patch_fg_mask`).
 
     P = (INPUT_SIDE / 14)^2 (1369 at 518×518). D = EMBEDDING_DIM
     (1024 for ViT-L/14).
 
-    No TTA — patches already encode position-specific detail, so
+    No TTA - patches already encode position-specific detail, so
     averaging across views washes out the spatial information that
     patch matching exists to use. CLS token is dropped (we only
     care about the patch grid here).
@@ -276,7 +276,7 @@ def encode_image(pil: PILImage.Image) -> np.ndarray:
         pixel_values = inputs["pixel_values"].to(_DEVICE)
         if pixel_values.dtype != _MODEL.dtype:
             pixel_values = pixel_values.to(_MODEL.dtype)
-        # Foreground patch mask in (1, P) — _pool drops black-only
+        # Foreground patch mask in (1, P) - _pool drops black-only
         # patches from the patch_mean so they don't dilute the
         # embedding. (1, P) instead of (P,) so the mask broadcasts
         # over the (1, 1+P, D) token tensor.
@@ -298,7 +298,7 @@ def _tta_views(img: PILImage.Image) -> list[PILImage.Image]:
     and re-normalised so the per-image output is the centroid.
 
     The intuition is that subtle distinctions like ear length or
-    limb proportion can flip between views — flipping reveals the
+    limb proportion can flip between views - flipping reveals the
     object from the mirror angle, and the zoomed-out view brings
     in surrounding context so the network sees proportion against
     a wider frame. Voting across views is more discriminative than
@@ -308,10 +308,10 @@ def _tta_views(img: PILImage.Image) -> list[PILImage.Image]:
     Padding fills with BLACK to match the upstream `inpaint_bbox_crop`
     background (which also fills non-mask pixels with black). Using
     the same fill keeps the TTA's zoom-out frame consistent with
-    the masked input — no second background colour for the model
+    the masked input - no second background colour for the model
     to encode.
 
-    Vertical flip / large rotation are deliberately excluded — they
+    Vertical flip / large rotation are deliberately excluded - they
     invalidate identity for orientation-sensitive labels (number
     plates, faces, "horse standing vs lying", etc.).
     """
@@ -341,7 +341,7 @@ def encode_images_batch(pils: list[PILImage.Image], *, tta: bool = True) -> np.n
 
     TTA is ON by default for every caller (references at upload, the
     edit-flush PUT, the imports pipeline, click-to-detect, and the
-    standalone /embed_crops endpoint) — fine-grained discrimination
+    standalone /embed_crops endpoint) - fine-grained discrimination
     relies on the multi-view smoothing, so the only path that opts
     out is `warmup` where the output is discarded anyway.
 
@@ -350,7 +350,7 @@ def encode_images_batch(pils: list[PILImage.Image], *, tta: bool = True) -> np.n
     flip, +10% zoom-out with black pad). All views go through one
     batched forward pass at 518×518 grouped back to (N, 3, D), each
     view L2-normalised, mean-pooled across views, and re-normalised.
-    The per-image output is the centroid of three view embeddings —
+    The per-image output is the centroid of three view embeddings -
     same dim, lower variance, better robustness to lighting / pose
     quirks that would tilt a single pass.
 
@@ -422,14 +422,14 @@ def inpaint_bbox_crop(
     """Crop `image` to `box`, then replace non-mask pixels with a flat
     fill colour so DINOv2 only sees the object SAM identified.
 
-    Default fill is now BLACK (0, 0, 0) — switched from grey on the
+    Default fill is now BLACK (0, 0, 0) - switched from grey on the
     user's instruction. The intuition: grey lands on the centre of
     the ImageNet normalisation distribution and contributes "neutral"
     activations, but in practice the patch_mean pool still averages
     those neutral patches with object patches and dilutes the signal
     by a factor of (n_bg / n_total). A black background activates a
     consistent, high-contrast silhouette boundary at the edge of the
-    object — which is exactly the kind of feature DINOv2 was trained
+    object - which is exactly the kind of feature DINOv2 was trained
     to encode strongly. Reference and live-query crops both use the
     same procedure, so any systematic bias from the black fill is
     common-mode and cancels in the cosine match. Pass

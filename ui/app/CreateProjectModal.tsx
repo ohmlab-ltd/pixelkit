@@ -108,7 +108,7 @@ export function CreateProjectModal({
             </div>
           )}
           {coverPreview && (
-            // Legibility scrim over the photo only — never over the flat
+            // Legibility scrim over the photo only - never over the flat
             // panel placeholder.
             <span className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/40 to-transparent px-3 py-2 text-xs font-medium text-white opacity-0 transition group-hover:opacity-100">
               Change cover

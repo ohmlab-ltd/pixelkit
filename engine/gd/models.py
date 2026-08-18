@@ -1,4 +1,4 @@
-"""Model manager — download state, HF token, progress.
+"""Model manager - download state, HF token, progress.
 
 Owns everything about getting weights onto disk:
   - the registry of models the portable build uses (SAM3 required+gated,
@@ -28,7 +28,7 @@ import workspace
 SAM3_REPO = os.environ.get("SAM3_MODEL_ID", "facebook/sam3")
 DINO_REPO = os.environ.get("V2_DINO_MODEL", "facebook/dinov2-large")
 
-# Skip alternative-format mirrors some repos carry (GGUF/ONNX etc.) —
+# Skip alternative-format mirrors some repos carry (GGUF/ONNX etc.) -
 # transformers only needs configs + safetensors + tokenizer/processor files.
 _ALLOW_PATTERNS = [
     "*.json", "*.txt", "*.model", "*.safetensors",
@@ -126,7 +126,7 @@ def validate_token(token: str | None = None) -> dict[str, Any]:
     except GatedRepoError:
         out["sam3Access"] = False
         out["detail"] = (
-            f"token is valid but has no access to {SAM3_REPO} — "
+            f"token is valid but has no access to {SAM3_REPO} - "
             "accept the license on the model page first"
         )
     except RepositoryNotFoundError:
@@ -216,7 +216,7 @@ def _make_tqdm(progress: dict[str, Any]):
 
 def start_download(name: str) -> dict[str, Any]:
     """Kick a background download; returns the progress record. Safe to
-    call repeatedly — an in-flight download is returned, a finished one
+    call repeatedly - an in-flight download is returned, a finished one
     restarts only if the snapshot is incomplete."""
     if name not in REGISTRY:
         raise KeyError(name)

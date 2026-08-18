@@ -157,7 +157,7 @@ export function ReviewModeV2({
     try {
       window.localStorage.setItem("pk-review-confidence-sort", next ? "1" : "0");
     } catch {
-      /* private mode etc. — the toggle still works for this session */
+      /* private mode etc. - the toggle still works for this session */
     }
     // Deck reorders: land on the first unrated card of the new order
     // (index 0 would re-deal already-rated cards in "unrated" scope).
@@ -284,7 +284,7 @@ export function ReviewModeV2({
       <div
         // In-content PAGE: fills the shell's content area (below the
         // title bar, above the status bar, right of the Explorer side
-        // bar) on an opaque ground — the app chrome stays visible.
+        // bar) on an opaque ground - the app chrome stays visible.
         className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] z-[1200] grid place-items-center bg-[var(--background)] p-6"
       >
         <div className="max-w-md rounded-md border border-[var(--line)] bg-[var(--panel)] px-8 py-7 text-center">
@@ -315,7 +315,7 @@ export function ReviewModeV2({
   const tintOpacity = animating ? 0 : Math.min(0.18, tintIntensity * 0.18);
 
   return (
-    // Contained in the shell's content area — the Explorer tree, title
+    // Contained in the shell's content area - the Explorer tree, title
     // bar and status bar stay visible while reviewing.
     <div
       // In-content PAGE, not an overlay: opaque ground filling the

@@ -81,7 +81,7 @@ export const setHfToken = (token: string) =>
 export const clearHfToken = () =>
   apiFetch("/api/settings/hf-token", { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r));
 
-// NOTE: the per-model download/load/unload client calls are gone —
+// NOTE: the per-model download/load/unload client calls are gone -
 // models are engine-managed plumbing (auto-download + auto-load once
 // the HF token exists); the UI only ever READS /api/models/status.
 

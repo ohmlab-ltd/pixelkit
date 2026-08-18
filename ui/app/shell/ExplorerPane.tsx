@@ -13,7 +13,7 @@
 //   GET /api/containers                → { containers: [{id, name, ...}] }
 //   GET /api/projects?owner=<user>&…   → {total, items: ProjectSummary[]}
 //     (each item: id, name, n_images, n_references, derived, v2,
-//      createdBy, container: {id, name} | null — the reverse map that
+//      createdBy, container: {id, name} | null - the reverse map that
 //      assigns a dataset to its Project)
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -166,7 +166,7 @@ export function ExplorerPane({
   onOpenDataset: (ds: ExplorerDataset) => void;
   onOpenSection: (ds: ExplorerDataset, section: DatasetSection) => void;
   /** Open the Project (container) page for a top-level tree row.
-   *  Fired by the row's NAME area only — the chevron just expands. */
+   *  Fired by the row's NAME area only - the chevron just expands. */
   onOpenProject: (containerId: string) => void;
   onNewDataset: () => void;
   /** Collapse the side bar (pane-header chevron button). The
@@ -210,7 +210,7 @@ export function ExplorerPane({
           containerId: p.container?.id ?? null,
         })),
       );
-      // listContainers() returns null on failure — keep the last-known
+      // listContainers() returns null on failure - keep the last-known
       // list rather than clobbering the tree with an empty state.
       if (cards !== null) setContainers(cards);
       setError(null);
@@ -233,7 +233,7 @@ export function ExplorerPane({
   // the change right away instead of waiting out the 10 s poll.
   useEffect(() => onExplorerRefresh(() => { void refresh(); }), [refresh]);
 
-  // Opening a dataset (from anywhere — tree, workspace cards, deep
+  // Opening a dataset (from anywhere - tree, workspace cards, deep
   // link) reveals its section rows: expand the dataset node and the
   // Project that contains it, so the selection is always visible.
   // Guarded by a "handled" ref so the 10s poll's fresh `datasets`
@@ -251,11 +251,11 @@ export function ExplorerPane({
     setDsExpanded((prev) =>
       prev.has(selectedDatasetId) ? prev : new Set(prev).add(selectedDatasetId),
     );
-    if (datasets === null) return; // container unknown — retry once loaded
+    if (datasets === null) return; // container unknown - retry once loaded
     // A just-created dataset can be selected BEFORE the listing has
     // caught up (the create path fires an explorer-refresh, but this
     // effect may run against the stale array first). Don't mark it
-    // handled until the dataset actually appears — the refreshed
+    // handled until the dataset actually appears - the refreshed
     // `datasets` re-runs this effect and the container then expands.
     const ds = datasets.find((d) => d.id === selectedDatasetId);
     if (!ds) return;
@@ -399,7 +399,7 @@ export function ExplorerPane({
                   {/* Two sibling buttons, same pattern as DatasetNode:
                       the chevron ONLY toggles expansion, the name row
                       opens the Project page (and reveals the children
-                      as a side effect — expand, never collapse). */}
+                      as a side effect - expand, never collapse). */}
                   <div className="flex w-full items-stretch pl-2">
                     <button
                       type="button"
@@ -444,8 +444,8 @@ export function ExplorerPane({
 }
 
 // One dataset in the tree plus (for V2 datasets) its expandable
-// section rows. V1 datasets have no sections — the legacy view keeps
-// its own internal nav — so they render as a plain row.
+// section rows. V1 datasets have no sections - the legacy view keeps
+// its own internal nav - so they render as a plain row.
 function DatasetNode({
   ds,
   selected,
@@ -483,7 +483,7 @@ function DatasetNode({
   return (
     <>
       {hasSections ? (
-        // Two sibling buttons (chevron + name) — nesting a button in a
+        // Two sibling buttons (chevron + name) - nesting a button in a
         // button is invalid HTML. Chevron toggles the section rows,
         // the name row opens the dataset (which also expands it via
         // the selection effect in the pane).

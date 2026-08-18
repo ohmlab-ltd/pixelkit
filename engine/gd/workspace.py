@@ -1,7 +1,7 @@
 """Workspace resolution for the portable build.
 
-Everything PixelKit stores — projects, datasets, images, annotations, model
-weights — lives inside one user-chosen workspace folder. This module resolves
+Everything PixelKit stores - projects, datasets, images, annotations, model
+weights - lives inside one user-chosen workspace folder. This module resolves
 that folder and must be imported BEFORE torch/transformers so HF_HOME points
 model downloads into the workspace.
 
@@ -10,7 +10,7 @@ Resolution order:
   2. "workspace" key in the app config file (per-OS config dir)
   3. default: ~/PixelKit
 
-The app config dir (small, machine-local, never inside the workspace — the
+The app config dir (small, machine-local, never inside the workspace - the
 workspace may be synced or shared, and config holds the HF token):
   macOS:   ~/Library/Application Support/PixelKit
   Windows: %APPDATA%/PixelKit

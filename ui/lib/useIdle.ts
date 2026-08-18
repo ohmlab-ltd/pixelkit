@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 //
 // Used to suspend background polling (augment job active, sidecar
 // signal) so an idle tab doesn't keep firing /api/v2 requests
-// every 2 s — eats Vercel observability quota for no user-visible
+// every 2 s - eats Vercel observability quota for no user-visible
 // benefit. Activity flips us back to active immediately so the
 // next genuine interaction sees up-to-date state.
 export function useIdle(timeoutMs: number = 90_000): boolean {
