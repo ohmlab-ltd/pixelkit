@@ -22,6 +22,7 @@ This document is the public contract; the implementation is
         references/               # reference crops ("specific" datasets)
         augmentations/            # generated variants + transformed anns
         snapshots/                # annotation snapshots (zips; see below)
+        models/                   # trained models + Neuro N6 exports
         thumbs/                   # thumbnails/previews (regenerable cache)
         exports/                  # export zips land here
     <dataset-slug>/               # datasets outside any Project sit at root

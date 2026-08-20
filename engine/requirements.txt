@@ -20,3 +20,5 @@ orjson>=3.10
 msgpack>=1.0
 psutil>=5.9
 requests>=2.31
+onnx>=1.16
+onnxruntime>=1.18

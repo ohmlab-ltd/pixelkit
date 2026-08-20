@@ -31,6 +31,7 @@ function jobVerb(kind: string): string {
   if (kind === "label_charlie") return "Labelling";
   if (kind === "purge_label") return "Removing label";
   if (kind === "augment_generate") return "Augmenting";
+  if (kind === "train_yolox") return "Training";
   const words = kind.replace(/[_-]+/g, " ").trim();
   return words ? words[0].toUpperCase() + words.slice(1) : "Working";
 }

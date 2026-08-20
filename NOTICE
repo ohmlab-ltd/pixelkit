@@ -12,3 +12,10 @@ are licensed by their respective owners - in particular:
     Hugging Face before download.
   - facebook/dinov2-large: Apache License 2.0.
   - Qwen/Qwen3-VL-2B-Instruct (optional): Apache License 2.0.
+
+The engine vendors model-definition and loss code from YOLOX
+(https://github.com/Megvii-BaseDetection/YOLOX), Copyright (c) Megvii
+Inc., Apache License 2.0, at engine/gd/vendor/yolox/ (from the
+yolox==0.3.0 sdist, with minor import/logging adaptations). Training
+may download Megvii's COCO-pretrained yolox_nano checkpoint at the
+user's request; it carries the same Apache-2.0 license.

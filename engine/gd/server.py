@@ -745,6 +745,7 @@ async def lifespan(app: FastAPI):
         state["charlie"] = None
 
     state["jobs"].register_runner("label_charlie", _run_label_charlie_job)
+    state["jobs"].register_runner("train_yolox", _run_train_yolox_job)
     state["jobs"].register_runner("purge_label", _run_purge_label_job)
     state["jobs"].register_runner("augment_generate", _gpu_job_guarded(_run_augment_generate_job))
 
@@ -3342,6 +3343,69 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
     # _invalidate_project_payloads above already deleted the stale sidecar
     # files; the wrapper's _kick_sidecar_refresh rebuilds them so the next
     # /overview / /initial GET serves from disk, not a request-thread synth.
+
+
+_TRAIN_IMGSZ = (128, 192, 256, 320, 416)
+
+
+async def _run_train_yolox_job(job, emit, cancel_event):
+    """YOLOX-Nano training + Neuro N6 export (gd/train_yolox.py).
+
+    Holds the GPU gate at job priority while training shares the
+    labelling device; a params.device targeting a DIFFERENT CUDA
+    index (multi-GPU boxes) trains outside the gate so labelling
+    stays interactive on the primary card."""
+    import train_yolox as _ty
+
+    params = job.params or {}
+    engine_dev = str(state.get("device") or "cpu")
+    train_dev = (str(params.get("device") or "").strip() or engine_dev)
+    if train_dev == "cpu" and _configured_device() != "cpu":
+        raise RuntimeError(
+            "no GPU available for training (switch Compute to CPU in Settings to force)"
+        )
+    try:
+        epochs = max(1, min(500, int(params.get("epochs", 50))))
+    except (TypeError, ValueError):
+        epochs = 50
+    try:
+        imgsz = int(params.get("imgsz", 256))
+    except (TypeError, ValueError):
+        imgsz = 256
+    if imgsz not in _TRAIN_IMGSZ:
+        imgsz = 256
+
+    cfg = _ty.TrainConfig(epochs=epochs, imgsz=imgsz, device=train_dev)
+    loop = asyncio.get_running_loop()
+
+    def prog(p: dict) -> None:
+        fut = asyncio.run_coroutine_threadsafe(
+            emit("progress", {
+                "index": p.get("index"),
+                "total": p.get("total"),
+                "image": p.get("phase") or "",
+            }),
+            loop,
+        )
+        try:
+            fut.result(timeout=5)
+        except Exception:
+            pass  # progress is best-effort
+
+    async def _go():
+        return await asyncio.to_thread(_ty.train, job.project, cfg, prog, cancel_event)
+
+    try:
+        if train_dev == engine_dev:
+            async with state["gpu_lock"]:
+                report = await _go()
+        else:
+            report = await _go()
+    except _ty.Cancelled:
+        return {"cancelled": True}
+    print(f"[train-yolox] {job.project}: AP50 fp32={report.get('ap50_fp32')} "
+          f"int8={report.get('ap50_int8')} run={report.get('run')}")
+    return report
 
 
 async def _run_purge_label_job(job, emit, cancel_event):
@@ -16195,7 +16259,7 @@ async def schedule_job(
     dataset's own creator, OR (for a dataset in a Project) any editor/owner of
     that Project, so a Project editor can run auto-labelling / training on a
     dataset a teammate created."""
-    if payload.kind not in ("label_charlie", "purge_label"):
+    if payload.kind not in ("label_charlie", "purge_label", "train_yolox"):
         raise HTTPException(400, f"unknown kind: {payload.kind}")
     proj = project_dir(payload.project)
     if not proj.exists():
@@ -16280,6 +16344,24 @@ async def schedule_job(
                 "no images to process - drop some onto the dataset first"
                 if force_relabel
                 else "no unlabelled images to process",
+            )
+    elif payload.kind == "train_yolox":
+        manifest = project_manifest
+
+        def _is_labelled(e: dict) -> bool:
+            if e.get("editedBoxesSet"):
+                edited = e.get("editedBoxes")
+                return isinstance(edited, list) and len(edited) > 0
+            return bool(e.get("detections"))
+
+        n_images = sum(
+            1
+            for e in (manifest.get("imports") or [])
+            if isinstance(e, dict) and _is_labelled(e)
+        )
+        if n_images < 2:
+            raise HTTPException(
+                400, "training needs at least 2 labelled images - label some first"
             )
 
     job = state["jobs"].schedule(
@@ -18816,6 +18898,61 @@ async def import_legacy_endpoint(payload: LegacyImportIn):
     # projects/containers stay invisible until an engine restart.
     store.rescan()
     return {"ok": True}
+
+
+# ── Trained models (YOLOX-Nano runs under <dataset>/models/) ─────────────────
+
+_RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
+
+
+@app.get("/api/v2/projects/{project_id}/models")
+async def trained_models_list(project_id: str):
+    try:
+        d = store.dataset_dir(project_id)
+    except KeyError:
+        raise HTTPException(404, "project not found")
+    out = []
+    root = d / "models" / "yolox_nano"
+    if root.exists():
+        for run_dir in sorted(root.iterdir(), reverse=True):
+            if not run_dir.is_dir() or not _RUN_ID_RE.fullmatch(run_dir.name):
+                continue
+            rep = {}
+            try:
+                rep = _json_loads((run_dir / "report.json").read_bytes())
+            except Exception:
+                continue  # half-written run (crash mid-export): hide it
+            out.append({
+                "run": run_dir.name,
+                "model": rep.get("model", "yolox_nano"),
+                "imgsz": rep.get("imgsz"),
+                "epochs": rep.get("epochs"),
+                "images": rep.get("images"),
+                "ap50Fp32": rep.get("ap50_fp32"),
+                "ap50Int8": rep.get("ap50_int8"),
+                "minutes": rep.get("minutes"),
+                "hasExport": (run_dir / "export.zip").is_file(),
+            })
+    return {"models": out}
+
+
+@app.get("/api/v2/projects/{project_id}/models/{run_id}/export")
+async def trained_model_export(project_id: str, run_id: str):
+    if not _RUN_ID_RE.fullmatch(run_id):
+        raise HTTPException(400, "bad run id")
+    try:
+        d = store.dataset_dir(project_id)
+    except KeyError:
+        raise HTTPException(404, "project not found")
+    z = d / "models" / "yolox_nano" / run_id / "export.zip"
+    if not z.is_file():
+        raise HTTPException(404, "export not found")
+    name = _safe_slug((load_manifest(project_id, copy=False) or {}).get("name") or project_id)
+    return FileResponse(
+        z,
+        media_type="application/zip",
+        filename=f"{name}-neuron6-{run_id}.zip",
+    )
 
 
 # ── Dataset snapshots ─────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@ import { apiFetch } from "../../lib/apiFetch";
 import { colourForLabelStable } from "./OnboardLabelsV2";
 import { FactorRadar, FACTOR_ORDER, FACTOR_INFO, factorColour } from "./HealthRadar";
 import { VariationPlot, type StatsPoint, type AugmentPoint } from "./DatasetStatsCard";
+import { TrainCard } from "./TrainCard";
 import type { StoreImport } from "./store/projectStore";
 
 // Project Overview body. Answers "how is this project doing?" at a glance:
@@ -427,6 +428,7 @@ export function OverviewPanel({
             </Card>
           </div>
           <div className="lg:col-span-1">
+            {projectId && <TrainCard projectId={projectId} />}
             <Card title="Activity">
               {activity.length === 0 ? (
                 <p className="m-auto text-[13px] text-foreground/55">Activity will appear here.</p>
