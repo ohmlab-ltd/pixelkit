@@ -20,9 +20,23 @@ Everything runs locally against one PixelKit dataset:
   5. Writes the Neuro N6 bundle: model + labels.h + sketch snippet +
      report.json + export.zip under <dataset>/models/yolox_nano/<run>/.
 
-Input contract (documented in the snippet): RGB, 0-255, letterboxed to
-a square with 114-gray padding, NO normalization - matching upstream
-YOLOX and keeping the embedded preprocessing trivial.
+INPUT CONTRACT (Neuro N6 platform contract, not a model choice). The
+DCMIPP DMAs packed interleaved RGB888 straight into the model's input
+buffer, and stedgeai is told `--input-data-type uint8
+--inputs-ch-position chlast`. That re-encoding is only correct when the
+graph input is quantised ASYMMETRICALLY over [0,1]: scale 1/255,
+zero-point -128 (int8) == uint8 zero-point 0. So the network is trained
+on [0,1] tensors (RGB, letterboxed with 114/255 gray) and calibration
+carries a black and a white frame, which puts MinMax exactly on [0,1].
+_verify_input_contract() then refuses to emit a model that misses it -
+this failure is silent on device, and stedgeai rejects an unquantised
+input outright.
+
+OUTPUT: raw head rows, decoded on the M55 (see yolox_pp.c), because
+YOLOX's in-graph decode exports dynamic-shape ops (ScatterND/Expand/
+Where) that ST Edge AI cannot shape-infer. Rows are
+[dx, dy, dw, dh, obj, cls...] with obj/cls already sigmoided and the
+box terms in grid units.
 """
 from __future__ import annotations
 
@@ -44,6 +58,7 @@ import torch
 import store
 import workspace
 from vendor.yolox import YOLOX, YOLOPAFPN, YOLOXHead, postprocess
+from vendor.yolox.network_blocks import BaseConv
 
 PRETRAINED_URL = (
     "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_nano.pth"
@@ -228,7 +243,8 @@ def _make_batch(samples: list[Sample], idxs: list[int], size: int, train: bool,
         if train:
             img, boxes, cls = _augment(img, boxes, cls)
         img, scale, dx, dy = letterbox(img, size)
-        imgs[bi] = img.astype(np.float32).transpose(2, 0, 1)
+        # [0,1], not [0,255]: see the input contract in the module docstring.
+        imgs[bi] = img.astype(np.float32).transpose(2, 0, 1) / 255.0
         n = min(len(boxes), max_objs)
         for j in range(n):
             x0, y0, x1, y1 = boxes[j] * scale
@@ -292,6 +308,102 @@ def ap50(preds: list[np.ndarray], gts: list[np.ndarray], n_classes: int,
     return mean, per_class
 
 
+# Contract constants: uint8 camera bytes re-encoded as int8 must mean [0,1].
+CONTRACT_SCALE = 1.0 / 255.0
+CONTRACT_ZP = -128
+
+
+def _decode_raw(raw: np.ndarray, imgsz: int) -> np.ndarray:
+    """Apply YOLOX's grid decode to raw head rows, in numpy.
+
+    The graph no longer does this (it exports dynamic-shape ops ST Edge
+    AI cannot handle), so the host does it for scoring and yolox_pp.c
+    does it on the M55. Row order is stride 8, then 16, then 32."""
+    out = np.array(raw, dtype=np.float32, copy=True)
+    grids, strides = [], []
+    for s_ in (8, 16, 32):
+        g = imgsz // s_
+        yv, xv = np.meshgrid(np.arange(g), np.arange(g), indexing="ij")
+        grids.append(np.stack((xv, yv), 2).reshape(-1, 2))
+        strides.append(np.full((g * g, 1), s_, dtype=np.float32))
+    grid = np.concatenate(grids, 0)[None].astype(np.float32)
+    stride = np.concatenate(strides, 0)[None]
+    out[..., :2] = (out[..., :2] + grid) * stride
+    out[..., 2:4] = np.exp(np.clip(out[..., 2:4], -20, 20)) * stride
+    return out
+
+
+def _verify_input_contract(path: Path) -> dict:
+    """Pin and then CHECK the graph input's quantisation.
+
+    stedgeai is told to re-encode the input as uint8 channel-last; that
+    is only correct for an asymmetric [0,1] input (scale 1/255, zp
+    -128). A model that misses it either fails to build or, worse,
+    runs on scrambled values and detects noise. Refuse to emit one."""
+    import onnx
+    from onnx import helper, numpy_helper as nh
+
+    m = onnx.load(str(path))
+    g = m.graph
+    inp = g.input[0].name
+    init = {i.name: i for i in g.initializer}
+    q = next((n for n in g.node if n.op_type == "QuantizeLinear" and n.input[0] == inp), None)
+    calibrated = None
+    if q is not None:
+        arr0 = {i.name: nh.to_array(i) for i in g.initializer}
+        cal_s, cal_z = float(arr0[q.input[1]]), int(arr0[q.input[2]])
+        calibrated = {"scale": cal_s, "zeroPoint": cal_z}
+        # Calibration should already BE the contract (we train on [0,1] and
+        # calibrate with a black and a white frame). If it is not, the
+        # preprocessing has drifted and pinning would be the post-hoc
+        # rewrite that measurably costs more accuracy than it saves:
+        # refuse instead.
+        if cal_z != CONTRACT_ZP or abs(cal_s - CONTRACT_SCALE) > 0.02 * CONTRACT_SCALE:
+            raise ValueError(
+                f"export rejected: input calibrated to scale={cal_s:.8f} zp={cal_z}, "
+                f"but the Neuro N6 contract needs scale={CONTRACT_SCALE:.8f} zp={CONTRACT_ZP}. "
+                "The model was calibrated on the wrong input range - fix the "
+                "preprocessing rather than rewriting the finished network.")
+        # Within tolerance: make it exact.
+        init[q.input[1]].CopyFrom(nh.from_array(np.float32(CONTRACT_SCALE), q.input[1]))
+        init[q.input[2]].CopyFrom(nh.from_array(np.int8(CONTRACT_ZP), q.input[2]))
+    else:
+        # Nothing quantised the input (e.g. the first op is a reshape):
+        # insert the contract pair and rewire the original consumers.
+        s_n, z_n = inp + "_pk_scale", inp + "_pk_zp"
+        g.initializer.extend([nh.from_array(np.float32(CONTRACT_SCALE), s_n),
+                              nh.from_array(np.int8(CONTRACT_ZP), z_n)])
+        qout, dout = inp + "_pk_q", inp + "_pk_dq"
+        for n in g.node:
+            for i, nm in enumerate(n.input):
+                if nm == inp:
+                    n.input[i] = dout
+        g.node.insert(0, helper.make_node("DequantizeLinear", [qout, s_n, z_n], [dout],
+                                          name=inp + "_pk_DQ"))
+        g.node.insert(0, helper.make_node("QuantizeLinear", [inp, s_n, z_n], [qout],
+                                          name=inp + "_pk_Q"))
+    onnx.save(m, str(path))
+
+    # Re-read and assert, so the check tests the file we actually ship.
+    m = onnx.load(str(path))
+    g = m.graph
+    arr = {i.name: nh.to_array(i) for i in g.initializer}
+    q = next((n for n in g.node
+              if n.op_type == "QuantizeLinear" and n.input[0] == g.input[0].name), None)
+    if q is None:
+        raise ValueError("export rejected: graph input is not quantised (Neuro N6 "
+                         "needs an asymmetric [0,1] input; see the module docstring)")
+    scale, zp = float(arr[q.input[1]]), int(arr[q.input[2]])
+    if abs(scale - CONTRACT_SCALE) > 1e-9 or zp != CONTRACT_ZP or arr[q.input[2]].dtype != np.int8:
+        raise ValueError(
+            f"export rejected: input quantisation is scale={scale} zp={zp} "
+            f"({arr[q.input[2]].dtype}), the Neuro N6 contract needs "
+            f"scale={CONTRACT_SCALE} zp={CONTRACT_ZP} (int8)")
+    return {"scale": scale, "zeroPoint": zp,
+            "range": [round(scale * (-128 - zp), 6), round(scale * (127 - zp), 6)],
+            "calibrated": calibrated}
+
+
 def _decode_rows(out: torch.Tensor, conf: float, nms: float, n_classes: int) -> np.ndarray:
     dets = postprocess(out, n_classes, conf, nms)[0]
     if dets is None:
@@ -307,10 +419,18 @@ class Cancelled(Exception):
     pass
 
 
-def _build_model(n_classes: int) -> YOLOX:
+def _build_model(n_classes: int, conv_stem: bool = True) -> YOLOX:
     backbone = YOLOPAFPN(depth=0.33, width=0.25, depthwise=True)
     head = YOLOXHead(num_classes=n_classes, width=0.25, depthwise=True)
     model = YOLOX(backbone, head)
+    if conv_stem:
+        # YOLOX's Focus stem is a 4-way slice + concat. The Neural-ART
+        # compiler maps those Slices as pure-software epochs (measured:
+        # 6 of 129), so swap in the stride-2 conv YOLOv5 and ST's own
+        # st_yoloxn use instead. Same output shape, so the rest of the
+        # COCO warm start still loads; only the stem trains from scratch.
+        base_ch = int(0.25 * 64)
+        model.backbone.backbone.stem = BaseConv(3, base_ch, ksize=6, stride=2, act="silu")
 
     def init(m):
         if isinstance(m, torch.nn.BatchNorm2d):
@@ -331,8 +451,33 @@ def _load_pretrained(model: YOLOX) -> bool:
             urllib.request.urlretrieve(PRETRAINED_URL, tmp)  # noqa: S310 (pinned URL)
             tmp.replace(dest)
         ckpt = torch.load(dest, map_location="cpu", weights_only=False)
-        state = ckpt.get("model", ckpt)
+        state = dict(ckpt.get("model", ckpt))
         own = model.state_dict()
+
+        # The COCO checkpoint has YOLOX's Focus stem (4-way slice + 3x3
+        # conv on 12 channels). We build a 6x6 stride-2 conv instead, and
+        # the two are exactly equivalent: grid cell (i,j) of the Focus
+        # path reads original pixels 2i-2..2i+3, which is precisely the
+        # 6x6 stride-2 window. Remap rather than drop it, so small
+        # datasets keep a warm first layer.
+        f_w = state.pop("backbone.backbone.stem.conv.conv.weight", None)
+        tgt = "backbone.backbone.stem.conv.weight"
+        if f_w is not None and tgt in own and own[tgt].shape[-1] == 6:
+            k6 = torch.zeros_like(own[tgt])                 # [out, 3, 6, 6]
+            for grp, (py, px) in enumerate(((0, 0), (1, 0), (0, 1), (1, 1))):
+                for di in range(-1, 2):
+                    for dj in range(-1, 2):
+                        k6[:, :, 2 * di + py + 2, 2 * dj + px + 2] =                             f_w[:, grp * 3:(grp + 1) * 3, di + 1, dj + 1]
+            # Trained on [0,255]; the graph now takes [0,1], and this is
+            # the first layer, so fold the 255 in here. Everything
+            # downstream then sees identical activations.
+            state[tgt] = k6 * 255.0
+        # Focus wrapped its BN one level deeper than a bare BaseConv does.
+        for suffix in ("weight", "bias", "running_mean", "running_var", "num_batches_tracked"):
+            v = state.pop(f"backbone.backbone.stem.conv.bn.{suffix}", None)
+            if v is not None:
+                state[f"backbone.backbone.stem.bn.{suffix}"] = v
+
         loadable = {
             k: v for k, v in state.items()
             if k in own and own[k].shape == v.shape
@@ -465,16 +610,18 @@ def train(
                out_dir / "best.pt")
 
     model.eval().cpu()
-    model.head.decode_in_inference = True
+    # Raw head: the in-graph decode exports ScatterND/Expand/Where, which
+    # ST Edge AI cannot shape-infer. yolox_pp.c decodes on the M55.
+    model.head.decode_in_inference = False
     fp32_onnx = out_dir / f"{slug}_fp32.onnx"
     torch.onnx.export(
         model, torch.zeros(1, 3, cfg.imgsz, cfg.imgsz),
         str(fp32_onnx), opset_version=17,
-        input_names=["images"], output_names=["dets"], dynamo=False,
+        input_names=["images"], output_names=["raw"], dynamo=False,
     )
 
     int8_onnx = out_dir / f"{slug}_int8.onnx"
-    int8_ap, int8_per_class = _quantize_and_score(
+    int8_ap, int8_per_class, contract = _quantize_and_score(
         fp32_onnx, int8_onnx, samples, train_s, val_s, cfg, classes)
 
     _write_bundle(out_dir, slug, classes, cfg, {
@@ -484,6 +631,9 @@ def train(
         "epochs": cfg.epochs,
         "imgsz": cfg.imgsz,
         "pretrained": pretrained_used,
+        "head": "raw",
+        "input": {**contract, "layout": "NCHW float [0,1]",
+                  "note": "stedgeai re-encodes to uint8 channel-last"},
         "ap50_fp32": round(fp32_ap, 4),
         "ap50_int8": round(int8_ap, 4),
         "per_class_fp32": {c: round(a, 4) for c, a in zip(classes, fp32_per_class)},
@@ -496,18 +646,29 @@ def train(
 # ── int8 quantization (ONNX Runtime static QDQ) ─────────────────────
 
 def _quantize_and_score(fp32_path: Path, int8_path: Path, samples, train_s, val_s,
-                        cfg: TrainConfig, classes: list[str]) -> tuple[float, list[float]]:
+                        cfg: TrainConfig, classes: list[str]
+                        ) -> tuple[float, list[float], dict]:
     from onnxruntime.quantization import (CalibrationDataReader, QuantFormat,
                                           QuantType, quantize_static)
     import onnxruntime as ort
 
     calib_idxs = train_s[: cfg.calib_images]
+    # A black and a white frame pin MinMax to exactly [0,1], so the
+    # calibrated input scale/zp ARE the contract rather than being
+    # rewritten into it afterwards (a post-hoc rewrite of a finished
+    # network leaves every downstream range mismatched).
+    extremes = [np.zeros((1, 3, cfg.imgsz, cfg.imgsz), np.float32),
+                np.ones((1, 3, cfg.imgsz, cfg.imgsz), np.float32)]
 
     class Reader(CalibrationDataReader):
         def __init__(self):
+            self._extremes = iter(extremes)
             self._it = iter(calib_idxs)
 
         def get_next(self):
+            e = next(self._extremes, None)
+            if e is not None:
+                return {"images": e}
             si = next(self._it, None)
             if si is None:
                 return None
@@ -521,12 +682,14 @@ def _quantize_and_score(fp32_path: Path, int8_path: Path, samples, train_s, val_
         weight_type=QuantType.QInt8,
         per_channel=True,
     )
+    contract = _verify_input_contract(int8_path)
 
     sess = ort.InferenceSession(str(int8_path), providers=["CPUExecutionProvider"])
     preds, gts = [], []
     for si in val_s:
         imgs, _ = _make_batch(samples, [si], cfg.imgsz, train=False)
-        out = torch.from_numpy(sess.run(None, {"images": imgs.numpy()})[0])
+        raw = sess.run(None, {"images": imgs.numpy()})[0]
+        out = torch.from_numpy(_decode_raw(raw, cfg.imgsz))
         preds.append(_decode_rows(out, 0.01, cfg.nms_thres, len(classes)))
         s = samples[si]
         img = _read_rgb(s.path)
@@ -538,7 +701,8 @@ def _quantize_and_score(fp32_path: Path, int8_path: Path, samples, train_s, val_
         g[:, [0, 2]] += dx
         g[:, [1, 3]] += dy
         gts.append(np.hstack([g, s.classes[:, None]]))
-    return ap50(preds, gts, len(classes))
+    mean, per_class = ap50(preds, gts, len(classes))
+    return mean, per_class, contract
 
 
 # ── the Neuro N6 bundle ─────────────────────────────────────────────
@@ -573,11 +737,15 @@ def _write_bundle(out_dir: Path, slug: str, classes: list[str], cfg: TrainConfig
         "",
         f"NEURON6_DECLARE_MODEL({slug});",
         "",
-        "// Input: RGB, 0-255, letterboxed to "
-        f"{cfg.imgsz}x{cfg.imgsz} with 114-gray padding (no normalization).",
-        "// Output rows: [cx, cy, w, h, objectness, class scores...] in input",
-        "// pixels; decode with the PostProcess library's YOLOX decoder",
-        "// (app_postprocess_od_yolox) using the thresholds from the header.",
+        f"// Input: {cfg.imgsz}x{cfg.imgsz}. The camera feeds the NPU directly:",
+        "// the model is quantised asymmetrically over [0,1] (scale 1/255,",
+        "// zero-point -128), which is exactly what packed RGB888 bytes mean,",
+        "// so there is no conversion step in your sketch.",
+        "//",
+        "// Output: ONE raw head tensor, rows [dx, dy, dw, dh, obj, cls...]",
+        "// (obj/cls already sigmoided, box terms in grid units). The",
+        "// PostProcess YOLOX decoder does the grid decode, thresholding and",
+        "// NMS for you using the values in the header.",
         f"// Pass &NN_Instance_{slug} to Vision as usual.",
         "",
     ])
