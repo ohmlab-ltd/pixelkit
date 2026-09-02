@@ -16,6 +16,7 @@ from .compat import meshgrid
 
 from .losses import IOUloss
 from .network_blocks import BaseConv, DWConv
+from .qat import ActFQ, fq_weight
 
 
 class YOLOXHead(nn.Module):
@@ -131,6 +132,18 @@ class YOLOXHead(nn.Module):
         self.iou_loss = IOUloss(reduction="none")
         self.strides = strides
         self.grids = [torch.zeros(1)] * len(in_channels)
+        # PixelKit QAT: pred convs (plain Conv2d) get weight + output fake
+        # quant; sigmoids a fixed [0,1] range; the concatenated raw
+        # output one shared learned range.
+        self.qat = False
+        self.fq_pred = nn.ModuleList([ActFQ() for _ in range(3 * len(in_channels))])
+        self.fq_sig = ActFQ(fixed=(0.0, 1.0))
+        self.fq_out = ActFQ()
+
+    def _pred(self, conv, x, fq):
+        if self.qat:
+            return fq(F.conv2d(x, fq_weight(conv.weight), conv.bias))
+        return conv(x)
 
     def initialize_biases(self, prior_prob):
         for conv in self.cls_preds:
@@ -145,6 +158,7 @@ class YOLOXHead(nn.Module):
 
     def forward(self, xin, labels=None, imgs=None):
         outputs = []
+        split_parts = []  # PixelKit export_split: (reg, obj, cls) per level
         origin_preds = []
         x_shifts = []
         y_shifts = []
@@ -158,11 +172,11 @@ class YOLOXHead(nn.Module):
             reg_x = x
 
             cls_feat = cls_conv(cls_x)
-            cls_output = self.cls_preds[k](cls_feat)
+            cls_output = self._pred(self.cls_preds[k], cls_feat, self.fq_pred[3 * k + 2])
 
             reg_feat = reg_conv(reg_x)
-            reg_output = self.reg_preds[k](reg_feat)
-            obj_output = self.obj_preds[k](reg_feat)
+            reg_output = self._pred(self.reg_preds[k], reg_feat, self.fq_pred[3 * k])
+            obj_output = self._pred(self.obj_preds[k], reg_feat, self.fq_pred[3 * k + 1])
 
             if self.training:
                 output = torch.cat([reg_output, obj_output, cls_output], 1)
@@ -188,9 +202,20 @@ class YOLOXHead(nn.Module):
                     origin_preds.append(reg_output.clone())
 
             else:
-                output = torch.cat(
-                    [reg_output, obj_output.sigmoid(), cls_output.sigmoid()], 1
-                )
+                if getattr(self, "export_split", False):
+                    # PixelKit: keep the three branches apart all the way
+                    # to the graph outputs. Concatenating them makes the
+                    # quantiser share one scale across reg (grid units)
+                    # and the [0,1] sigmoids, which costs ~20 AP points.
+                    split_parts.append(
+                        (reg_output, self.fq_sig(obj_output.sigmoid()),
+                         self.fq_sig(cls_output.sigmoid()))
+                    )
+                    continue
+                output = self.fq_out(torch.cat(
+                    [reg_output, self.fq_sig(obj_output.sigmoid()),
+                     self.fq_sig(cls_output.sigmoid())], 1
+                ))
 
             outputs.append(output)
 
@@ -206,11 +231,19 @@ class YOLOXHead(nn.Module):
                 dtype=xin[0].dtype,
             )
         else:
+            if getattr(self, "export_split", False):
+                def _flat(ts):
+                    return torch.cat([t.flatten(start_dim=2) for t in ts], dim=2).permute(0, 2, 1)
+                return (
+                    _flat([p[0] for p in split_parts]),   # [B, N, 4]  grid-unit box terms
+                    _flat([p[1] for p in split_parts]),   # [B, N, 1]  objectness
+                    _flat([p[2] for p in split_parts]),   # [B, N, nc] class scores
+                )
             self.hw = [x.shape[-2:] for x in outputs]
             # [batch, n_anchors_all, 85]
-            outputs = torch.cat(
+            outputs = self.fq_out(torch.cat(
                 [x.flatten(start_dim=2) for x in outputs], dim=2
-            ).permute(0, 2, 1)
+            ).permute(0, 2, 1))
             if self.decode_in_inference:
                 return self.decode_outputs(outputs, dtype=xin[0].type())
             else:

@@ -18930,6 +18930,7 @@ async def trained_models_list(project_id: str):
                 "images": rep.get("images"),
                 "ap50Fp32": rep.get("ap50_fp32"),
                 "ap50Int8": rep.get("ap50_int8"),
+                "qatEpochs": rep.get("qat_epochs"),
                 "minutes": rep.get("minutes"),
                 "hasExport": (run_dir / "export.zip").is_file(),
                 "exportRejected": bool(rep.get("exportRejected")),

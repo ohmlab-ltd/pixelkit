@@ -4,6 +4,7 @@
 
 import torch.nn as nn
 
+from .qat import ActFQ
 from .yolo_head import YOLOXHead
 from .yolo_pafpn import YOLOPAFPN
 
@@ -24,10 +25,13 @@ class YOLOX(nn.Module):
 
         self.backbone = backbone
         self.head = head
+        # PixelKit: the input is the Neuro N6 contract, uint8 bytes read
+        # as [0,1] -> scale 1/255, zero-point -128. Fixed, never learned.
+        self.fq_in = ActFQ(fixed=(0.0, 1.0))
 
     def forward(self, x, targets=None):
         # fpn output content features of [dark3, dark4, dark5]
-        fpn_outs = self.backbone(x)
+        fpn_outs = self.backbone(self.fq_in(x))
 
         if self.training:
             assert targets is not None

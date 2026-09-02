@@ -37,6 +37,7 @@ type TrainedRun = {
   images: { train: number; val: number } | null;
   ap50Fp32: number | null;
   ap50Int8: number | null;
+  qatEpochs?: number | null;
   minutes: number | null;
   hasExport: boolean;
   exportRejected?: boolean;
@@ -225,6 +226,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
                 {fmtRunDate(r.run)}
                 <span className="ml-2 text-foreground/40">
                   {r.imgsz ?? "?"}px · {r.epochs ?? "?"} epochs
+                  {typeof r.qatEpochs === "number" && r.qatEpochs > 0 ? ` + ${r.qatEpochs} QAT` : ""}
                 </span>
               </span>
               <span className="flex shrink-0 items-center gap-3 text-[11.5px] tabular-nums">

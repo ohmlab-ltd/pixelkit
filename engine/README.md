@@ -23,6 +23,10 @@ mode is explicitly chosen (very slow).
 
 Migrate SaaS-era data: `python import_legacy.py <old-dir-or-backup.zip>`.
 
+Training a YOLOX-Nano for the Neuro N6 (dataset overview -> Train card;
+export contract, NPU verification and the validated recipe are in
+[docs/TRAINING.md](../docs/TRAINING.md)).
+
 Headless batch labelling (no UI, results land in the normal workspace):
 
     pixelkit label ./photos --prompts "bolt,washer" --export yolo

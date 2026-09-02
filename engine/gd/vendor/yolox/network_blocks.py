@@ -4,6 +4,9 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+from .qat import ActFQ, fold_bn, fq_weight
 
 
 class SiLU(nn.Module):
@@ -46,8 +49,23 @@ class BaseConv(nn.Module):
         )
         self.bn = nn.BatchNorm2d(out_channels)
         self.act = get_activation(act, inplace=True)
+        # PixelKit QAT: simulated int8 on the BN-folded weight, the conv
+        # output, the sigmoid inside SiLU, and the block output - every
+        # tensor between ops, which is what the Neural-ART compiler
+        # needs to keep the whole block on the NPU (see qat.py).
+        self.qat = False
+        self.fq_pre = ActFQ()
+        self.fq_sig = ActFQ(fixed=(0.0, 1.0))
+        self.fq = ActFQ()
 
     def forward(self, x):
+        if self.qat:
+            w, b = fold_bn(self.conv, self.bn)
+            y = self.fq_pre(F.conv2d(x, fq_weight(w), b, self.conv.stride, self.conv.padding,
+                                     self.conv.dilation, self.conv.groups))
+            if isinstance(self.act, nn.SiLU):
+                return self.fq(y * self.fq_sig(torch.sigmoid(y)))
+            return self.fq(self.act(y))
         return self.act(self.bn(self.conv(x)))
 
     def fuseforward(self, x):
@@ -93,11 +111,14 @@ class Bottleneck(nn.Module):
         self.conv1 = BaseConv(in_channels, hidden_channels, 1, stride=1, act=act)
         self.conv2 = Conv(hidden_channels, out_channels, 3, stride=1, act=act)
         self.use_add = shortcut and in_channels == out_channels
+        # PixelKit QAT: a fake-quant point only where the add exists,
+        # so the "every observer saw data" check stays meaningful.
+        self.fq_add = ActFQ() if self.use_add else nn.Identity()
 
     def forward(self, x):
         y = self.conv2(self.conv1(x))
         if self.use_add:
-            y = y + x
+            y = self.fq_add(y + x)
         return y
 
 
@@ -136,10 +157,12 @@ class SPPBottleneck(nn.Module):
         )
         conv2_channels = hidden_channels * (len(kernel_sizes) + 1)
         self.conv2 = BaseConv(conv2_channels, out_channels, 1, stride=1, act=activation)
+        self.fq_cat = ActFQ()  # PixelKit QAT
+        self.fq_pool = nn.ModuleList([ActFQ() for _ in kernel_sizes])
 
     def forward(self, x):
         x = self.conv1(x)
-        x = torch.cat([x] + [m(x) for m in self.m], dim=1)
+        x = self.fq_cat(torch.cat([x] + [fq(m(x)) for m, fq in zip(self.m, self.fq_pool)], dim=1))
         x = self.conv2(x)
         return x
 
@@ -176,12 +199,13 @@ class CSPLayer(nn.Module):
             for _ in range(n)
         ]
         self.m = nn.Sequential(*module_list)
+        self.fq_cat = ActFQ()  # PixelKit QAT
 
     def forward(self, x):
         x_1 = self.conv1(x)
         x_2 = self.conv2(x)
         x_1 = self.m(x_1)
-        x = torch.cat((x_1, x_2), dim=1)
+        x = self.fq_cat(torch.cat((x_1, x_2), dim=1))
         return self.conv3(x)
 
 

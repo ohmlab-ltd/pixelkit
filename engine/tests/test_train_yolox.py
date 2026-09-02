@@ -153,3 +153,96 @@ def test_decode_raw_matches_hand_computation():
     assert d[0, 1024, 2] == pytest.approx(16 * np.e, rel=1e-5)
     # Last stride-8 row is grid (31,31).
     assert d[0, 1023, 0] == pytest.approx(31 * 8)
+
+
+# ── QAT (vendor/yolox/qat.py + export fold) ──────────────────────────
+
+def test_qat_switch_and_fixed_input_range():
+    import torch
+    from train_yolox import _build_model, CONTRACT_SCALE, CONTRACT_ZP
+    from vendor.yolox.qat import set_qat
+
+    m = _build_model(2)
+    n = set_qat(m, True)
+    assert n > 100  # one fake-quant point per tensor between ops
+    scale, zp = m.fq_in.qparams()
+    assert scale == pytest.approx(CONTRACT_SCALE) and zp == CONTRACT_ZP
+    # A learned point clamps its range to include zero and is affine.
+    fq = m.backbone.backbone.stem.fq
+    fq.enabled = True
+    fq.train()
+    fq(torch.rand(1, 4, 8, 8) + 2.0)  # all positive: lo must still be <= 0
+    s, z = fq.qparams()
+    assert s > 0 and -128 <= z <= 127
+    assert set_qat(m, False) == n
+
+
+def test_qat_forward_backward_and_export_fold(tmp_path):
+    """A QAT-instrumented model trains (STE), exports to a QDQ graph, and
+    the fold pass leaves int8 weights, int32 biases and no Constant
+    nodes - the shape the Neural-ART compiler maps fully to hardware."""
+    import numpy as np
+    import onnx
+    import torch
+    from train_yolox import (_build_model, _export_onnx, _fold_weight_quant,
+                             _verify_input_contract)
+    from vendor.yolox.qat import set_qat
+
+    m = _build_model(2)
+    set_qat(m, True)
+    m.train()
+    x = torch.rand(2, 3, 96, 96)
+    t = torch.zeros(2, 100, 5)
+    t[0, 0] = torch.tensor([1, 40.0, 40.0, 20.0, 20.0])
+    with torch.no_grad():
+        m(x, t)  # seed the observers
+    loss = m(x, t)["total_loss"]
+    assert torch.isfinite(loss)
+    loss.backward()
+
+    p = tmp_path / "qat_int8.onnx"
+    _export_onnx(m, p, 96, qat=True)
+    n_conv = _fold_weight_quant(p)
+    g = onnx.load(str(p)).graph
+    ops = [n.op_type for n in g.node]
+    assert n_conv == ops.count("Conv") > 50
+    assert "Constant" not in ops and "BatchNormalization" not in ops
+    inits = {i.name: i for i in g.initializer}
+    convs = [n for n in g.node if n.op_type == "Conv"]
+    for c in convs:
+        w_dq = next(n for n in g.node if n.output[0] == c.input[1])
+        assert w_dq.op_type == "DequantizeLinear"
+        assert inits[w_dq.input[0]].data_type == onnx.TensorProto.INT8
+        if len(c.input) > 2:
+            b_dq = next(n for n in g.node if n.output[0] == c.input[2])
+            assert inits[b_dq.input[0]].data_type == onnx.TensorProto.INT32
+    info = _verify_input_contract(p)
+    assert info["calibrated"] == {"scale": pytest.approx(1 / 255), "zeroPoint": -128}
+    # Every Q/DQ parameter is an initializer (the compiler's requirement).
+    for n in g.node:
+        if n.op_type in ("QuantizeLinear", "DequantizeLinear"):
+            assert all(i in inits for i in n.input[1:]), n.name
+
+
+@pytest.mark.skipif(__import__("neuron6_verify").find_stedgeai() is None,
+                    reason="ST Edge AI Core not installed")
+def test_qat_export_maps_fully_to_the_npu(tmp_path):
+    import torch
+    import neuron6_verify as nv
+    from train_yolox import _build_model, _export_onnx, _fold_weight_quant, _verify_input_contract
+    from vendor.yolox.qat import set_qat
+
+    m = _build_model(2)
+    set_qat(m, True)
+    m.train()
+    with torch.no_grad():
+        for _ in range(3):
+            m(torch.rand(2, 3, 128, 128), torch.zeros(2, 100, 5))
+    p = tmp_path / "qat_int8.onnx"
+    _export_onnx(m, p, 128, qat=True)
+    _fold_weight_quant(p)
+    _verify_input_contract(p)
+    info = nv.verify(p, tmp_path / "keep")
+    assert info["verified"] is True
+    assert info["epochsSoftware"] == 0, info
+    assert info["epochsHardware"] > 100

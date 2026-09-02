@@ -37,6 +37,23 @@ core's `yolox_pp.c`, because YOLOX's in-graph decode exports
 Focus stem is replaced by a 6x6 stride-2 conv (mathematically identical;
 COCO stem weights are remapped) so no `Slice` runs in software.
 
+## Why the export is quantisation-aware
+
+Post-training quantisation of this network loses a lot: on VOC2007
+(5011 images, 20 classes) the float model scores 0.550 AP@0.5 and its
+int8 PTQ export 0.339, and every class is hurt. Bisecting the loss
+showed the weights quantise for free (+0.1 with per-channel int8) and
+the entire gap is per-tensor activation quantisation in the depthwise
+backbone: outlier channels dominate each tensor's range. Better
+calibration only recovers part of it (MinMax -17, moving average -11,
+percentile 99.9 -8). So after the float run PixelKit fine-tunes for
+`qat_epochs` (default 8) with int8 simulated at every tensor between
+ops (weights per-channel, activations per-tensor with moving-average
+ranges, BatchNorm folded, input pinned to the contract) and exports the
+QDQ graph straight from that model. The exported graph carries int8
+weights, int32 biases, and Q/DQ around every op, which is the shape
+ST Edge AI maps entirely to hardware.
+
 ## NPU verification (report.json `neuron6`)
 
 When ST Edge AI Core is installed (`C:\ST\STEdgeAI\<ver>`, or
