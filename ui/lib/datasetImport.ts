@@ -130,41 +130,546 @@ function mimeForName(name: string): string | undefined {
 
 // ── Format detection + dispatch ────────────────────────────────────────────
 
+// YOLO sidecar files that name classes rather than label an image.
+const YOLO_META_RE = /^(classes\.txt|obj\.names|data\.ya?ml|dataset\.ya?ml)$/i;
+
+// Cheap extension-based guess for UI hints. parseDataset() makes the real
+// call: COCO is confirmed by sniffing JSON content (a stray metadata.json
+// must not hijack a YOLO folder), and YOLO by whether any .txt actually
+// parses as label rows.
 export function detectFormat(files: CollectedFile[]): DatasetFormat {
   let hasXml = false;
-  let hasCocoJson = false;
-  let hasYoloTxt = false;
-  let hasYoloMeta = false;
+  let hasJson = false;
+  let hasTxt = false;
   for (const cf of files) {
     const n = baseName(cf.path).toLowerCase();
     if (n.endsWith(".xml")) hasXml = true;
-    else if (n.endsWith(".json")) hasCocoJson = true;
-    else if (n.endsWith(".txt") && n !== "classes.txt") hasYoloTxt = true;
-    else if (n === "classes.txt" || n === "data.yaml" || n === "data.yml") hasYoloMeta = true;
+    else if (n.endsWith(".json")) hasJson = true;
+    else if (n.endsWith(".txt") && !YOLO_META_RE.test(n)) hasTxt = true;
   }
   if (hasXml) return "voc";
-  if (hasCocoJson) return "coco";
-  if (hasYoloTxt && hasYoloMeta) return "yolo";
+  if (hasJson) return "coco";
+  if (hasTxt) return "yolo";
   return "unknown";
 }
 
-// Parse a collected dataset. Only Pascal VOC is implemented today; COCO /
-// YOLO are detected and rejected with a clear message until their parsers
-// land (the rest of the pipeline is format-agnostic).
+// Parse a collected dataset: Pascal VOC, COCO, or YOLO. The rest of the
+// pipeline is format-agnostic - every parser yields the same ImportItem
+// shape (absolute-pixel boxes, or unit-space boxes flagged by width =
+// height = 1 for YOLO, which prepareItemForUpload scales by the decoded
+// dims).
 export async function parseDataset(
   files: CollectedFile[],
   onProgress?: (done: number, total: number) => void,
 ): Promise<ParsedDataset> {
-  const fmt = detectFormat(files);
-  if (fmt === "voc") return parseVoc(files, onProgress);
-  if (fmt === "coco" || fmt === "yolo") {
+  if (detectFormat(files) === "voc") return parseVoc(files, onProgress);
+  const cocoJsons = await findCocoJsons(files);
+  if (cocoJsons.length > 0) return parseCoco(files, cocoJsons, onProgress);
+  if (files.some((cf) => /\.txt$/i.test(baseName(cf.path)))) return parseYolo(files, onProgress);
+  throw new Error(
+    "Couldn't recognise this dataset. Supported layouts: Pascal VOC (Annotations/*.xml next to images), " +
+      "COCO (a JSON with images + annotations), or YOLO (labels/*.txt with classes.txt or data.yaml).",
+  );
+}
+
+// ── Shared image index (COCO / YOLO pairing) ───────────────────────────────
+
+type ImageIndex = {
+  all: CollectedFile[]; // every image, in input order
+  byName: Map<string, CollectedFile>; // lowercased basename (last wins)
+  byPath: Map<string, CollectedFile>; // lowercased relative path, "/"-normalised
+  collisions: Set<string>; // stems shared by >1 image (train/a.jpg + val/a.jpg)
+  byStem: (stem: string) => CollectedFile | undefined; // unambiguous stems only
+};
+
+function indexImages(files: CollectedFile[]): ImageIndex {
+  const all: CollectedFile[] = [];
+  const byName = new Map<string, CollectedFile>();
+  const byPath = new Map<string, CollectedFile>();
+  const stems = new Map<string, CollectedFile>();
+  const collisions = new Set<string>();
+  for (const cf of files) {
+    const name = baseName(cf.path);
+    if (!IMAGE_EXT_RE.test(name)) continue;
+    all.push(cf);
+    const stem = stemOf(name).toLowerCase();
+    if (stems.has(stem)) collisions.add(stem);
+    else stems.set(stem, cf);
+    byName.set(name.toLowerCase(), cf);
+    byPath.set(normPath(cf.path), cf);
+  }
+  return {
+    all,
+    byName,
+    byPath,
+    collisions,
+    byStem: (s) => (collisions.has(s) ? undefined : stems.get(s)),
+  };
+}
+
+function normPath(p: string): string {
+  return p.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+}
+
+// ── COCO ───────────────────────────────────────────────────────────────────
+
+type CocoAnn = {
+  id?: number | string;
+  image_id: number | string;
+  category_id?: number | string;
+  bbox?: unknown;
+  segmentation?: unknown;
+  iscrowd?: number;
+};
+type CocoJson = {
+  images: { id: number | string; file_name?: string; width?: number; height?: number }[];
+  annotations: CocoAnn[];
+  categories?: { id: number | string; name?: string }[];
+};
+
+function isCocoJson(d: unknown): d is CocoJson {
+  return (
+    !!d &&
+    typeof d === "object" &&
+    Array.isArray((d as CocoJson).images) &&
+    Array.isArray((d as CocoJson).annotations)
+  );
+}
+
+// Every .json whose content is COCO-shaped (train + val splits commonly
+// arrive together; all are merged).
+async function findCocoJsons(files: CollectedFile[]): Promise<{ cf: CollectedFile; data: CocoJson }[]> {
+  const out: { cf: CollectedFile; data: CocoJson }[] = [];
+  for (const cf of files) {
+    if (!/\.json$/i.test(baseName(cf.path))) continue;
+    let data: unknown;
+    try {
+      data = JSON.parse(await cf.file.text());
+    } catch {
+      continue;
+    }
+    if (isCocoJson(data)) out.push({ cf, data });
+  }
+  return out;
+}
+
+// COCO segmentation -> polygon rings as [x, y] pairs. Polygon form is a list
+// of flat [x0, y0, x1, y1, ...] rings; RLE (an object) is skipped, since the
+// editor's mask type is polygon-only. Returns "rle" so the caller can count.
+function cocoPolygons(seg: unknown): number[][][] | "rle" | null {
+  if (!seg) return null;
+  if (!Array.isArray(seg)) return typeof seg === "object" ? "rle" : null;
+  const rings: number[][][] = [];
+  const flatRings: unknown[] = seg.length > 0 && !Array.isArray(seg[0]) ? [seg] : seg;
+  for (const ring of flatRings) {
+    if (!Array.isArray(ring)) continue;
+    const nums = ring.map(Number);
+    if (nums.length < 6 || nums.length % 2 !== 0 || !nums.every(Number.isFinite)) continue;
+    const pts: number[][] = [];
+    for (let i = 0; i < nums.length; i += 2) pts.push([nums[i], nums[i + 1]]);
+    rings.push(pts);
+  }
+  return rings.length ? rings : null;
+}
+
+async function parseCoco(
+  files: CollectedFile[],
+  jsons: { cf: CollectedFile; data: CocoJson }[],
+  onProgress?: (done: number, total: number) => void,
+): Promise<ParsedDataset> {
+  const idx = indexImages(files);
+  const warnings: string[] = [];
+  const items: ImportItem[] = [];
+  const classes: string[] = [];
+  const classSeen = new Set<string>();
+  const seenImages = new Set<string>(); // normalised paths already imported
+  let boxesTotal = 0;
+  let dropped = 0;
+  let unpairedAnnotations = 0;
+  let annotated = 0;
+  let background = 0;
+  let duplicates = 0;
+  let rleMasks = 0;
+
+  const addClass = (label: string) => {
+    if (!classSeen.has(label)) {
+      classSeen.add(label);
+      classes.push(label);
+    }
+  };
+
+  const total = jsons.reduce((n, j) => n + j.data.images.length, 0);
+  let done = 0;
+  for (const { data } of jsons) {
+    // Declared categories seed the class list in declared order, so a
+    // label set survives even when a split has no instance of a class.
+    const catName = new Map<string, string>();
+    for (const c of data.categories ?? []) {
+      if (!c || c.id == null) continue;
+      const name = String(c.name ?? c.id).trim().toLowerCase();
+      if (!name) continue;
+      catName.set(String(c.id), name);
+      addClass(name);
+    }
+    const annsByImage = new Map<string, CocoAnn[]>();
+    for (const a of data.annotations) {
+      if (!a || a.image_id == null) continue;
+      const k = String(a.image_id);
+      const list = annsByImage.get(k);
+      if (list) list.push(a);
+      else annsByImage.set(k, [a]);
+    }
+
+    for (const im of data.images) {
+      onProgress?.(++done, total);
+      if (!im || im.id == null) {
+        unpairedAnnotations++;
+        continue;
+      }
+      const base = baseName(String(im.file_name ?? "")).toLowerCase();
+      const img =
+        (base && (idx.byPath.get(normPath(String(im.file_name))) ?? idx.byName.get(base))) ||
+        (base ? idx.byStem(stemOf(base)) : undefined);
+      if (!img) {
+        unpairedAnnotations++;
+        continue;
+      }
+      const key = normPath(img.path);
+      if (seenImages.has(key)) {
+        duplicates++;
+        continue;
+      }
+      seenImages.add(key);
+
+      const boxes: ImportBox[] = [];
+      (annsByImage.get(String(im.id)) ?? []).forEach((a, i) => {
+        const label =
+          catName.get(String(a.category_id)) ??
+          (a.category_id != null ? String(a.category_id).trim().toLowerCase() : "");
+        if (!label) {
+          dropped++;
+          return;
+        }
+        const polys = cocoPolygons(a.segmentation);
+        if (polys === "rle") rleMasks++;
+        const bb = Array.isArray(a.bbox) ? a.bbox.map(Number) : [];
+        let x0: number, y0: number, x1: number, y1: number;
+        if (bb.length === 4 && bb.every(Number.isFinite)) {
+          [x0, y0] = [bb[0], bb[1]];
+          [x1, y1] = [bb[0] + bb[2], bb[1] + bb[3]];
+        } else if (polys && polys !== "rle") {
+          const xs = polys.flat().map((p) => p[0]);
+          const ys = polys.flat().map((p) => p[1]);
+          [x0, x1] = [Math.min(...xs), Math.max(...xs)];
+          [y0, y1] = [Math.min(...ys), Math.max(...ys)];
+        } else {
+          dropped++;
+          return;
+        }
+        if (x1 < x0) [x0, x1] = [x1, x0];
+        if (y1 < y0) [y0, y1] = [y1, y0];
+        if (x1 - x0 < 1 || y1 - y0 < 1) {
+          dropped++;
+          return;
+        }
+        boxes.push({
+          id: `coco_${a.id ?? i}`,
+          label,
+          x0,
+          y0,
+          x1,
+          y1,
+          score: null,
+          mask: polys && polys !== "rle" ? { polygons: polys } : null,
+        });
+        addClass(label);
+      });
+
+      boxesTotal += boxes.length;
+      annotated++;
+      if (boxes.length === 0) background++;
+      items.push({
+        file: img.file,
+        originalName: baseName(img.path),
+        boxes,
+        width: Number.isFinite(Number(im.width)) ? Number(im.width) : 0,
+        height: Number.isFinite(Number(im.height)) ? Number(im.height) : 0,
+      });
+    }
+  }
+
+  let unpairedImages = 0;
+  for (const cf of idx.all) {
+    if (seenImages.has(normPath(cf.path))) continue;
+    unpairedImages++;
+    background++;
+    items.push({ file: cf.file, originalName: baseName(cf.path), boxes: [], width: 0, height: 0 });
+  }
+
+  if (unpairedAnnotations > 0)
+    warnings.push(`${unpairedAnnotations} image entr${unpairedAnnotations === 1 ? "y" : "ies"} in the JSON had no matching file and were skipped.`);
+  if (unpairedImages > 0)
+    warnings.push(`${unpairedImages} image(s) were not referenced by any JSON and were imported as empty background frames.`);
+  if (duplicates > 0)
+    warnings.push(`${duplicates} image(s) appeared in more than one JSON; the first occurrence was kept.`);
+  if (dropped > 0)
+    warnings.push(`${dropped} annotation(s) were unlabelled or degenerate (zero-area) and were dropped.`);
+  if (rleMasks > 0)
+    warnings.push(`${rleMasks} RLE-encoded mask(s) were imported as boxes only (polygon masks are kept).`);
+  if (idx.collisions.size > 0)
+    warnings.push(`${idx.collisions.size} image name(s) were ambiguous (same name, different extension); their annotations may not have paired.`);
+  if (items.length === 0) warnings.push("No image/annotation pairs were found - check the folder layout.");
+
+  return {
+    format: "coco",
+    items,
+    classes,
+    stats: { images: items.length, annotated, background, boxes: boxesTotal, droppedBoxes: dropped, unpairedAnnotations },
+    warnings,
+  };
+}
+
+// ── YOLO ───────────────────────────────────────────────────────────────────
+
+type YoloRow = { cls: number; x0: number; y0: number; x1: number; y1: number; polygon: number[][] | null };
+
+// Parse one label file's text. Rows are `cls cx cy w h` (box) or
+// `cls x1 y1 x2 y2 ...` (YOLO-seg / OBB polygon, >= 3 points), all in
+// [0,1] unit space. Returns null when the text is not label rows at all
+// (a README.txt, a licence) so the caller can ignore it; an EMPTY file is
+// a valid "no objects" label.
+export function parseYoloLabelText(text: string): { rows: YoloRow[]; bad: number } | null {
+  const rows: YoloRow[] = [];
+  let bad = 0;
+  let lines = 0;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    lines++;
+    const nums = line.split(/[\s,]+/).map(Number);
+    if (nums.length < 5 || !nums.every(Number.isFinite) || nums[0] < 0 || !Number.isInteger(nums[0])) {
+      bad++;
+      continue;
+    }
+    const cls = nums[0];
+    if (nums.length === 5) {
+      const [cx, cy, w, h] = nums.slice(1);
+      rows.push({ cls, x0: cx - w / 2, y0: cy - h / 2, x1: cx + w / 2, y1: cy + h / 2, polygon: null });
+      continue;
+    }
+    const coords = nums.slice(1);
+    if (coords.length % 2 !== 0 || coords.length < 6) {
+      bad++;
+      continue;
+    }
+    const pts: number[][] = [];
+    for (let i = 0; i < coords.length; i += 2) pts.push([coords[i], coords[i + 1]]);
+    const xs = pts.map((p) => p[0]);
+    const ys = pts.map((p) => p[1]);
+    rows.push({
+      cls,
+      x0: Math.min(...xs),
+      y0: Math.min(...ys),
+      x1: Math.max(...xs),
+      y1: Math.max(...ys),
+      polygon: pts,
+    });
+  }
+  if (lines > 0 && rows.length === 0) return null;
+  return { rows, bad };
+}
+
+// Class names from data.yaml / dataset.yaml. Handles the three shapes in
+// the wild: inline `names: [a, b]`, a block list, and an index mapping.
+export function parseYamlNames(text: string): string[] {
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((l) => /^\s*names\s*:/.test(l));
+  if (start < 0) return [];
+  const clean = (s: string) => s.trim().replace(/^['"]|['"]$/g, "").trim().toLowerCase();
+  const head = lines[start].replace(/^\s*names\s*:/, "").trim();
+  if (head.startsWith("[")) {
+    const inner = head.replace(/^\[|\]\s*$/g, "");
+    return inner.split(",").map(clean).filter(Boolean);
+  }
+  const listed: string[] = [];
+  const mapped: [number, string][] = [];
+  for (let i = start + 1; i < lines.length; i++) {
+    const l = lines[i];
+    if (!l.trim()) continue;
+    if (!/^\s/.test(l)) break; // dedent = end of block
+    const li = /^\s*-\s*(.+)$/.exec(l);
+    if (li) {
+      listed.push(clean(li[1]));
+      continue;
+    }
+    const mi = /^\s*(\d+)\s*:\s*(.+)$/.exec(l);
+    if (mi) mapped.push([Number(mi[1]), clean(mi[2])]);
+  }
+  if (listed.length) return listed.filter(Boolean);
+  mapped.sort((a, b) => a[0] - b[0]);
+  const out: string[] = [];
+  for (const [i, n] of mapped) out[i] = n;
+  return Array.from(out, (n) => n ?? "");
+}
+
+async function parseYolo(
+  files: CollectedFile[],
+  onProgress?: (done: number, total: number) => void,
+): Promise<ParsedDataset> {
+  const idx = indexImages(files);
+  const warnings: string[] = [];
+
+  // Class names: classes.txt / obj.names (one per line, index = class id),
+  // else data.yaml. Without either, ids become `class_N` so the import
+  // still works and the user renames in the ontology panel.
+  let names: string[] = [];
+  let namesSource = "";
+  for (const cf of files) {
+    const n = baseName(cf.path).toLowerCase();
+    if (n === "classes.txt" || n === "obj.names") {
+      names = (await cf.file.text())
+        .split(/\r?\n/)
+        .map((s) => s.trim().toLowerCase())
+        .filter((s) => s.length > 0);
+      if (names.length) {
+        namesSource = n;
+        break;
+      }
+    }
+  }
+  if (!names.length) {
+    for (const cf of files) {
+      const n = baseName(cf.path).toLowerCase();
+      if (/^(data|dataset)\.ya?ml$/.test(n)) {
+        names = parseYamlNames(await cf.file.text());
+        if (names.length) {
+          namesSource = n;
+          break;
+        }
+      }
+    }
+  }
+  if (!names.length)
+    warnings.push("No classes.txt or data.yaml found; classes were named class_0, class_1, ... - rename them after import.");
+  const nameFor = (id: number) => names[id] || `class_${id}`;
+
+  const labelFiles = files.filter(
+    (cf) => /\.txt$/i.test(baseName(cf.path)) && !YOLO_META_RE.test(baseName(cf.path)),
+  );
+  const items: ImportItem[] = [];
+  const classes: string[] = [];
+  const classSeen = new Set<string>();
+  const usedImages = new Set<string>(); // normalised paths with a label file
+  let boxesTotal = 0;
+  let dropped = 0;
+  let unpairedAnnotations = 0;
+  let annotated = 0;
+  let background = 0;
+  let notLabels = 0;
+
+  // Pair a label to its image: the mirrored path first (labels/x/a.txt ->
+  // images/x/a.<ext>, which keeps train/ and val/ twins apart), then an
+  // unambiguous stem.
+  const imageFor = (labelPath: string): CollectedFile | undefined => {
+    const p = normPath(labelPath);
+    const mirrored = p.replace(/(^|\/)labels(\/|$)/, "$1images$2").replace(/\.txt$/, "");
+    for (const ext of ["jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff", "gif", "heic", "heif", "avif"]) {
+      const hit = idx.byPath.get(`${mirrored}.${ext}`);
+      if (hit) return hit;
+    }
+    return idx.byStem(stemOf(baseName(labelPath)).toLowerCase());
+  };
+
+  const total = labelFiles.length;
+  let done = 0;
+  for (const lf of labelFiles) {
+    const parsed = parseYoloLabelText(await lf.file.text());
+    onProgress?.(++done, total);
+    if (!parsed) {
+      notLabels++;
+      continue;
+    }
+    const img = imageFor(lf.path);
+    if (!img) {
+      unpairedAnnotations++;
+      continue;
+    }
+    const imgKey = normPath(img.path);
+    if (usedImages.has(imgKey)) continue; // two label files for one image: first wins
+    usedImages.add(imgKey);
+
+    const boxes: ImportBox[] = [];
+    dropped += parsed.bad;
+    parsed.rows.forEach((r, i) => {
+      const x0 = Math.min(Math.max(r.x0, 0), 1);
+      const y0 = Math.min(Math.max(r.y0, 0), 1);
+      const x1 = Math.min(Math.max(r.x1, 0), 1);
+      const y1 = Math.min(Math.max(r.y1, 0), 1);
+      if (x1 - x0 <= 0 || y1 - y0 <= 0) {
+        dropped++;
+        return;
+      }
+      const label = nameFor(r.cls);
+      boxes.push({
+        id: `yolo_${i}`,
+        label,
+        x0,
+        y0,
+        x1,
+        y1,
+        score: null,
+        mask: r.polygon ? { polygons: [r.polygon] } : null,
+      });
+      if (!classSeen.has(label)) {
+        classSeen.add(label);
+        classes.push(label);
+      }
+    });
+    boxesTotal += boxes.length;
+    annotated++;
+    if (boxes.length === 0) background++;
+    // width = height = 1 marks UNIT space: prepareItemForUpload scales by
+    // trueW / 1 = trueW, landing the boxes in decoded pixels.
+    items.push({ file: img.file, originalName: baseName(img.path), boxes, width: 1, height: 1 });
+  }
+
+  if (annotated === 0) {
     throw new Error(
-      `${fmt.toUpperCase()} import isn't supported yet - only Pascal VOC (Annotations/*.xml + images) for now.`,
+      "No YOLO label files parsed (expected lines like `0 0.5 0.5 0.2 0.3` in labels/*.txt next to images).",
     );
   }
-  throw new Error(
-    "Couldn't recognise this as a Pascal VOC dataset (no .xml annotation files found alongside images).",
-  );
+
+  // Images without a label file: YOLO's own convention for "no objects".
+  let unlabelledImages = 0;
+  for (const cf of idx.all) {
+    if (usedImages.has(normPath(cf.path))) continue;
+    unlabelledImages++;
+    background++;
+    items.push({ file: cf.file, originalName: baseName(cf.path), boxes: [], width: 0, height: 0 });
+  }
+
+  // Keep declared class order for the label set when we have names.
+  const orderedClasses = names.length
+    ? Array.from(new Set([...names.filter(Boolean), ...classes]))
+    : classes;
+
+  if (namesSource) warnings.push(`Class names read from ${namesSource}.`);
+  if (unpairedAnnotations > 0)
+    warnings.push(`${unpairedAnnotations} label file(s) had no matching image and were skipped.`);
+  if (unlabelledImages > 0)
+    warnings.push(`${unlabelledImages} image(s) had no label file and were imported as empty background frames.`);
+  if (notLabels > 0) warnings.push(`${notLabels} .txt file(s) were not label rows and were ignored.`);
+  if (dropped > 0) warnings.push(`${dropped} row(s) were malformed or degenerate and were dropped.`);
+  if (idx.collisions.size > 0)
+    warnings.push(`${idx.collisions.size} image name(s) were ambiguous (same name, different extension); their labels may not have paired.`);
+
+  return {
+    format: "yolo",
+    items,
+    classes: orderedClasses,
+    stats: { images: items.length, annotated, background, boxes: boxesTotal, droppedBoxes: dropped, unpairedAnnotations },
+    warnings,
+  };
 }
 
 // ── Pascal VOC ─────────────────────────────────────────────────────────────

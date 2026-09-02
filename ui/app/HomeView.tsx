@@ -1671,9 +1671,12 @@ export function HomeView({
                 Import a labelled dataset
               </h2>
               <p className="mt-3 text-sm text-foreground/50 leading-relaxed">
-                Pascal VOC - an <span className="font-mono">Annotations/</span> folder of XML next
-                to your images - as a folder or a <span className="font-mono">.zip</span>. Every
-                image and box comes in fully editable.
+                Pascal VOC (<span className="font-mono">Annotations/*.xml</span>), COCO (a JSON
+                with images and annotations) or YOLO (<span className="font-mono">labels/*.txt</span>{" "}
+                with <span className="font-mono">classes.txt</span> or{" "}
+                <span className="font-mono">data.yaml</span>), as a folder or a{" "}
+                <span className="font-mono">.zip</span>. Every image and box comes in fully
+                editable; polygon masks are kept.
               </p>
 
               {error && <p className="mt-4 text-sm text-[var(--bad)]">{error}</p>}
