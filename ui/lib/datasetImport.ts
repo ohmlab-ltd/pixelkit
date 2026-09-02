@@ -104,8 +104,13 @@ async function collectFromZip(zip: File): Promise<CollectedFile[]> {
   });
   const out: CollectedFile[] = [];
   for (const [path, data] of Object.entries(entries)) {
-    if (path.endsWith("/") || data.byteLength === 0) continue; // directory entry
+    if (path.endsWith("/")) continue; // directory entry
     const name = baseName(path);
+    // Finder zips carry __MACOSX/._x.jpg resource forks that decode as
+    // nothing; skip them. A zero-byte .txt is a legitimate empty YOLO
+    // label ("no objects"), so only images need bytes.
+    if (/(^|\/)__MACOSX\//i.test(path) || name.startsWith("._")) continue;
+    if (data.byteLength === 0 && !/\.txt$/i.test(name)) continue;
     const type = mimeForName(name);
     out.push({
       path,
@@ -176,18 +181,24 @@ export async function parseDataset(
 
 type ImageIndex = {
   all: CollectedFile[]; // every image, in input order
-  byName: Map<string, CollectedFile>; // lowercased basename (last wins)
   byPath: Map<string, CollectedFile>; // lowercased relative path, "/"-normalised
   collisions: Set<string>; // stems shared by >1 image (train/a.jpg + val/a.jpg)
   byStem: (stem: string) => CollectedFile | undefined; // unambiguous stems only
+  // Resolve an annotation's file reference ("train/a.jpg", "a.jpg") to
+  // the ONE image whose path ends with it. The folder picker prefixes
+  // every path with the chosen folder's name ("ds/train/a.jpg"), so an
+  // exact match never hits; a basename match with train/ and val/ twins
+  // is ambiguous and must not pair (it attached one split's boxes to the
+  // other split's file). Ambiguous -> undefined.
+  bySuffix: (ref: string) => CollectedFile | undefined;
 };
 
 function indexImages(files: CollectedFile[]): ImageIndex {
   const all: CollectedFile[] = [];
-  const byName = new Map<string, CollectedFile>();
   const byPath = new Map<string, CollectedFile>();
   const stems = new Map<string, CollectedFile>();
   const collisions = new Set<string>();
+  const bySuffixMap = new Map<string, CollectedFile[]>();
   for (const cf of files) {
     const name = baseName(cf.path);
     if (!IMAGE_EXT_RE.test(name)) continue;
@@ -195,15 +206,25 @@ function indexImages(files: CollectedFile[]): ImageIndex {
     const stem = stemOf(name).toLowerCase();
     if (stems.has(stem)) collisions.add(stem);
     else stems.set(stem, cf);
-    byName.set(name.toLowerCase(), cf);
-    byPath.set(normPath(cf.path), cf);
+    const p = normPath(cf.path);
+    byPath.set(p, cf);
+    const parts = p.split("/");
+    for (let i = 0; i < parts.length; i++) {
+      const suffix = parts.slice(i).join("/");
+      const list = bySuffixMap.get(suffix);
+      if (list) list.push(cf);
+      else bySuffixMap.set(suffix, [cf]);
+    }
   }
   return {
     all,
-    byName,
     byPath,
     collisions,
     byStem: (s) => (collisions.has(s) ? undefined : stems.get(s)),
+    bySuffix: (ref) => {
+      const list = bySuffixMap.get(normPath(ref));
+      return list && list.length === 1 ? list[0] : undefined;
+    },
   };
 }
 
@@ -326,10 +347,11 @@ async function parseCoco(
         unpairedAnnotations++;
         continue;
       }
-      const base = baseName(String(im.file_name ?? "")).toLowerCase();
+      const fileName = String(im.file_name ?? "");
+      const base = baseName(fileName).toLowerCase();
       const img =
-        (base && (idx.byPath.get(normPath(String(im.file_name))) ?? idx.byName.get(base))) ||
-        (base ? idx.byStem(stemOf(base)) : undefined);
+        (base && idx.bySuffix(fileName)) ||
+        (base && !fileName.includes("/") && !fileName.includes("\\") ? idx.byStem(stemOf(base)) : undefined);
       if (!img) {
         unpairedAnnotations++;
         continue;
@@ -373,7 +395,9 @@ async function parseCoco(
           return;
         }
         boxes.push({
-          id: `coco_${a.id ?? i}`,
+          // Index keeps ids unique even when some annotations carry an
+          // id and others do not (a.id 1 vs index 1 collided).
+          id: a.id != null ? `coco_${a.id}_${i}` : `coco_${i}`,
           label,
           x0,
           y0,
@@ -431,30 +455,50 @@ async function parseCoco(
 
 // ── YOLO ───────────────────────────────────────────────────────────────────
 
-type YoloRow = { cls: number; x0: number; y0: number; x1: number; y1: number; polygon: number[][] | null };
+type YoloRow = {
+  cls: number;
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  polygon: number[][] | null;
+  score: number | null;
+};
 
-// Parse one label file's text. Rows are `cls cx cy w h` (box) or
+// Parse one label file's text. Rows are `cls cx cy w h` (box), the same
+// with a trailing confidence (`yolo predict save_txt save_conf`), or
 // `cls x1 y1 x2 y2 ...` (YOLO-seg / OBB polygon, >= 3 points), all in
 // [0,1] unit space. Returns null when the text is not label rows at all
 // (a README.txt, a licence) so the caller can ignore it; an EMPTY file is
-// a valid "no objects" label.
+// a valid "no objects" label, and a file of malformed rows is a label
+// file with dropped rows, not prose.
 export function parseYoloLabelText(text: string): { rows: YoloRow[]; bad: number } | null {
   const rows: YoloRow[] = [];
   let bad = 0;
   let lines = 0;
+  let looksLikeLabels = false;
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
     lines++;
+    if (/^\d+(\s|,|$)/.test(line)) looksLikeLabels = true;
     const nums = line.split(/[\s,]+/).map(Number);
     if (nums.length < 5 || !nums.every(Number.isFinite) || nums[0] < 0 || !Number.isInteger(nums[0])) {
       bad++;
       continue;
     }
     const cls = nums[0];
-    if (nums.length === 5) {
+    if (nums.length === 5 || nums.length === 6) {
       const [cx, cy, w, h] = nums.slice(1);
-      rows.push({ cls, x0: cx - w / 2, y0: cy - h / 2, x1: cx + w / 2, y1: cy + h / 2, polygon: null });
+      rows.push({
+        cls,
+        x0: cx - w / 2,
+        y0: cy - h / 2,
+        x1: cx + w / 2,
+        y1: cy + h / 2,
+        polygon: null,
+        score: nums.length === 6 ? nums[5] : null,
+      });
       continue;
     }
     const coords = nums.slice(1);
@@ -473,39 +517,70 @@ export function parseYoloLabelText(text: string): { rows: YoloRow[]; bad: number
       x1: Math.max(...xs),
       y1: Math.max(...ys),
       polygon: pts,
+      score: null,
     });
   }
-  if (lines > 0 && rows.length === 0) return null;
+  if (lines > 0 && rows.length === 0 && !looksLikeLabels) return null;
   return { rows, bad };
 }
 
-// Class names from data.yaml / dataset.yaml. Handles the three shapes in
-// the wild: inline `names: [a, b]`, a block list, and an index mapping.
+// Class names from data.yaml / dataset.yaml. Handles every shape seen in
+// the wild: inline `names: [a, b]` (possibly spanning lines, possibly
+// with a trailing comment), a flow mapping `names: {0: a, 1: b}`, a
+// block list (indented, or at column 0 as PyYAML dumps it), and a block
+// index mapping with plain or quoted keys.
 export function parseYamlNames(text: string): string[] {
-  const lines = text.split(/\r?\n/);
+  const stripComment = (l: string) => l.replace(/(^|\s)#.*$/, "");
+  const lines = text.split(/\r?\n/).map(stripComment);
   const start = lines.findIndex((l) => /^\s*names\s*:/.test(l));
   if (start < 0) return [];
   const clean = (s: string) => s.trim().replace(/^['"]|['"]$/g, "").trim().toLowerCase();
+  const namesIndent = /^(\s*)/.exec(lines[start])![1].length;
   const head = lines[start].replace(/^\s*names\s*:/, "").trim();
-  if (head.startsWith("[")) {
-    const inner = head.replace(/^\[|\]\s*$/g, "");
-    return inner.split(",").map(clean).filter(Boolean);
+
+  const flow = (open: string, close: string): string | null => {
+    if (!head.startsWith(open)) return null;
+    let body = head;
+    let i = start + 1;
+    while (!body.includes(close) && i < lines.length) body += " " + lines[i++].trim();
+    return body.slice(1, body.lastIndexOf(close) >= 0 ? body.lastIndexOf(close) : undefined);
+  };
+  const flowList = flow("[", "]");
+  if (flowList !== null) return flowList.split(",").map(clean).filter(Boolean);
+  const flowMap = flow("{", "}");
+  if (flowMap !== null) {
+    const mapped: [number, string][] = [];
+    for (const kv of flowMap.split(",")) {
+      const m = /^\s*['"]?(\d+)['"]?\s*:\s*(.+)$/.exec(kv);
+      if (m) mapped.push([Number(m[1]), clean(m[2])]);
+    }
+    return orderMapped(mapped);
   }
+
   const listed: string[] = [];
   const mapped: [number, string][] = [];
   for (let i = start + 1; i < lines.length; i++) {
     const l = lines[i];
     if (!l.trim()) continue;
-    if (!/^\s/.test(l)) break; // dedent = end of block
+    const indent = /^(\s*)/.exec(l)![1].length;
     const li = /^\s*-\s*(.+)$/.exec(l);
     if (li) {
+      if (indent < namesIndent) break;
       listed.push(clean(li[1]));
       continue;
     }
-    const mi = /^\s*(\d+)\s*:\s*(.+)$/.exec(l);
-    if (mi) mapped.push([Number(mi[1]), clean(mi[2])]);
+    const mi = /^\s*['"]?(\d+)['"]?\s*:\s*(.+)$/.exec(l);
+    if (mi && indent > namesIndent) {
+      mapped.push([Number(mi[1]), clean(mi[2])]);
+      continue;
+    }
+    if (indent <= namesIndent) break; // next top-level key ends the block
   }
   if (listed.length) return listed.filter(Boolean);
+  return orderMapped(mapped);
+}
+
+function orderMapped(mapped: [number, string][]): string[] {
   mapped.sort((a, b) => a[0] - b[0]);
   const out: string[] = [];
   for (const [i, n] of mapped) out[i] = n;
@@ -617,7 +692,7 @@ async function parseYolo(
         y0,
         x1,
         y1,
-        score: null,
+        score: r.score,
         mask: r.polygon ? { polygons: [r.polygon] } : null,
       });
       if (!classSeen.has(label)) {

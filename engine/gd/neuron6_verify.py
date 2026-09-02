@@ -118,6 +118,22 @@ def parse_generate_report(text: str) -> dict:
     return out
 
 
+def _kill_tree(proc: subprocess.Popen) -> None:
+    try:
+        if sys.platform.startswith("win"):
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=30)
+        else:
+            os.killpg(os.getpgid(proc.pid), 9)
+    except Exception:
+        pass
+    try:
+        proc.kill()
+        proc.wait(timeout=10)
+    except Exception:
+        pass
+
+
 def verify(model_path: Path, keep_dir: Path, name: str = "m") -> dict:
     """Run `stedgeai generate` exactly as the core's pragma pipeline does.
 
@@ -163,12 +179,19 @@ def verify(model_path: Path, keep_dir: Path, name: str = "m") -> dict:
                *GENERATE_INTERFACE_OPTIONS]
         t0 = time.time()
         log_path = work / "stedgeai.log"
-        try:
-            with open(log_path, "w", encoding="utf-8", errors="replace") as lf:
-                proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT,
-                                      cwd=str(work), timeout=COMPILE_TIMEOUT_S)
-        except subprocess.TimeoutExpired:
-            raise RuntimeError(f"stedgeai generate timed out after {COMPILE_TIMEOUT_S // 60} min")
+        # stedgeai.exe is a launcher; the compiler runs in child processes.
+        # Own process group so a timeout can kill the whole tree (killing
+        # only the launcher left orphans compiling and the temp dir pinned).
+        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if sys.platform.startswith("win") else 0
+        with open(log_path, "w", encoding="utf-8", errors="replace") as lf:
+            proc = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT,
+                                    cwd=str(work), creationflags=flags,
+                                    start_new_session=not sys.platform.startswith("win"))
+            try:
+                proc.wait(timeout=COMPILE_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                _kill_tree(proc)
+                raise RuntimeError(f"stedgeai generate timed out after {COMPILE_TIMEOUT_S // 60} min")
         log = log_path.read_text("utf-8", errors="replace") if log_path.exists() else ""
         shutil.copyfile(log_path, keep_dir / "stedgeai.log")
         report_path = next(iter(out_dir.glob("*_generate_report.txt")), None)

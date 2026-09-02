@@ -13,12 +13,16 @@ Everything runs locally against one PixelKit dataset:
      AMP on CUDA.
   3. Evaluates VOC-style AP@0.5 per class on the val split (no
      pycocotools dependency).
-  4. Exports fp32 ONNX (decoded head: [cx,cy,w,h,obj,cls...] rows) and
-     a full-integer QDQ int8 ONNX calibrated on the dataset's own
-     images, then re-scores BOTH on the val split so report.json
-     states the float->int8 mAP delta honestly.
-  5. Writes the Neuro N6 bundle: model + labels.h + sketch snippet +
-     report.json + export.zip under <dataset>/models/yolox_nano/<run>/.
+  4. Exports a float ONNX reference (raw head), then fine-tunes for
+     qat_epochs with int8 simulated throughout the graph
+     (vendor/yolox/qat.py) and exports the QDQ int8 ONNX straight from
+     that model (qat_epochs=0 falls back to percentile PTQ). Both are
+     re-scored on the val split so report.json states the float->int8
+     delta honestly.
+  5. Compiles the int8 export with ST Edge AI when it is installed
+     (neuron6_verify.py) and writes the Neuro N6 bundle: model +
+     labels.h + sketch snippet + report.json + export.zip under
+     <dataset>/models/yolox_nano/<run>/.
 
 INPUT CONTRACT (Neuro N6 platform contract, not a model choice). The
 DCMIPP DMAs packed interleaved RGB888 straight into the model's input
@@ -26,11 +30,11 @@ buffer, and stedgeai is told `--input-data-type uint8
 --inputs-ch-position chlast`. That re-encoding is only correct when the
 graph input is quantised ASYMMETRICALLY over [0,1]: scale 1/255,
 zero-point -128 (int8) == uint8 zero-point 0. So the network is trained
-on [0,1] tensors (RGB, letterboxed with 114/255 gray) and calibration
-carries a black and a white frame, which puts MinMax exactly on [0,1].
-_verify_input_contract() then refuses to emit a model that misses it -
-this failure is silent on device, and stedgeai rejects an unquantised
-input outright.
+on [0,1] tensors (RGB, letterboxed with 114/255 gray), the QAT graph
+pins its input fake-quant to exactly those parameters, and
+_verify_input_contract() checks the written file and refuses a model
+whose calibrated input range is not a sub-range of [0,1] - that failure
+is silent on device, and stedgeai rejects an unquantised input outright.
 
 OUTPUT: raw head rows, decoded on the M55 (see yolox_pp.c), because
 YOLOX's in-graph decode exports dynamic-shape ops (ScatterND/Expand/
@@ -43,6 +47,7 @@ from __future__ import annotations
 import io
 import json
 import math
+import os
 import queue
 import random
 import re
@@ -322,9 +327,13 @@ def _voc_ap(recall: np.ndarray, precision: np.ndarray) -> float:
 
 
 def ap50(preds: list[np.ndarray], gts: list[np.ndarray], n_classes: int,
-         iou_thr: float = 0.5) -> tuple[float, list[float]]:
-    """preds[i]: (n,6) x0,y0,x1,y1,score,cls per image; gts[i]: (m,5) x0..y1,cls."""
-    per_class: list[float] = []
+         iou_thr: float = 0.5) -> tuple[float, list[float | None]]:
+    """preds[i]: (n,6) x0,y0,x1,y1,score,cls per image; gts[i]: (m,5) x0..y1,cls.
+
+    Returns (mean over classes that have ground truth, per-class list of
+    length n_classes with None where a class has no ground truth). The
+    list is positional so callers can zip it with the class names."""
+    per_class: list[float | None] = []
     for c in range(n_classes):
         rows = []  # (score, is_tp)
         n_gt = 0
@@ -352,6 +361,7 @@ def ap50(preds: list[np.ndarray], gts: list[np.ndarray], n_classes: int,
                 else:
                     rows.append((p[4], 0))
         if n_gt == 0:
+            per_class.append(None)  # keep the list positional
             continue
         if not rows:
             per_class.append(0.0)
@@ -360,7 +370,8 @@ def ap50(preds: list[np.ndarray], gts: list[np.ndarray], n_classes: int,
         tp = np.cumsum([r[1] for r in rows])
         fp = np.cumsum([1 - r[1] for r in rows])
         per_class.append(_voc_ap(tp / n_gt, tp / np.maximum(tp + fp, 1e-9)))
-    mean = float(np.mean(per_class)) if per_class else 0.0
+    present = [a for a in per_class if a is not None]
+    mean = float(np.mean(present)) if present else 0.0
     return mean, per_class
 
 
@@ -515,16 +526,27 @@ def _build_model(n_classes: int, conv_stem: bool = True) -> YOLOX:
     return model
 
 
-def _load_pretrained(model: YOLOX) -> bool:
+def _load_pretrained(model: YOLOX, cancel=None) -> bool:
     """Warm-start from Megvii's COCO nano checkpoint (skips the
     class-dependent head layers). Cached in <workspace>/weights/yolox/."""
     dest = workspace.weights_dir() / "yolox" / "yolox_nano.pth"
     try:
         if not dest.is_file():
             dest.parent.mkdir(parents=True, exist_ok=True)
-            tmp = dest.with_suffix(".tmp")
-            urllib.request.urlretrieve(PRETRAINED_URL, tmp)  # noqa: S310 (pinned URL)
-            tmp.replace(dest)
+            # Streamed with a socket timeout and a cancel poll: a stalled
+            # connection used to hang the training thread forever while it
+            # held the GPU gate. Per-process temp name so two first runs
+            # cannot clobber each other's download.
+            tmp = dest.with_suffix(f".{os.getpid()}.tmp")
+            with urllib.request.urlopen(PRETRAINED_URL, timeout=30) as r, open(tmp, "wb") as f:  # noqa: S310
+                while True:
+                    if cancel is not None and cancel.is_set():
+                        raise Cancelled()
+                    chunk = r.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+            os.replace(tmp, dest)
         ckpt = torch.load(dest, map_location="cpu", weights_only=False)
         state = dict(ckpt.get("model", ckpt))
         own = model.state_dict()
@@ -559,8 +581,15 @@ def _load_pretrained(model: YOLOX) -> bool:
         }
         model.load_state_dict(loadable, strict=False)
         return True
+    except Cancelled:
+        raise
     except Exception:
         return False  # offline / hash mismatch: train from scratch
+
+
+def _check_cancel(cancel) -> None:
+    if cancel is not None and cancel.is_set():
+        raise Cancelled()
 
 
 def train(
@@ -569,6 +598,18 @@ def train(
     progress: Callable[[dict], None] | None = None,
     cancel=None,
 ) -> dict:
+    """Train + export. On a cuda:N device the CURRENT device is set for
+    this thread only for the duration (the vendored head allocates its
+    grids on the current device); it is restored on exit because the
+    thread pool is shared with labelling inference."""
+    device = torch.device(cfg.device)
+    if device.type == "cuda" and device.index is not None:
+        with torch.cuda.device(device):
+            return _train_impl(project_id, cfg, progress, cancel)
+    return _train_impl(project_id, cfg, progress, cancel)
+
+
+def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel) -> dict:
     t0 = time.time()
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
@@ -584,13 +625,8 @@ def train(
 
     device = torch.device(cfg.device)
     use_amp = device.type == "cuda"
-    if device.type == "cuda" and device.index is not None:
-        # Per-thread current device: the vendored head builds its grids
-        # with .type(torch.cuda.FloatTensor), which lands on the CURRENT
-        # device, so a cuda:1 run needs cuda:1 to be current here.
-        torch.cuda.set_device(device)
     model = _build_model(len(classes)).to(device)
-    pretrained_used = cfg.pretrained and _load_pretrained(model)
+    pretrained_used = cfg.pretrained and _load_pretrained(model, cancel)
 
     batch = max(2, min(cfg.batch, len(train_s)))
     lr = cfg.lr * batch / 64
@@ -676,13 +712,14 @@ def train(
             })
     if best_state is not None:
         model.load_state_dict(best_state)
+    _check_cancel(cancel)
     fp32_ap, fp32_per_class = evaluate(model)
 
     # ── export ──────────────────────────────────────────────────────
     run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     out_dir = store.dataset_dir(project_id) / "models" / "yolox_nano" / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    slug = re.sub(r"[^a-z0-9]+", "_", (store.load(project_id) or {}).get("name", "model").lower()).strip("_") or "model"
+    slug = _c_slug((store.load(project_id) or {}).get("name", "model"))
 
     # Float reference first: the plain graph, before any fine-tuning.
     # Raw head: the in-graph decode exports ScatterND/Expand/Where, which
@@ -698,6 +735,7 @@ def train(
     # ── quantisation-aware fine-tuning ──────────────────────────────
     qat_ap = None
     if cfg.qat_epochs > 0:
+        _check_cancel(cancel)
         qat_ap = _qat_finetune(model, samples, train_s, batch, cfg, device, lr,
                                evaluate, progress, cancel)
 
@@ -705,6 +743,7 @@ def train(
                 "qat": cfg.qat_epochs > 0},
                out_dir / "best.pt")
 
+    _check_cancel(cancel)
     int8_onnx = out_dir / f"{slug}_int8.onnx"
     if cfg.qat_epochs > 0:
         # The QAT graph exports its own Q/DQ pairs; no calibration pass.
@@ -715,6 +754,7 @@ def train(
         contract = _ptq_quantize(fp32_onnx, int8_onnx, samples, train_s, cfg)
     int8_ap, int8_per_class = _score_onnx(int8_onnx, samples, val_s, cfg, classes)
 
+    _check_cancel(cancel)
     neuron6 = _verify_neuron6(int8_onnx, out_dir, slug) if cfg.verify_neuron6 else {
         "verified": False, "available": None, "reason": "verification disabled"}
     if neuron6.get("error"):
@@ -739,8 +779,11 @@ def train(
         "ap50_int8": round(int8_ap, 4),
         "qat_epochs": cfg.qat_epochs,
         "ap50_qat_sim": (round(qat_ap, 4) if qat_ap is not None else None),
-        "per_class_fp32": {c: round(a, 4) for c, a in zip(classes, fp32_per_class)},
-        "per_class_int8": {c: round(a, 4) for c, a in zip(classes, int8_per_class)},
+        # None = no ground truth for that class in the val split.
+        "per_class_fp32": {c: (round(a, 4) if a is not None else None)
+                           for c, a in zip(classes, fp32_per_class)},
+        "per_class_int8": {c: (round(a, 4) if a is not None else None)
+                           for c, a in zip(classes, int8_per_class)},
         "neuron6": neuron6,
         "minutes": round((time.time() - t0) / 60, 1),
     }, int8_onnx)
@@ -757,8 +800,8 @@ def _verify_neuron6(int8_onnx: Path, out_dir: Path, slug: str) -> dict:
     del slug  # the generated C symbol is discarded; a short name avoids MAX_PATH
     try:
         return neuron6_verify.verify(int8_onnx, out_dir / "neuron6")
-    except RuntimeError as e:
-        return {"verified": False, "available": True, "error": str(e)}
+    except Exception as e:  # noqa: BLE001 - a compiler-wrapper OSError must not void the run
+        return {"verified": False, "available": True, "error": f"{type(e).__name__}: {e}"}
 
 
 # ── export helpers ──────────────────────────────────────────────────
@@ -869,7 +912,11 @@ def _fold_weight_quant(path: Path) -> int:
                     b_t = init[n.input[2]]
                     b = nh.to_array(b_t)
                     b_scale = (scale * x_scale).astype(np.float32)
-                    b_q = np.clip(np.round(b / b_scale), -2**31, 2**31 - 1).astype(np.int32)
+                    # float64: float32 cannot hold 2**31-1, so a saturated
+                    # bias cast to int32 wrapped to INT_MIN and killed the
+                    # channel on the board.
+                    b_q = np.clip(np.round(b.astype(np.float64) / b_scale.astype(np.float64)),
+                                  -2**31, 2**31 - 1).astype(np.int32)
                     bbase = n.input[2]
                     g.initializer.remove(b_t)
                     g.initializer.extend([
@@ -915,6 +962,7 @@ def _qat_finetune(model: YOLOX, samples, train_s, batch: int, cfg: TrainConfig, 
     missing = unseeded(model)
     if missing:
         raise RuntimeError(f"QAT observers never saw data: {missing[:5]}")
+    _check_cancel(cancel)
     model.train()
     # Fine-tune at a tenth of the float LR, cosine to 1% over the phase.
     qat_lr = lr * 0.1
@@ -1020,6 +1068,28 @@ def _score_onnx(path: Path, samples, val_s, cfg: TrainConfig, classes: list[str]
 
 # ── the Neuro N6 bundle ─────────────────────────────────────────────
 
+_C_KEYWORDS = frozenset("""auto break case char const continue default do double else enum extern
+float for goto if inline int long register restrict return short signed sizeof static struct
+switch typedef union unsigned void volatile while bool true false""".split())
+
+
+def _c_slug(name: str) -> str:
+    """Dataset name -> a slug that is a valid C identifier AND macro
+    prefix: the sketch snippet uses it as `#pragma neuron6 name=<slug>`,
+    `NEURON6_DECLARE_MODEL(<slug>)`, `NN_Instance_<slug>` and `<SLUG>_*`
+    macros. A leading digit ("3d objects") or a keyword ("int") made the
+    shipped bundle uncompilable."""
+    slug = re.sub(r"[^a-z0-9]+", "_", (name or "").lower()).strip("_") or "model"
+    if slug[0].isdigit() or slug in _C_KEYWORDS or slug.upper() in _C_KEYWORDS:
+        slug = "pk_" + slug
+    return slug
+
+
+def _c_str(s: str) -> str:
+    """Escape a class name for a C string literal."""
+    return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
 def _write_bundle(out_dir: Path, slug: str, classes: list[str], cfg: TrainConfig,
                   report: dict, int8_onnx: Path) -> None:
     guard = f"{slug.upper()}_LABELS_H"
@@ -1033,33 +1103,50 @@ def _write_bundle(out_dir: Path, slug: str, classes: list[str], cfg: TrainConfig
         f"#define {slug.upper()}_CONF_THRESHOLD {cfg.conf_thres}f",
         f"#define {slug.upper()}_NMS_THRESHOLD {cfg.nms_thres}f",
         f"static const char* const {slug.upper()}_CLASSES[{len(classes)}] = {{",
-        *[f'  "{c}",' for c in classes],
+        *[f'  "{_c_str(c)}",' for c in classes],
         "};",
         f"#endif /* {guard} */",
         "",
     ])
     (out_dir / f"{slug}_labels.h").write_text(labels_h, "utf-8")
 
+    U = slug.upper()
     snippet = "\n".join([
         f"// PixelKit export - drop {int8_onnx.name} and {slug}_labels.h into your",
-        "// sketch folder, then:",
+        "// sketch folder. The core compiles the model with the sketch and flashes",
+        "// its weights; PostProcess.h brings the YOLOX decoder.",
         "//",
         f'#pragma neuron6 model="{int8_onnx.name}" name={slug}',
         f'#include "{slug}_labels.h"',
-        "#include <Models.h>",
+        "#include <PostProcess.h>",
         "",
         f"NEURON6_DECLARE_MODEL({slug});",
         "",
-        f"// Input: {cfg.imgsz}x{cfg.imgsz}. The camera feeds the NPU directly:",
-        "// the model is quantised asymmetrically over [0,1] (scale 1/255,",
-        "// zero-point -128), which is exactly what packed RGB888 bytes mean,",
-        "// so there is no conversion step in your sketch.",
-        "//",
-        "// Output: ONE raw head tensor, rows [dx, dy, dw, dh, obj, cls...]",
-        "// (obj/cls already sigmoided, box terms in grid units). The",
-        "// PostProcess YOLOX decoder does the grid decode, thresholding and",
-        "// NMS for you using the values in the header.",
-        f"// Pass &NN_Instance_{slug} to Vision as usual.",
+        "void setup() {",
+        "  // No built-in post-processor for this network: pass nullptr and run",
+        "  // the YOLOX decoder yourself after each frame (below).",
+        f"  Vision.begin(&NN_Instance_{slug}, nullptr);",
+        f"  app_postprocess_od_yolox_ui_init({U}_CONF_THRESHOLD, {U}_NMS_THRESHOLD,",
+        f"                                   {U}_NUM_CLASSES, (float){U}_INPUT_W);",
+        "}",
+        "",
+        "void loop() {",
+        "  Vision.run();  // one camera frame through the NPU",
+        f"  app_postprocess_od_yolox_ui_run(&NN_Instance_{slug});",
+        "  for (int i = 0; i < yolox_pp_output.nb_detect; i++) {",
+        "    const yolox_det_t &d = yolox_pp_output.pOutBuff[i];",
+        f"    // {U}_CLASSES[d.class_index], d.conf, and d.x_center / d.y_center /",
+        "    // d.width / d.height in [0,1] of the model input.",
+        "  }",
+        "}",
+        "",
+        f"// Input: {cfg.imgsz}x{cfg.imgsz}. The camera feeds the NPU directly: the model",
+        "// is quantised asymmetrically over [0,1] (scale 1/255, zero-point -128),",
+        "// which is exactly what packed RGB888 bytes mean, so nothing converts.",
+        "// Output: ONE raw head tensor, rows [dx, dy, dw, dh, obj, cls...] (obj/cls",
+        "// sigmoided, box terms in grid units); the decoder does the grid decode,",
+        "// thresholding and NMS with the values in the header. Keep the header and",
+        "// the model from the SAME export: the decoder refuses a mismatch (-3).",
         "",
     ])
     (out_dir / f"{slug}_snippet.ino.txt").write_text(snippet, "utf-8")

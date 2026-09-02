@@ -3358,8 +3358,19 @@ async def _run_train_yolox_job(job, emit, cancel_event):
     import train_yolox as _ty
 
     params = job.params or {}
-    engine_dev = str(state.get("device") or "cpu")
-    train_dev = (str(params.get("device") or "").strip() or engine_dev)
+
+    def _norm_dev(s: str) -> str:
+        # "cuda" and "cuda:0" are the same card; compare them as such.
+        try:
+            d = torch.device(s)
+        except (RuntimeError, TypeError, ValueError):
+            return s
+        if d.type == "cuda":
+            return f"cuda:{d.index if d.index is not None else 0}"
+        return d.type
+
+    engine_dev = _norm_dev(str(state.get("device") or "cpu"))
+    train_dev = _norm_dev(str(params.get("device") or "").strip() or engine_dev)
     if train_dev == "cpu" and _configured_device() != "cpu":
         raise RuntimeError(
             "no GPU available for training (switch Compute to CPU in Settings to force)"
@@ -18905,7 +18916,10 @@ async def import_legacy_endpoint(payload: LegacyImportIn):
 _RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
 
 
-@app.get("/api/v2/projects/{project_id}/models")
+@app.get(
+    "/api/v2/projects/{project_id}/models",
+    dependencies=[Depends(require_project_read_access)],
+)
 async def trained_models_list(project_id: str):
     try:
         d = store.dataset_dir(project_id)
@@ -18947,7 +18961,10 @@ async def trained_models_list(project_id: str):
     return {"models": out}
 
 
-@app.get("/api/v2/projects/{project_id}/models/{run_id}/export")
+@app.get(
+    "/api/v2/projects/{project_id}/models/{run_id}/export",
+    dependencies=[Depends(require_project_read_access)],
+)
 async def trained_model_export(project_id: str, run_id: str):
     if not _RUN_ID_RE.fullmatch(run_id):
         raise HTTPException(400, "bad run id")

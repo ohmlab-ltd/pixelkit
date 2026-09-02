@@ -92,21 +92,35 @@ function Neuron6Line({ n6, rejected }: { n6: Neuron6Summary | null | undefined; 
 
 export function TrainCard({ projectId }: { projectId: string }) {
   const [runs, setRuns] = useState<TrainedRun[] | null>(null);
-  const [epochs, setEpochs] = useState(50);
+  // Raw string so clearing the field to retype doesn't snap to 1 and
+  // turn "20" into "120"; clamped when read.
+  const [epochsText, setEpochsText] = useState("50");
+  const epochs = Math.max(1, Math.min(500, Number(epochsText) || 50));
   const [imgsz, setImgsz] = useState<number>(256);
   const [training, setTraining] = useState(false); // an active train job for THIS dataset
   const [error, setError] = useState<string | null>(null);
   const wasTraining = useRef(false);
+  // The card is re-rendered, not remounted, on a project switch: a late
+  // response for the previous project must not overwrite this one's list.
+  const fetchSeq = useRef(0);
 
   const refresh = useCallback(async () => {
+    const seq = ++fetchSeq.current;
     try {
       const r = await apiFetch(`/api/v2/projects/${projectId}/models`);
-      if (r.ok) setRuns(((await r.json()) as { models: TrainedRun[] }).models);
+      if (r.ok) {
+        const models = ((await r.json()) as { models: TrainedRun[] }).models;
+        if (seq === fetchSeq.current) setRuns(models);
+      }
     } catch {
       /* engine down; card just shows nothing new */
     }
   }, [projectId]);
   useEffect(() => {
+    setRuns(null);
+    setError(null);
+    wasTraining.current = false;
+    setTraining(false);
     void refresh();
   }, [refresh]);
 
@@ -181,8 +195,9 @@ export function TrainCard({ projectId }: { projectId: string }) {
             type="number"
             min={1}
             max={500}
-            value={epochs}
-            onChange={(e) => setEpochs(Math.max(1, Math.min(500, Number(e.target.value) || 1)))}
+            value={epochsText}
+            onChange={(e) => setEpochsText(e.target.value)}
+            onBlur={() => setEpochsText(String(epochs))}
             className="w-16 rounded-md border border-[var(--line)] bg-transparent px-2 py-1 text-[12px] tabular-nums outline-none focus:border-[var(--line-strong)]"
           />
         </label>

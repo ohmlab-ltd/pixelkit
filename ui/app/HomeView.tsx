@@ -751,6 +751,14 @@ export function HomeView({
           result.errors[0] ? `Import failed: ${result.errors[0]}` : "No images were imported.",
         );
       }
+      if (result.failed > 0) {
+        // Partial success still opens the project, but say what was lost
+        // (undecodable HEICs, resource forks) rather than pretending.
+        const first = result.errors.slice(0, 2).join("; ");
+        window.alert(
+          `${result.failed} of ${result.total} image(s) could not be imported${first ? `: ${first}` : "."}`,
+        );
+      }
       // Open the new project. Labels = the dataset's classes.
       if (onV2Begin) onV2Begin(v2Name.trim(), parsed.classes, [], projectId, null);
       // Reset onboarding state (mirrors v2HandOff's tail).

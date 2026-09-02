@@ -288,7 +288,9 @@ async function ensureWindowsRuntime({ requirementsPath, onStatus, log }) {
 
   // 4. Sanity + marker ------------------------------------------------------
   status('Checking the runtime…');
-  const check = spawnSync(py, ['-c', 'import torch, transformers, fastapi, cv2, PIL'], {
+  // onnx + onnxruntime are the export stack; a broken ORT install (missing
+  // VC++ runtime) would otherwise only surface at the end of a training run.
+  const check = spawnSync(py, ['-c', 'import torch, transformers, fastapi, cv2, PIL, onnx, onnxruntime'], {
     windowsHide: true,
   });
   if (check.status !== 0) {

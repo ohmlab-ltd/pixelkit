@@ -428,7 +428,11 @@ export function OverviewPanel({
             </Card>
           </div>
           <div className="lg:col-span-1">
-            {projectId && <TrainCard projectId={projectId} />}
+            {projectId && (
+              <div className="mb-4">
+                <TrainCard projectId={projectId} />
+              </div>
+            )}
             <Card title="Activity">
               {activity.length === 0 ? (
                 <p className="m-auto text-[13px] text-foreground/55">Activity will appear here.</p>

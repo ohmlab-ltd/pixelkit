@@ -132,6 +132,57 @@ describe("YOLO", () => {
   });
 });
 
+describe("sweep regressions", () => {
+  it("COCO: folder-prefixed paths pair by suffix and twins never cross splits", async () => {
+    // The folder picker prefixes every path with the chosen folder name.
+    const train = JSON.stringify({
+      images: [{ id: 1, file_name: "train/a.jpg", width: 10, height: 10 }],
+      categories: [{ id: 1, name: "cat" }],
+      annotations: [{ id: 1, image_id: 1, category_id: 1, bbox: [1, 1, 5, 5] }],
+    });
+    const val = JSON.stringify({
+      images: [{ id: 1, file_name: "val/a.jpg", width: 10, height: 10 }],
+      categories: [{ id: 2, name: "dog" }],
+      annotations: [{ id: 9, image_id: 1, category_id: 2, bbox: [2, 2, 3, 3] }],
+    });
+    const files = [jpg("ds/train/a.jpg"), jpg("ds/val/a.jpg"), f("ds/instances_train.json", train), f("ds/instances_val.json", val)];
+    const ds = await parseDataset(files);
+    const t = ds.items.find((i) => i.file === files[0].file)!;
+    const v = ds.items.find((i) => i.file === files[1].file)!;
+    expect(t.boxes.map((b) => b.label)).toEqual(["cat"]);
+    expect(v.boxes.map((b) => b.label)).toEqual(["dog"]);
+    expect(ds.stats.unpairedAnnotations).toBe(0);
+  });
+
+  it("COCO: a bare file name that matches two files is ambiguous, not last-wins", async () => {
+    const j = JSON.stringify({
+      images: [{ id: 1, file_name: "a.jpg", width: 10, height: 10 }],
+      categories: [{ id: 1, name: "cat" }],
+      annotations: [{ id: 1, image_id: 1, category_id: 1, bbox: [1, 1, 5, 5] }],
+    });
+    const ds = await parseDataset([jpg("ds/train/a.jpg"), jpg("ds/val/a.jpg"), f("ds/x.json", j)]);
+    expect(ds.stats.unpairedAnnotations).toBe(1);
+    expect(ds.items.every((i) => i.boxes.length === 0)).toBe(true);
+  });
+
+  it("YAML names: column-0 list, trailing comment, flow mapping, quoted keys, multi-line list", () => {
+    expect(parseYamlNames("nc: 2\nnames:\n- cat\n- dog\nval: x")).toEqual(["cat", "dog"]);
+    expect(parseYamlNames("names: ['cat', 'dog']  # classes")).toEqual(["cat", "dog"]);
+    expect(parseYamlNames("names: {0: cat, 1: dog}")).toEqual(["cat", "dog"]);
+    expect(parseYamlNames("names:\n  '1': dog\n  \"0\": cat\n")).toEqual(["cat", "dog"]);
+    expect(parseYamlNames("names: [cat,\n  dog]\nnc: 2")).toEqual(["cat", "dog"]);
+  });
+
+  it("YOLO: confidence rows are boxes with a score; malformed rows are not prose", () => {
+    const r = parseYoloLabelText("0 0.5 0.5 0.2 0.2 0.93\n")!;
+    expect(r.rows).toHaveLength(1);
+    expect(r.rows[0].score).toBeCloseTo(0.93);
+    const t = parseYoloLabelText("0 0.5 0.5 0.2\n")!; // truncated row: still a label file
+    expect(t).toEqual({ rows: [], bad: 1 });
+    expect(parseYoloLabelText("Licensed under CC-BY.\nSee README.")).toBeNull();
+  });
+});
+
 describe("VOC", () => {
   it("still parses (regression guard for the dispatch rewrite)", async () => {
     const xml = `<annotation><filename>a.jpg</filename><size><width>10</width><height>20</height></size>

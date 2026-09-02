@@ -246,3 +246,52 @@ def test_qat_export_maps_fully_to_the_npu(tmp_path):
     assert info["verified"] is True
     assert info["epochsSoftware"] == 0, info
     assert info["epochsHardware"] > 100
+
+
+# ── sweep regressions ────────────────────────────────────────────────
+
+def test_slug_is_a_valid_c_identifier():
+    from train_yolox import _c_slug, _c_str
+
+    assert _c_slug("3D objects") == "pk_3d_objects"
+    assert _c_slug("int") == "pk_int"
+    assert _c_slug("Bolts & Nuts!") == "bolts_nuts"
+    assert _c_slug("") == "model"
+    assert _c_str('say "hi"' + chr(92)) == 'say ' + chr(92) + '"hi' + chr(92) + '"' + chr(92) * 2
+
+
+def test_ap50_per_class_is_positional_when_a_class_has_no_val_gt():
+    import numpy as np
+    from train_yolox import ap50
+
+    # class 0 never appears in GT; class 1 perfect; class 2 missed.
+    gt = [np.array([[10, 10, 50, 50, 1], [60, 60, 90, 90, 2]], np.float32)]
+    pr = [np.array([[10, 10, 50, 50, 0.9, 1]], np.float32)]
+    mean, per = ap50(pr, gt, n_classes=3)
+    assert per[0] is None and per[1] == pytest.approx(1.0) and per[2] == pytest.approx(0.0)
+    assert mean == pytest.approx(0.5)
+
+
+def test_int32_bias_fold_saturates_instead_of_wrapping(tmp_path):
+    import numpy as np
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper as nh
+    from train_yolox import _fold_weight_quant
+
+    # input -> Q/DQ -> Conv(w float, b float huge) -> output
+    w = np.ones((1, 1, 1, 1), np.float32)
+    b = np.array([5e9], np.float32)  # far beyond int32 after / (x_scale * w_scale)
+    init = [nh.from_array(np.float32(0.02), "xs"), nh.from_array(np.int8(0), "xz"),
+            nh.from_array(w, "W"), nh.from_array(b, "B")]
+    nodes = [helper.make_node("QuantizeLinear", ["images", "xs", "xz"], ["q"]),
+             helper.make_node("DequantizeLinear", ["q", "xs", "xz"], ["dq"]),
+             helper.make_node("Conv", ["dq", "W", "B"], ["y"], name="/c/Conv")]
+    g = helper.make_graph(nodes, "t", [helper.make_tensor_value_info("images", TensorProto.FLOAT, [1, 1, 4, 4])],
+                          [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 1, 4, 4])], initializer=init)
+    p = tmp_path / "t.onnx"
+    onnx.save(helper.make_model(g, opset_imports=[helper.make_opsetid("", 17)]), str(p))
+    assert _fold_weight_quant(p) == 1
+    g2 = onnx.load(str(p)).graph
+    inits = {i.name: nh.to_array(i) for i in g2.initializer}
+    bq = next(v for k, v in inits.items() if k.endswith("B_q"))
+    assert bq.dtype == np.int32 and bq[0] == 2**31 - 1  # saturated high, not INT_MIN

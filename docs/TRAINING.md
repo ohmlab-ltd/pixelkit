@@ -23,10 +23,11 @@ The core's build tells ST Edge AI `--input-data-type uint8
 --inputs-ch-position chlast`, because the camera DMAs packed RGB888 bytes
 straight into the model's input buffer. That is only correct when the
 graph input is quantised asymmetrically over [0,1]: scale 1/255,
-zero-point -128. PixelKit trains on [0,1] tensors and calibrates with a
-black and a white frame so the calibrated input IS the contract; the
-export refuses to emit a model whose calibration drifted (a post-hoc
-rewrite of a finished network measures worse than the bug it fixes).
+zero-point -128. PixelKit trains on [0,1] tensors, the QAT graph pins
+the input fake-quant to exactly those parameters, and the export checks
+the file it wrote: a calibrated input range outside [0,1] (a symmetric
+or a [0,255] model) is refused rather than rewritten, because a post-hoc
+rewrite of a finished network measures worse than the bug it fixes.
 
 ## The head
 
@@ -78,9 +79,11 @@ compiler the export still succeeds and says `verified: false`.
 
 ## The recipe, validated on Pascal VOC 2007
 
-Defaults: 50 epochs, 256x256, batch 16 (32 on a 24 GB card is fine), SGD
-with warmup and cosine decay, hflip + HSV + scale jitter, COCO warm
-start, MinMax calibration on 64 training images plus the two extremes.
+Defaults: 50 float epochs plus 8 quantisation-aware epochs, 256x256,
+batch 16 (32 on a 24 GB card is fine), SGD with warmup and cosine decay,
+hflip + HSV + scale jitter, COCO warm start. With `qat_epochs=0` the
+fallback is post-training quantisation with percentile-99.9 calibration
+on up to 200 natural training images.
 
 <!-- VOC_RESULTS -->
 
