@@ -222,9 +222,12 @@ class YOLOXHead(nn.Module):
         batch_size = output.shape[0]
         n_ch = 5 + self.num_classes
         hsize, wsize = output.shape[-2:]
-        if grid.shape[2:4] != output.shape[2:4]:
+        if grid.shape[2:4] != output.shape[2:4] or grid.device != output.device:
             yv, xv = meshgrid([torch.arange(hsize), torch.arange(wsize)])
-            grid = torch.stack((xv, yv), 2).view(1, 1, hsize, wsize, 2).type(dtype)
+            # PixelKit: build on the OUTPUT's device, not the current CUDA
+            # device, so training on cuda:1 while cuda:0 is current works.
+            grid = torch.stack((xv, yv), 2).view(1, 1, hsize, wsize, 2).to(
+                device=output.device, dtype=output.dtype)
             self.grids[k] = grid
 
         output = output.view(batch_size, self.n_anchors, n_ch, hsize, wsize)
@@ -246,8 +249,8 @@ class YOLOXHead(nn.Module):
             shape = grid.shape[:2]
             strides.append(torch.full((*shape, 1), stride))
 
-        grids = torch.cat(grids, dim=1).type(dtype)
-        strides = torch.cat(strides, dim=1).type(dtype)
+        grids = torch.cat(grids, dim=1).to(device=outputs.device, dtype=outputs.dtype)
+        strides = torch.cat(strides, dim=1).to(device=outputs.device, dtype=outputs.dtype)
 
         outputs[..., :2] = (outputs[..., :2] + grids) * strides
         outputs[..., 2:4] = torch.exp(outputs[..., 2:4]) * strides

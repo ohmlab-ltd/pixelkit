@@ -16,6 +16,20 @@ const API =
     ? "http://localhost:8001"
     : "");
 
+type Neuron6Summary = {
+  verified?: boolean | null;
+  available?: boolean | null;
+  error?: string | null;
+  reason?: string | null;
+  epochsSoftware?: number | null;
+  epochsHardware?: number | null;
+  epochsTotal?: number | null;
+  weightsBytes?: number | null;
+  activationsBytes?: number | null;
+  poolRemainingBytes?: number | null;
+  poolUsedPct?: number | null;
+};
+
 type TrainedRun = {
   run: string;
   imgsz: number | null;
@@ -25,6 +39,8 @@ type TrainedRun = {
   ap50Int8: number | null;
   minutes: number | null;
   hasExport: boolean;
+  exportRejected?: boolean;
+  neuron6?: Neuron6Summary | null;
 };
 
 type ActiveJob = { id: string; kind: string; project: string; status: string };
@@ -40,6 +56,38 @@ function fmtRunDate(run: string): string {
 }
 
 const pct = (v: number | null) => (typeof v === "number" ? `${(v * 100).toFixed(1)}%` : "-");
+const kb = (b: number | null | undefined) =>
+  typeof b === "number" ? (b >= 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(2)} MB` : `${Math.round(b / 1024)} kB`) : "-";
+
+// One line of NPU truth per run: did ST Edge AI build it, how much ran
+// in software, and what it costs against the board's weights pool.
+function Neuron6Line({ n6, rejected }: { n6: Neuron6Summary | null | undefined; rejected?: boolean }) {
+  if (rejected || n6?.error) {
+    return (
+      <span className="text-[11px] text-[var(--bad)]" title={n6?.error ?? "ST Edge AI rejected this export"}>
+        Rejected by ST Edge AI{n6?.error ? `: ${n6.error.slice(0, 80)}` : ""}
+      </span>
+    );
+  }
+  if (!n6 || !n6.verified) {
+    return (
+      <span className="text-[11px] text-foreground/40" title={n6?.reason ?? undefined}>
+        NPU build not verified{n6?.available === false ? " (ST Edge AI not installed)" : ""}
+      </span>
+    );
+  }
+  const sw = n6.epochsSoftware ?? 0;
+  return (
+    <span className="text-[11px] tabular-nums text-foreground/55" title="Compiled with ST Edge AI against the Neuro N6 memory map">
+      <span className={sw === 0 ? "text-[var(--ok)]" : "text-[var(--warn,#c9a227)]"}>
+        {sw === 0 ? "Fully on NPU" : `${sw} software epoch${sw === 1 ? "" : "s"}`}
+      </span>
+      {" · "}weights {kb(n6.weightsBytes)}
+      {typeof n6.poolUsedPct === "number" && ` (${n6.poolUsedPct.toFixed(1)}% of pool)`}
+      {" · "}activations {kb(n6.activationsBytes)}
+    </span>
+  );
+}
 
 export function TrainCard({ projectId }: { projectId: string }) {
   const [runs, setRuns] = useState<TrainedRun[] | null>(null);
@@ -184,6 +232,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
                   AP50 {pct(r.ap50Fp32)}
                   <span className="text-foreground/35"> → int8 {pct(r.ap50Int8)}</span>
                 </span>
+                <Neuron6Line n6={r.neuron6} rejected={r.exportRejected} />
                 {r.hasExport && (
                   <a
                     href={`${API}/api/v2/projects/${projectId}/models/${r.run}/export`}

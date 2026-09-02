@@ -67,7 +67,8 @@
         "from": "../engine/gd",
         "to": "engine/gd",
         "filter": [
-          "**/*.py"
+          "**/*.py",
+          "**/*.mpool"
         ]
       },
       {

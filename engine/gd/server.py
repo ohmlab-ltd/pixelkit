@@ -18932,6 +18932,16 @@ async def trained_models_list(project_id: str):
                 "ap50Int8": rep.get("ap50_int8"),
                 "minutes": rep.get("minutes"),
                 "hasExport": (run_dir / "export.zip").is_file(),
+                "exportRejected": bool(rep.get("exportRejected")),
+                # ST Edge AI verification summary (PK-1.3): present when the
+                # compiler ran, so the card can say "0 SW epochs, 898 kB".
+                "neuron6": {
+                    k: (rep.get("neuron6") or {}).get(k)
+                    for k in ("verified", "available", "error", "reason",
+                              "epochsSoftware", "epochsHardware", "epochsTotal",
+                              "weightsBytes", "activationsBytes",
+                              "poolRemainingBytes", "poolUsedPct")
+                },
             })
     return {"models": out}
 

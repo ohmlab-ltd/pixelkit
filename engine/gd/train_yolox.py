@@ -43,8 +43,12 @@ from __future__ import annotations
 import io
 import json
 import math
+import queue
 import random
+import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
@@ -88,6 +92,10 @@ class TrainConfig:
     calib_images: int = 64
     seed: int = 0
     warmup_epochs: int = 3
+    # Compile the int8 export with ST Edge AI when it is installed and
+    # record epochs / weights / pool headroom in report.json. When the
+    # compiler is present and rejects the model, the export is refused.
+    verify_neuron6: bool = True
 
 
 @dataclass
@@ -190,6 +198,19 @@ def letterbox(img: np.ndarray, size: int) -> tuple[np.ndarray, float, int, int]:
     return out, scale, dx, dy
 
 
+def _dims(s: Sample) -> tuple[int, int]:
+    """(h, w) of a sample: the manifest's recorded dims when present,
+    else decode once. Val scoring needs these to place ground truth in
+    letterbox space."""
+    if s.h > 0 and s.w > 0:
+        return s.h, s.w
+    img = _read_rgb(s.path)
+    if img is None:
+        return (s.h or 1, s.w or 1)
+    s.h, s.w = img.shape[:2]
+    return s.h, s.w
+
+
 def _read_rgb(path: Path) -> np.ndarray | None:
     data = np.fromfile(str(path), dtype=np.uint8)
     img = cv2.imdecode(data, cv2.IMREAD_COLOR)
@@ -252,6 +273,29 @@ def _make_batch(samples: list[Sample], idxs: list[int], size: int, train: bool,
             y0, y1 = y0 + dy, y1 + dy
             targets[bi, j] = [cls[j], (x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0]
     return torch.from_numpy(imgs), torch.from_numpy(targets)
+
+
+def _batch_iter(samples: list[Sample], order: list[int], batch: int, size: int,
+                train: bool, workers: int = 4, lookahead: int = 6):
+    """Yield (imgs, targets) batches with decode + augment running on a
+    thread pool ahead of the consumer. cv2 releases the GIL, so this
+    overlaps the CPU pipeline with the GPU step instead of serialising
+    them (VOC2007: 30 s/epoch of loading otherwise)."""
+    chunks = [order[i:i + batch] for i in range(0, len(order), batch)]
+    chunks = [c for c in chunks if c]
+    if not chunks:
+        return
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        pending: "queue.Queue" = queue.Queue()
+        it = iter(chunks)
+        for _ in range(min(lookahead, len(chunks))):
+            pending.put(pool.submit(_make_batch, samples, next(it), size, train))
+        while not pending.empty():
+            fut = pending.get()
+            nxt = next(it, None)
+            if nxt is not None:
+                pending.put(pool.submit(_make_batch, samples, nxt, size, train))
+            yield fut.result()
 
 
 # ── evaluation: VOC AP@0.5, no pycocotools ──────────────────────────
@@ -509,6 +553,11 @@ def train(
 
     device = torch.device(cfg.device)
     use_amp = device.type == "cuda"
+    if device.type == "cuda" and device.index is not None:
+        # Per-thread current device: the vendored head builds its grids
+        # with .type(torch.cuda.FloatTensor), which lands on the CURRENT
+        # device, so a cuda:1 run needs cuda:1 to be current here.
+        torch.cuda.set_device(device)
     model = _build_model(len(classes)).to(device)
     pretrained_used = cfg.pretrained and _load_pretrained(model)
 
@@ -548,8 +597,7 @@ def train(
             out = net(imgs.to(device))
             preds.append(_decode_rows(out, 0.01, cfg.nms_thres, len(classes)))
             s = samples[si]
-            img = _read_rgb(s.path)
-            hh, ww = (img.shape[:2] if img is not None else (s.h or 1, s.w or 1))
+            hh, ww = _dims(s)
             scale = min(cfg.imgsz / ww, cfg.imgsz / hh)
             dx = (cfg.imgsz - int(round(ww * scale))) // 2
             dy = (cfg.imgsz - int(round(hh * scale))) // 2
@@ -567,15 +615,14 @@ def train(
             raise Cancelled()
         order = train_s[:]
         random.shuffle(order)
+        # Drop the ragged tail so every step is a full batch (BN stats).
+        order = order[: steps_per_epoch * batch]
         epoch_loss = 0.0
-        for step in range(steps_per_epoch):
-            idxs = order[step * batch : (step + 1) * batch]
-            if not idxs:
-                continue
+        for step, (imgs, targets) in enumerate(
+                _batch_iter(samples, order, batch, cfg.imgsz, train=True)):
             for g in opt.param_groups:
                 g["lr"] = lr_at(epoch, step)
-            imgs, targets = _make_batch(samples, idxs, cfg.imgsz, train=True)
-            imgs, targets = imgs.to(device), targets.to(device)
+            imgs, targets = imgs.to(device, non_blocking=True), targets.to(device, non_blocking=True)
             with torch.autocast("cuda", enabled=use_amp):
                 out = model(imgs, targets)
                 loss = out["total_loss"]
@@ -604,7 +651,7 @@ def train(
     run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     out_dir = store.dataset_dir(project_id) / "models" / "yolox_nano" / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    slug = "".join(c if c.isalnum() else "_" for c in (store.load(project_id) or {}).get("name", "model").lower()) or "model"
+    slug = re.sub(r"[^a-z0-9]+", "_", (store.load(project_id) or {}).get("name", "model").lower()).strip("_") or "model"
 
     torch.save({"model": model.state_dict(), "classes": classes, "imgsz": cfg.imgsz},
                out_dir / "best.pt")
@@ -624,6 +671,16 @@ def train(
     int8_ap, int8_per_class, contract = _quantize_and_score(
         fp32_onnx, int8_onnx, samples, train_s, val_s, cfg, classes)
 
+    neuron6 = _verify_neuron6(int8_onnx, out_dir, slug) if cfg.verify_neuron6 else {
+        "verified": False, "available": None, "reason": "verification disabled"}
+    if neuron6.get("error"):
+        # The compiler is installed and said no: not a deliverable. Leave
+        # the ONNX for debugging, write the reason, emit no bundle.
+        (out_dir / "report.json").write_text(json.dumps({
+            "run": run_id, "model": "yolox_nano", "exportRejected": True,
+            "neuron6": neuron6}, indent=2), "utf-8")
+        raise ValueError(f"export rejected by ST Edge AI: {neuron6['error']}")
+
     _write_bundle(out_dir, slug, classes, cfg, {
         "run": run_id,
         "model": "yolox_nano",
@@ -638,9 +695,24 @@ def train(
         "ap50_int8": round(int8_ap, 4),
         "per_class_fp32": {c: round(a, 4) for c, a in zip(classes, fp32_per_class)},
         "per_class_int8": {c: round(a, 4) for c, a in zip(classes, int8_per_class)},
+        "neuron6": neuron6,
         "minutes": round((time.time() - t0) / 60, 1),
     }, int8_onnx)
     return json.loads((out_dir / "report.json").read_text("utf-8"))
+
+
+# ── Neuro N6 build verification (PK-1.3) ────────────────────────────
+
+def _verify_neuron6(int8_onnx: Path, out_dir: Path, slug: str) -> dict:
+    """Compile the export with ST Edge AI as the core's pragma pipeline
+    would. The compiler log and generate report land in <run>/neuron6/."""
+    import neuron6_verify
+
+    del slug  # the generated C symbol is discarded; a short name avoids MAX_PATH
+    try:
+        return neuron6_verify.verify(int8_onnx, out_dir / "neuron6")
+    except RuntimeError as e:
+        return {"verified": False, "available": True, "error": str(e)}
 
 
 # ── int8 quantization (ONNX Runtime static QDQ) ─────────────────────
@@ -692,8 +764,7 @@ def _quantize_and_score(fp32_path: Path, int8_path: Path, samples, train_s, val_
         out = torch.from_numpy(_decode_raw(raw, cfg.imgsz))
         preds.append(_decode_rows(out, 0.01, cfg.nms_thres, len(classes)))
         s = samples[si]
-        img = _read_rgb(s.path)
-        hh, ww = (img.shape[:2] if img is not None else (s.h or 1, s.w or 1))
+        hh, ww = _dims(s)
         scale = min(cfg.imgsz / ww, cfg.imgsz / hh)
         dx = (cfg.imgsz - int(round(ww * scale))) // 2
         dy = (cfg.imgsz - int(round(hh * scale))) // 2
