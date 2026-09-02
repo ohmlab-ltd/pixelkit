@@ -17,6 +17,7 @@ export type GuideSectionKey =
   | "settings"
   | "teams"
   | "derived"
+  | "training"
   | "reference";
 
 const GUIDE_SECTIONS: { key: GuideSectionKey; title: string; blurb: string }[] = [
@@ -29,6 +30,7 @@ const GUIDE_SECTIONS: { key: GuideSectionKey; title: string; blurb: string }[] =
   { key: "settings", title: "Settings & themes", blurb: "Renaming, recolouring labels, annotation snapshots, export." },
   { key: "teams", title: "Projects & teams", blurb: "Group datasets into a Project: shared labels, covers, activity." },
   { key: "derived", title: "Derived datasets", blurb: "Crop each detection into a child dataset: ROI squares, inherited or fresh labels, live sync." },
+  { key: "training", title: "Train for Neuro N6", blurb: "Train a YOLOX-Nano on this dataset, verify it for the NPU, export the board bundle." },
   { key: "reference", title: "Reference", blurb: "Keyboard shortcuts and reference tables." },
 ];
 
@@ -94,6 +96,7 @@ export function GuideView() {
         {section === "settings" && <SettingsSection go={go} />}
         {section === "teams" && <TeamsSection go={go} />}
         {section === "derived" && <DerivedSection go={go} />}
+        {section === "training" && <TrainingSection go={go} />}
         {section === "reference" && <ReferenceSection />}
       </div>
     </main>
@@ -260,7 +263,7 @@ function NextUp({
 
 // ---------- New helpers: LLM prompt + figures ----------
 
-const LLM_PROMPT = `You are a helpful assistant for someone using PixelKit, a SaaS for building labelled computer-vision datasets. Answer my questions in plain English. If something is unclear or undocumented in what follows, say so rather than guessing.
+const LLM_PROMPT = `You are a helpful assistant for someone using PixelKit, a free desktop app for building labelled computer-vision datasets and training detectors for the OhmLab Neuro N6 board. Answer my questions in plain English. If something is unclear or undocumented in what follows, say so rather than guessing.
 
 ==============================================================
 WHAT PIXELKIT IS
@@ -380,10 +383,11 @@ SETTINGS, THEMES, EXPORT
 ==============================================================
 The gear icon at the top of any project page opens Settings.
 
-You can rename the project, set its visibility (private projects
-require Pro), pick the cover image, and rename / recolour labels.
+You can rename the project, pick the cover image, and rename /
+recolour labels.
 
-Export in YOLO, COCO, or Pascal VOC. Choose your train/val split.
+Export in YOLO, COCO, Pascal VOC, CVAT, Label Studio or PNG masks.
+Choose your train/val split.
 The split is reproducible - the same image always lands in the
 same set, even across re-exports.
 
@@ -396,7 +400,7 @@ Deleting a project is destructive and irreversible. Type the
 project name to confirm.
 
 ==============================================================
-PROJECTS (TEAMS) AND ROLES
+PROJECTS
 ==============================================================
 A Project (capital P) is a folder that groups several related
 datasets, with a cover and an activity timeline. It is different
@@ -411,6 +415,26 @@ label merges the two everywhere.
 
 Deleting a dataset from a Project asks whether to remove it from the
 Project (it survives as a standalone dataset) or delete it entirely.
+
+==============================================================
+IMPORTING AN EXISTING DATASET
+==============================================================
+The Import a labelled dataset step on the home page accepts Pascal
+VOC (Annotations/*.xml), COCO (a JSON with images and annotations)
+and YOLO (labels/*.txt with classes.txt or data.yaml), as a folder
+or a zip. Every box comes in editable; polygon masks are kept.
+
+==============================================================
+TRAINING FOR THE NEURO N6
+==============================================================
+The Train for Neuro N6 card on a dataset's overview trains a
+YOLOX-Nano detector on this machine (GPU required), fine-tunes it
+with int8 simulated so the deployed model keeps its accuracy, and
+exports a zip with the int8 model, a labels header, a sketch snippet
+and report.json. When ST Edge AI Core is installed the export is
+compiled for the board's NPU and the run shows how much runs in
+hardware and how much flash it uses. A model the compiler rejects is
+kept with the reason instead of exported.
 
 ==============================================================
 DERIVED DATASETS
@@ -1050,6 +1074,7 @@ function DatasetSection({ go }: { go: (k: GuideSectionKey) => void }) {
                         "Image orientation from EXIF metadata is honoured so iPhone photos don&rsquo;t end up sideways.",
             "Upload progress streams into the dataset gallery one tile at a time, with blurred placeholders for in-flight files.",
             "Up to 100 MB per video, then the file gets split into per-frame images on the server.",
+            "Already have annotations? The <em>Import a labelled dataset</em> step on the home page takes Pascal VOC, COCO or YOLO (folder or zip): every box comes in editable and polygon masks are kept.",
           ]}
         />
       </GuideSection>
@@ -1655,9 +1680,8 @@ function SettingsSection({ go }: { go: (k: GuideSectionKey) => void }) {
         title="Settings & themes"
         intro={
           <>
-            Project settings, label management, visibility, the light / dark
-            toggle, the workspace and public-projects feeds, and exporting
-            the finished dataset.
+            Project settings, label management, the light / dark toggle,
+            and exporting the finished dataset.
           </>
         }
       />
@@ -1665,9 +1689,9 @@ function SettingsSection({ go }: { go: (k: GuideSectionKey) => void }) {
       <GuideSection n={1} title="Opening Settings">
         <p>
           Click the gear icon at the top of any project page to open the
-          Settings panel. From there you can rename the project, change its
-          visibility, set the cover image, manage label colours, and delete
-          the project entirely.
+          Settings panel. From there you can rename the project, set the
+          cover image, manage label colours, and delete the project
+          entirely.
         </p>
       </GuideSection>
 
@@ -1952,16 +1976,88 @@ function DerivedSection({ go }: { go: (k: GuideSectionKey) => void }) {
         />
       </GuideSection>
 
+      <NextUp next="training" go={go} />
+    </>
+  );
+}
+
+function TrainingSection({ go }: { go: (k: GuideSectionKey) => void }) {
+  return (
+    <>
+      <GuideHeader
+        eyebrow="Section 09"
+        title="Train for Neuro N6"
+        intro={
+          <>
+            Turn a labelled dataset into a detector that runs on the OhmLab
+            Neuro N6 board. Training happens on this machine, the export is
+            compiled for the board&rsquo;s NPU, and everything you need lands
+            in one zip.
+          </>
+        }
+      />
+
+      <GuideSection n={1} title="Starting a run">
+        <p>
+          Open a dataset&rsquo;s overview and find the{" "}
+          <strong>Train for Neuro N6</strong> card. Pick the number of epochs
+          and the input size, then Start training. The job runs in the
+          background and reports in the status bar; you can keep labelling
+          while it trains.
+        </p>
+        <Bullets
+          items={[
+            "<strong>Epochs</strong>. 50 is the default; small datasets are usually fine with fewer.",
+            "<strong>Input</strong>. The square resolution the model sees (256 by default). Bigger inputs see smaller objects at the cost of speed on the board.",
+            "<strong>GPU required</strong>. Training needs a CUDA card or Apple Silicon. With a second GPU installed, training uses it so labelling stays responsive.",
+          ]}
+        />
+      </GuideSection>
+
+      <GuideSection n={2} title="What the run does">
+        <Bullets
+          items={[
+            "<strong>Float training</strong>. A YOLOX-Nano detector, warm-started from COCO, trained on the dataset&rsquo;s labelled images with the same train/val split the exporters use.",
+            "<strong>Quantisation-aware fine-tuning</strong>. A few extra epochs with int8 simulated throughout the network, so the exported model scores like the float one instead of losing ten to twenty points.",
+            "<strong>Export and verify</strong>. The int8 model is written with the board&rsquo;s input contract built in and, when ST Edge AI Core is installed, compiled for the NPU so the run can report how much of it runs in hardware and how much flash it needs.",
+          ]}
+        />
+      </GuideSection>
+
+      <GuideSection n={3} title="Reading a run">
+        <p>Each finished run in the card shows three things:</p>
+        <Bullets
+          items={[
+            "<strong>AP50 float and int8</strong>. Accuracy on the held-out split for the float model and for the exact int8 file you deploy. The report.json in the export carries the per-class numbers.",
+            "<strong>The NPU line</strong>. <em>Fully on NPU</em> means zero software epochs; otherwise it says how many ops fell back to the CPU. Weights are shown against the board&rsquo;s flash pool.",
+            "<strong>Rejected</strong>. If the compiler refuses the model the run is kept with the reason instead of shipping something that cannot build.",
+          ]}
+        />
+      </GuideSection>
+
+      <GuideSection n={4} title="Putting it on the board">
+        <p>
+          Click <strong>N6 export</strong> to download the zip, drop its files
+          into your sketch folder and paste the two lines from the snippet:
+          the <span className="font-mono">#pragma neuron6</span> line that
+          names the model file, and the include for the generated labels
+          header. The core compiles and flashes the model with the sketch,
+          and the PostProcess library&rsquo;s YOLOX decoder turns the output
+          into boxes with the thresholds from the header.
+        </p>
+      </GuideSection>
+
       <NextUp next="reference" go={go} />
     </>
   );
 }
 
+
 function ReferenceSection() {
   return (
     <>
       <GuideHeader
-        eyebrow="Section 09"
+        eyebrow="Section 10"
         title="Reference"
         intro={
           <>
