@@ -85,7 +85,27 @@ hflip + HSV + scale jitter, COCO warm start. With `qat_epochs=0` the
 fallback is post-training quantisation with percentile-99.9 calibration
 on up to 200 natural training images.
 
-<!-- VOC_RESULTS -->
+Measured on Pascal VOC 2007 trainval (5011 images, 12,608 boxes, 20
+classes, non-difficult; the sha1 split gives 4008 train / 1003 val) on
+one RTX 3090, 25.6 minutes end to end including the compile:
+
+| | AP@0.5 | note |
+|---|---|---|
+| float model | 0.542 | after 50 epochs |
+| int8 export, PTQ (retired recipe) | 0.339 | every class hurt, -21 points |
+| int8 export, QAT (shipped recipe) | **0.507** | -3.5 points |
+
+Per class the QAT export is within 2 points of float for 13 of the 20
+classes; the largest remaining gaps are sofa (-9.5), bicycle (-8.9),
+train (-8.8), bus (-8.5) and pottedplant (-8.1). The compiled model:
+0 pure-software epochs, 119 hardware + 3 hybrid, 923 kB of weights
+(3.5% of the pool), 459 kB of activations, 274 MMACs.
+
+A note on scale: these are numbers for a 0.9 M-parameter detector at
+256x256 on a 20-class benchmark, which is a harder task than most
+PixelKit datasets (a few classes, a fixed camera). On the 3-image QA
+set and the 300-image VOC subset the QAT export matched or beat the
+float model.
 
 ## Importing an existing dataset
 
