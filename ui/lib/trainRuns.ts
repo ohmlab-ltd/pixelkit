@@ -33,14 +33,21 @@ export type ThresholdSummary = {
   precision?: number | null;
   recall?: number | null;
   calibrated?: boolean;
-  fallback?: boolean; // the model found nothing on val: the default was written
+  fallback?: boolean | null; // the model found nothing on val: the default was written
 };
+
+// Reports written before the flag existed carry calibrated=false with an
+// all-zero sweep when the model found nothing: read that as the fallback.
+export function isThresholdFallback(thr: ThresholdSummary): boolean {
+  if (thr.fallback) return true;
+  return !thr.calibrated && (thr.f1 ?? 0) === 0 && (thr.precision ?? 0) === 0 && (thr.recall ?? 0) === 0;
+}
 
 export function thresholdNote(thr: ThresholdSummary): string {
   if (thr.calibrated) {
     return `chosen on the val split for the best F1 (${(thr.f1 ?? 0).toFixed(2)}): precision ${pct(thr.precision)}, recall ${pct(thr.recall)}. Written into the labels header.`;
   }
-  if (thr.fallback) return "the default: the model found nothing on the val split at any threshold.";
+  if (isThresholdFallback(thr)) return "the default: the model found nothing on the val split at any threshold.";
   return "as configured for this run.";
 }
 

@@ -61,6 +61,7 @@ import os
 import queue
 import random
 import re
+import threading
 import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -175,6 +176,7 @@ class Sample:
     source: str = "original"  # "original" | "augmented" | "eval"
     parent: str = ""          # augmented copies: the original's filename
     import_id: str = ""
+    measured: bool = False    # w/h come from decoding the file, not the manifest
 
 
 def _box_xyxy(b: dict) -> tuple[float, float, float, float] | None:
@@ -349,7 +351,11 @@ def stratified_split(samples: list[Sample], train_split: float, seed: int = 0) -
     and keeps at least one train image; the val share of each class is
     round(n * (1 - train_split)). Images are visited rarest-class first
     in a hash order keyed on filename and seed, so the result does not
-    depend on upload order and repeats exactly for the same dataset."""
+    depend on upload order and repeats exactly for the same dataset.
+    The one exception: an image that also carries a class with a single
+    image stays in train (learning that class beats measuring another),
+    so a class whose every image shares a picture with such a singleton
+    can end up unmeasured; the pre-flight check says so."""
     if not samples:
         return
     if train_split >= 0.999:
@@ -485,8 +491,9 @@ def preflight_samples(samples: list[Sample], classes: list[str], info: dict, cfg
     n_orig_train = sum(1 for s in train_s if s.source == "original")
     rows = split_summary(samples, classes)
 
-    if len(train_s) < 2:
-        blockers.append(f"training needs at least 2 labelled images, have {len(train_s)}")
+    n_labelled = n_orig_train + sum(1 for s in val_s if s.source == "original")
+    if n_labelled < 2 or (not train_s):
+        blockers.append(f"training needs at least 2 labelled images, have {n_labelled}")
     if cfg.eval_project and not val_s:
         blockers.append("the held-out dataset has no labelled images with this dataset's labels")
     if cfg.eval_project and info.get("evalMissingClasses"):
@@ -596,24 +603,35 @@ def letterbox(img: np.ndarray, size: int) -> tuple[np.ndarray, float, int, int]:
 
 
 def _dims(s: Sample) -> tuple[int, int]:
-    """(h, w) of a sample: the manifest's recorded dims when present,
-    else decode once. Val scoring needs these to place ground truth in
-    letterbox space."""
-    if s.h > 0 and s.w > 0:
+    """(h, w) of a sample as the trainer will see it: decoded once and
+    cached. The manifest's dims are not trusted here because an
+    EXIF-rotated JPEG can be recorded unrotated by one import path and
+    decoded rotated by cv2, which would put the val ground truth on the
+    wrong axis."""
+    if s.measured and s.h > 0 and s.w > 0:
         return s.h, s.w
     img = _read_rgb(s.path)
     if img is None:
         return (s.h or 1, s.w or 1)
     s.h, s.w = img.shape[:2]
+    s.measured = True
     return s.h, s.w
 
 
 def _read_rgb(path: Path) -> np.ndarray | None:
+    """Decode an image file; None for anything unreadable (missing,
+    empty, truncated, not an image). Callers skip None samples, so one
+    bad file never ends a run."""
     try:
         data = np.fromfile(str(path), dtype=np.uint8)
     except OSError:
         return None
-    img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    if data.size == 0:
+        return None
+    try:
+        img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    except cv2.error:
+        return None
     if img is None:
         return None
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -666,12 +684,23 @@ def _make_batch(samples: list[Sample], idxs: list[int], size: int, train: bool,
         img, scale, dx, dy = letterbox(img, size)
         # [0,1], not [0,255]: see the input contract in the module docstring.
         imgs[bi] = img.astype(np.float32).transpose(2, 0, 1) / 255.0
-        n = min(len(boxes), max_objs)
-        for j in range(n):
-            x0, y0, x1, y1 = boxes[j] * scale
+        j = 0
+        for k in range(len(boxes)):
+            if j >= max_objs:
+                break
+            x0, y0, x1, y1 = boxes[k] * scale
             x0, x1 = x0 + dx, x1 + dx
             y0, y1 = y0 + dy, y1 + dy
-            targets[bi, j] = [cls[j], (x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0]
+            # Clip to the canvas: a box (partly) outside the picture, as
+            # an augmentation warp or a sloppy import can produce, must
+            # not reach the head (a box with no anchor near it crashes
+            # its matching; a negative coordinate hides a later box).
+            x0, x1 = max(0.0, x0), min(float(size), x1)
+            y0, y1 = max(0.0, y0), min(float(size), y1)
+            if x1 - x0 < 2.0 or y1 - y0 < 2.0:
+                continue
+            targets[bi, j] = [cls[k], (x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0]
+            j += 1
     return torch.from_numpy(imgs), torch.from_numpy(targets)
 
 
@@ -691,7 +720,9 @@ def _gt_letterbox(s: Sample, imgsz: int) -> np.ndarray:
     g = s.boxes * scale
     g[:, [0, 2]] += dx
     g[:, [1, 3]] += dy
-    return np.hstack([g, s.classes[:, None]]).astype(np.float32)
+    g = np.clip(g, 0.0, float(imgsz))
+    keep = (g[:, 2] - g[:, 0] >= 1.0) & (g[:, 3] - g[:, 1] >= 1.0)
+    return np.hstack([g[keep], s.classes[keep][:, None]]).astype(np.float32)
 
 
 def _batch_iter(samples: list[Sample], order: list[int], batch: int, size: int,
@@ -996,15 +1027,22 @@ def _load_pretrained(model: YOLOX, cancel=None, size: str = "nano") -> bool:
             # held the GPU gate. Per-process temp name so two first runs
             # cannot clobber each other's download.
             tmp = dest.with_suffix(f".{os.getpid()}.tmp")
-            with urllib.request.urlopen(spec["url"], timeout=30) as r, open(tmp, "wb") as f:  # noqa: S310
-                while True:
-                    if cancel is not None and cancel.is_set():
-                        raise Cancelled()
-                    chunk = r.read(1 << 20)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-            os.replace(tmp, dest)
+            try:
+                with urllib.request.urlopen(spec["url"], timeout=30) as r, open(tmp, "wb") as f:  # noqa: S310
+                    while True:
+                        if cancel is not None and cancel.is_set():
+                            raise Cancelled()
+                        chunk = r.read(1 << 20)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                os.replace(tmp, dest)
+            finally:
+                if tmp.exists():
+                    try:
+                        tmp.unlink()
+                    except OSError:
+                        pass
         ckpt = torch.load(dest, map_location="cpu", weights_only=False)
         state = dict(ckpt.get("model", ckpt))
         own = model.state_dict()
@@ -1080,8 +1118,9 @@ def _is_oom(e: BaseException) -> bool:
 # and 50 such epochs are 150 steps (measured on VOC-300: AP 0 after 10
 # epochs at batch 64, against 0.38 at batch 16).
 MIN_STEPS_PER_EPOCH = 15
-# How often a running epoch refreshes history.json (see _epoch); the
-# server treats a run whose file is younger than a few of these as live.
+# How often a live run refreshes history.json (a thread in _train_impl);
+# the server treats a run whose file is younger than a few of these as
+# live even when it has no job for it (the CLI trained it).
 HEARTBEAT_SECONDS = 30
 
 
@@ -1109,10 +1148,13 @@ def _auto_batch(device: torch.device, imgsz: int, size: str, n_train: int) -> in
 
 def _epoch(samples, train_s: list[int], st: dict, imgsz: int, step_fn, cancel, notes: list[str]
            ) -> float:
-    """One pass over train_s at st["batch"], returning the mean loss.
-    On a CUDA out-of-memory error the batch is halved (st["batch"],
-    st["steps"] updated) and the epoch restarts; below batch 2 the error
-    propagates."""
+    """One pass over train_s at st["batch"], returning the mean loss
+    over the steps whose loss was finite. On a CUDA out-of-memory error
+    the batch is halved (st["batch"], st["steps"] updated), st["on_oom"]
+    is called (the float phase uses it to replace its GradScaler, whose
+    state is undefined after an OOM inside step()) and the epoch
+    restarts; below batch 2 the error propagates. An epoch whose every
+    step was non-finite is a diverged run and raises."""
     while True:
         batch = st["batch"]
         steps = max(1, len(train_s) // batch)
@@ -1121,22 +1163,18 @@ def _epoch(samples, train_s: list[int], st: dict, imgsz: int, step_fn, cancel, n
         random.shuffle(order)
         # Drop the ragged tail so every step is a full batch (BN stats).
         order = order[: steps * batch]
-        loss_sum, n = 0.0, 0
+        loss_sum, n, bad = 0.0, 0, 0
         it = _batch_iter(samples, order, batch, imgsz, train=True)
         oom = False
-        heartbeat = st.get("heartbeat")
-        last_beat = time.time()
         try:
             for step, (imgs, targets) in enumerate(it):
                 _check_cancel(cancel)
-                loss_sum += step_fn(step, imgs, targets)
-                n += 1
-                # Long epochs: keep history.json's timestamp fresh so
-                # another process (the app, while the CLI trains) can
-                # tell a live run from an interrupted one.
-                if heartbeat is not None and time.time() - last_beat > HEARTBEAT_SECONDS:
-                    heartbeat()
-                    last_beat = time.time()
+                v = step_fn(step, imgs, targets)
+                if math.isfinite(v):
+                    loss_sum += v
+                    n += 1
+                else:
+                    bad += 1
         except RuntimeError as e:
             if not _is_oom(e) or batch <= 2:
                 raise
@@ -1144,24 +1182,66 @@ def _epoch(samples, train_s: list[int], st: dict, imgsz: int, step_fn, cancel, n
         finally:
             it.close()
         if not oom:
+            if bad and not n:
+                raise RuntimeError("training diverged: every step of the epoch had a non-finite "
+                                   "loss (check the boxes, or lower the learning rate)")
+            if bad:
+                notes.append(f"{bad} step(s) with a non-finite loss were skipped")
             return loss_sum / max(1, n)
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         st["batch"] = max(2, batch // 2)
         notes.append(f"out of memory at batch {batch}: continuing at {st['batch']}")
+        on_oom = st.get("on_oom")
+        if on_oom is not None:
+            on_oom()
+
+
+def _json_safe(obj):
+    """Strict JSON: a non-finite float becomes null (orjson, which the
+    server parses with, rejects the NaN token and would hide the run)."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, (np.floating,)):
+        return float(obj) if math.isfinite(float(obj)) else None
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    return obj
+
+
+def _replace_retry(tmp: Path, path: Path, tries: int = 40, wait: float = 0.05) -> None:
+    """os.replace with a retry: on Windows the rename fails with
+    PermissionError while another process has the target open for
+    reading (the app polls history.json every few seconds)."""
+    for i in range(tries):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if i == tries - 1:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+                raise
+            time.sleep(wait)
 
 
 def _write_json_atomic(path: Path, data) -> None:
-    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(data, indent=2), "utf-8")
-    os.replace(tmp, path)
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(json.dumps(_json_safe(data), indent=2, allow_nan=False), "utf-8")
+    _replace_retry(tmp, path)
 
 
 def _save_ckpt(path: Path, payload: dict) -> None:
     tmp = path.with_suffix(f".{os.getpid()}.tmp")
     torch.save(payload, tmp)
-    os.replace(tmp, path)
+    _replace_retry(tmp, path)
 
 
 def train(
@@ -1234,19 +1314,57 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel) -> dict:
     # ── run directory from the start, so checkpoints have a home ───
     run_id = cfg.run_id or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     out_dir = store.dataset_dir(project_id) / "models" / spec["dir"] / run_id
+    if ck is None and cfg.run_id is None:
+        # Two runs started in the same second (the CLI next to the app)
+        # must not share a folder.
+        for _ in range(5):
+            try:
+                out_dir.mkdir(parents=True, exist_ok=False)
+                break
+            except FileExistsError:
+                time.sleep(1.0)
+                run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+                out_dir = out_dir.with_name(run_id)
     out_dir.mkdir(parents=True, exist_ok=True)
     slug = _c_slug((store.load(project_id) or {}).get("name", "model"))
     history: list[dict] = list(ck.get("history") or []) if ck is not None else []
     notes: list[str] = list(ck.get("notes") or []) if ck is not None else []
     total_epochs = cfg.epochs + cfg.qat_epochs
 
+    run_state = {"status": "training", "error": None, "final": False}
+    history_lock = threading.Lock()
+
     def write_history(status: str, error: str | None = None) -> None:
-        _write_json_atomic(out_dir / "history.json", {
-            "run": run_id, "model": spec["dir"], "size": cfg.size, "status": status,
-            "epochs": cfg.epochs, "qatEpochs": cfg.qat_epochs, "imgsz": cfg.imgsz,
-            "classes": classes, "history": history, "notes": notes,
-            "error": error, "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        })
+        """history.json is a progress report, never worth the run: an
+        I/O failure is noted once and otherwise ignored."""
+        run_state["status"] = status
+        run_state["error"] = error
+        try:
+            with history_lock:
+                _write_json_atomic(out_dir / "history.json", {
+                    "run": run_id, "model": spec["dir"], "size": cfg.size, "status": status,
+                    "epochs": cfg.epochs, "qatEpochs": cfg.qat_epochs, "imgsz": cfg.imgsz,
+                    "classes": classes, "history": list(history), "notes": list(notes),
+                    "error": error, "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                })
+        except OSError as e:
+            msg = f"could not update history.json ({type(e).__name__})"
+            if msg not in notes:
+                notes.append(msg)
+
+    # Heartbeat: another process (the app while the CLI trains, or the
+    # other way round) tells a live run from an interrupted one by the
+    # age of history.json, so keep it fresh through the long stretches
+    # without an epoch boundary (evaluation, export, the compile).
+    stop_beat = threading.Event()
+
+    def _beat() -> None:
+        while not stop_beat.wait(HEARTBEAT_SECONDS):
+            if run_state["final"]:
+                return
+            write_history(run_state["status"], run_state["error"])
+
+    beat_thread = threading.Thread(target=_beat, name="pk-train-heartbeat", daemon=True)
 
     # ── weights: resume, previous run, COCO, or scratch ─────────────
     init_info: dict | None = None
@@ -1274,8 +1392,7 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel) -> dict:
     else:
         batch = cfg.batch if cfg.batch > 0 else _auto_batch(device, cfg.imgsz, cfg.size, len(train_s))
     batch = max(2, min(batch, len(train_s)))
-    st = {"batch": batch, "steps": max(1, len(train_s) // batch),
-          "heartbeat": lambda: write_history("training")}
+    st = {"batch": batch, "steps": max(1, len(train_s) // batch)}
 
     pg_bn, pg_w, pg_b = [], [], []
     for m in model.modules():
@@ -1291,14 +1408,22 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel) -> dict:
          {"params": pg_b, "weight_decay": 0.0}],
         lr=cfg.lr * batch / 64, momentum=0.9, nesterov=True,
     )
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    scaler_ref = [torch.amp.GradScaler("cuda", enabled=use_amp)]
     if ck is not None and ck.get("phase") == "float":
         try:
             opt.load_state_dict(ck["opt"])
             if ck.get("scaler") and use_amp:
-                scaler.load_state_dict(ck["scaler"])
+                scaler_ref[0].load_state_dict(ck["scaler"])
         except Exception:  # noqa: BLE001 - a stale optimiser state is not worth losing the run
             notes.append("optimiser state could not be restored; momentum restarted")
+
+    def _on_oom() -> None:
+        # An OOM inside scaler.step() leaves the scaler mid-update
+        # (gradients unscaled, scale not adjusted): start it afresh.
+        scaler_ref[0] = torch.amp.GradScaler("cuda", enabled=use_amp)
+        opt.zero_grad(set_to_none=True)
+
+    st["on_oom"] = _on_oom
 
     def lr_at(epoch: int, step: int) -> float:
         lr = cfg.lr * st["batch"] / 64  # scaled by batch like upstream
@@ -1338,13 +1463,14 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel) -> dict:
         start_epoch = cfg.epochs if ck.get("phase") == "qat" else int(ck.get("epoch") or 0)
         notes.append(f"resumed at epoch {start_epoch + 1}")
     write_history("training")
+    beat_thread.start()
 
     def save_checkpoint(phase: str, epoch: int) -> None:
         _save_ckpt(out_dir / "ckpt_last.pt", {
             "phase": phase, "epoch": epoch, "run_id": run_id,
             "model": {k: v.detach().cpu() for k, v in model.state_dict().items()},
             "opt": opt.state_dict() if phase == "float" else None,
-            "scaler": scaler.state_dict() if (phase == "float" and use_amp) else None,
+            "scaler": scaler_ref[0].state_dict() if (phase == "float" and use_amp) else None,
             "best_ap": best_ap, "best_state": best_state,
             "history": history, "notes": notes, "classes": classes,
             "cfg": asdict(cfg), "batch": st["batch"], "init": init_info,
@@ -1361,6 +1487,7 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel) -> dict:
                 out = model(imgs, targets)
                 loss = out["total_loss"]
             opt.zero_grad(set_to_none=True)
+            scaler = scaler_ref[0]
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
@@ -1468,6 +1595,7 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel) -> dict:
             _write_json_atomic(out_dir / "report.json", {
                 "run": run_id, "model": spec["dir"], "size": cfg.size, "exportRejected": True,
                 "neuron6": neuron6, "history": history})
+            run_state["final"] = True
             write_history("rejected", neuron6["error"])
             (out_dir / "ckpt_last.pt").unlink(missing_ok=True)
             raise ValueError(f"export rejected by ST Edge AI: {neuron6['error']}")
@@ -1513,15 +1641,24 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel) -> dict:
         }
         _write_bundle(out_dir, slug, classes, cfg, report, int8_onnx, conf)
         (out_dir / "ckpt_last.pt").unlink(missing_ok=True)
+        run_state["final"] = True
         write_history("done")
         return json.loads((out_dir / "report.json").read_text("utf-8"))
     except Cancelled:
-        write_history("interrupted", "cancelled")
+        if not run_state["final"]:
+            run_state["final"] = True
+            write_history("interrupted", "cancelled")
         raise
     except Exception as e:  # noqa: BLE001 - record, then re-raise for the job
-        write_history("interrupted" if (out_dir / "ckpt_last.pt").is_file() else "failed",
-                      f"{type(e).__name__}: {e}")
+        if not run_state["final"]:
+            run_state["final"] = True
+            write_history("interrupted" if (out_dir / "ckpt_last.pt").is_file() else "failed",
+                          f"{type(e).__name__}: {e}")
         raise
+    finally:
+        stop_beat.set()
+        if beat_thread.is_alive():
+            beat_thread.join(timeout=2.0)
 
 
 # ── Neuro N6 build verification (PK-1.3) ────────────────────────────
@@ -1782,7 +1919,7 @@ def _ptq_quantize(fp32_path: Path, int8_path: Path, samples, train_s, cfg: Train
 
     try:
         _run(CalibrationMethod.Percentile, {"CalibPercentile": cfg.calib_percentile})
-    except (ValueError, ZeroDivisionError, RuntimeError) as e:
+    except Exception as e:  # noqa: BLE001 - ORT raises its own Exception subclasses
         # The percentile calibrator builds histograms and dies on a
         # tensor with no range at all (a dead channel, a constant
         # output on a tiny dataset): "Too many bins for data range".

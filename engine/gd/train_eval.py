@@ -51,37 +51,46 @@ def match_image(pred: np.ndarray, gt: np.ndarray, conf: float, iou_thr: float = 
     first) to its ground truth.
 
     Returns (kind, pred_index, gt_index) triples; -1 stands for "none".
-    A prediction takes the best-IoU unmatched box of ITS OWN class when
-    one overlaps at >= iou_thr (a "dog" over both a dog and a cat is a
-    correct dog), otherwise the best-IoU unmatched box of any class
-    ("wrong"), otherwise it is a false positive. Ground truth nobody
-    took is a miss."""
+    Two passes, each in score order: first every prediction takes the
+    best-IoU unmatched box of ITS OWN class when one overlaps at
+    >= iou_thr (a "dog" over both a dog and a cat is a correct dog, and
+    a stronger "cat" box on the same dog does not steal it), then the
+    leftovers take the best-IoU unmatched box of any class ("wrong"),
+    and the rest are false positives. Ground truth nobody took is a
+    miss."""
     pred = np.asarray(pred, dtype=np.float32).reshape(-1, 6)
     gt = np.asarray(gt, dtype=np.float32).reshape(-1, 5)
     keep = np.where(pred[:, 4] >= conf)[0]
     keep = keep[np.argsort(-pred[keep, 4], kind="stable")]
-    out: list[tuple[str, int, int]] = []
     used = np.zeros(len(gt), dtype=bool)
+    assigned: dict[int, tuple[str, int]] = {}
     ious = _iou_matrix(pred[:, :4], gt[:, :4]) if len(keep) and len(gt) else None
+    if ious is not None:
+        for pi in keep:
+            pi = int(pi)
+            row = ious[pi].copy()
+            row[used] = -1.0
+            cand = np.where((row >= iou_thr) & (gt[:, 4] == pred[pi, 5]))[0]
+            if len(cand):
+                gi = int(cand[np.argmax(row[cand])])
+                assigned[pi] = ("tp", gi)
+                used[gi] = True
+        for pi in keep:
+            pi = int(pi)
+            if pi in assigned:
+                continue
+            row = ious[pi].copy()
+            row[used] = -1.0
+            cand = np.where(row >= iou_thr)[0]
+            if len(cand):
+                gi = int(cand[np.argmax(row[cand])])
+                assigned[pi] = ("wrong", gi)
+                used[gi] = True
+    out: list[tuple[str, int, int]] = []
     for pi in keep:
         pi = int(pi)
-        if ious is None:
-            out.append(("fp", pi, -1))
-            continue
-        row = ious[pi].copy()
-        row[used] = -1.0
-        cand = np.where(row >= iou_thr)[0]
-        if len(cand) == 0:
-            out.append(("fp", pi, -1))
-            continue
-        same = cand[gt[cand, 4] == pred[pi, 5]]
-        if len(same):
-            gi = int(same[np.argmax(row[same])])
-            out.append(("tp", pi, gi))
-        else:
-            gi = int(cand[np.argmax(row[cand])])
-            out.append(("wrong", pi, gi))
-        used[gi] = True
+        kind, gi = assigned.get(pi, ("fp", -1))
+        out.append((kind, pi, gi))
     for gi in np.where(~used)[0]:
         out.append(("fn", -1, int(gi)))
     return out

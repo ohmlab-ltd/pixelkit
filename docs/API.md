@@ -54,14 +54,15 @@ POST /api/jobs
 | `evalProject` | | a second dataset id used as the held-out set |
 | `resumeRun` | | continue an interrupted run; other params are ignored |
 | `conf` | | fix the confidence threshold instead of calibrating it |
-| `device` | engine device | e.g. `cuda:1` to train on a second GPU |
+| `device` | see below | e.g. `cuda:1`; without it, a second GPU is used when there is one, else the engine's device |
 
 Returns `{"jobId": ...}`. One training job per dataset at a time (409
 otherwise). Progress is on `GET /api/jobs/{jobId}`
 (`progress.index/total` = epoch, `progress.image` = loss, AP@0.5 and the
 time left) and on the status bar. `DELETE
 /api/v2/projects/{pid}/jobs/{jobId}` cancels; a cancelled run keeps its
-checkpoint and shows as interrupted.
+last checkpoint and shows as interrupted (as failed if no epoch had
+finished yet).
 
 ## Runs
 
@@ -73,7 +74,8 @@ Newest first. Each entry: `run`, `model` (`yolox_nano` / `yolox_tiny`),
 `size`, `status` (`done`, `training`, `interrupted`, `failed`,
 `rejected`), `resumable`, `epochsDone`, `totalEpochs`, `images`,
 `ap50Fp32`, `ap50Int8`, `threshold` (`conf`, `f1`, `precision`,
-`recall`, `calibrated`), `neuron6` (the ST Edge AI build summary),
+`recall`, `calibrated`, `fallback`: the default was written because the
+model found nothing on val), `neuron6` (the ST Edge AI build summary),
 `hasExport`, `failuresCount`, `initRun`, `resumed`, and, for a run in
 progress, `history`.
 
@@ -108,8 +110,9 @@ POST /api/jobs
 ```
 
 Runs the run's exported int8 model over the dataset's unlabelled images
-(all auto-labelled images too with `overwrite`; images edited by hand are
-never touched) at the run's calibrated threshold unless `conf` is given.
+(all auto-labelled images too with `overwrite`; images edited by hand,
+including ones deliberately emptied, are never touched) at the run's
+calibrated threshold unless `conf` is given.
 Detections land in the manifest like the SAM 3 labeller's, so the
 editor, exports and the next training run read them the same way.
 

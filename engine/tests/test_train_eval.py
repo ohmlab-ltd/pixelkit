@@ -116,3 +116,17 @@ def test_failures_are_ranked_worst_first_and_rendered(tmp_path):
     kinds = sorted(it["kind"] for it in gallery[0]["items"])
     assert kinds == ["fp", "wrong"]
     assert gallery[0]["items"][0]["box"][2] <= 100  # boxes reported in model space
+
+
+def test_a_stronger_wrong_class_box_does_not_steal_the_truth_from_the_right_one():
+    from train_eval import class_report, match_image
+
+    dog, cat = 0, 1
+    pred = np.array([[10, 10, 50, 50, 0.9, cat],    # confident, wrong class
+                     [10, 10, 50, 50, 0.8, dog]], np.float32)  # right class, weaker
+    gt = np.array([[10, 10, 50, 50, dog]], np.float32)
+    m = match_image(pred, gt, conf=0.1)
+    assert ("tp", 1, 0) in m and ("fp", 0, -1) in m
+    rep = class_report([pred], [gt], 0.1, ["dog", "cat"])
+    assert rep[0]["tp"] == 1 and rep[0]["fn"] == 0 and rep[0]["recall"] == 1.0
+    assert rep[1]["fp"] == 1

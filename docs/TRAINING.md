@@ -11,7 +11,7 @@ locally. The local API behind the Train card is in [API.md](API.md).
 | File | Purpose |
 |---|---|
 | `<slug>_int8.onnx` | the deployable model: full-integer QDQ int8, raw head |
-| `<slug>_labels.h` | `NUM_CLASSES`, `INPUT_W/H`, the calibrated `CONF_THRESHOLD`, `NMS_THRESHOLD`, `CLASSES[]` |
+| `<slug>_labels.h` | `<SLUG>_NUM_CLASSES`, `<SLUG>_INPUT_W/H`, the calibrated `<SLUG>_CONF_THRESHOLD`, `<SLUG>_NMS_THRESHOLD`, `<SLUG>_CLASSES[]` |
 | `<slug>_snippet.ino.txt` | the `#pragma neuron6` line and decoder wiring to paste |
 | `report.json` | AP@0.5 float vs int8 (overall and per class), threshold sweep, per-class precision/recall, confusion matrix, per-epoch history, input contract, NPU build facts |
 | `export.zip` | the four files above, ready to drop into a sketch folder |
@@ -30,9 +30,12 @@ the val score is never inflated by a copy of a val picture.
 
 The split is per class rather than per image: every class with two or
 more images gets at least one val image and keeps at least one train
-image, and the val share of each class is the chosen ratio (60 to 90%
-train). It is keyed on filenames, so the same dataset splits the same
-way every time. Alternatively a second dataset can be the held-out set:
+image, and each class is held out at the chosen ratio (60 to 90% of its
+images train). It is keyed on filenames, so the same dataset splits the
+same way every time. One exception: an image that also shows a class
+with a single image stays in train, because learning that class beats
+measuring another; a class left unmeasured that way is named by the
+pre-flight check. Alternatively a second dataset can be the held-out set:
 everything in this dataset trains, everything labelled in that one is
 scored, labels matched by name. That is the honest number for a camera
 the model has never seen.
@@ -48,7 +51,7 @@ split. Warnings are recorded in the report.
 | | parameters | int8 weights | MACs at 256x256 | when |
 |---|---|---|---|---|
 | YOLOX-Nano | 0.9 M | about 0.9 MB | 0.27 G | the default; a few classes, a fixed camera |
-| YOLOX-Tiny | 5.1 M | about 5 MB | 1.6 G | Nano's accuracy is not enough; still 20% of the weights pool |
+| YOLOX-Tiny | 5.1 M | about 5 MB | 1.3 G | Nano's accuracy is not enough; still under 20% of the weights pool |
 
 Both use the same stem, head, quantisation and export path; the compile
 report says what each costs on the board. A run can also start from a
@@ -57,14 +60,20 @@ a second pass on a grown dataset.
 
 ## Batch size, interruptions
 
-The batch is sized from free VRAM at the start (about 40 MB per image
-for Nano and 90 MB for Tiny at 256x256, 60% of what is free, capped at
-64). If the card still runs out of memory the batch is halved and the
-epoch restarts; the report records it. A checkpoint is written every
-epoch, so an interrupted run (the app closed, a crash, a cancel) shows
-as Interrupted and resumes from its last epoch with its own settings.
-The Train card shows the loss and AP@0.5 curves as the run trains, with
-the time left.
+The batch is sized from free VRAM at the start (about 70 MB per image
+for Nano and 150 MB for Tiny at 256x256, 60% of what is free, capped at
+64) and then capped so an epoch has at least 15 optimiser steps (a
+240-image dataset trains at batch 16, not 64: with three steps per
+epoch a 50-epoch run barely moves). If the card still runs out of
+memory the batch is halved and the epoch restarts; the report records
+it. A checkpoint is written after every float epoch, so an interrupted
+run (the app closed, a crash, Cancel training in the card) shows as
+Interrupted and resumes from its last epoch with its own settings; an
+interruption during the int8 fine-tuning restarts that short phase
+from the float result, and a cancel before the first epoch completes
+shows as failed. On a machine with two GPUs the run goes to the card
+labelling is not using. The Train card shows the loss and AP@0.5 curves
+as the run trains, with the time left.
 
 ## The input contract
 
@@ -136,9 +145,9 @@ header, with the precision and recall it gives. The report also carries
 per-class precision and recall at that threshold, a confusion matrix
 (truth by prediction, with a background row and column for spurious
 boxes and misses) and a gallery of the val images with the most errors:
-green is the truth, yellow a miss, red a spurious box, orange the right
-place with the wrong class. That gallery is where the next labelling
-hour should go.
+green is the truth, thin blue a correct detection, yellow a miss, red a
+spurious box, orange the right place with the wrong class. That gallery
+is where the next labelling hour should go.
 
 ## Label with your own model
 

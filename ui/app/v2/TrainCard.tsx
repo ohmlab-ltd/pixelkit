@@ -9,7 +9,7 @@
 // while one trains, and per run the training curves, the calibrated
 // threshold, per-class precision/recall, the confusion matrix, the
 // worst val images, plus the actions: N6 export, label images with
-// the model, resume an interrupted run, delete.
+// the model, resume an interrupted run, cancel, delete.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -26,12 +26,16 @@ import {
   sizeLabel,
   statusLabel,
   thresholdNote,
+  type ClassReportRow,
   type HistoryRow,
   type Neuron6Summary,
   type Preflight,
   type RunDetail,
+  type RunStatus,
   type TrainedRun,
 } from "@/lib/trainRuns";
+
+import { GlassDialog } from "./GlassDialog";
 
 type ActiveJob = {
   id: string;
@@ -41,7 +45,18 @@ type ActiveJob = {
   progress?: { index?: number | null; total?: number | null; image?: string | null } | null;
 };
 
+type FinishedJob = { status?: string; error?: string | null };
+
 type DatasetOption = { id: string; name: string };
+
+// Tailwind's opacity modifier cannot apply to a bare CSS-variable colour
+// (it needs RGB channels), so tinted backgrounds use color-mix inline.
+const tint = (colour: string, pctOf = 15) => `color-mix(in srgb, ${colour} ${pctOf}%, transparent)`;
+
+async function readDetail(r: Response, fallback: string): Promise<string> {
+  const body = (await r.json().catch(() => null)) as { detail?: string } | null;
+  return body?.detail ?? fallback;
+}
 
 // One line of NPU truth per run: did ST Edge AI build it, how much ran
 // in software, and what it costs against the board's weights pool.
@@ -77,9 +92,9 @@ function Neuron6Line({ n6, rejected }: { n6: Neuron6Summary | null | undefined; 
 // quantisation-aware fine-tuning starts.
 function Curves({ history, total }: { history: HistoryRow[] | null | undefined; total: number | null | undefined }) {
   const g = useMemo(() => curveGeometry(history, total, 320, 96), [history, total]);
-  if (!g) return null;
-  const last = history![history!.length - 1];
-  const lastAp = [...history!].reverse().find((h) => typeof h.ap50 === "number");
+  if (!g || !history || history.length === 0) return null;
+  const last = history[history.length - 1];
+  const lastAp = [...history].reverse().find((h) => typeof h.ap50 === "number");
   return (
     <div className="flex flex-wrap items-end gap-3">
       <svg
@@ -146,7 +161,7 @@ function ConfusionMatrix({ labels, matrix }: { labels: string[]; matrix: number[
                     key={j}
                     className="px-1 text-right"
                     style={{
-                      background: shade > 0 ? `color-mix(in srgb, ${diag ? "var(--ok)" : "var(--bad)"} ${Math.round(shade * 55)}%, transparent)` : undefined,
+                      background: shade > 0 ? tint(diag ? "var(--ok)" : "var(--bad)", Math.round(shade * 55)) : undefined,
                     }}
                     title={`${labels[i]} → ${labels[j]}: ${v}`}
                   >
@@ -162,16 +177,44 @@ function ConfusionMatrix({ labels, matrix }: { labels: string[]; matrix: number[
   );
 }
 
-function RunDetails({ projectId, detail }: { projectId: string; detail: RunDetail }) {
+type ClassRow = Partial<ClassReportRow> & { name: string };
+
+function RunDetails({
+  projectId,
+  detail,
+  liveHistory,
+  status,
+}: {
+  projectId: string;
+  detail: RunDetail;
+  liveHistory: HistoryRow[] | null | undefined;
+  status: RunStatus;
+}) {
   const rep = detail.report;
-  const history = rep?.history ?? detail.live?.history ?? detail.history ?? null;
+  // A run in progress: the list's live history is fresher than the
+  // detail fetched when the panel opened.
+  const history =
+    status === "training" && liveHistory && liveHistory.length > 0
+      ? liveHistory
+      : rep?.history ?? detail.live?.history ?? detail.history ?? null;
   const thr = rep?.threshold;
-  const classes = rep?.classes ?? (rep?.classReport ?? []).map((c) => c.name);
+  // Reports from the previous engine version have per-class AP but no
+  // class report: still show what they have.
+  const rows: ClassRow[] =
+    rep?.classReport && rep.classReport.length > 0
+      ? rep.classReport
+      : Object.keys(rep?.per_class_int8 ?? rep?.per_class_fp32 ?? {}).map((name) => ({ name }));
   const [showAllFailures, setShowAllFailures] = useState(false);
+  const [zoomed, setZoomed] = useState<string | null>(null);
   const failures = rep?.failures ?? [];
   const shown = showAllFailures ? failures : failures.slice(0, 8);
+  const failureUrl = (file: string) => `${API_BASE}/api/v2/projects/${projectId}/models/${detail.run}/failures/${file}`;
+  const error = detail.error ?? detail.live?.error ?? null;
   return (
     <div className="mt-2 grid min-w-0 gap-3 border-t border-[var(--line)] pt-3">
+      {error && (status === "failed" || status === "interrupted") && (
+        <p className="text-[12px] text-[var(--bad)]">{error}</p>
+      )}
       <Curves history={history} total={detail.totalEpochs} />
 
       {thr && (
@@ -182,7 +225,7 @@ function RunDetails({ projectId, detail }: { projectId: string; detail: RunDetai
         </p>
       )}
 
-      {rep?.classReport && rep.classReport.length > 0 && (
+      {rows.length > 0 && (
         <div className="min-w-0 overflow-x-auto">
           <table className="w-full text-[11px] tabular-nums">
             <thead className="text-foreground/40">
@@ -196,14 +239,14 @@ function RunDetails({ projectId, detail }: { projectId: string; detail: RunDetai
               </tr>
             </thead>
             <tbody className="text-foreground/70">
-              {rep.classReport.map((c) => (
+              {rows.map((c) => (
                 <tr key={c.name} className="border-t border-[var(--line)]">
                   <td className="py-0.5 pr-2">{c.name}</td>
-                  <td className="text-right">{pct(rep.per_class_fp32?.[c.name])}</td>
-                  <td className="text-right">{pct(rep.per_class_int8?.[c.name])}</td>
+                  <td className="text-right">{pct(rep?.per_class_fp32?.[c.name])}</td>
+                  <td className="text-right">{pct(rep?.per_class_int8?.[c.name])}</td>
                   <td className="text-right">{pct(c.precision)}</td>
                   <td className="text-right">{pct(c.recall)}</td>
-                  <td className="text-right text-foreground/45">{c.support}</td>
+                  <td className="text-right text-foreground/45">{typeof c.support === "number" ? c.support : "-"}</td>
                 </tr>
               ))}
             </tbody>
@@ -219,21 +262,40 @@ function RunDetails({ projectId, detail }: { projectId: string; detail: RunDetai
       )}
 
       {failures.length > 0 && (
-        <div>
+        <div className="min-w-0">
           <div className="pk-micro mb-1 text-foreground/45">
-            Worst val images · <span className="text-[var(--warn,#c9a227)]">yellow</span> missed,{" "}
-            <span className="text-[var(--bad)]">red</span> spurious, orange wrong class, green truth
+            Worst val images · green truth, blue correct,{" "}
+            <span className="text-[var(--warn,#c9a227)]">yellow</span> missed,{" "}
+            <span className="text-[var(--bad)]">red</span> spurious, orange wrong class. Click to enlarge.
           </div>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          {zoomed && (
+            <figure className="mb-2 min-w-0">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={failureUrl(zoomed)}
+                alt={zoomed}
+                className="w-full cursor-zoom-out rounded-md border border-[var(--line)]"
+                onClick={() => setZoomed(null)}
+              />
+            </figure>
+          )}
+          <div className="grid grid-cols-2 gap-2">
             {shown.map((f) => (
               <figure key={f.file} className="min-w-0">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={`${API_BASE}/api/v2/projects/${projectId}/models/${detail.run}/failures/${f.file}`}
-                  alt={f.image}
-                  loading="lazy"
-                  className="w-full rounded-md border border-[var(--line)]"
-                />
+                <button
+                  type="button"
+                  onClick={() => setZoomed(zoomed === f.file ? null : f.file)}
+                  className="block w-full cursor-zoom-in"
+                  aria-label={`Enlarge ${f.image}`}
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={failureUrl(f.file)}
+                    alt={f.image}
+                    loading="lazy"
+                    className="w-full rounded-md border border-[var(--line)]"
+                  />
+                </button>
                 <figcaption className="mt-0.5 truncate text-[10.5px] text-foreground/50" title={f.image}>
                   {[
                     f.fn ? `${f.fn} missed` : null,
@@ -259,7 +321,7 @@ function RunDetails({ projectId, detail }: { projectId: string; detail: RunDetai
           )}
         </div>
       )}
-      {rep && classes.length > 0 && failures.length === 0 && (
+      {rep && rows.length > 0 && rep.failures && rep.failures.length === 0 && (
         <p className="text-[11.5px] text-foreground/45">No errors on the val split at this threshold.</p>
       )}
 
@@ -288,15 +350,28 @@ export function TrainCard({ projectId }: { projectId: string }) {
   const [evalProject, setEvalProject] = useState<string>("");
   const [datasets, setDatasets] = useState<DatasetOption[]>([]);
   const [preflight, setPreflight] = useState<Preflight | null>(null);
+  // Bumped when a labelling job on this dataset finishes: the label
+  // counts the pre-flight reports have changed.
+  const [labelsVersion, setLabelsVersion] = useState(0);
   const [training, setTraining] = useState(false); // an active train job for THIS dataset
+  const [queued, setQueued] = useState(false); // ...still waiting behind another job
   const [labelling, setLabelling] = useState(false); // an active label_model job for THIS dataset
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [progressText, setProgressText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const [details, setDetails] = useState<Record<string, RunDetail>>({});
   const [busy, setBusy] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const wasTraining = useRef(false);
+  const wasLabelling = useRef(false);
+  // Job ids this card started, so a job that fails before it writes a
+  // run folder (no GPU, labels changed) still gets its error shown.
+  const trainJobId = useRef<string | null>(null);
+  const labelJobId = useRef<string | null>(null);
+  const openRef = useRef<string | null>(null);
+  openRef.current = open;
   // The card is re-rendered, not remounted, on a project switch: a late
   // response for the previous project must not overwrite this one's list.
   const fetchSeq = useRef(0);
@@ -315,6 +390,22 @@ export function TrainCard({ projectId }: { projectId: string }) {
     }
   }, [projectId]);
 
+  const loadDetail = useCallback(
+    async (run: string) => {
+      const seq = fetchSeq.current;
+      try {
+        const r = await apiFetch(`/api/v2/projects/${projectId}/models/${run}`, { cache: "no-store" });
+        if (r.ok) {
+          const d = (await r.json()) as RunDetail;
+          if (seq === fetchSeq.current) setDetails((prev) => ({ ...prev, [run]: d }));
+        }
+      } catch {
+        /* the row still shows its summary */
+      }
+    },
+    [projectId],
+  );
+
   useEffect(() => {
     setRuns(null);
     setError(null);
@@ -324,10 +415,20 @@ export function TrainCard({ projectId }: { projectId: string }) {
     setPreflight(null);
     setInitRun("");
     setEvalProject("");
+    setDatasets([]);
+    setActiveJobId(null);
+    setProgressText(null);
+    setConfirmDelete(null);
     wasTraining.current = false;
+    wasLabelling.current = false;
+    trainJobId.current = null;
+    labelJobId.current = null;
     setTraining(false);
+    setQueued(false);
+    setLabelling(false);
     void refresh();
     // Other datasets in the workspace, for the held-out picker.
+    const seq = fetchSeq.current;
     (async () => {
       try {
         const r = await apiFetch("/api/projects");
@@ -341,7 +442,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
         const opts = items
           .map((it) => ({ id: String(it.id ?? it.project_id ?? ""), name: String(it.name ?? "") }))
           .filter((it) => it.id && it.id !== projectId);
-        setDatasets(opts);
+        if (seq === fetchSeq.current) setDatasets(opts);
       } catch {
         /* optional */
       }
@@ -349,24 +450,50 @@ export function TrainCard({ projectId }: { projectId: string }) {
   }, [projectId, refresh]);
 
   // Watch the global jobs poll for train / label_model jobs on this
-  // dataset so the buttons disable while one runs and the list
-  // refreshes when it ends (and every few seconds during training, for
-  // the live curves).
+  // dataset so the buttons disable while one runs, the list refreshes
+  // when one ends (and every few seconds during training, for the live
+  // curves), and a job that failed says why.
   useEffect(() => {
     let cancelled = false;
     let timer: number | null = null;
     let ticks = 0;
+    const finished = async (jobId: string | null, what: "Training" | "Labelling") => {
+      if (!jobId) return;
+      try {
+        const r = await apiFetch(`/api/jobs/${jobId}`, { cache: "no-store" });
+        if (!r.ok) return;
+        const j = (await r.json()) as FinishedJob;
+        if (cancelled) return;
+        if (j.status === "failed") setError(`${what} failed: ${j.error ?? "no detail"}`);
+        else if (j.status === "cancelled") {
+          setNotice(what === "Training"
+            ? "Training cancelled. The run keeps its last checkpoint and can be resumed."
+            : "Labelling cancelled; the images done so far keep their boxes.");
+        } else if (j.status === "done" && what === "Labelling") {
+          setNotice("Labelling finished. Review the new boxes in the gallery; hand-edited images were not touched.");
+        }
+      } catch {
+        /* nothing to add */
+      }
+    };
     const tick = async () => {
       let active = false;
+      let isQueued = false;
       let lab = false;
       let text: string | null = null;
+      let jobId: string | null = null;
       try {
         const r = await apiFetch("/api/jobs/active", { cache: "no-store" });
         if (r.ok) {
           const jobs = ((await r.json()) as { jobs?: ActiveJob[] }).jobs ?? [];
           const mine = jobs.find((j) => j.kind === "train_yolox" && j.project === projectId);
           active = !!mine;
-          lab = jobs.some((j) => j.kind === "label_model" && j.project === projectId);
+          isQueued = mine?.status === "queued";
+          jobId = mine?.id ?? null;
+          if (mine) trainJobId.current = mine.id;
+          const labJob = jobs.find((j) => j.kind === "label_model" && j.project === projectId);
+          lab = !!labJob;
+          if (labJob) labelJobId.current = labJob.id;
           if (mine?.progress) {
             const p = mine.progress;
             text = p.index != null && p.total ? `epoch ${p.index}/${p.total}${p.image ? ` · ${p.image}` : ""}` : (p.image ?? null);
@@ -376,11 +503,30 @@ export function TrainCard({ projectId }: { projectId: string }) {
         active = false;
       }
       if (cancelled) return;
-      if (wasTraining.current && !active) void refresh(); // just finished
-      else if (active && ticks++ % 3 === 0) void refresh(); // live history
+      if (wasTraining.current && !active) {
+        // Just finished: the list, the open panel (live history became
+        // a report), and the job's own verdict.
+        void refresh();
+        const id = trainJobId.current;
+        trainJobId.current = null;
+        setDetails({});
+        if (openRef.current) void loadDetail(openRef.current);
+        void finished(id, "Training");
+      } else if (active && ticks++ % 3 === 0) {
+        void refresh(); // live history
+      }
+      if (wasLabelling.current && !lab) {
+        const id = labelJobId.current;
+        labelJobId.current = null;
+        setLabelsVersion((v) => v + 1);
+        void finished(id, "Labelling");
+      }
       wasTraining.current = active;
+      wasLabelling.current = lab;
       setTraining(active);
+      setQueued(isQueued);
       setLabelling(lab);
+      setActiveJobId(jobId);
       setProgressText(text);
       timer = window.setTimeout(tick, active || lab ? 3000 : 8000);
     };
@@ -389,12 +535,19 @@ export function TrainCard({ projectId }: { projectId: string }) {
       cancelled = true;
       if (timer != null) window.clearTimeout(timer);
     };
-  }, [projectId, refresh]);
+  }, [projectId, refresh, loadDetail]);
 
-  // Pre-flight: what the run would use, debounced on option changes.
+  // Pre-flight: what the run would use, debounced on option changes and
+  // re-run when a labelling job changed the counts. Not on every list
+  // refresh: the check reads every image header.
   useEffect(() => {
     const seq = ++preflightSeq.current;
     const t = window.setTimeout(async () => {
+      const failed = (msg: string) => {
+        if (seq === preflightSeq.current) {
+          setPreflight({ ok: false, blockers: [msg], warnings: [], classes: [], images: null });
+        }
+      };
       try {
         const q = new URLSearchParams({
           imgsz: String(imgsz),
@@ -404,15 +557,28 @@ export function TrainCard({ projectId }: { projectId: string }) {
           evalProject: evalProject,
         });
         const r = await apiFetch(`/api/v2/projects/${projectId}/train/preflight?${q}`, { cache: "no-store" });
-        if (!r.ok) return;
+        if (!r.ok) {
+          failed(`pre-flight check failed: ${await readDetail(r, `engine returned ${r.status}`)}`);
+          return;
+        }
         const body = (await r.json()) as Preflight;
         if (seq === preflightSeq.current) setPreflight(body);
       } catch {
-        /* engine down */
+        failed("pre-flight check failed: the engine is not reachable");
       }
     }, 350);
     return () => window.clearTimeout(t);
-  }, [projectId, imgsz, split, size, useAug, evalProject, runs]);
+  }, [projectId, imgsz, split, size, useAug, evalProject, labelsVersion]);
+
+  const postJob = async (kind: "train_yolox" | "label_model", params: Record<string, unknown>) => {
+    const r = await apiFetch("/api/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind, project: projectId, params }),
+    });
+    if (!r.ok) throw new Error(await readDetail(r, `could not start (${r.status})`));
+    return ((await r.json()) as { jobId?: string }).jobId ?? null;
+  };
 
   const start = async () => {
     setError(null);
@@ -421,15 +587,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
       const params: Record<string, unknown> = { epochs, imgsz, size, split, augmentations: useAug };
       if (initRun) params.initRun = initRun;
       if (evalProject) params.evalProject = evalProject;
-      const r = await apiFetch("/api/jobs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind: "train_yolox", project: projectId, params }),
-      });
-      if (!r.ok) {
-        const body = (await r.json().catch(() => null)) as { detail?: string } | null;
-        throw new Error(body?.detail ?? `could not start training (${r.status})`);
-      }
+      trainJobId.current = await postJob("train_yolox", params);
       wasTraining.current = true;
       setTraining(true);
     } catch (e) {
@@ -439,6 +597,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
 
   const resume = async (run: string) => {
     setError(null);
+    setNotice(null);
     setBusy(run);
     try {
       const r = await apiFetch(`/api/v2/projects/${projectId}/models/${run}/resume`, {
@@ -446,10 +605,8 @@ export function TrainCard({ projectId }: { projectId: string }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
       });
-      if (!r.ok) {
-        const body = (await r.json().catch(() => null)) as { detail?: string } | null;
-        throw new Error(body?.detail ?? `could not resume (${r.status})`);
-      }
+      if (!r.ok) throw new Error(await readDetail(r, `could not resume (${r.status})`));
+      trainJobId.current = ((await r.json()) as { jobId?: string }).jobId ?? null;
       wasTraining.current = true;
       setTraining(true);
     } catch (e) {
@@ -459,20 +616,26 @@ export function TrainCard({ projectId }: { projectId: string }) {
     }
   };
 
+  const cancelTraining = async () => {
+    const id = activeJobId ?? trainJobId.current;
+    if (!id) return;
+    setError(null);
+    try {
+      const r = await apiFetch(`/api/v2/projects/${projectId}/jobs/${id}`, { method: "DELETE" });
+      if (!r.ok) throw new Error(await readDetail(r, `could not cancel (${r.status})`));
+      setNotice("Cancelling after the current epoch. The run keeps its last checkpoint and can be resumed.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   const labelWith = async (run: string) => {
     setError(null);
     setNotice(null);
     setBusy(run);
     try {
-      const r = await apiFetch("/api/jobs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind: "label_model", project: projectId, params: { run } }),
-      });
-      if (!r.ok) {
-        const body = (await r.json().catch(() => null)) as { detail?: string } | null;
-        throw new Error(body?.detail ?? `could not start labelling (${r.status})`);
-      }
+      labelJobId.current = await postJob("label_model", { run });
+      wasLabelling.current = true;
       setLabelling(true);
       setNotice("Labelling the unlabelled images with this model. Progress is in the status bar; review the boxes in the gallery when it finishes.");
     } catch (e) {
@@ -483,15 +646,12 @@ export function TrainCard({ projectId }: { projectId: string }) {
   };
 
   const remove = async (run: string) => {
-    if (!window.confirm(`Delete run ${fmtRunDate(run)}? Its weights, export and gallery go with it.`)) return;
+    setConfirmDelete(null);
     setError(null);
     setBusy(run);
     try {
       const r = await apiFetch(`/api/v2/projects/${projectId}/models/${run}`, { method: "DELETE" });
-      if (!r.ok) {
-        const body = (await r.json().catch(() => null)) as { detail?: string } | null;
-        throw new Error(body?.detail ?? `could not delete (${r.status})`);
-      }
+      if (!r.ok) throw new Error(await readDetail(r, `could not delete (${r.status})`));
       if (open === run) setOpen(null);
       if (initRun === run) setInitRun("");
       await refresh();
@@ -508,15 +668,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
       return;
     }
     setOpen(run);
-    try {
-      const r = await apiFetch(`/api/v2/projects/${projectId}/models/${run}`, { cache: "no-store" });
-      if (r.ok) {
-        const d = (await r.json()) as RunDetail;
-        setDetails((prev) => ({ ...prev, [run]: d }));
-      }
-    } catch {
-      /* the row still shows its summary */
-    }
+    await loadDetail(run);
   };
 
   const doneRuns = (runs ?? []).filter((r) => r.status === "done");
@@ -524,6 +676,8 @@ export function TrainCard({ projectId }: { projectId: string }) {
   const warnings = preflight?.warnings ?? [];
   const eta = etaFromProgressText(progressText);
   const canStart = !training && blockers.length === 0 && preflight !== null;
+  const pillColour = (s: RunStatus) =>
+    s === "training" ? "var(--ok)" : s === "interrupted" ? "var(--warn,#c9a227)" : "var(--bad)";
 
   return (
     <div className="pk-card min-w-0 rounded-md p-4">
@@ -532,7 +686,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
         <span className="text-[11px] text-foreground/40">YOLOX · Apache-2.0</span>
       </div>
       <p className="mt-1.5 text-[12.5px] leading-relaxed text-foreground/55">
-        Trains on this dataset&rsquo;s labelled images and their augmentations, quantizes to int8,
+        Trains on this dataset&rsquo;s labelled images and their augmentations, quantises to int8,
         calibrates the confidence threshold, and packs a model + labels + sketch snippet ready for{" "}
         <span className="font-mono text-[11.5px]">#pragma neuron6</span>.
       </p>
@@ -562,7 +716,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
             ))}
           </select>
         </label>
-        <label className="flex items-center gap-1.5 text-[12px] text-foreground/60" title="Nano: 0.9 M parameters, under 1 MB of weights. Tiny: 5 M parameters, about 5 MB, more accurate, 4x the compute.">
+        <label className="flex items-center gap-1.5 text-[12px] text-foreground/60" title="Nano: 0.9 M parameters, under 1 MB of weights. Tiny: 5 M parameters, about 5 MB, more accurate, about six times the compute.">
           Model
           <select
             value={size}
@@ -625,15 +779,26 @@ export function TrainCard({ projectId }: { projectId: string }) {
             </select>
           </label>
         )}
-        <button
-          type="button"
-          onClick={() => void start()}
-          disabled={!canStart}
-          className="pk-btn-primary ml-auto rounded-md px-3.5 py-1.5 text-[12px] font-medium disabled:opacity-40"
-          title={blockers.length ? blockers[0] : undefined}
-        >
-          {training ? "Training…" : "Start training"}
-        </button>
+        {training ? (
+          <button
+            type="button"
+            onClick={() => void cancelTraining()}
+            disabled={!activeJobId && !trainJobId.current}
+            className="ml-auto rounded-md border border-[var(--line)] px-3.5 py-1.5 text-[12px] text-foreground/70 transition-colors hover:border-[var(--line-strong)] hover:text-foreground disabled:opacity-40"
+          >
+            Cancel training
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => void start()}
+            disabled={!canStart}
+            className="pk-btn-primary ml-auto rounded-md px-3.5 py-1.5 text-[12px] font-medium disabled:opacity-40"
+            title={blockers.length ? blockers[0] : undefined}
+          >
+            Start training
+          </button>
+        )}
       </div>
 
       {preflight && (
@@ -657,9 +822,9 @@ export function TrainCard({ projectId }: { projectId: string }) {
       )}
       {training && (
         <p className="mt-2 text-[12px] text-foreground/50">
-          Running{progressText ? ` · ${progressText}` : ""}
-          {eta ? "" : " · progress is in the status bar"}. You can keep working; the run below updates as it trains
-          and can be resumed if the app closes.
+          {queued
+            ? "Queued behind another job; it starts when that one finishes."
+            : `Running${progressText ? ` · ${progressText}` : ""}${eta ? "" : " · progress is in the status bar"}. You can keep working; the run below updates as it trains and can be resumed if the app closes.`}
         </p>
       )}
       {error && <p className="mt-2 text-[12px] text-[var(--bad)]">{error}</p>}
@@ -670,6 +835,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
           {runs.map((r) => {
             const isOpen = open === r.run;
             const detail = details[r.run];
+            const showPill = r.status !== "done" && r.status !== "rejected";
             return (
               <li key={r.run} className="min-w-0 rounded-md border border-[var(--line)] px-3 py-2">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -681,15 +847,10 @@ export function TrainCard({ projectId }: { projectId: string }) {
                       {r.initRun ? ` · from ${fmtRunDate(r.initRun)}` : ""}
                       {r.split?.evalProject ? " · held-out dataset" : ""}
                     </span>
-                    {r.status !== "done" && (
+                    {showPill && (
                       <span
-                        className={`ml-2 rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wider ${
-                          r.status === "training"
-                            ? "bg-[var(--ok)]/15 text-[var(--ok)]"
-                            : r.status === "interrupted"
-                              ? "bg-[var(--warn,#c9a227)]/15 text-[var(--warn,#c9a227)]"
-                              : "bg-[var(--bad)]/15 text-[var(--bad)]"
-                        }`}
+                        className="ml-2 rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wider"
+                        style={{ background: tint(pillColour(r.status)), color: pillColour(r.status) }}
                         title={r.error ?? undefined}
                       >
                         {statusLabel(r)}
@@ -742,7 +903,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
                         N6 export
                       </a>
                     )}
-                    {(r.status === "done" || r.status === "rejected" || r.history) && (
+                    {(r.status === "done" || r.status === "rejected" || r.history || r.error) && (
                       <button
                         type="button"
                         onClick={() => void toggle(r.run)}
@@ -754,7 +915,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
                     {r.status !== "training" && (
                       <button
                         type="button"
-                        onClick={() => void remove(r.run)}
+                        onClick={() => setConfirmDelete(r.run)}
                         disabled={busy === r.run || training}
                         title="Delete this run"
                         aria-label="Delete this run"
@@ -765,13 +926,16 @@ export function TrainCard({ projectId }: { projectId: string }) {
                     )}
                   </span>
                 </div>
+                {r.error && (r.status === "failed" || r.status === "interrupted") && !isOpen && (
+                  <p className="mt-1 text-[11px] text-[var(--bad)]">{r.error}</p>
+                )}
                 {r.status === "training" && r.history && r.history.length > 0 && !isOpen && (
                   <div className="mt-2">
                     <Curves history={r.history} total={r.totalEpochs} />
                   </div>
                 )}
                 {isOpen && (detail ? (
-                  <RunDetails projectId={projectId} detail={detail} />
+                  <RunDetails projectId={projectId} detail={detail} liveHistory={r.history} status={r.status} />
                 ) : (
                   <p className="mt-2 text-[11.5px] text-foreground/40">Loading…</p>
                 ))}
@@ -780,6 +944,25 @@ export function TrainCard({ projectId }: { projectId: string }) {
           })}
         </ul>
       )}
+
+      <GlassDialog open={confirmDelete !== null} onClose={() => setConfirmDelete(null)} title="Delete this run?" maxWidth="max-w-md">
+        <p className="pt-3 text-[13px] text-foreground/70">
+          {confirmDelete ? `The run from ${fmtRunDate(confirmDelete)}` : "This run"}, its weights, its export and its
+          gallery are removed from the dataset folder. This cannot be undone.
+        </p>
+        <div className="mt-4 flex justify-end gap-2">
+          <button type="button" onClick={() => setConfirmDelete(null)} className="pk-btn px-3.5">
+            Keep it
+          </button>
+          <button
+            type="button"
+            onClick={() => confirmDelete && void remove(confirmDelete)}
+            className="pk-btn-primary rounded-md px-3.5 py-1.5 text-[12px] font-medium"
+          >
+            Delete run
+          </button>
+        </div>
+      </GlassDialog>
     </div>
   );
 }

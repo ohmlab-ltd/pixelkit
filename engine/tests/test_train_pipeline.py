@@ -394,3 +394,118 @@ def test_train_params_are_clamped(app_module):
     assert cfg.resume_run == "20990101T000000Z" and cfg.device == "cuda:1"
     assert app_module._fmt_eta(45) == "45 s" and app_module._fmt_eta(600) == "10 min"
     assert app_module._fmt_eta(2 * 3600 + 5 * 60) == "2 h 05 min"
+
+
+# ── sweep: one bad file, one bad box, one bad step must not end a run ──
+
+def test_unreadable_images_and_outside_boxes_are_skipped(tmp_path):
+    import torch
+    from train_yolox import Sample, _build_model, _gt_letterbox, _make_batch, _read_rgb
+
+    empty = tmp_path / "empty.jpg"
+    empty.write_bytes(b"")
+    assert _read_rgb(empty) is None
+    garbage = tmp_path / "garbage.jpg"
+    garbage.write_bytes(b"not an image at all")
+    assert _read_rgb(garbage) is None
+    assert _read_rgb(tmp_path / "missing.jpg") is None
+
+    good = tmp_path / "good.png"
+    Image.new("RGB", (96, 64), (10, 20, 30)).save(good)
+    # One box inside, one far outside the picture, one that straddles the edge.
+    s = Sample(path=good, boxes=np.array([[10, 10, 40, 40], [400, 10, 440, 50], [80, 20, 130, 60]], np.float32),
+               classes=np.array([0, 1, 0], np.float32), split="train", w=96, h=64, name="good.png")
+    imgs, targets = _make_batch([s, Sample(path=empty, boxes=s.boxes, classes=s.classes, split="train")],
+                                [0, 1], size=64, train=False)
+    rows = targets[0][targets[0].sum(1) > 0]
+    assert len(rows) == 2                       # the outside box is gone
+    assert float((rows[:, 1] + rows[:, 3] / 2).max()) <= 64.0 + 1e-3  # x1 clipped to the canvas
+    assert targets[1].sum() == 0 and imgs[1].sum() == 0  # unreadable: blank sample, no boxes
+    gt = _gt_letterbox(s, 64)
+    assert len(gt) == 2 and gt[:, :4].max() <= 64.0
+    # The head accepts the batch (this used to raise "selected index k out of range").
+    model = _build_model(n_classes=2)
+    model.train()
+    out = model(imgs, targets)
+    assert torch.isfinite(out["total_loss"])
+
+
+def test_non_finite_steps_are_skipped_and_a_diverged_epoch_raises(tmp_path):
+    from train_yolox import Sample, _epoch, _json_safe, _write_json_atomic
+
+    p = tmp_path / "t.png"
+    Image.new("RGB", (32, 32), (1, 2, 3)).save(p)
+    samples = [Sample(path=p, boxes=np.array([[2, 2, 20, 20]], np.float32),
+                      classes=np.array([0], np.float32), split="train", w=32, h=32) for _ in range(4)]
+    seen = []
+
+    def step_fn(step, imgs, targets):
+        seen.append(step)
+        return float("nan") if step == 0 else 2.0
+
+    st = {"batch": 2, "steps": 2}
+    notes: list[str] = []
+    assert _epoch(samples, [0, 1, 2, 3], st, 32, step_fn, None, notes) == 2.0
+    assert notes and "non-finite" in notes[0]
+    with pytest.raises(RuntimeError, match="diverged"):
+        _epoch(samples, [0, 1, 2, 3], st, 32, lambda *_a: float("inf"), None, [])
+
+    # history.json stays strict JSON whatever the numbers were.
+    out = tmp_path / "h.json"
+    _write_json_atomic(out, {"loss": float("nan"), "rows": [1.5, float("inf")], "n": np.int64(3)})
+    text = out.read_text("utf-8")
+    assert "NaN" not in text and "Infinity" not in text
+    assert json.loads(text) == {"loss": None, "rows": [1.5, None], "n": 3}
+    assert _json_safe({"a": (np.float32(1.5),)}) == {"a": [1.5]}
+
+
+def test_atomic_replace_retries_while_the_file_is_open(tmp_path):
+    """Windows refuses to rename over a file another handle has open;
+    the writer waits it out instead of ending the run."""
+    import threading
+    import time as _time
+
+    from train_yolox import _write_json_atomic
+
+    target = tmp_path / "history.json"
+    _write_json_atomic(target, {"v": 0})
+    fh = open(target, "rb")
+
+    def release():
+        _time.sleep(0.3)
+        fh.close()
+
+    threading.Thread(target=release).start()
+    _write_json_atomic(target, {"v": 1})  # would raise PermissionError on Windows without the retry
+    assert json.loads(target.read_text("utf-8")) == {"v": 1}
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_preflight_two_labelled_images_are_enough():
+    from train_yolox import Sample, TrainConfig, preflight_samples
+
+    def mk(name, split):
+        return Sample(path=Path(name), boxes=np.array([[5, 5, 40, 40]], np.float32),
+                      classes=np.array([0], np.float32), split=split, w=96, h=64, name=name)
+
+    info = {"originals": 2, "augmented": 0, "unlabelled": 0}
+    out = preflight_samples([mk("a.jpg", "train"), mk("b.jpg", "val")], ["dog"], info, TrainConfig(imgsz=64))
+    assert out["ok"] is True, out["blockers"]
+    # One original plus its augmented copy is still one labelled image.
+    aug = mk("aug_a_000.jpg", "train")
+    aug.source = "augmented"
+    out = preflight_samples([mk("a.jpg", "train"), aug], ["dog"],
+                            {"originals": 1, "augmented": 1, "unlabelled": 0}, TrainConfig(imgsz=64))
+    assert out["ok"] is False and "have 1" in out["blockers"][0]
+
+
+def test_label_model_targets_never_touch_hand_edited_images(app_module):
+    manifest = {"imports": [
+        {"id": "a", "filename": "a.jpg"},                                             # untouched
+        {"id": "b", "filename": "b.jpg", "detections": [{"label": "x"}], "labelled": True},  # auto
+        {"id": "c", "filename": "c.jpg", "editedBoxesSet": True, "editedBoxes": [{"label": "x"}]},
+        {"id": "d", "filename": "d.jpg", "editedBoxesSet": True, "editedBoxes": []},  # cleared by hand
+        {"id": "e"},                                                                   # no file
+    ]}
+    assert [e["id"] for e in app_module._label_model_targets(manifest, False)] == ["a"]
+    assert [e["id"] for e in app_module._label_model_targets(manifest, True)] == ["a", "b"]

@@ -13,9 +13,10 @@ are deliberately not started here.
    its raw head rows with the host's int8 predictions, so the number in
    the report is the number on silicon. Needs a host-to-device bulk
    transport (NeuroStudio removed its FWU0 push) and a core mode that
-   accepts frames over USB and returns the raw tensor. PixelKit already
-   keeps per-image val predictions and the letterbox geometry, so the
-   comparison is a small addition once frames can be sent.
+   accepts frames over USB and returns the raw tensor. PixelKit has the
+   per-image val predictions and the letterbox geometry in memory when
+   it scores an export (it persists only the worst-image gallery), so
+   the comparison is a small addition once frames can be sent.
 2. **Classification models.** A MobileNet-class classifier needs a core
    post-processor (softmax + argmax over the labels header) and a demo
    sketch; PixelKit would train on derived datasets (one crop per box,

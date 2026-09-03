@@ -2035,13 +2035,13 @@ function TrainingSection({ go }: { go: (k: GuideSectionKey) => void }) {
           items={[
             "<strong>Epochs</strong>. 50 is the default; small datasets are usually fine with fewer.",
             "<strong>Input</strong>. The square resolution the model sees (256 by default). Bigger inputs see smaller objects at the cost of speed on the board.",
-            "<strong>Model</strong>. Nano (0.9 M parameters, under 1 MB of weights) or Tiny (5 M parameters, about 5 MB, more accurate, four times the compute).",
+            "<strong>Model</strong>. Nano (0.9 M parameters, under 1 MB of weights) or Tiny (5 M parameters, about 5 MB, more accurate, about six times the compute).",
             "<strong>Split</strong>. The share of images that train; the rest is held out per class, so every class with two or more images gets a val image and is measured.",
             "<strong>Augmentations</strong>. Generated copies of training images join the training set (with their transformed boxes). Copies of val images are never used, so the val score stays honest.",
             "<strong>Start from</strong>. Continue from an earlier run&rsquo;s weights instead of the COCO checkpoint, for a second pass on a grown dataset.",
             "<strong>Evaluate on</strong>. Score on a separate dataset instead of a held-out split: everything here trains, everything labelled there is scored. The honest number for a camera the model has never seen.",
             "<strong>Pre-flight</strong>. Before you start, the card says how many images and augmentations the run will use and warns about classes with few boxes, classes the val split cannot measure, objects under 8 px at the input size, and identical images on both sides of the split. Too few labelled images blocks the run.",
-            "<strong>GPU required</strong>. Training needs a CUDA card or Apple Silicon. With a second GPU installed, training uses it so labelling stays responsive.",
+            "<strong>GPU</strong>. Training wants a CUDA card or Apple Silicon; it runs on the CPU only when Compute is set to CPU in Settings, and slowly. With a second GPU installed, training uses the card labelling is not on, so labelling stays responsive.",
           ]}
         />
       </GuideSection>
@@ -2050,7 +2050,7 @@ function TrainingSection({ go }: { go: (k: GuideSectionKey) => void }) {
         <Bullets
           items={[
             "<strong>Float training</strong>. A YOLOX detector, warm-started from COCO or a previous run, trained on the dataset&rsquo;s labelled images and their augmentations. The batch size comes from free GPU memory and is halved automatically if the card runs out.",
-            "<strong>Live curves</strong>. The run shows loss and AP@0.5 per epoch as it trains, with the time left. Every epoch is checkpointed: a run interrupted by a crash, a cancel or a closed app shows as Interrupted and resumes from its last epoch with the Resume button.",
+            "<strong>Live curves</strong>. The run shows loss and AP@0.5 per epoch as it trains, with the time left. Every float epoch is checkpointed: a run interrupted by a crash, Cancel training or a closed app shows as Interrupted and resumes from its last epoch with the Resume button (an interruption during the int8 fine-tuning restarts that short phase).",
             "<strong>Quantisation-aware fine-tuning</strong>. A few extra epochs with int8 simulated throughout the network, so the exported model scores like the float one instead of losing ten to twenty points.",
             "<strong>Threshold calibration</strong>. On the int8 model&rsquo;s val predictions the confidence threshold with the best F1 is chosen and written into the labels header, with the precision and recall it gives.",
             "<strong>Export and verify</strong>. The int8 model is written with the board&rsquo;s input contract built in and, when ST Edge AI Core is installed, compiled for the NPU so the run can report how much of it runs in hardware and how much flash it needs.",
@@ -2064,8 +2064,8 @@ function TrainingSection({ go }: { go: (k: GuideSectionKey) => void }) {
           items={[
             "<strong>AP50 float and int8</strong>. Accuracy on the held-out split for the float model and for the exact int8 file you deploy, with the per-class numbers in Details.",
             "<strong>The threshold line</strong>. The calibrated confidence threshold and its F1; Details shows per-class precision and recall at that threshold and the confusion matrix (truth by prediction, with a background row and column for spurious boxes and misses).",
-            "<strong>Worst images</strong>. The val images with the most errors, drawn: green is the truth, yellow a miss, red a spurious box, orange the right place with the wrong class. That gallery is where the next labelling hour should go.",
-            "<strong>The NPU line</strong>. <em>Fully on NPU</em> means zero software epochs; otherwise it says how many ops fell back to the CPU. Weights are shown against the board&rsquo;s flash pool.",
+            "<strong>Worst images</strong>. The val images with the most errors, drawn: green is the truth, thin blue a correct detection, yellow a miss, red a spurious box, orange the right place with the wrong class. Click one to enlarge it. That gallery is where the next labelling hour should go.",
+            "<strong>The NPU line</strong>. <em>Fully on NPU</em> means zero software epochs; otherwise it says how many of the compiler&rsquo;s epochs run on the CPU instead. Weights are shown against the board&rsquo;s flash pool.",
             "<strong>Rejected</strong>. If the compiler refuses the model the run is kept with the reason instead of shipping something that cannot build.",
             "<strong>Label images</strong>. Runs the exported model over the dataset&rsquo;s unlabelled images at its calibrated threshold, so you review and correct instead of drawing from scratch. Hand-edited images are never touched. Review, correct, retrain.",
           ]}
@@ -2075,10 +2075,11 @@ function TrainingSection({ go }: { go: (k: GuideSectionKey) => void }) {
       <GuideSection n={4} title="Putting it on the board">
         <p>
           Click <strong>N6 export</strong> to download the zip, drop its files
-          into your sketch folder and paste the two lines from the snippet:
-          the <span className="font-mono">#pragma neuron6</span> line that
-          names the model file, and the include for the generated labels
-          header. The core compiles and flashes the model with the sketch,
+          into your sketch folder and paste the snippet: the{" "}
+          <span className="font-mono">#pragma neuron6</span> line that names
+          the model file, the include for the generated labels header, and
+          the setup and loop calls that run the decoder. The core compiles
+          and flashes the model with the sketch,
           and the PostProcess library&rsquo;s YOLOX decoder turns the output
           into boxes with the thresholds from the header. The same run can
           be started from a terminal with{" "}

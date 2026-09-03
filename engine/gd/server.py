@@ -3413,6 +3413,29 @@ def _train_cfg_from_params(params: dict, device: str):
     )
 
 
+def _second_gpu(engine_dev: str) -> str | None:
+    """On a multi-GPU machine, train on the CUDA device with the most
+    free memory OTHER than the one labelling runs on, so labelling
+    stays interactive. None when there is no second card."""
+    try:
+        if not engine_dev.startswith("cuda") or torch.cuda.device_count() < 2:
+            return None
+        own = int(engine_dev.split(":")[1]) if ":" in engine_dev else 0
+        best, best_free = None, -1
+        for i in range(torch.cuda.device_count()):
+            if i == own:
+                continue
+            try:
+                free, _total = torch.cuda.mem_get_info(i)
+            except Exception:  # noqa: BLE001
+                continue
+            if free > best_free:
+                best, best_free = i, free
+        return f"cuda:{best}" if best is not None else None
+    except Exception:  # noqa: BLE001 - a driver hiccup must not block training
+        return None
+
+
 def _train_job_active(project_id: str) -> bool:
     return any(
         j.project == project_id and j.kind == "train_yolox" and j.status in ("queued", "running")
@@ -3422,13 +3445,13 @@ def _train_job_active(project_id: str) -> bool:
 
 def _label_model_targets(manifest: dict, overwrite: bool) -> list[dict]:
     """Imports a trained model may write boxes to: never one the user
-    edited by hand; without overwrite, only ones with no boxes at all."""
+    edited by hand (an explicitly emptied image is a decision too);
+    without overwrite, only ones with no boxes at all."""
     out = []
     for e in manifest.get("imports") or []:
         if not isinstance(e, dict) or not e.get("filename"):
             continue
-        edited = e.get("editedBoxes")
-        if e.get("editedBoxesSet") and isinstance(edited, list) and len(edited) > 0:
+        if e.get("editedBoxesSet"):
             continue
         has_auto = bool(e.get("detections")) or e.get("labelled") is True
         if has_auto and not overwrite:
@@ -3459,7 +3482,7 @@ async def _run_train_yolox_job(job, emit, cancel_event):
         return d.type
 
     engine_dev = _norm_dev(str(state.get("device") or "cpu"))
-    train_dev = _norm_dev(str(params.get("device") or "").strip() or engine_dev)
+    train_dev = _norm_dev(str(params.get("device") or "").strip() or _second_gpu(engine_dev) or engine_dev)
     if train_dev == "cpu" and _configured_device() != "cpu":
         raise RuntimeError(
             "no GPU available for training (switch Compute to CPU in Settings to force)"
@@ -3571,12 +3594,8 @@ async def _run_label_model_job(job, emit, cancel_event):
             mm["tags"] = tags
             for upd in updates:
                 e = by_id.get(upd["id"])
-                if e is None:
-                    continue
-                prior = e.get("editedBoxes")
-                if e.get("editedBoxesSet") and isinstance(prior, list) and len(prior) == 0:
-                    e.pop("editedBoxes", None)
-                    e.pop("editedBoxesSet", None)
+                if e is None or e.get("editedBoxesSet"):
+                    continue  # edited by hand since the job started: leave it
                 e["detections"] = upd["detections"]
                 e["labelled"] = True
                 e["labelledAt"] = int(time.time() * 1000)
@@ -19199,24 +19218,34 @@ def _run_is_live(run_dir: Path) -> bool:
     """True while some process is training this run (see _run_status)."""
     if (run_dir / "report.json").is_file():
         return False
-    try:
-        hist = _json_loads((run_dir / "history.json").read_bytes())
-    except Exception:
+    hist = _read_run_json(run_dir / "history.json")
+    if not isinstance(hist, dict):
         return False
     return hist.get("status") in ("training", "exporting") and _history_is_fresh(hist)
 
 
+def _read_run_json(path: Path):
+    """A run file, or None. Retries a few times: the trainer replaces
+    history.json atomically, and on Windows the reader can hit the
+    instant of the rename."""
+    for i in range(4):
+        try:
+            return _json_loads(path.read_bytes())
+        except FileNotFoundError:
+            if not path.parent.is_dir():
+                return None
+        except PermissionError:
+            pass
+        except Exception:
+            return None
+        if i < 3:
+            time.sleep(0.03)
+    return None
+
+
 def _run_entry(run_dir: Path, active: bool) -> dict | None:
-    rep = None
-    hist = None
-    try:
-        rep = _json_loads((run_dir / "report.json").read_bytes())
-    except Exception:
-        rep = None
-    try:
-        hist = _json_loads((run_dir / "history.json").read_bytes())
-    except Exception:
-        hist = None
+    rep = _read_run_json(run_dir / "report.json")
+    hist = _read_run_json(run_dir / "history.json")
     if rep is None and hist is None:
         return None  # half-written run from an older engine: hide it
     status, resumable = _run_status(run_dir, rep, hist, active)
@@ -19251,7 +19280,10 @@ def _run_entry(run_dir: Path, active: bool) -> dict | None:
         "exportRejected": bool((rep or {}).get("exportRejected")),
         "initRun": (rep or {}).get("initRun"),
         "resumed": bool((rep or {}).get("resumed")),
-        "threshold": ({k: thr.get(k) for k in ("conf", "f1", "precision", "recall", "calibrated", "fallback")}
+        "threshold": ({**{k: thr.get(k) for k in ("conf", "f1", "precision", "recall", "calibrated")},
+                       "fallback": bool(thr.get("fallback") or (not thr.get("calibrated")
+                                                                and not thr.get("f1")
+                                                                and not thr.get("precision")))}
                       if isinstance(thr, dict) else None),
         "failuresCount": len((rep or {}).get("failures") or []),
         "warningsCount": len((rep or {}).get("warnings") or []),
@@ -19352,17 +19384,8 @@ async def trained_model_detail(project_id: str, run_id: str):
     entry = _run_entry(run_dir, _train_job_active(project_id))
     if entry is None:
         raise HTTPException(404, "run not found")
-    report = None
-    try:
-        report = _json_loads((run_dir / "report.json").read_bytes())
-    except Exception:
-        report = None
-    history = None
-    if report is None:
-        try:
-            history = _json_loads((run_dir / "history.json").read_bytes())
-        except Exception:
-            history = None
+    report = _read_run_json(run_dir / "report.json")
+    history = _read_run_json(run_dir / "history.json") if report is None else None
     return {**entry, "report": report, "live": history}
 
 
