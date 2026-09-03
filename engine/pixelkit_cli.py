@@ -370,7 +370,9 @@ def train(args) -> int:
         if thr:
             print(f"  threshold: {thr.get('conf')}"
                   + (f"  (F1 {thr.get('f1')}, precision {thr.get('precision')}, recall {thr.get('recall')})"
-                     if thr.get("calibrated") else "  (as configured)"))
+                     if thr.get("calibrated")
+                     else ("  (default: the model found nothing on the val split)"
+                           if thr.get("fallback") else "  (as configured)")))
         if n6.get("verified"):
             print(f"  Neuro N6:  {n6.get('epochsSoftware')} software epochs, "
                   f"{(n6.get('weightsBytes') or 0) // 1024} kB weights "
@@ -398,6 +400,13 @@ def train(args) -> int:
 
 
 def main() -> None:
+    # A redirected console on Windows is cp1252: never let a progress
+    # line with a non-ASCII character take the engine down.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     ap = argparse.ArgumentParser(prog="pixelkit", description=__doc__)
     sub = ap.add_subparsers(dest="command")
     sub.add_parser("serve", help="start the engine (default)").add_argument(
@@ -438,7 +447,7 @@ def main() -> None:
         raise SystemExit(label(args))
     if cmd == "train":
         raise SystemExit(train(args))
-    print(f"PixelKit engine → http://127.0.0.1:{args.port}")
+    print(f"PixelKit engine -> http://127.0.0.1:{args.port}")
     serve(args.port)
 
 

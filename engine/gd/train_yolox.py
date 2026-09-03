@@ -90,10 +90,10 @@ _RELEASE = "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.
 MODEL_SPECS: dict[str, dict] = {
     "nano": {"label": "YOLOX-Nano", "width": 0.25, "depth": 0.33, "depthwise": True,
              "dir": "yolox_nano", "file": "yolox_nano.pth", "url": _RELEASE + "yolox_nano.pth",
-             "mb_per_image": 40.0},
+             "mb_per_image": 70.0},
     "tiny": {"label": "YOLOX-Tiny", "width": 0.375, "depth": 0.33, "depthwise": False,
              "dir": "yolox_tiny", "file": "yolox_tiny.pth", "url": _RELEASE + "yolox_tiny.pth",
-             "mb_per_image": 90.0},
+             "mb_per_image": 150.0},
 }
 MODEL_DIRS = tuple(spec["dir"] for spec in MODEL_SPECS.values())
 RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
@@ -1075,22 +1075,35 @@ def _is_oom(e: BaseException) -> bool:
     return isinstance(e, RuntimeError) and ("out of memory" in msg or "cudnn_status_alloc_failed" in msg)
 
 
+# An epoch should be at least this many optimiser steps: a batch that
+# swallows a small dataset in three steps trains three times per epoch,
+# and 50 such epochs are 150 steps (measured on VOC-300: AP 0 after 10
+# epochs at batch 64, against 0.38 at batch 16).
+MIN_STEPS_PER_EPOCH = 15
+# How often a running epoch refreshes history.json (see _epoch); the
+# server treats a run whose file is younger than a few of these as live.
+HEARTBEAT_SECONDS = 30
+
+
 def _auto_batch(device: torch.device, imgsz: int, size: str, n_train: int) -> int:
-    """Batch size from free VRAM: 60% of what is free divided by a
-    per-image peak measured for each size at 256x256, scaled by input
-    area, clamped to [4, 64] and to the dataset. An estimate on purpose;
+    """Batch size from free VRAM and dataset size: 60% of the free
+    memory divided by a per-image peak measured for each size at
+    256x256 (scaled by input area), capped at 64 and at what keeps
+    MIN_STEPS_PER_EPOCH steps in an epoch. An estimate on purpose;
     _epoch() halves the batch if the card still says no."""
+    by_steps = max(2, int(round(n_train / MIN_STEPS_PER_EPOCH)))
     if device.type != "cuda":
-        return max(2, min(8, n_train))
+        return max(2, min(8, by_steps, n_train))
     try:
         free, _total = torch.cuda.mem_get_info(device)
     except Exception:  # noqa: BLE001 - driver hiccup: use the documented default
-        return max(2, min(16, n_train))
+        return max(2, min(16, by_steps, n_train))
     per_image = MODEL_SPECS[size]["mb_per_image"] * 1e6 * (imgsz / 256.0) ** 2
     b = int(free * 0.6 / per_image)
+    b = max(4, min(64, b))
+    b = min(b, by_steps)
     if b >= 16:
         b -= b % 8
-    b = max(4, min(64, b))
     return max(2, min(b, n_train))
 
 
@@ -1111,11 +1124,19 @@ def _epoch(samples, train_s: list[int], st: dict, imgsz: int, step_fn, cancel, n
         loss_sum, n = 0.0, 0
         it = _batch_iter(samples, order, batch, imgsz, train=True)
         oom = False
+        heartbeat = st.get("heartbeat")
+        last_beat = time.time()
         try:
             for step, (imgs, targets) in enumerate(it):
                 _check_cancel(cancel)
                 loss_sum += step_fn(step, imgs, targets)
                 n += 1
+                # Long epochs: keep history.json's timestamp fresh so
+                # another process (the app, while the CLI trains) can
+                # tell a live run from an interrupted one.
+                if heartbeat is not None and time.time() - last_beat > HEARTBEAT_SECONDS:
+                    heartbeat()
+                    last_beat = time.time()
         except RuntimeError as e:
             if not _is_oom(e) or batch <= 2:
                 raise
@@ -1253,7 +1274,8 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel) -> dict:
     else:
         batch = cfg.batch if cfg.batch > 0 else _auto_batch(device, cfg.imgsz, cfg.size, len(train_s))
     batch = max(2, min(batch, len(train_s)))
-    st = {"batch": batch, "steps": max(1, len(train_s) // batch)}
+    st = {"batch": batch, "steps": max(1, len(train_s) // batch),
+          "heartbeat": lambda: write_history("training")}
 
     pg_bn, pg_w, pg_b = [], [], []
     for m in model.modules():

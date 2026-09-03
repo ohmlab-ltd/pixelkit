@@ -207,8 +207,14 @@ def test_preflight_reports_blockers_and_warnings(client):
 def test_auto_batch_on_cpu_and_oom_halving():
     from train_yolox import _auto_batch, _epoch, _is_oom
 
-    assert _auto_batch(torch.device("cpu"), 256, "nano", 100) == 8
-    assert _auto_batch(torch.device("cpu"), 256, "nano", 3) == 3
+    assert _auto_batch(torch.device("cpu"), 256, "nano", 300) == 8
+    assert _auto_batch(torch.device("cpu"), 256, "nano", 100) == 7   # 15 steps per epoch
+    assert _auto_batch(torch.device("cpu"), 256, "nano", 3) == 2
+    if torch.cuda.is_available():
+        dev = torch.device("cuda:1" if torch.cuda.device_count() > 1 else "cuda:0")
+        assert _auto_batch(dev, 256, "nano", 240) == 16        # 240 images: 15 steps
+        assert _auto_batch(dev, 256, "nano", 4000) in (24, 32, 40, 48, 56, 64)
+        assert _auto_batch(dev, 256, "nano", 20) == 2
 
     calls = []
     oom_cls = getattr(torch.cuda, "OutOfMemoryError", RuntimeError)

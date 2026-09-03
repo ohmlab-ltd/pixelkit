@@ -1,21 +1,70 @@
 # Training and Neuro N6 export
 
-PixelKit trains a YOLOX-Nano detector on a dataset and exports it for the
-OhmLab Neuro N6 (STM32N657, Neural-ART NPU). Everything runs locally.
+PixelKit trains a YOLOX detector (Nano or Tiny) on a dataset and exports
+it for the OhmLab Neuro N6 (STM32N657, Neural-ART NPU). Everything runs
+locally. The local API behind the Train card is in [API.md](API.md).
 
 ## What you get
 
-`<dataset>/models/yolox_nano/<run>/`:
+`<dataset>/models/<yolox_nano|yolox_tiny>/<run>/`:
 
 | File | Purpose |
 |---|---|
 | `<slug>_int8.onnx` | the deployable model: full-integer QDQ int8, raw head |
-| `<slug>_labels.h` | `NUM_CLASSES`, `INPUT_W/H`, thresholds, `CLASSES[]` |
+| `<slug>_labels.h` | `NUM_CLASSES`, `INPUT_W/H`, the calibrated `CONF_THRESHOLD`, `NMS_THRESHOLD`, `CLASSES[]` |
 | `<slug>_snippet.ino.txt` | the `#pragma neuron6` line and decoder wiring to paste |
-| `report.json` | AP@0.5 float vs int8 (overall and per class), input contract, NPU build facts |
+| `report.json` | AP@0.5 float vs int8 (overall and per class), threshold sweep, per-class precision/recall, confusion matrix, per-epoch history, input contract, NPU build facts |
 | `export.zip` | the four files above, ready to drop into a sketch folder |
+| `failures/`, `failures.json` | the worst val images with misses, spurious boxes and wrong classes drawn |
+| `history.json` | per-epoch loss and AP@0.5, written as the run trains |
 | `neuron6/` | ST Edge AI compiler log and generate report |
 | `<slug>_fp32.onnx`, `best.pt` | the float model and checkpoint, for re-export or inspection |
+| `ckpt_last.pt` | only while a run is unfinished: what Resume continues from |
+
+## What trains, and what is measured
+
+The training set is every labelled image the split puts in train, plus
+that image's generated augmentations (from the Augmentations tab), with
+their transformed boxes. Augmentations of a val image are never used, so
+the val score is never inflated by a copy of a val picture.
+
+The split is per class rather than per image: every class with two or
+more images gets at least one val image and keeps at least one train
+image, and the val share of each class is the chosen ratio (60 to 90%
+train). It is keyed on filenames, so the same dataset splits the same
+way every time. Alternatively a second dataset can be the held-out set:
+everything in this dataset trains, everything labelled in that one is
+scored, labels matched by name. That is the honest number for a camera
+the model has never seen.
+
+Before a run starts, a pre-flight check says what will be used and
+what will go wrong: too few labelled images (blocks), classes with fewer
+than ten boxes, classes the val split cannot measure, objects under 8
+px at the chosen input size, byte-identical images on both sides of the
+split. Warnings are recorded in the report.
+
+## Nano or Tiny
+
+| | parameters | int8 weights | MACs at 256x256 | when |
+|---|---|---|---|---|
+| YOLOX-Nano | 0.9 M | about 0.9 MB | 0.27 G | the default; a few classes, a fixed camera |
+| YOLOX-Tiny | 5.1 M | about 5 MB | 1.6 G | Nano's accuracy is not enough; still 20% of the weights pool |
+
+Both use the same stem, head, quantisation and export path; the compile
+report says what each costs on the board. A run can also start from a
+previous run's weights instead of the COCO checkpoint (Start from), for
+a second pass on a grown dataset.
+
+## Batch size, interruptions
+
+The batch is sized from free VRAM at the start (about 40 MB per image
+for Nano and 90 MB for Tiny at 256x256, 60% of what is free, capped at
+64). If the card still runs out of memory the batch is halved and the
+epoch restarts; the report records it. A checkpoint is written every
+epoch, so an interrupted run (the app closed, a crash, a cancel) shows
+as Interrupted and resumes from its last epoch with its own settings.
+The Train card shows the loss and AP@0.5 curves as the run trains, with
+the time left.
 
 ## The input contract
 
@@ -77,13 +126,34 @@ the last 1 MB is OTA app slot B). A model the compiler rejects is not
 exported; the reason is recorded and shown in the app. Without the
 compiler the export still succeeds and says `verified: false`.
 
+## The threshold, and how the model fails
+
+The decoder on the board needs one confidence threshold. After the int8
+export is scored, PixelKit sweeps the threshold from 0.05 to 0.95 on
+the val predictions and writes the one with the best F1 (all classes
+pooled; the middle of a plateau when several tie) into the labels
+header, with the precision and recall it gives. The report also carries
+per-class precision and recall at that threshold, a confusion matrix
+(truth by prediction, with a background row and column for spurious
+boxes and misses) and a gallery of the val images with the most errors:
+green is the truth, yellow a miss, red a spurious box, orange the right
+place with the wrong class. That gallery is where the next labelling
+hour should go.
+
+## Label with your own model
+
+A finished run can pre-label the dataset's unlabelled images (Label
+images on the run): the exported int8 model, run on the CPU at its
+calibrated threshold, writes boxes the way the SAM 3 labeller does.
+Hand-edited images are never touched. Review, correct, retrain.
+
 ## The recipe, validated on Pascal VOC 2007
 
 Defaults: 50 float epochs plus 8 quantisation-aware epochs, 256x256,
-batch 16 (32 on a 24 GB card is fine), SGD with warmup and cosine decay,
-hflip + HSV + scale jitter, COCO warm start. With `qat_epochs=0` the
-fallback is post-training quantisation with percentile-99.9 calibration
-on up to 200 natural training images.
+batch from free VRAM, SGD with warmup and cosine decay, hflip + HSV +
+scale jitter, COCO warm start. With `qat_epochs=0` the fallback is
+post-training quantisation with percentile-99.9 calibration on up to
+200 natural training images (MinMax if a tensor has no range).
 
 Measured on Pascal VOC 2007 trainval (5011 images, 12,608 boxes, 20
 classes, non-difficult; the sha1 split gives 4008 train / 1003 val) on
@@ -106,6 +176,13 @@ A note on scale: these are numbers for a 0.9 M-parameter detector at
 PixelKit datasets (a few classes, a fixed camera). On the 3-image QA
 set and the 300-image VOC subset the QAT export matched or beat the
 float model.
+
+## Headless
+
+`pixelkit train <dataset> --epochs 50 --input 256 --size nano --split 0.8
+[--eval-dataset NAME] [--from RUN] [--resume RUN] [--device cuda:1] [--out DIR]`
+runs the same job from a terminal and copies the export out. The
+endpoints are in [API.md](API.md).
 
 ## Importing an existing dataset
 

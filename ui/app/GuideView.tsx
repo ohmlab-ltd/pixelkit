@@ -30,7 +30,7 @@ const GUIDE_SECTIONS: { key: GuideSectionKey; title: string; blurb: string }[] =
   { key: "settings", title: "Settings & themes", blurb: "Renaming, recolouring labels, annotation snapshots, export." },
   { key: "teams", title: "Projects & teams", blurb: "Group datasets into a Project: shared labels, covers, activity." },
   { key: "derived", title: "Derived datasets", blurb: "Crop each detection into a child dataset: ROI squares, inherited or fresh labels, live sync." },
-  { key: "training", title: "Train for Neuro N6", blurb: "Train a YOLOX-Nano on this dataset, verify it for the NPU, export the board bundle." },
+  { key: "training", title: "Train for Neuro N6", blurb: "Train a YOLOX on this dataset, check it before and after, verify it for the NPU, export the board bundle." },
   { key: "reference", title: "Reference", blurb: "Keyboard shortcuts and reference tables." },
 ];
 
@@ -428,13 +428,39 @@ or a zip. Every box comes in editable; polygon masks are kept.
 TRAINING FOR THE NEURO N6
 ==============================================================
 The Train for Neuro N6 card on a dataset's overview trains a
-YOLOX-Nano detector on this machine (GPU required), fine-tunes it
-with int8 simulated so the deployed model keeps its accuracy, and
-exports a zip with the int8 model, a labels header, a sketch snippet
-and report.json. When ST Edge AI Core is installed the export is
+YOLOX detector (Nano, or Tiny for more accuracy at five times the
+weights) on this machine (GPU required), fine-tunes it with int8
+simulated so the deployed model keeps its accuracy, and exports a
+zip with the int8 model, a labels header, a sketch snippet and
+report.json. When ST Edge AI Core is installed the export is
 compiled for the board's NPU and the run shows how much runs in
 hardware and how much flash it uses. A model the compiler rejects is
 kept with the reason instead of exported.
+
+Options: epochs, input size, model size, the train/val split (per
+class, so every class is measured; or pick another dataset as the
+held-out set), whether generated augmentations join the training
+set (they follow their source image's split, never the val side),
+and Start from (continue from an earlier run's weights). A pre-flight
+line under the options says what the run will use and warns about
+classes with few boxes, classes the val split cannot measure, objects
+too small for the input size, and duplicate images across the split.
+
+While it trains the run shows live loss and AP@0.5 curves and the
+time left. The batch size comes from free GPU memory and is halved
+automatically if the card runs out. Every epoch is checkpointed: a
+run interrupted by a crash or a closed app shows as Interrupted with
+a Resume button.
+
+Each finished run has Details: the curves, the confidence threshold
+(calibrated on the val split for the best F1 and written into the
+labels header), per-class precision and recall at that threshold, a
+confusion matrix, and a gallery of the val images the model got most
+wrong (missed, spurious, wrong class). Label images runs the exported
+model over the dataset's unlabelled images so you can review and
+correct instead of drawing from scratch; hand-edited images are never
+touched. The same run can be started from a terminal with
+pixelkit train.
 
 ==============================================================
 DERIVED DATASETS
@@ -2000,15 +2026,21 @@ function TrainingSection({ go }: { go: (k: GuideSectionKey) => void }) {
       <GuideSection n={1} title="Starting a run">
         <p>
           Open a dataset&rsquo;s overview and find the{" "}
-          <strong>Train for Neuro N6</strong> card. Pick the number of epochs
-          and the input size, then Start training. The job runs in the
-          background and reports in the status bar; you can keep labelling
-          while it trains.
+          <strong>Train for Neuro N6</strong> card. Pick the options, read
+          the pre-flight line under them, then Start training. The job runs
+          in the background and reports in the status bar; you can keep
+          labelling while it trains.
         </p>
         <Bullets
           items={[
             "<strong>Epochs</strong>. 50 is the default; small datasets are usually fine with fewer.",
             "<strong>Input</strong>. The square resolution the model sees (256 by default). Bigger inputs see smaller objects at the cost of speed on the board.",
+            "<strong>Model</strong>. Nano (0.9 M parameters, under 1 MB of weights) or Tiny (5 M parameters, about 5 MB, more accurate, four times the compute).",
+            "<strong>Split</strong>. The share of images that train; the rest is held out per class, so every class with two or more images gets a val image and is measured.",
+            "<strong>Augmentations</strong>. Generated copies of training images join the training set (with their transformed boxes). Copies of val images are never used, so the val score stays honest.",
+            "<strong>Start from</strong>. Continue from an earlier run&rsquo;s weights instead of the COCO checkpoint, for a second pass on a grown dataset.",
+            "<strong>Evaluate on</strong>. Score on a separate dataset instead of a held-out split: everything here trains, everything labelled there is scored. The honest number for a camera the model has never seen.",
+            "<strong>Pre-flight</strong>. Before you start, the card says how many images and augmentations the run will use and warns about classes with few boxes, classes the val split cannot measure, objects under 8 px at the input size, and identical images on both sides of the split. Too few labelled images blocks the run.",
             "<strong>GPU required</strong>. Training needs a CUDA card or Apple Silicon. With a second GPU installed, training uses it so labelling stays responsive.",
           ]}
         />
@@ -2017,20 +2049,25 @@ function TrainingSection({ go }: { go: (k: GuideSectionKey) => void }) {
       <GuideSection n={2} title="What the run does">
         <Bullets
           items={[
-            "<strong>Float training</strong>. A YOLOX-Nano detector, warm-started from COCO, trained on the dataset&rsquo;s labelled images with the same train/val split the exporters use.",
+            "<strong>Float training</strong>. A YOLOX detector, warm-started from COCO or a previous run, trained on the dataset&rsquo;s labelled images and their augmentations. The batch size comes from free GPU memory and is halved automatically if the card runs out.",
+            "<strong>Live curves</strong>. The run shows loss and AP@0.5 per epoch as it trains, with the time left. Every epoch is checkpointed: a run interrupted by a crash, a cancel or a closed app shows as Interrupted and resumes from its last epoch with the Resume button.",
             "<strong>Quantisation-aware fine-tuning</strong>. A few extra epochs with int8 simulated throughout the network, so the exported model scores like the float one instead of losing ten to twenty points.",
+            "<strong>Threshold calibration</strong>. On the int8 model&rsquo;s val predictions the confidence threshold with the best F1 is chosen and written into the labels header, with the precision and recall it gives.",
             "<strong>Export and verify</strong>. The int8 model is written with the board&rsquo;s input contract built in and, when ST Edge AI Core is installed, compiled for the NPU so the run can report how much of it runs in hardware and how much flash it needs.",
           ]}
         />
       </GuideSection>
 
       <GuideSection n={3} title="Reading a run">
-        <p>Each finished run in the card shows three things:</p>
+        <p>Each finished run in the card shows its summary, and Details opens the rest:</p>
         <Bullets
           items={[
-            "<strong>AP50 float and int8</strong>. Accuracy on the held-out split for the float model and for the exact int8 file you deploy. The report.json in the export carries the per-class numbers.",
+            "<strong>AP50 float and int8</strong>. Accuracy on the held-out split for the float model and for the exact int8 file you deploy, with the per-class numbers in Details.",
+            "<strong>The threshold line</strong>. The calibrated confidence threshold and its F1; Details shows per-class precision and recall at that threshold and the confusion matrix (truth by prediction, with a background row and column for spurious boxes and misses).",
+            "<strong>Worst images</strong>. The val images with the most errors, drawn: green is the truth, yellow a miss, red a spurious box, orange the right place with the wrong class. That gallery is where the next labelling hour should go.",
             "<strong>The NPU line</strong>. <em>Fully on NPU</em> means zero software epochs; otherwise it says how many ops fell back to the CPU. Weights are shown against the board&rsquo;s flash pool.",
             "<strong>Rejected</strong>. If the compiler refuses the model the run is kept with the reason instead of shipping something that cannot build.",
+            "<strong>Label images</strong>. Runs the exported model over the dataset&rsquo;s unlabelled images at its calibrated threshold, so you review and correct instead of drawing from scratch. Hand-edited images are never touched. Review, correct, retrain.",
           ]}
         />
       </GuideSection>
@@ -2043,7 +2080,11 @@ function TrainingSection({ go }: { go: (k: GuideSectionKey) => void }) {
           names the model file, and the include for the generated labels
           header. The core compiles and flashes the model with the sketch,
           and the PostProcess library&rsquo;s YOLOX decoder turns the output
-          into boxes with the thresholds from the header.
+          into boxes with the thresholds from the header. The same run can
+          be started from a terminal with{" "}
+          <span className="font-mono">pixelkit train &lt;dataset&gt;</span>;
+          the local endpoints behind the card are documented in the
+          repository&rsquo;s docs/API.md.
         </p>
       </GuideSection>
 

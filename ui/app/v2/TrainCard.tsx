@@ -25,6 +25,7 @@ import {
   pct,
   sizeLabel,
   statusLabel,
+  thresholdNote,
   type HistoryRow,
   type Neuron6Summary,
   type Preflight,
@@ -176,9 +177,8 @@ function RunDetails({ projectId, detail }: { projectId: string; detail: RunDetai
       {thr && (
         <p className="text-[12px] text-foreground/65">
           <span className="font-medium text-foreground/80">Confidence threshold {thr.conf.toFixed(2)}</span>
-          {thr.calibrated
-            ? ` · chosen on the val split for the best F1 (${(thr.f1 ?? 0).toFixed(2)}): precision ${pct(thr.precision)}, recall ${pct(thr.recall)}. Written into the labels header.`
-            : " · as configured for this run."}
+          {" · "}
+          {thresholdNote(thr)}
         </p>
       )}
 

@@ -16592,6 +16592,8 @@ async def schedule_job(
             rd = _ty.find_run_dir(payload.project, resume)
             if rd is None or not (rd / "ckpt_last.pt").is_file():
                 raise HTTPException(400, "nothing to resume: that run has no checkpoint")
+            if _run_is_live(rd):
+                raise HTTPException(409, "that run is still training in another process")
         init_run = str(prm.get("initRun") or "").strip()
         if init_run:
             rd = _ty.find_run_dir(payload.project, init_run)
@@ -19159,19 +19161,49 @@ _RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
 _FAILURE_FILE_RE = re.compile(r"^[0-9]{2,3}_[A-Za-z0-9_-]{1,64}\.jpg$")
 
 
+# A run whose history.json was refreshed this recently is being trained
+# by SOME process (the trainer heartbeats every 30 s during an epoch),
+# even when this engine has no job for it: the CLI, or a previous
+# engine instance that is still finishing.
+_RUN_LIVE_SECONDS = 180
+
+
+def _history_is_fresh(hist: dict | None) -> bool:
+    ts = (hist or {}).get("updatedAt")
+    if not isinstance(ts, str):
+        return False
+    try:
+        t = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return (datetime.now(timezone.utc) - t).total_seconds() < _RUN_LIVE_SECONDS
+
+
 def _run_status(run_dir: Path, rep: dict | None, hist: dict | None, active: bool) -> tuple[str, bool]:
     """(status, resumable). done / rejected come from report.json; a
-    run without one is training (a job is live for the dataset),
-    interrupted (checkpoint on disk) or failed."""
+    run without one is training (a job is live for the dataset in this
+    engine, or its history file is still being refreshed by another
+    process), interrupted (checkpoint on disk) or failed."""
     if rep is not None:
         return ("rejected" if rep.get("exportRejected") else "done"), False
     resumable = (run_dir / "ckpt_last.pt").is_file()
     hs = (hist or {}).get("status")
-    if active and hs in ("training", "exporting"):
+    if hs in ("training", "exporting") and (active or _history_is_fresh(hist)):
         return "training", False
     if resumable:
         return "interrupted", True
     return "failed", False
+
+
+def _run_is_live(run_dir: Path) -> bool:
+    """True while some process is training this run (see _run_status)."""
+    if (run_dir / "report.json").is_file():
+        return False
+    try:
+        hist = _json_loads((run_dir / "history.json").read_bytes())
+    except Exception:
+        return False
+    return hist.get("status") in ("training", "exporting") and _history_is_fresh(hist)
 
 
 def _run_entry(run_dir: Path, active: bool) -> dict | None:
@@ -19219,7 +19251,7 @@ def _run_entry(run_dir: Path, active: bool) -> dict | None:
         "exportRejected": bool((rep or {}).get("exportRejected")),
         "initRun": (rep or {}).get("initRun"),
         "resumed": bool((rep or {}).get("resumed")),
-        "threshold": ({k: thr.get(k) for k in ("conf", "f1", "precision", "recall", "calibrated")}
+        "threshold": ({k: thr.get(k) for k in ("conf", "f1", "precision", "recall", "calibrated", "fallback")}
                       if isinstance(thr, dict) else None),
         "failuresCount": len((rep or {}).get("failures") or []),
         "warningsCount": len((rep or {}).get("warnings") or []),
@@ -19404,6 +19436,8 @@ async def trained_model_resume(project_id: str, run_id: str, request: Request):
         raise HTTPException(409, "that run already finished")
     if _train_job_active(project_id):
         raise HTTPException(409, "a training run is already queued or running for this dataset")
+    if _run_is_live(run_dir):
+        raise HTTPException(409, "that run is still training in another process")
     body = {}
     try:
         body = await request.json()
@@ -19438,7 +19472,7 @@ async def trained_model_delete(project_id: str, run_id: str):
     run_dir = _ty.find_run_dir(project_id, run_id)
     if run_dir is None:
         raise HTTPException(404, "run not found")
-    if _train_job_active(project_id):
+    if _train_job_active(project_id) or _run_is_live(run_dir):
         raise HTTPException(409, "a training run is live for this dataset; wait for it to finish")
     await asyncio.to_thread(shutil.rmtree, run_dir, True)
     return {"ok": True, "run": run_id}

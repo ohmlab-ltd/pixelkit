@@ -152,7 +152,7 @@ def calibrate_threshold(preds, gts, n_classes: int, *, lo: float = 0.05, hi: flo
         t += step
     if not sweep or max(exact) <= 0.0:
         return {"conf": fallback, "f1": 0.0, "precision": 0.0, "recall": 0.0,
-                "sweep": sweep, "calibrated": False}
+                "sweep": sweep, "calibrated": False, "fallback": True}
     top = max(exact)
     plateau = [i for i, f in enumerate(exact) if abs(f - top) < 1e-9]
     # Contiguous run of the best rows that contains the first best row;

@@ -33,7 +33,16 @@ export type ThresholdSummary = {
   precision?: number | null;
   recall?: number | null;
   calibrated?: boolean;
+  fallback?: boolean; // the model found nothing on val: the default was written
 };
+
+export function thresholdNote(thr: ThresholdSummary): string {
+  if (thr.calibrated) {
+    return `chosen on the val split for the best F1 (${(thr.f1 ?? 0).toFixed(2)}): precision ${pct(thr.precision)}, recall ${pct(thr.recall)}. Written into the labels header.`;
+  }
+  if (thr.fallback) return "the default: the model found nothing on the val split at any threshold.";
+  return "as configured for this run.";
+}
 
 export type RunStatus = "done" | "rejected" | "training" | "interrupted" | "failed";
 
