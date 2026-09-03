@@ -1452,7 +1452,12 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel) -> dict:
             return
         eta = None
         if epoch_secs:
-            eta = float(np.mean(epoch_secs[-5:])) * max(0, total_epochs - index)
+            # Fine-tuning epochs run in fp32 with fake quantisation and
+            # take about 1.8x a float epoch (measured on VOC-300).
+            per = float(np.mean(epoch_secs[-5:]))
+            left_float = max(0, cfg.epochs - index)
+            left_qat = max(0, total_epochs - max(index, cfg.epochs))
+            eta = per * (left_float + (1.8 if index < cfg.epochs else 1.0) * left_qat)
         progress({"index": index, "total": total_epochs, "phase": phase,
                   "eta_s": (round(eta) if eta is not None else None)})
 
