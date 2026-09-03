@@ -62,6 +62,10 @@ class Job:
     n_images: int = 0
     # Filled in once the job completes.
     cost_pence: float = 0.0
+    # What the runner returned, when it returned a small dict (a train
+    # job's run id and scores, a labelling job's counts): the headless
+    # CLI reads it from GET /api/jobs/{id}.
+    result: dict | None = None
 
     # Internal - wall-clock start used for live elapsed/cost while running.
     _start_monotonic: float | None = None
@@ -83,6 +87,7 @@ class Job:
             "elapsedS": round(elapsed, 1),
             "n_images": self.n_images,
             "costPence": round(elapsed_to_cost(elapsed), 5),
+            "result": self.result,
         }
 
     def live_elapsed_s(self) -> float:
@@ -209,6 +214,7 @@ class JobManager:
 
         try:
             result = await runner(job, emit, cancel_event)
+            job.result = result if isinstance(result, dict) else None
             job.status = "cancelled" if cancel_event.is_set() else "done"
             return result
         except Exception as e:  # noqa: BLE001
@@ -399,7 +405,8 @@ class JobManager:
                 print(f"[jobs] emit failed for {job.id}: {e}")
 
         try:
-            await runner(job, emit, cancel_event)
+            out = await runner(job, emit, cancel_event)
+            job.result = out if isinstance(out, dict) else None
             if cancel_event.is_set():
                 job.status = "cancelled"
             else:

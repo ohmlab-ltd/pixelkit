@@ -360,11 +360,15 @@ def test_interrupt_resume_and_label_with_the_model(client):
             break
         time.sleep(0.3)
     assert j["status"] == "done", j
+    assert j["result"]["run"] == run_id and "labelled" in j["result"]
     m = store.load(pid)
     e = next(x for x in m["imports"] if x["id"] == fresh)
     assert e["labelled"] is True and e["labelledBy"]["model"] == run_id
     for d in e["detections"]:
         assert d["label"] in ("dog", "cat") and len(d["box"]) == 4 and d["source"] == "pixelkit-model"
+        # The editor reads pred_label/gd_score, exports box_xyxy: all present.
+        assert d["pred_label"] == d["label"] == d["gd_label"]
+        assert d["gd_score"] == d["score"] and d["box_xyxy"] == d["box"]
     # Hand-labelled images were not touched, and a second run finds nothing to do.
     e0 = next(x for x in m["imports"] if x["id"] == iids[0])
     assert e0.get("editedBoxesSet") and len(e0["editedBoxes"]) >= 1
@@ -387,6 +391,8 @@ def test_train_params_are_clamped(app_module):
     }, "cpu")
     assert cfg.epochs == 500 and cfg.imgsz == 256 and cfg.size == "nano"
     assert cfg.train_split == 0.8 and cfg.use_augmentations is False
+    odd = app_module._train_cfg_from_params({"epochs": True, "augmentations": "", "imgsz": None}, "cpu")
+    assert odd.epochs == 50 and odd.use_augmentations is True and odd.imgsz == 256
     assert cfg.init_run is None and cfg.conf_thres is None and cfg.eval_project is None
     cfg = app_module._train_cfg_from_params({"size": "tiny", "split": "0.9", "conf": "0.4",
                                              "resumeRun": "20990101T000000Z"}, "cuda:1")

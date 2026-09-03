@@ -56,10 +56,13 @@ POST /api/jobs
 | `conf` | | fix the confidence threshold instead of calibrating it |
 | `device` | see below | e.g. `cuda:1`; without it, a second GPU is used when there is one, else the engine's device |
 
-Returns `{"jobId": ...}`. One training job per dataset at a time (409
-otherwise). Progress is on `GET /api/jobs/{jobId}`
-(`progress.index/total` = epoch, `progress.image` = loss, AP@0.5 and the
-time left) and on the status bar. `DELETE
+Returns `{"jobId": ...}`. One training job per dataset at a time (409,
+also when another process is training it). Progress is on
+`GET /api/jobs/{jobId}` (`progress.index/total` = epoch, `progress.image`
+= loss, AP@0.5 and the time left) and on the status bar; once the job is
+`done` the same call carries `result` (`run`, `model`, `size`,
+`ap50_fp32`, `ap50_int8`, `threshold`), which is how the CLI finds the
+run it trained. `DELETE
 /api/v2/projects/{pid}/jobs/{jobId}` cancels; a cancelled run keeps its
 last checkpoint and shows as interrupted (as failed if no epoch had
 finished yet).
@@ -114,7 +117,8 @@ Runs the run's exported int8 model over the dataset's unlabelled images
 including ones deliberately emptied, are never touched) at the run's
 calibrated threshold unless `conf` is given.
 Detections land in the manifest like the SAM 3 labeller's, so the
-editor, exports and the next training run read them the same way.
+editor, exports and the next training run read them the same way. The
+job's `result` is `{"labelled": n, "run", "conf"}`.
 
 ## Headless
 

@@ -3369,8 +3369,11 @@ def _train_cfg_from_params(params: dict, device: str):
     import train_yolox as _ty
 
     def _int(k, d, lo, hi):
+        raw = params.get(k, d)
+        if isinstance(raw, bool) or raw in (None, ""):
+            raw = d
         try:
-            v = int(params.get(k, d))
+            v = int(raw)
         except (TypeError, ValueError):
             v = d
         return max(lo, min(hi, v))
@@ -3389,7 +3392,9 @@ def _train_cfg_from_params(params: dict, device: str):
     if not (0.5 <= split <= 0.95):
         split = 0.8
     aug = params.get("augmentations", True)
-    if isinstance(aug, str):
+    if aug is None or (isinstance(aug, str) and not aug.strip()):
+        aug = True
+    elif isinstance(aug, str):
         aug = aug.strip().lower() not in ("0", "false", "no", "off")
     else:
         aug = bool(aug)
@@ -3521,7 +3526,11 @@ async def _run_train_yolox_job(job, emit, cancel_event):
         return {"cancelled": True}
     print(f"[train-yolox] {job.project}: AP50 fp32={report.get('ap50_fp32')} "
           f"int8={report.get('ap50_int8')} run={report.get('run')}")
-    return report
+    return {
+        "run": report.get("run"), "model": report.get("model"), "size": report.get("size"),
+        "ap50_fp32": report.get("ap50_fp32"), "ap50_int8": report.get("ap50_int8"),
+        "threshold": (report.get("threshold") or {}).get("conf"),
+    }
 
 
 async def _run_label_model_job(job, emit, cancel_event):
@@ -3531,7 +3540,22 @@ async def _run_label_model_job(job, emit, cancel_event):
     are written the way the SAM 3 labelling job writes them, so the
     editor, the exports and the trainer read them the same way. Images
     the user edited by hand are never touched; auto-labelled images
-    only with params.overwrite."""
+    only with params.overwrite.
+
+    Sidecar rebuilds are suppressed for the job's duration (each flush
+    would otherwise rebuild the overview) and fired once at the end."""
+    _SIDECAR_REFRESH_SUPPRESSED.add(job.project)
+    try:
+        return await _run_label_model_job_impl(job, emit, cancel_event)
+    finally:
+        _SIDECAR_REFRESH_SUPPRESSED.discard(job.project)
+        try:
+            _kick_sidecar_refresh(job.project)
+        except Exception as e:  # noqa: BLE001
+            print(f"[label-model] final sidecar refresh failed: {e}")
+
+
+async def _run_label_model_job_impl(job, emit, cancel_event):
     import train_yolox as _ty
 
     params = job.params or {}
@@ -3592,6 +3616,7 @@ async def _run_label_model_job(job, emit, cancel_event):
                     tags.append(c)
                     lowered.add(c)
             mm["tags"] = tags
+            mm["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             for upd in updates:
                 e = by_id.get(upd["id"])
                 if e is None or e.get("editedBoxesSet"):
@@ -3627,11 +3652,16 @@ async def _run_label_model_job(job, emit, cancel_event):
             ci = int(r[5])
             if not (0 <= ci < len(classes)):
                 continue
+            name = classes[ci]
+            sc = round(float(r[4]), 4)
+            bx = [round(float(v), 2) for v in r[:4]]
+            # Every reader's key: the editor unwraps pred_label/gd_label and
+            # gd_score, exports and the trainer read label/box_xyxy/box.
             dets.append({
                 "id": f"pm_{secrets.token_hex(4)}",
-                "label": classes[ci],
-                "score": round(float(r[4]), 4),
-                "box": [round(float(v), 2) for v in r[:4]],
+                "label": name, "pred_label": name, "gd_label": name,
+                "score": sc, "gd_score": sc,
+                "box": bx, "box_xyxy": bx,
                 "mask": None,
                 "source": "pixelkit-model",
                 "modelRun": run_id,
@@ -16605,6 +16635,12 @@ async def schedule_job(
             raise HTTPException(409, "a training run is already queued or running for this dataset")
         import train_yolox as _ty
 
+        try:
+            if any(_run_is_live(rd) for rd in _iter_run_dirs(store.dataset_dir(payload.project))):
+                raise HTTPException(409, "a training run for this dataset is live in another process")
+        except KeyError:
+            raise HTTPException(404, "project not found")
+
         prm = payload.params or {}
         resume = str(prm.get("resumeRun") or "").strip()
         if resume:
@@ -16632,6 +16668,9 @@ async def schedule_job(
         if (run_dir is None or not (run_dir / "report.json").is_file()
                 or not any(run_dir.glob("*_int8.onnx"))):
             raise HTTPException(400, "that run has no exported model")
+        rep = _read_run_json(run_dir / "report.json")
+        if not isinstance(rep, dict) or rep.get("exportRejected"):
+            raise HTTPException(400, "that run's export was rejected by ST Edge AI; train again")
         n_images = len(_label_model_targets(project_manifest, bool(prm.get("overwrite"))))
         if n_images == 0:
             raise HTTPException(
@@ -19207,7 +19246,10 @@ def _run_status(run_dir: Path, rep: dict | None, hist: dict | None, active: bool
         return ("rejected" if rep.get("exportRejected") else "done"), False
     resumable = (run_dir / "ckpt_last.pt").is_file()
     hs = (hist or {}).get("status")
-    if hs in ("training", "exporting") and (active or _history_is_fresh(hist)):
+    # Its own heartbeat decides, not the dataset's job flag: while one
+    # run trains, a crashed sibling still saying "training" is not live.
+    del active
+    if hs in ("training", "exporting") and _history_is_fresh(hist):
         return "training", False
     if resumable:
         return "interrupted", True
@@ -19452,6 +19494,15 @@ async def trained_model_resume(project_id: str, run_id: str, request: Request):
         raise HTTPException(400, "bad run id")
     if not store.dataset_exists(project_id):
         raise HTTPException(404, "project not found")
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    # No await between these checks and schedule(): two concurrent
+    # resumes must not both pass.
     run_dir = _ty.find_run_dir(project_id, run_id)
     if run_dir is None or not (run_dir / "ckpt_last.pt").is_file():
         raise HTTPException(400, "nothing to resume: that run has no checkpoint")
@@ -19461,11 +19512,6 @@ async def trained_model_resume(project_id: str, run_id: str, request: Request):
         raise HTTPException(409, "a training run is already queued or running for this dataset")
     if _run_is_live(run_dir):
         raise HTTPException(409, "that run is still training in another process")
-    body = {}
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
     params = {"resumeRun": run_id}
     dev = str((body or {}).get("device") or "").strip()
     if dev:
@@ -19497,7 +19543,13 @@ async def trained_model_delete(project_id: str, run_id: str):
         raise HTTPException(404, "run not found")
     if _train_job_active(project_id) or _run_is_live(run_dir):
         raise HTTPException(409, "a training run is live for this dataset; wait for it to finish")
-    await asyncio.to_thread(shutil.rmtree, run_dir, True)
+    if any(j.project == project_id and j.kind == "label_model" and j.status in ("queued", "running")
+           for j in state["jobs"].jobs.values()):
+        raise HTTPException(409, "a labelling job is using this dataset's runs; wait for it to finish")
+    try:
+        await asyncio.to_thread(shutil.rmtree, run_dir)
+    except OSError as e:
+        raise HTTPException(500, f"could not delete the run: {e}")
     return {"ok": True, "run": run_id}
 
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -245,8 +246,7 @@ def _resolve_dataset(ref: str) -> str | None:
         return ref
     hits = []
     for pid in store.iter_dataset_ids():
-        m = store.load(pid) or {}
-        if str(m.get("name") or "").strip().lower() == ref.lower():
+        if _dataset_name(pid).strip().lower() == ref.lower():
             hits.append(pid)
     if len(hits) == 1:
         return hits[0]
@@ -254,6 +254,21 @@ def _resolve_dataset(ref: str) -> str | None:
         print(f"error: {len(hits)} datasets are called '{ref}'; use the id")
         raise SystemExit(2)
     return None
+
+
+def _dataset_name(pid: str) -> str:
+    """The dataset's display name from dataset.json alone (store.load
+    would also read every per-image annotation file)."""
+    import store
+
+    try:
+        return str((json.loads((store.dataset_dir(pid) / "dataset.json").read_text("utf-8"))
+                    or {}).get("name") or "")
+    except (OSError, ValueError, KeyError):
+        try:
+            return str((store.load(pid) or {}).get("name") or "")
+        except Exception:  # noqa: BLE001
+            return ""
 
 
 def train(args) -> int:
@@ -283,8 +298,7 @@ def train(args) -> int:
             print("error: no supported GPU detected. Re-run with --device cpu to force")
             print("       (slow), or use an NVIDIA/Apple-Silicon machine.")
             return 2
-        name = (client.get(f"/api/v2/projects/{pid}").json().get("name")
-                if client.get(f"/api/v2/projects/{pid}").status_code == 200 else pid)
+        name = _dataset_name(pid) or pid
         print("PixelKit training")
         print(f"  dataset: {name} ({pid})")
         print(f"  device:  {args.device or dev}")
@@ -339,28 +353,52 @@ def train(args) -> int:
         jid = r.json().get("jobId") or r.json().get("id")
 
         last = ""
-        while True:
-            j = client.get(f"/api/jobs/{jid}").json()
-            status = j.get("status")
-            prog = j.get("progress") or {}
-            idx, total, text = prog.get("index"), prog.get("total"), prog.get("image") or ""
-            if status in ("done", "failed", "cancelled", "interrupted"):
-                break
-            line = f"  epoch {idx}/{total}  {text}" if idx is not None and total else "  starting"
-            if line != last:
-                print(line, flush=True)
-                last = line
-            time.sleep(3)
+        j: dict = {}
+        status = None
+        try:
+            while True:
+                j = client.get(f"/api/jobs/{jid}").json()
+                status = j.get("status")
+                prog = j.get("progress") or {}
+                idx, total, text = prog.get("index"), prog.get("total"), prog.get("image") or ""
+                if status in ("done", "failed", "cancelled", "interrupted"):
+                    break
+                line = f"  epoch {idx}/{total}  {text}" if idx is not None and total else "  starting"
+                if line != last:
+                    print(line, flush=True)
+                    last = line
+                time.sleep(3)
+        except KeyboardInterrupt:
+            # Cancel the job (the run keeps its last checkpoint) rather
+            # than leaving the engine to finish hours of work unseen.
+            print("\n  cancelling after the current epoch…", flush=True)
+            client.delete(f"/api/v2/projects/{pid}/jobs/{jid}")
+            deadline = time.time() + 600
+            while time.time() < deadline:
+                j = client.get(f"/api/jobs/{jid}").json()
+                if j.get("status") in ("done", "failed", "cancelled", "interrupted"):
+                    break
+                time.sleep(2)
+            models = client.get(f"/api/v2/projects/{pid}/models").json().get("models") or []
+            paused = next((m for m in models if m.get("resumable")), None)
+            if paused:
+                print(f"  cancelled. Resume with: pixelkit train {args.dataset} --resume {paused['run']}")
+            else:
+                print("  cancelled.")
+            return 130
         if status != "done":
             print(f"error: training ended with status '{status}': {j.get('error') or 'no detail'}")
             return 1
 
         models = client.get(f"/api/v2/projects/{pid}/models").json().get("models") or []
-        done = [m for m in models if m.get("status") == "done"]
-        if not done:
+        result = j.get("result") or {}
+        run = next((m for m in models if m.get("run") == result.get("run")), None)
+        if run is None:
+            done = [m for m in models if m.get("status") == "done"]
+            run = done[0] if done else None
+        if run is None:
             print("error: training finished but no run was written")
             return 1
-        run = done[0]
         detail = client.get(f"/api/v2/projects/{pid}/models/{run['run']}").json()
         rep = detail.get("report") or {}
         thr = rep.get("threshold") or {}
@@ -393,7 +431,8 @@ def train(args) -> int:
             out_dir.mkdir(parents=True, exist_ok=True)
             z = run_dir / "export.zip"
             if z.is_file():
-                dest = out_dir / f"{Path(str(name)).stem or pid}-neuron6-{run['run']}.zip"
+                slug = re.sub(r"[^a-z0-9]+", "-", str(name).lower()).strip("-") or pid
+                dest = out_dir / f"{slug}-neuron6-{run['run']}.zip"
                 dest.write_bytes(z.read_bytes())
                 print(f"  export:    {dest}")
     return 0
