@@ -120,7 +120,7 @@ function Curves({ history, total }: { history: HistoryRow[] | null | undefined; 
 function ConfusionMatrix({ labels, matrix }: { labels: string[]; matrix: number[][] }) {
   if (labels.length === 0 || matrix.length !== labels.length) return null;
   return (
-    <div className="overflow-x-auto">
+    <div className="min-w-0 overflow-x-auto">
       <table className="text-[10.5px] tabular-nums">
         <thead>
           <tr>
@@ -171,7 +171,7 @@ function RunDetails({ projectId, detail }: { projectId: string; detail: RunDetai
   const failures = rep?.failures ?? [];
   const shown = showAllFailures ? failures : failures.slice(0, 8);
   return (
-    <div className="mt-2 grid gap-3 border-t border-[var(--line)] pt-3">
+    <div className="mt-2 grid min-w-0 gap-3 border-t border-[var(--line)] pt-3">
       <Curves history={history} total={detail.totalEpochs} />
 
       {thr && (
@@ -183,7 +183,7 @@ function RunDetails({ projectId, detail }: { projectId: string; detail: RunDetai
       )}
 
       {rep?.classReport && rep.classReport.length > 0 && (
-        <div className="overflow-x-auto">
+        <div className="min-w-0 overflow-x-auto">
           <table className="w-full text-[11px] tabular-nums">
             <thead className="text-foreground/40">
               <tr>
@@ -212,7 +212,7 @@ function RunDetails({ projectId, detail }: { projectId: string; detail: RunDetai
       )}
 
       {rep?.confusion && rep.confusionLabels && (
-        <div>
+        <div className="min-w-0">
           <div className="pk-micro mb-1 text-foreground/45">Confusion matrix (val, at the threshold)</div>
           <ConfusionMatrix labels={rep.confusionLabels} matrix={rep.confusion} />
         </div>
@@ -526,7 +526,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
   const canStart = !training && blockers.length === 0 && preflight !== null;
 
   return (
-    <div className="pk-card rounded-md p-4">
+    <div className="pk-card min-w-0 rounded-md p-4">
       <div className="flex items-center justify-between gap-3">
         <h3 className="pk-micro">Train for Neuro N6</h3>
         <span className="text-[11px] text-foreground/40">YOLOX · Apache-2.0</span>
@@ -666,12 +666,12 @@ export function TrainCard({ projectId }: { projectId: string }) {
       {notice && <p className="mt-2 text-[12px] text-foreground/60">{notice}</p>}
 
       {runs && runs.length > 0 && (
-        <ul className="mt-3 grid gap-1.5">
+        <ul className="mt-3 grid min-w-0 gap-1.5">
           {runs.map((r) => {
             const isOpen = open === r.run;
             const detail = details[r.run];
             return (
-              <li key={r.run} className="rounded-md border border-[var(--line)] px-3 py-2">
+              <li key={r.run} className="min-w-0 rounded-md border border-[var(--line)] px-3 py-2">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="min-w-0 text-[12px] text-foreground/75 tabular-nums">
                     {fmtRunDate(r.run)}
@@ -696,7 +696,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
                       </span>
                     )}
                   </span>
-                  <span className="flex shrink-0 flex-wrap items-center gap-3 text-[11.5px] tabular-nums">
+                  <span className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[11.5px] tabular-nums">
                     {r.status === "done" && (
                       <span className="text-foreground/60" title="AP@0.5, float model / int8 export">
                         AP50 {pct(r.ap50Fp32)}
