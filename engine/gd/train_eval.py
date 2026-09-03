@@ -1,0 +1,312 @@
+"""Post-training evaluation extras for a detector run (numpy + cv2 only).
+
+Everything here works on the same (preds, gts) lists the AP@0.5 scorer
+uses: preds[i] is an (n, 6) array of x0, y0, x1, y1, score, cls rows for
+image i and gts[i] an (m, 5) array of x0, y0, x1, y1, cls, both in the
+model's letterbox space, with preds kept down to a very low score so a
+threshold can be chosen afterwards.
+
+  match_image          greedy IoU matching of one image at a threshold
+  calibrate_threshold  the confidence threshold that maximises F1 on val
+  class_report         per-class TP/FP/FN, precision, recall at a threshold
+  confusion_matrix     (classes + background) x (classes + background)
+  rank_failures        the val images the model gets most wrong
+  render_failure       an annotated JPEG for one of them
+
+The numbers are computed on the predictions of the EXPORTED int8 model,
+because that is what ships; the float model only serves as a reference.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Callable
+
+import cv2
+import numpy as np
+
+# What a matched box can be. "wrong" is a box the model found at the
+# right place with the wrong class: it counts as a false positive of the
+# predicted class AND a miss of the true class, and lands off-diagonal
+# in the confusion matrix.
+KINDS = ("tp", "wrong", "fp", "fn")
+
+
+def _iou_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """(n,4) x (m,4) xyxy -> (n,m) IoU."""
+    if len(a) == 0 or len(b) == 0:
+        return np.zeros((len(a), len(b)), dtype=np.float32)
+    xx0 = np.maximum(a[:, None, 0], b[None, :, 0])
+    yy0 = np.maximum(a[:, None, 1], b[None, :, 1])
+    xx1 = np.minimum(a[:, None, 2], b[None, :, 2])
+    yy1 = np.minimum(a[:, None, 3], b[None, :, 3])
+    inter = np.clip(xx1 - xx0, 0, None) * np.clip(yy1 - yy0, 0, None)
+    area_a = (a[:, 2] - a[:, 0]) * (a[:, 3] - a[:, 1])
+    area_b = (b[:, 2] - b[:, 0]) * (b[:, 3] - b[:, 1])
+    return inter / np.maximum(area_a[:, None] + area_b[None, :] - inter, 1e-9)
+
+
+def match_image(pred: np.ndarray, gt: np.ndarray, conf: float, iou_thr: float = 0.5
+                ) -> list[tuple[str, int, int]]:
+    """Greedy matching of one image's predictions (score >= conf, best
+    first) to its ground truth.
+
+    Returns (kind, pred_index, gt_index) triples; -1 stands for "none".
+    A prediction takes the best-IoU unmatched box of ITS OWN class when
+    one overlaps at >= iou_thr (a "dog" over both a dog and a cat is a
+    correct dog), otherwise the best-IoU unmatched box of any class
+    ("wrong"), otherwise it is a false positive. Ground truth nobody
+    took is a miss."""
+    pred = np.asarray(pred, dtype=np.float32).reshape(-1, 6)
+    gt = np.asarray(gt, dtype=np.float32).reshape(-1, 5)
+    keep = np.where(pred[:, 4] >= conf)[0]
+    keep = keep[np.argsort(-pred[keep, 4], kind="stable")]
+    out: list[tuple[str, int, int]] = []
+    used = np.zeros(len(gt), dtype=bool)
+    ious = _iou_matrix(pred[:, :4], gt[:, :4]) if len(keep) and len(gt) else None
+    for pi in keep:
+        pi = int(pi)
+        if ious is None:
+            out.append(("fp", pi, -1))
+            continue
+        row = ious[pi].copy()
+        row[used] = -1.0
+        cand = np.where(row >= iou_thr)[0]
+        if len(cand) == 0:
+            out.append(("fp", pi, -1))
+            continue
+        same = cand[gt[cand, 4] == pred[pi, 5]]
+        if len(same):
+            gi = int(same[np.argmax(row[same])])
+            out.append(("tp", pi, gi))
+        else:
+            gi = int(cand[np.argmax(row[cand])])
+            out.append(("wrong", pi, gi))
+        used[gi] = True
+    for gi in np.where(~used)[0]:
+        out.append(("fn", -1, int(gi)))
+    return out
+
+
+def _counts(preds, gts, conf: float, n_classes: int, iou_thr: float = 0.5):
+    """Per-class tp / fp / fn at a threshold, plus the confusion matrix."""
+    tp = np.zeros(n_classes, dtype=np.int64)
+    fp = np.zeros(n_classes, dtype=np.int64)
+    fn = np.zeros(n_classes, dtype=np.int64)
+    cm = np.zeros((n_classes + 1, n_classes + 1), dtype=np.int64)
+    bg = n_classes
+    for pred, gt in zip(preds, gts):
+        pred = np.asarray(pred, dtype=np.float32).reshape(-1, 6)
+        gt = np.asarray(gt, dtype=np.float32).reshape(-1, 5)
+        for kind, pi, gi in match_image(pred, gt, conf, iou_thr):
+            pc = int(pred[pi, 5]) if pi >= 0 else -1
+            gc = int(gt[gi, 4]) if gi >= 0 else -1
+            if not (0 <= pc < n_classes or pc == -1) or not (0 <= gc < n_classes or gc == -1):
+                continue  # a row with a class id outside the dataset: ignore
+            if kind == "tp":
+                tp[pc] += 1
+                cm[gc, pc] += 1
+            elif kind == "wrong":
+                fp[pc] += 1
+                fn[gc] += 1
+                cm[gc, pc] += 1
+            elif kind == "fp":
+                fp[pc] += 1
+                cm[bg, pc] += 1
+            else:
+                fn[gc] += 1
+                cm[gc, bg] += 1
+    return tp, fp, fn, cm
+
+
+def _prf(tp: float, fp: float, fn: float) -> tuple[float, float, float]:
+    p = tp / (tp + fp) if tp + fp > 0 else 0.0
+    r = tp / (tp + fn) if tp + fn > 0 else 0.0
+    f1 = 2 * p * r / (p + r) if p + r > 0 else 0.0
+    return float(p), float(r), float(f1)
+
+
+def calibrate_threshold(preds, gts, n_classes: int, *, lo: float = 0.05, hi: float = 0.95,
+                        step: float = 0.02, fallback: float = 0.25) -> dict:
+    """Sweep the confidence threshold and keep the one with the best
+    micro-averaged F1 over the val split (all classes pooled, so a
+    frequent class weighs more, which is what a single decoder
+    threshold on the board experiences). When several thresholds tie
+    for the best F1 (a plateau, which is the normal shape on a small val
+    split) the middle of the plateau is chosen, so on unseen frames a
+    slightly weaker or stronger score does not fall off either edge.
+
+    Returns {"conf", "f1", "precision", "recall", "sweep": [...],
+    "calibrated": bool}. When the model finds nothing at any threshold
+    (F1 0 everywhere) the documented default is returned instead and
+    "calibrated" is False."""
+    sweep = []
+    exact = []  # unrounded f1 per sweep row, for the argmax
+    t = lo
+    while t <= hi + 1e-9:
+        conf = round(t, 4)
+        tp, fp, fn, _cm = _counts(preds, gts, conf, n_classes)
+        p, r, f1 = _prf(int(tp.sum()), int(fp.sum()), int(fn.sum()))
+        sweep.append({"conf": conf, "precision": round(p, 4), "recall": round(r, 4),
+                      "f1": round(f1, 4)})
+        exact.append(f1)
+        t += step
+    if not sweep or max(exact) <= 0.0:
+        return {"conf": fallback, "f1": 0.0, "precision": 0.0, "recall": 0.0,
+                "sweep": sweep, "calibrated": False}
+    top = max(exact)
+    plateau = [i for i, f in enumerate(exact) if abs(f - top) < 1e-9]
+    # Contiguous run of the best rows that contains the first best row;
+    # its middle is the pick.
+    run = [plateau[0]]
+    for i in plateau[1:]:
+        if i == run[-1] + 1:
+            run.append(i)
+        else:
+            break
+    best = sweep[run[len(run) // 2]]
+    return {"conf": best["conf"], "f1": best["f1"], "precision": best["precision"],
+            "recall": best["recall"], "sweep": sweep, "calibrated": True}
+
+
+def class_report(preds, gts, conf: float, classes: list[str]) -> list[dict]:
+    """Per-class counts at a threshold. `support` is the number of
+    ground-truth boxes; a class with support 0 reports None for recall
+    (it was not measured) and its precision counts pure false alarms."""
+    n = len(classes)
+    tp, fp, fn, _cm = _counts(preds, gts, conf, n)
+    out = []
+    for c in range(n):
+        p, r, f1 = _prf(int(tp[c]), int(fp[c]), int(fn[c]))
+        support = int(tp[c] + fn[c])
+        out.append({
+            "name": classes[c],
+            "support": support,
+            "tp": int(tp[c]), "fp": int(fp[c]), "fn": int(fn[c]),
+            "precision": round(p, 4) if tp[c] + fp[c] > 0 else None,
+            "recall": round(r, 4) if support > 0 else None,
+            "f1": round(f1, 4) if support > 0 or tp[c] + fp[c] > 0 else None,
+        })
+    return out
+
+
+def confusion_matrix(preds, gts, conf: float, n_classes: int) -> list[list[int]]:
+    """Rows are the truth, columns the prediction; the last row/column
+    is background (a false positive sits in the background row, a miss
+    in the background column)."""
+    _tp, _fp, _fn, cm = _counts(preds, gts, conf, n_classes)
+    return cm.tolist()
+
+
+def rank_failures(preds, gts, conf: float, limit: int = 24, iou_thr: float = 0.5) -> list[dict]:
+    """The val images with the most errors at a threshold, worst first.
+    Each entry: {"index", "fn", "fp", "wrong", "matches"} where matches
+    are the (kind, pred_index, gt_index) triples for rendering. Images
+    the model got entirely right are not listed."""
+    rows = []
+    for i, (pred, gt) in enumerate(zip(preds, gts)):
+        m = match_image(pred, gt, conf, iou_thr)
+        n_fn = sum(1 for k, _p, _g in m if k == "fn")
+        n_fp = sum(1 for k, _p, _g in m if k == "fp")
+        n_wrong = sum(1 for k, _p, _g in m if k == "wrong")
+        if n_fn + n_fp + n_wrong == 0:
+            continue
+        rows.append({"index": i, "fn": n_fn, "fp": n_fp, "wrong": n_wrong, "matches": m})
+    # Misses and misclassifications weigh double: a spurious box is the
+    # cheaper mistake on a device that mostly wants to know something
+    # is there.
+    rows.sort(key=lambda r: (-(2 * r["fn"] + 2 * r["wrong"] + r["fp"]), -r["fn"], r["index"]))
+    return rows[:limit]
+
+
+# Colours (RGB) for the annotated failure images.
+_COL_GT = (40, 200, 90)        # ground truth, thin
+_COL_TP = (70, 130, 240)       # correct detection, thin
+_COL_FP = (230, 60, 60)        # spurious detection
+_COL_FN = (250, 200, 40)       # missed ground truth
+_COL_WRONG = (250, 130, 30)    # right place, wrong class
+
+
+def render_failure(img_rgb: np.ndarray, pred: np.ndarray, gt: np.ndarray,
+                   matches: list[tuple[str, int, int]], classes: list[str],
+                   out_path: Path, view: int = 384) -> dict:
+    """Draw one val image's errors and write a JPEG. `img_rgb` is the
+    letterboxed model input; boxes are in the same space. Returns the
+    items drawn: [{"kind", "class", "score", "box"}] with the box in the
+    letterbox space so the UI can list them next to the picture."""
+    pred = np.asarray(pred, dtype=np.float32).reshape(-1, 6)
+    gt = np.asarray(gt, dtype=np.float32).reshape(-1, 5)
+    h, w = img_rgb.shape[:2]
+    s = view / max(1, max(h, w))
+    canvas = cv2.resize(img_rgb, (int(round(w * s)), int(round(h * s))), interpolation=cv2.INTER_LINEAR)
+    canvas = np.ascontiguousarray(canvas)
+
+    def _name(c: int) -> str:
+        return classes[c] if 0 <= c < len(classes) else str(c)
+
+    def _rect(box, colour, thick, text=None):
+        x0, y0, x1, y1 = [int(round(float(v) * s)) for v in box]
+        cv2.rectangle(canvas, (x0, y0), (x1, y1), colour, thick)
+        if text:
+            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+            ty = y0 - 3 if y0 - th - 6 >= 0 else y1 + th + 4
+            cv2.rectangle(canvas, (x0, ty - th - 3), (x0 + tw + 4, ty + 2), colour, -1)
+            cv2.putText(canvas, text, (x0 + 2, ty - 1), cv2.FONT_HERSHEY_SIMPLEX, 0.38,
+                        (20, 20, 20), 1, cv2.LINE_AA)
+
+    items: list[dict] = []
+    # Ground truth and correct detections first (thin), errors on top.
+    for g in gt:
+        _rect(g[:4], _COL_GT, 1)
+    for kind, pi, gi in matches:
+        if kind == "tp":
+            _rect(pred[pi, :4], _COL_TP, 1)
+    for kind, pi, gi in matches:
+        if kind == "fp":
+            p = pred[pi]
+            _rect(p[:4], _COL_FP, 2, f"{_name(int(p[5]))} {p[4]:.2f} (spurious)")
+            items.append({"kind": "fp", "class": _name(int(p[5])), "score": round(float(p[4]), 3),
+                          "box": [round(float(v), 1) for v in p[:4]]})
+        elif kind == "fn":
+            g = gt[gi]
+            _rect(g[:4], _COL_FN, 2, f"{_name(int(g[4]))} (missed)")
+            items.append({"kind": "fn", "class": _name(int(g[4])), "score": None,
+                          "box": [round(float(v), 1) for v in g[:4]]})
+        elif kind == "wrong":
+            p, g = pred[pi], gt[gi]
+            _rect(p[:4], _COL_WRONG, 2, f"{_name(int(g[4]))} as {_name(int(p[5]))} {p[4]:.2f}")
+            items.append({"kind": "wrong", "class": _name(int(g[4])), "predicted": _name(int(p[5])),
+                          "score": round(float(p[4]), 3),
+                          "box": [round(float(v), 1) for v in p[:4]]})
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    ok, buf = cv2.imencode(".jpg", cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR),
+                           [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+    if not ok:
+        raise RuntimeError("could not encode failure image")
+    buf.tofile(str(out_path))
+    return {"items": items, "width": int(canvas.shape[1]), "height": int(canvas.shape[0])}
+
+
+def write_failure_gallery(preds, gts, conf: float, classes: list[str], names: list[str],
+                          load_letterboxed: Callable[[int], np.ndarray | None],
+                          out_dir: Path, limit: int = 24) -> list[dict]:
+    """rank_failures + render_failure for the worst `limit` val images.
+    `names[i]` labels image i (its filename); `load_letterboxed(i)`
+    returns the letterboxed RGB input for image i (None to skip).
+    Writes <out_dir>/NN_<slug>.jpg and returns the gallery manifest."""
+    import re
+
+    gallery = []
+    for k, row in enumerate(rank_failures(preds, gts, conf, limit=limit)):
+        i = row["index"]
+        img = load_letterboxed(i)
+        if img is None:
+            continue
+        stem = re.sub(r"[^A-Za-z0-9_-]+", "_", Path(names[i]).stem)[:48] or "image"
+        fname = f"{k:02d}_{stem}.jpg"
+        meta = render_failure(img, preds[i], gts[i], row["matches"], classes, out_dir / fname)
+        gallery.append({
+            "file": fname, "image": names[i], "index": i,
+            "fn": row["fn"], "fp": row["fp"], "wrong": row["wrong"],
+            **meta,
+        })
+    return gallery

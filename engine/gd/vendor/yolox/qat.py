@@ -130,6 +130,18 @@ def set_calibrate(model, on: bool) -> None:
             m.calibrate = on
 
 
+def reset_observers(model) -> None:
+    """Forget every learned range so the next calibration pass seeds
+    from scratch (a warm start from another run must not inherit its
+    observers, and a resumed run re-seeds rather than blending)."""
+    for m in model.modules():
+        if isinstance(m, ActFQ):
+            m.lo.zero_()
+            m.hi.zero_()
+            m.seen.fill_(False)
+            m.n.zero_()
+
+
 def unseeded(model) -> list:
     """Names of learned fake-quant points that never saw data - a range
     of zero there saturates everything downstream."""

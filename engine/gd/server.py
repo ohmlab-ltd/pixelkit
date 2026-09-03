@@ -746,6 +746,7 @@ async def lifespan(app: FastAPI):
 
     state["jobs"].register_runner("label_charlie", _run_label_charlie_job)
     state["jobs"].register_runner("train_yolox", _run_train_yolox_job)
+    state["jobs"].register_runner("label_model", _run_label_model_job)
     state["jobs"].register_runner("purge_label", _run_purge_label_job)
     state["jobs"].register_runner("augment_generate", _gpu_job_guarded(_run_augment_generate_job))
 
@@ -3348,6 +3349,94 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
 _TRAIN_IMGSZ = (128, 192, 256, 320, 416)
 
 
+_TRAIN_SIZES = ("nano", "tiny")
+
+
+def _fmt_eta(seconds: float) -> str:
+    s = int(round(seconds))
+    if s < 90:
+        return f"{max(1, s)} s"
+    m = int(round(s / 60))
+    if m < 90:
+        return f"{m} min"
+    return f"{m // 60} h {m % 60:02d} min"
+
+
+def _train_cfg_from_params(params: dict, device: str):
+    """Job params -> TrainConfig, every field clamped to what the UI
+    offers. A resume request carries only the run id: the checkpoint's
+    own settings win inside the trainer."""
+    import train_yolox as _ty
+
+    def _int(k, d, lo, hi):
+        try:
+            v = int(params.get(k, d))
+        except (TypeError, ValueError):
+            v = d
+        return max(lo, min(hi, v))
+
+    epochs = _int("epochs", 50, 1, 500)
+    imgsz = _int("imgsz", 256, 32, 4096)
+    if imgsz not in _TRAIN_IMGSZ:
+        imgsz = 256
+    size = str(params.get("size") or "nano").strip().lower()
+    if size not in _TRAIN_SIZES:
+        size = "nano"
+    try:
+        split = float(params.get("split", 0.8))
+    except (TypeError, ValueError):
+        split = 0.8
+    if not (0.5 <= split <= 0.95):
+        split = 0.8
+    aug = params.get("augmentations", True)
+    if isinstance(aug, str):
+        aug = aug.strip().lower() not in ("0", "false", "no", "off")
+    else:
+        aug = bool(aug)
+
+    def _run_id(k):
+        v = str(params.get(k) or "").strip()
+        return v if _ty.RUN_ID_RE.fullmatch(v) else None
+
+    conf = params.get("conf")
+    try:
+        conf = float(conf) if conf not in (None, "") else None
+    except (TypeError, ValueError):
+        conf = None
+    if conf is not None and not (0.01 <= conf <= 0.99):
+        conf = None
+    eval_project = str(params.get("evalProject") or "").strip() or None
+    return _ty.TrainConfig(
+        epochs=epochs, imgsz=imgsz, size=size, train_split=split, device=device,
+        use_augmentations=aug, init_run=_run_id("initRun"), eval_project=eval_project,
+        resume_run=_run_id("resumeRun"), conf_thres=conf,
+    )
+
+
+def _train_job_active(project_id: str) -> bool:
+    return any(
+        j.project == project_id and j.kind == "train_yolox" and j.status in ("queued", "running")
+        for j in state["jobs"].jobs.values()
+    )
+
+
+def _label_model_targets(manifest: dict, overwrite: bool) -> list[dict]:
+    """Imports a trained model may write boxes to: never one the user
+    edited by hand; without overwrite, only ones with no boxes at all."""
+    out = []
+    for e in manifest.get("imports") or []:
+        if not isinstance(e, dict) or not e.get("filename"):
+            continue
+        edited = e.get("editedBoxes")
+        if e.get("editedBoxesSet") and isinstance(edited, list) and len(edited) > 0:
+            continue
+        has_auto = bool(e.get("detections")) or e.get("labelled") is True
+        if has_auto and not overwrite:
+            continue
+        out.append(e)
+    return out
+
+
 async def _run_train_yolox_job(job, emit, cancel_event):
     """YOLOX-Nano training + Neuro N6 export (gd/train_yolox.py).
 
@@ -3375,26 +3464,19 @@ async def _run_train_yolox_job(job, emit, cancel_event):
         raise RuntimeError(
             "no GPU available for training (switch Compute to CPU in Settings to force)"
         )
-    try:
-        epochs = max(1, min(500, int(params.get("epochs", 50))))
-    except (TypeError, ValueError):
-        epochs = 50
-    try:
-        imgsz = int(params.get("imgsz", 256))
-    except (TypeError, ValueError):
-        imgsz = 256
-    if imgsz not in _TRAIN_IMGSZ:
-        imgsz = 256
-
-    cfg = _ty.TrainConfig(epochs=epochs, imgsz=imgsz, device=train_dev)
+    cfg = _train_cfg_from_params(params, train_dev)
     loop = asyncio.get_running_loop()
 
     def prog(p: dict) -> None:
+        phase = p.get("phase") or ""
+        eta = p.get("eta_s")
+        if isinstance(eta, (int, float)) and eta > 0:
+            phase = f"{phase} · {_fmt_eta(eta)} left" if phase else f"{_fmt_eta(eta)} left"
         fut = asyncio.run_coroutine_threadsafe(
             emit("progress", {
                 "index": p.get("index"),
                 "total": p.get("total"),
-                "image": p.get("phase") or "",
+                "image": phase,
             }),
             loop,
         )
@@ -3417,6 +3499,132 @@ async def _run_train_yolox_job(job, emit, cancel_event):
     print(f"[train-yolox] {job.project}: AP50 fp32={report.get('ap50_fp32')} "
           f"int8={report.get('ap50_int8')} run={report.get('run')}")
     return report
+
+
+async def _run_label_model_job(job, emit, cancel_event):
+    """Pre-label images with a model trained on this dataset: the run's
+    exported int8 ONNX through ONNX Runtime on the CPU, at the run's
+    calibrated threshold unless params.conf overrides it. Detections
+    are written the way the SAM 3 labelling job writes them, so the
+    editor, the exports and the trainer read them the same way. Images
+    the user edited by hand are never touched; auto-labelled images
+    only with params.overwrite."""
+    import train_yolox as _ty
+
+    params = job.params or {}
+    run_id = str(params.get("run") or "").strip()
+    run_dir = _ty.find_run_dir(job.project, run_id)
+    if run_dir is None:
+        raise RuntimeError("model run not found")
+    try:
+        report = _json_loads((run_dir / "report.json").read_bytes())
+    except Exception:
+        raise RuntimeError("that run has no report (training did not finish)")
+    onnx_path = next(iter(sorted(run_dir.glob("*_int8.onnx"))), None)
+    if onnx_path is None or report.get("exportRejected"):
+        raise RuntimeError("that run has no exported model")
+    classes = [str(c) for c in (report.get("classes") or [])]
+    if not classes:
+        classes = list((report.get("per_class_int8") or {}).keys())
+    if not classes:
+        raise RuntimeError("the run's report lists no classes")
+    try:
+        imgsz = int(report.get("imgsz") or 256)
+    except (TypeError, ValueError):
+        imgsz = 256
+    conf_default = float((report.get("threshold") or {}).get("conf") or 0.25)
+    try:
+        conf = float(params.get("conf")) if params.get("conf") not in (None, "") else conf_default
+    except (TypeError, ValueError):
+        conf = conf_default
+    conf = max(0.01, min(0.99, conf))
+    nms = 0.45
+    overwrite = bool(params.get("overwrite"))
+
+    manifest = load_manifest(job.project, copy=False) or {}
+    targets = _label_model_targets(manifest, overwrite)
+    ids = [(str(e.get("id") or ""), str(e.get("filename") or "")) for e in targets]
+    job.n_images = len(ids)
+    if not ids:
+        return {"labelled": 0, "run": run_id, "conf": conf}
+    sess = await asyncio.to_thread(_ty.open_onnx, onnx_path)
+    images_root = project_dir(job.project) / "images"
+    pending: list[dict] = []
+    done = 0
+    now_tags = [t for t in classes]
+
+    async def flush() -> None:
+        nonlocal pending
+        if not pending:
+            return
+        updates, pending = pending, []
+        lock = await _manifest_write_lock(job.project)
+        async with lock:
+            mm = load_manifest(job.project, copy=False) or {}
+            by_id = {e.get("id"): e for e in (mm.get("imports") or []) if isinstance(e, dict)}
+            tags = [str(t) for t in (mm.get("tags") or [])]
+            lowered = {t.strip().lower() for t in tags}
+            for c in classes:
+                if c not in lowered:
+                    tags.append(c)
+                    lowered.add(c)
+            mm["tags"] = tags
+            for upd in updates:
+                e = by_id.get(upd["id"])
+                if e is None:
+                    continue
+                prior = e.get("editedBoxes")
+                if e.get("editedBoxesSet") and isinstance(prior, list) and len(prior) == 0:
+                    e.pop("editedBoxes", None)
+                    e.pop("editedBoxesSet", None)
+                e["detections"] = upd["detections"]
+                e["labelled"] = True
+                e["labelledAt"] = int(time.time() * 1000)
+                e["labelsRun"] = list(now_tags)
+                e["labelledBy"] = {"model": run_id, "conf": conf}
+                if not e.get("width") and upd.get("width"):
+                    e["width"] = upd["width"]
+                if not e.get("height") and upd.get("height"):
+                    e["height"] = upd["height"]
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: save_manifest(job.project, mm, cache_by_ref=True))
+
+    def _infer(path):
+        img = _ty._read_rgb(path)
+        if img is None:
+            return None
+        rows = _ty.infer_image(sess, img, imgsz, len(classes), conf, nms)
+        return img.shape[1], img.shape[0], rows
+
+    for i, (iid, fname) in enumerate(ids):
+        if cancel_event.is_set():
+            break
+        res = await asyncio.to_thread(_infer, images_root / fname)
+        if res is None:
+            continue
+        w, h, rows = res
+        dets = []
+        for r in rows:
+            ci = int(r[5])
+            if not (0 <= ci < len(classes)):
+                continue
+            dets.append({
+                "id": f"pm_{secrets.token_hex(4)}",
+                "label": classes[ci],
+                "score": round(float(r[4]), 4),
+                "box": [round(float(v), 2) for v in r[:4]],
+                "mask": None,
+                "source": "pixelkit-model",
+                "modelRun": run_id,
+            })
+        pending.append({"id": iid, "detections": dets, "width": w, "height": h})
+        done += 1
+        await emit("progress", {"index": i + 1, "total": len(ids), "image": fname})
+        if len(pending) >= 10:
+            await flush()
+    await flush()
+    _invalidate_project_payloads(job.project)
+    return {"labelled": done, "run": run_id, "conf": conf, "cancelled": cancel_event.is_set()}
 
 
 async def _run_purge_label_job(job, emit, cancel_event):
@@ -16270,7 +16478,7 @@ async def schedule_job(
     dataset's own creator, OR (for a dataset in a Project) any editor/owner of
     that Project, so a Project editor can run auto-labelling / training on a
     dataset a teammate created."""
-    if payload.kind not in ("label_charlie", "purge_label", "train_yolox"):
+    if payload.kind not in ("label_charlie", "purge_label", "train_yolox", "label_model"):
         raise HTTPException(400, f"unknown kind: {payload.kind}")
     proj = project_dir(payload.project)
     if not proj.exists():
@@ -16374,6 +16582,40 @@ async def schedule_job(
             raise HTTPException(
                 400, "training needs at least 2 labelled images - label some first"
             )
+        if _train_job_active(payload.project):
+            raise HTTPException(409, "a training run is already queued or running for this dataset")
+        import train_yolox as _ty
+
+        prm = payload.params or {}
+        resume = str(prm.get("resumeRun") or "").strip()
+        if resume:
+            rd = _ty.find_run_dir(payload.project, resume)
+            if rd is None or not (rd / "ckpt_last.pt").is_file():
+                raise HTTPException(400, "nothing to resume: that run has no checkpoint")
+        init_run = str(prm.get("initRun") or "").strip()
+        if init_run:
+            rd = _ty.find_run_dir(payload.project, init_run)
+            if rd is None or not (rd / "best.pt").is_file():
+                raise HTTPException(400, "cannot start from that run: it has no saved weights")
+        eval_project = str(prm.get("evalProject") or "").strip()
+        if eval_project:
+            if eval_project == payload.project:
+                raise HTTPException(400, "the held-out dataset must be a different dataset")
+            if not store.dataset_exists(eval_project):
+                raise HTTPException(404, "held-out dataset not found")
+    elif payload.kind == "label_model":
+        import train_yolox as _ty
+
+        prm = payload.params or {}
+        run_dir = _ty.find_run_dir(payload.project, str(prm.get("run") or "").strip())
+        if (run_dir is None or not (run_dir / "report.json").is_file()
+                or not any(run_dir.glob("*_int8.onnx"))):
+            raise HTTPException(400, "that run has no exported model")
+        n_images = len(_label_model_targets(project_manifest, bool(prm.get("overwrite"))))
+        if n_images == 0:
+            raise HTTPException(
+                400, "no unlabelled images to label (turn on overwrite to re-label "
+                     "auto-labelled images; hand-edited images are never touched)")
 
     job = state["jobs"].schedule(
         kind=payload.kind,
@@ -18914,6 +19156,130 @@ async def import_legacy_endpoint(payload: LegacyImportIn):
 # ── Trained models (YOLOX-Nano runs under <dataset>/models/) ─────────────────
 
 _RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
+_FAILURE_FILE_RE = re.compile(r"^[0-9]{2,3}_[A-Za-z0-9_-]{1,64}\.jpg$")
+
+
+def _run_status(run_dir: Path, rep: dict | None, hist: dict | None, active: bool) -> tuple[str, bool]:
+    """(status, resumable). done / rejected come from report.json; a
+    run without one is training (a job is live for the dataset),
+    interrupted (checkpoint on disk) or failed."""
+    if rep is not None:
+        return ("rejected" if rep.get("exportRejected") else "done"), False
+    resumable = (run_dir / "ckpt_last.pt").is_file()
+    hs = (hist or {}).get("status")
+    if active and hs in ("training", "exporting"):
+        return "training", False
+    if resumable:
+        return "interrupted", True
+    return "failed", False
+
+
+def _run_entry(run_dir: Path, active: bool) -> dict | None:
+    rep = None
+    hist = None
+    try:
+        rep = _json_loads((run_dir / "report.json").read_bytes())
+    except Exception:
+        rep = None
+    try:
+        hist = _json_loads((run_dir / "history.json").read_bytes())
+    except Exception:
+        hist = None
+    if rep is None and hist is None:
+        return None  # half-written run from an older engine: hide it
+    status, resumable = _run_status(run_dir, rep, hist, active)
+    src = rep if rep is not None else (hist or {})
+    thr = (rep or {}).get("threshold") or None
+    history = (rep or {}).get("history") if rep is not None else (hist or {}).get("history")
+    history = history if isinstance(history, list) else []
+    try:
+        epochs = int(src.get("epochs") or 0)
+        qat = int(src.get("qat_epochs") if rep is not None else src.get("qatEpochs") or 0)
+    except (TypeError, ValueError):
+        epochs, qat = 0, 0
+    return {
+        "run": run_dir.name,
+        "model": src.get("model") or run_dir.parent.name,
+        "size": src.get("size") or ("tiny" if run_dir.parent.name == "yolox_tiny" else "nano"),
+        "status": status,
+        "resumable": resumable,
+        "error": (hist or {}).get("error") if rep is None else None,
+        "imgsz": src.get("imgsz"),
+        "epochs": epochs or None,
+        "qatEpochs": qat,
+        "epochsDone": len(history),
+        "totalEpochs": (epochs + qat) or None,
+        "images": (rep or {}).get("images"),
+        "split": (rep or {}).get("split"),
+        "batch": (rep or {}).get("batch"),
+        "ap50Fp32": (rep or {}).get("ap50_fp32"),
+        "ap50Int8": (rep or {}).get("ap50_int8"),
+        "minutes": (rep or {}).get("minutes"),
+        "hasExport": (run_dir / "export.zip").is_file(),
+        "exportRejected": bool((rep or {}).get("exportRejected")),
+        "initRun": (rep or {}).get("initRun"),
+        "resumed": bool((rep or {}).get("resumed")),
+        "threshold": ({k: thr.get(k) for k in ("conf", "f1", "precision", "recall", "calibrated")}
+                      if isinstance(thr, dict) else None),
+        "failuresCount": len((rep or {}).get("failures") or []),
+        "warningsCount": len((rep or {}).get("warnings") or []),
+        # ST Edge AI verification summary (PK-1.3): present when the
+        # compiler ran, so the card can say "0 SW epochs, 898 kB".
+        "neuron6": {
+            k: ((rep or {}).get("neuron6") or {}).get(k)
+            for k in ("verified", "available", "error", "reason",
+                      "epochsSoftware", "epochsHardware", "epochsTotal",
+                      "weightsBytes", "activationsBytes",
+                      "poolRemainingBytes", "poolUsedPct")
+        },
+        # Live curves for a run in progress; finished runs serve theirs
+        # from the detail endpoint.
+        "history": history if rep is None else None,
+    }
+
+
+def _iter_run_dirs(d: Path):
+    import train_yolox as _ty
+
+    for model_dir in _ty.MODEL_DIRS:
+        root = d / "models" / model_dir
+        if not root.is_dir():
+            continue
+        for run_dir in root.iterdir():
+            if run_dir.is_dir() and _RUN_ID_RE.fullmatch(run_dir.name):
+                yield run_dir
+
+
+@app.get(
+    "/api/v2/projects/{project_id}/train/preflight",
+    dependencies=[Depends(require_project_read_access)],
+)
+async def train_preflight(
+    project_id: str,
+    imgsz: int = 256,
+    split: float = 0.8,
+    size: str = "nano",
+    augmentations: int = 1,
+    evalProject: str = "",
+):
+    """What training would use and what would go wrong: image counts by
+    split, per-class counts, blockers and warnings. Same loader and
+    checks the trainer runs, so the card can refuse before the job."""
+    import train_yolox as _ty
+
+    if not store.dataset_exists(project_id):
+        raise HTTPException(404, "project not found")
+    cfg = _train_cfg_from_params({
+        "imgsz": imgsz, "split": split, "size": size,
+        "augmentations": bool(augmentations), "evalProject": evalProject,
+    }, "cpu")
+    if cfg.eval_project and not store.dataset_exists(cfg.eval_project):
+        return {"ok": False, "blockers": ["held-out dataset not found"], "warnings": [],
+                "classes": [], "images": None}
+    try:
+        return await asyncio.to_thread(_ty.preflight, project_id, cfg)
+    except ValueError as e:
+        return {"ok": False, "blockers": [str(e)], "warnings": [], "classes": [], "images": None}
 
 
 @app.get(
@@ -18925,40 +19291,47 @@ async def trained_models_list(project_id: str):
         d = store.dataset_dir(project_id)
     except KeyError:
         raise HTTPException(404, "project not found")
+    active = _train_job_active(project_id)
     out = []
-    root = d / "models" / "yolox_nano"
-    if root.exists():
-        for run_dir in sorted(root.iterdir(), reverse=True):
-            if not run_dir.is_dir() or not _RUN_ID_RE.fullmatch(run_dir.name):
-                continue
-            rep = {}
-            try:
-                rep = _json_loads((run_dir / "report.json").read_bytes())
-            except Exception:
-                continue  # half-written run (crash mid-export): hide it
-            out.append({
-                "run": run_dir.name,
-                "model": rep.get("model", "yolox_nano"),
-                "imgsz": rep.get("imgsz"),
-                "epochs": rep.get("epochs"),
-                "images": rep.get("images"),
-                "ap50Fp32": rep.get("ap50_fp32"),
-                "ap50Int8": rep.get("ap50_int8"),
-                "qatEpochs": rep.get("qat_epochs"),
-                "minutes": rep.get("minutes"),
-                "hasExport": (run_dir / "export.zip").is_file(),
-                "exportRejected": bool(rep.get("exportRejected")),
-                # ST Edge AI verification summary (PK-1.3): present when the
-                # compiler ran, so the card can say "0 SW epochs, 898 kB".
-                "neuron6": {
-                    k: (rep.get("neuron6") or {}).get(k)
-                    for k in ("verified", "available", "error", "reason",
-                              "epochsSoftware", "epochsHardware", "epochsTotal",
-                              "weightsBytes", "activationsBytes",
-                              "poolRemainingBytes", "poolUsedPct")
-                },
-            })
+    for run_dir in sorted(_iter_run_dirs(d), key=lambda p: p.name, reverse=True):
+        entry = _run_entry(run_dir, active)
+        if entry is not None:
+            out.append(entry)
     return {"models": out}
+
+
+@app.get(
+    "/api/v2/projects/{project_id}/models/{run_id}",
+    dependencies=[Depends(require_project_read_access)],
+)
+async def trained_model_detail(project_id: str, run_id: str):
+    """The whole report of one run (curves, threshold sweep, per-class
+    precision/recall, confusion matrix, failure gallery), or the live
+    history of a run in progress."""
+    import train_yolox as _ty
+
+    if not _RUN_ID_RE.fullmatch(run_id):
+        raise HTTPException(400, "bad run id")
+    if not store.dataset_exists(project_id):
+        raise HTTPException(404, "project not found")
+    run_dir = _ty.find_run_dir(project_id, run_id)
+    if run_dir is None:
+        raise HTTPException(404, "run not found")
+    entry = _run_entry(run_dir, _train_job_active(project_id))
+    if entry is None:
+        raise HTTPException(404, "run not found")
+    report = None
+    try:
+        report = _json_loads((run_dir / "report.json").read_bytes())
+    except Exception:
+        report = None
+    history = None
+    if report is None:
+        try:
+            history = _json_loads((run_dir / "history.json").read_bytes())
+        except Exception:
+            history = None
+    return {**entry, "report": report, "live": history}
 
 
 @app.get(
@@ -18966,14 +19339,15 @@ async def trained_models_list(project_id: str):
     dependencies=[Depends(require_project_read_access)],
 )
 async def trained_model_export(project_id: str, run_id: str):
+    import train_yolox as _ty
+
     if not _RUN_ID_RE.fullmatch(run_id):
         raise HTTPException(400, "bad run id")
-    try:
-        d = store.dataset_dir(project_id)
-    except KeyError:
+    if not store.dataset_exists(project_id):
         raise HTTPException(404, "project not found")
-    z = d / "models" / "yolox_nano" / run_id / "export.zip"
-    if not z.is_file():
+    run_dir = _ty.find_run_dir(project_id, run_id)
+    z = (run_dir / "export.zip") if run_dir is not None else None
+    if z is None or not z.is_file():
         raise HTTPException(404, "export not found")
     name = _safe_slug((load_manifest(project_id, copy=False) or {}).get("name") or project_id)
     return FileResponse(
@@ -18981,6 +19355,93 @@ async def trained_model_export(project_id: str, run_id: str):
         media_type="application/zip",
         filename=f"{name}-neuron6-{run_id}.zip",
     )
+
+
+@app.get(
+    "/api/v2/projects/{project_id}/models/{run_id}/failures/{name}",
+    dependencies=[Depends(require_project_read_access)],
+)
+async def trained_model_failure_image(project_id: str, run_id: str, name: str):
+    import train_yolox as _ty
+
+    if not _RUN_ID_RE.fullmatch(run_id) or not _FAILURE_FILE_RE.fullmatch(name):
+        raise HTTPException(400, "bad id")
+    if not store.dataset_exists(project_id):
+        raise HTTPException(404, "project not found")
+    run_dir = _ty.find_run_dir(project_id, run_id)
+    if run_dir is None:
+        raise HTTPException(404, "run not found")
+    root = (run_dir / "failures").resolve()
+    target = (root / name).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        raise HTTPException(403, "forbidden")
+    if not target.is_file():
+        raise HTTPException(404, "image not found")
+    return FileResponse(target, media_type="image/jpeg",
+                        headers={"Cache-Control": "private, max-age=86400"})
+
+
+@app.post(
+    "/api/v2/projects/{project_id}/models/{run_id}/resume",
+    dependencies=[Depends(require_project_owner)],
+)
+async def trained_model_resume(project_id: str, run_id: str, request: Request):
+    """Continue an interrupted run from its last checkpoint: the same
+    train_yolox job with only the run id; the checkpoint carries the
+    run's settings."""
+    import train_yolox as _ty
+
+    if not _RUN_ID_RE.fullmatch(run_id):
+        raise HTTPException(400, "bad run id")
+    if not store.dataset_exists(project_id):
+        raise HTTPException(404, "project not found")
+    run_dir = _ty.find_run_dir(project_id, run_id)
+    if run_dir is None or not (run_dir / "ckpt_last.pt").is_file():
+        raise HTTPException(400, "nothing to resume: that run has no checkpoint")
+    if (run_dir / "report.json").is_file():
+        raise HTTPException(409, "that run already finished")
+    if _train_job_active(project_id):
+        raise HTTPException(409, "a training run is already queued or running for this dataset")
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    params = {"resumeRun": run_id}
+    dev = str((body or {}).get("device") or "").strip()
+    if dev:
+        params["device"] = dev
+    job = state["jobs"].schedule(
+        kind="train_yolox", project=project_id, params=params,
+        user=str((body or {}).get("user") or "anonymous"), n_images=0,
+    )
+    return {"jobId": job.id, **job.to_public()}
+
+
+@app.delete(
+    "/api/v2/projects/{project_id}/models/{run_id}",
+    dependencies=[Depends(require_project_owner)],
+)
+async def trained_model_delete(project_id: str, run_id: str):
+    """Remove a run (its weights, exports, gallery). Refused while a
+    training job is live for the dataset, because it could be that run."""
+    import shutil
+
+    import train_yolox as _ty
+
+    if not _RUN_ID_RE.fullmatch(run_id):
+        raise HTTPException(400, "bad run id")
+    if not store.dataset_exists(project_id):
+        raise HTTPException(404, "project not found")
+    run_dir = _ty.find_run_dir(project_id, run_id)
+    if run_dir is None:
+        raise HTTPException(404, "run not found")
+    if _train_job_active(project_id):
+        raise HTTPException(409, "a training run is live for this dataset; wait for it to finish")
+    await asyncio.to_thread(shutil.rmtree, run_dir, True)
+    return {"ok": True, "run": run_id}
 
 
 # ── Dataset snapshots ─────────────────────────────────────────────────────────
