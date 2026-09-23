@@ -431,8 +431,8 @@ The Train for Neuro N6 card on a dataset's overview trains a
 YOLOX detector (Nano, or Tiny for more accuracy at five times the
 weights) on this machine (GPU required), fine-tunes it with int8
 simulated so the deployed model keeps its accuracy, and exports a
-zip with the int8 model, a labels header, a sketch snippet and
-report.json. When ST Edge AI Core is installed the export is
+sketch folder ready to build: the sketch, the int8 model, a labels
+header and report.json. When ST Edge AI Core is installed the export is
 compiled for the board's NPU and the run shows how much runs in
 hardware and how much flash it uses. A model the compiler rejects is
 kept with the reason instead of exported.
@@ -2074,14 +2074,14 @@ function TrainingSection({ go }: { go: (k: GuideSectionKey) => void }) {
 
       <GuideSection n={4} title="Putting it on the board">
         <p>
-          Click <strong>N6 export</strong> to download the zip, drop its files
-          into your sketch folder and paste the snippet: the{" "}
-          <span className="font-mono">#pragma neuron6</span> line that names
-          the model file, the include for the generated labels header, and
-          the setup and loop calls that run the decoder. The core compiles
-          and flashes the model with the sketch,
-          and the PostProcess library&rsquo;s YOLOX decoder turns the output
-          into boxes with the thresholds from the header. The same run can
+          Click <strong>N6 export</strong> to download the zip, unzip it, open
+          the sketch inside in the Arduino IDE and upload it. The sketch
+          declares the camera, feeds the model at the size it was trained on
+          and hands its output to the core&rsquo;s PixelKit post-processor,
+          so the boxes appear on Neuro Studio&rsquo;s live video (or on the
+          TFT carrier&rsquo;s display) with the class names and the
+          calibrated threshold from the labels header. The core compiles the
+          model with ST Edge AI and flashes it with the sketch. The same run can
           be started from a terminal with{" "}
           <span className="font-mono">pixelkit train &lt;dataset&gt;</span>;
           the local endpoints behind the card are documented in the

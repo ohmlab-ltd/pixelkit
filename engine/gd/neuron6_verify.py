@@ -31,17 +31,26 @@ NEURAL_ART_OPTIONS = ("--native-float --cache-maintenance --Ocache-opt "
                       "--Omax-ca-pipe 4 --Oauto-sched --all-buffers-info")
 GENERATE_INTERFACE_OPTIONS = ("--input-data-type", "uint8", "--inputs-ch-position", "chlast")
 
+# A copy of the core's system/npu/NeuroN6_MemPool.mpool, so an export is
+# compiled against the memory map the board's build uses. It must follow
+# the core when the core changes it (tests/test_neuron6_verify.py checks
+# the copy against a core installed on the machine).
 MPOOL = Path(__file__).parent / "neuron6" / "NeuroN6_MemPool.mpool"
 
-# The weights pool the mempool declares runs 0x90300000..0x91D80000
-# (26.5 MB), but the last 1 MB is also OTA app slot B
-# (n6_ota_layout.h: N6_OTA_SLOT_B_OFF 0x01C80000). The safe ceiling for
-# packed weights is therefore 25.5 MB; headroom is reported against that.
-POOL_BASE = 0x90300000
-SAFE_POOL_END = 0x91C80000
-SAFE_POOL_BYTES = SAFE_POOL_END - POOL_BASE
-
 COMPILE_TIMEOUT_S = 15 * 60
+
+
+def weights_pool_bytes(mpool: Path = MPOOL) -> int | None:
+    """Size of the external-flash weights pool (xSPI1) the memory map
+    declares, the budget packed weights are measured against. The core
+    ends the pool where OTA slot B begins, so all of it is usable."""
+    try:
+        pools = json.loads(mpool.read_text("utf-8"))["memory"]["mempools"]
+        p = next(p for p in pools if p.get("fname") == "xSPI1")
+        unit = {"BYTES": 1, "KBYTES": 1024, "MBYTES": 1024 * 1024}[p["size"]["magnitude"].upper()]
+        return int(p["size"]["value"], 0) * unit
+    except (OSError, ValueError, KeyError, StopIteration):
+        return None
 
 
 def find_stedgeai() -> str | None:
@@ -215,10 +224,11 @@ def verify(model_path: Path, keep_dir: Path, name: str = "m") -> dict:
         blob = next(iter(out_dir.glob("*_atonbuf.xSPI1.raw")), None)
         if blob:
             info["weightsBytes"] = blob.stat().st_size
-        if "weightsBytes" in info:
-            info["poolSafeBytes"] = SAFE_POOL_BYTES
-            info["poolRemainingBytes"] = max(0, SAFE_POOL_BYTES - info["weightsBytes"])
-            info["poolUsedPct"] = round(100.0 * info["weightsBytes"] / SAFE_POOL_BYTES, 2)
+        pool = weights_pool_bytes()
+        if "weightsBytes" in info and pool:
+            info["poolSafeBytes"] = pool
+            info["poolRemainingBytes"] = max(0, pool - info["weightsBytes"])
+            info["poolUsedPct"] = round(100.0 * info["weightsBytes"] / pool, 2)
         return info
     finally:
         shutil.rmtree(work, ignore_errors=True)

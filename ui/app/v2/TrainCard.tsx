@@ -687,8 +687,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
       </div>
       <p className="mt-1.5 text-[12.5px] leading-relaxed text-foreground/55">
         Trains on this dataset&rsquo;s labelled images and their augmentations, quantises to int8,
-        calibrates the confidence threshold, and packs a model + labels + sketch snippet ready for{" "}
-        <span className="font-mono text-[11.5px]">#pragma neuron6</span>.
+        calibrates the confidence threshold, and packs a Neuro N6 sketch ready to build and upload.
       </p>
 
       <div className="mt-3 flex flex-wrap items-center gap-2">

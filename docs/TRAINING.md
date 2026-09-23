@@ -12,9 +12,9 @@ locally. The local API behind the Train card is in [API.md](API.md).
 |---|---|
 | `<slug>_int8.onnx` | the deployable model: full-integer QDQ int8, raw head |
 | `<slug>_labels.h` | `<SLUG>_NUM_CLASSES`, `<SLUG>_INPUT_W/H`, the calibrated `<SLUG>_CONF_THRESHOLD`, `<SLUG>_NMS_THRESHOLD`, `<SLUG>_CLASSES[]` |
-| `<slug>_snippet.ino.txt` | the `#pragma neuron6` line and decoder wiring to paste |
+| `<slug>.ino` | the sketch: declares the camera, feeds the model at its input size and binds the core's `PostProcess_PixelKitYOLOX`, which publishes the boxes to Neuro Studio |
 | `report.json` | AP@0.5 float vs int8 (overall and per class), threshold sweep, per-class precision/recall, confusion matrix, per-epoch history, input contract, NPU build facts |
-| `export.zip` | the four files above, ready to drop into a sketch folder |
+| `export.zip` | a `<slug>/` sketch folder with the sketch, the model, the labels header and `report.json`: unzip it and open the sketch in the Arduino IDE |
 | `failures/`, `failures.json` | the worst val images with misses, spurious boxes and wrong classes drawn |
 | `history.json` | per-epoch loss and AP@0.5, written as the run trains |
 | `neuron6/` | ST Edge AI compiler log and generate report |
@@ -93,6 +93,8 @@ The graph outputs one raw head tensor, `N x (5 + classes)` rows of
 `[dx, dy, dw, dh, obj, cls...]`. The grid decode runs on the M55 in the
 core's `yolox_pp.c`, because YOLOX's in-graph decode exports
 `ScatterND`/`Expand`/`Where`, which ST Edge AI cannot shape-infer. The
+core's `PostProcess_PixelKitYOLOX` wraps that decoder so the boxes reach
+Neuro Studio and the display the way every bundled model's do. The
 Focus stem is replaced by a 6x6 stride-2 conv (mathematically identical;
 COCO stem weights are remapped) so no `Slice` runs in software.
 
@@ -130,8 +132,10 @@ When ST Edge AI Core is installed (`C:\ST\STEdgeAI\<ver>`, or
 
 `epochsSoftware` is the number that matters: 0 means the whole network
 runs on the NPU. `poolRemainingBytes` is headroom in the external-flash
-weights pool, measured against 25.5 MB (the mempool declares 26.5 MB but
-the last 1 MB is OTA app slot B). A model the compiler rejects is not
+weights pool the core's memory map declares (25.5 MB, ending where OTA
+slot B begins). PixelKit compiles against a copy of that map, and a test
+checks the copy against a core installed on the machine. A model the
+compiler rejects is not
 exported; the reason is recorded and shown in the app. Without the
 compiler the export still succeeds and says `verified: false`.
 

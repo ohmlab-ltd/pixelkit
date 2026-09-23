@@ -24,7 +24,7 @@ This document is the public contract; the implementation is
         snapshots/                # annotation snapshots (zips; see below)
         models/                   # trained models + Neuro N6 exports
           yolox_nano/<run>/       #   best.pt, <slug>_{fp32,int8}.onnx, labels.h,
-                                  #   snippet, report.json, export.zip, and
+                                  #   <slug>.ino, report.json, export.zip, and
                                   #   neuron6/ (ST Edge AI log + generate report)
         thumbs/                   # thumbnails/previews (regenerable cache)
         exports/                  # export zips land here

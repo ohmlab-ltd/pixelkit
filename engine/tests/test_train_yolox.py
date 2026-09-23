@@ -258,6 +258,47 @@ def test_slug_is_a_valid_c_identifier():
     assert _c_slug("Bolts & Nuts!") == "bolts_nuts"
     assert _c_slug("") == "model"
     assert _c_str('say "hi"' + chr(92)) == 'say ' + chr(92) + '"hi' + chr(92) + '"' + chr(92) * 2
+    # Arduino caps sketch names at 63 characters; the slug names the sketch.
+    long = _c_slug("A very long dataset name about bolts, nuts, washers and every other fastener")
+    assert len(long) <= 40 and not long.endswith("_")
+
+
+def test_export_is_a_sketch_folder_that_runs_the_model(tmp_path):
+    """export.zip unzips to <slug>/ holding a complete sketch. The earlier
+    snippet bound no post-processor (Vision.run() then never infers),
+    declared no camera (the core then skips the camera) and left the NN
+    feed at its 256x256 default whatever the model's input size."""
+    import zipfile
+
+    from train_yolox import TrainConfig, _write_bundle
+
+    onnx = tmp_path / "bolts_int8.onnx"
+    onnx.write_bytes(b"onnx")
+    report = {"run": "20260101T000000Z", "ap50_int8": 0.8123,
+              "threshold": {"calibrated": True, "f1": 0.8, "precision": 0.9, "recall": 0.7}}
+    _write_bundle(tmp_path, "bolts", "Bolts */ & nuts \u00e9", ["bolt", "nut"],
+                  TrainConfig(imgsz=320), report, onnx, 0.42)
+
+    names = sorted(zipfile.ZipFile(tmp_path / "export.zip").namelist())
+    assert names == ["bolts/bolts.ino", "bolts/bolts_int8.onnx", "bolts/bolts_labels.h",
+                     "bolts/report.json"]
+    ino = (tmp_path / "bolts.ino").read_text("utf-8")
+    assert '#pragma neuron6 model="bolts_int8.onnx" name=bolts' in ino
+    assert '#include "bolts_labels.h"' in ino
+    assert "OV5640 camera;" in ino
+    assert "cfg.nn.width  = BOLTS_INPUT_W;" in ino and "cfg.nn.height = BOLTS_INPUT_H;" in ino
+    assert "cfg.nn.aspect = ASPECT_CROP_CENTER;" in ino
+    assert "PostProcess_PixelKitYOLOX(BOLTS_CONF_THRESHOLD, BOLTS_NMS_THRESHOLD," in ino
+    assert "BOLTS_CLASSES, BOLTS_NUM_CLASSES);" in ino
+    assert "Vision.begin(&NN_Instance_bolts, detector, cfg);" in ino
+    assert "nullptr, cfg" not in ino and "Vision.begin(&NN_Instance_bolts, nullptr" not in ino
+    assert "AP@0.5 0.812" in ino and "320x320" in ino
+    # The dataset name cannot close the header comment, and the sketch is ASCII.
+    header = ino.split("*/", 1)[0]
+    assert "Bolts * / & nuts ?" in header
+    ino.encode("ascii")
+    labels_h = (tmp_path / "bolts_labels.h").read_text("utf-8")
+    assert "#define BOLTS_INPUT_W 320" in labels_h and "#define BOLTS_CONF_THRESHOLD 0.42f" in labels_h
 
 
 def test_ap50_per_class_is_positional_when_a_class_has_no_val_gt():

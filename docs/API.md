@@ -99,8 +99,8 @@ POST /api/v2/projects/{pid}/models/{run}/resume  {"device": "cuda:1"}   -> a tra
 DELETE /api/v2/projects/{pid}/models/{run}
 ```
 
-`export.zip` holds the int8 ONNX, the labels header (with the calibrated
-`_CONF_THRESHOLD`), the sketch snippet and `report.json`; see
+`export.zip` is a `<slug>/` sketch folder: the sketch, the int8 ONNX, the
+labels header (with the calibrated `_CONF_THRESHOLD`) and `report.json`; see
 [TRAINING.md](TRAINING.md) for what is in it and how the core consumes
 it.
 
@@ -137,5 +137,5 @@ Prints the pre-flight, per-epoch progress, and the run summary; copies
 `history.json` (per-epoch, written as it trains), `ckpt_last.pt` (only
 while a run is unfinished; its presence is what makes a run resumable),
 `best.pt`, `<slug>_fp32.onnx`, `<slug>_int8.onnx`, `<slug>_labels.h`,
-`<slug>_snippet.ino.txt`, `export.zip`, `failures/` + `failures.json`,
+`<slug>.ino`, `export.zip`, `failures/` + `failures.json`,
 `neuron6/` (compiler log and report).

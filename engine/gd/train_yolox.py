@@ -30,7 +30,8 @@ Everything runs locally against one PixelKit dataset:
      gallery of the worst val images (train_eval.py).
   5. Compiles the int8 export with ST Edge AI when it is installed
      (neuron6_verify.py) and writes the Neuro N6 bundle: model +
-     labels.h + sketch snippet + report.json + export.zip under
+     labels.h + a complete sketch + report.json, and export.zip holding
+     them as a sketch folder, under
      <dataset>/models/<yolox_nano|yolox_tiny>/<run>/.
 
 INPUT CONTRACT (Neuro N6 platform contract, not a model choice). The
@@ -61,6 +62,7 @@ import os
 import queue
 import random
 import re
+import textwrap
 import threading
 import time
 from collections import Counter, defaultdict
@@ -1326,7 +1328,8 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel) -> dict:
                 run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
                 out_dir = out_dir.with_name(run_id)
     out_dir.mkdir(parents=True, exist_ok=True)
-    slug = _c_slug((store.load(project_id) or {}).get("name", "model"))
+    dataset_name = str((store.load(project_id) or {}).get("name") or "model")
+    slug = _c_slug(dataset_name)
     history: list[dict] = list(ck.get("history") or []) if ck is not None else []
     notes: list[str] = list(ck.get("notes") or []) if ck is not None else []
     total_epochs = cfg.epochs + cfg.qat_epochs
@@ -1644,7 +1647,7 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel) -> dict:
             "neuron6": neuron6,
             "minutes": round((time.time() - t0) / 60, 1),
         }
-        _write_bundle(out_dir, slug, classes, cfg, report, int8_onnx, conf)
+        _write_bundle(out_dir, slug, dataset_name, classes, cfg, report, int8_onnx, conf)
         (out_dir / "ckpt_last.pt").unlink(missing_ok=True)
         run_state["final"] = True
         write_history("done")
@@ -1961,12 +1964,13 @@ switch typedef union unsigned void volatile while bool true false""".split())
 
 
 def _c_slug(name: str) -> str:
-    """Dataset name -> a slug that is a valid C identifier AND macro
-    prefix: the sketch snippet uses it as `#pragma neuron6 name=<slug>`,
-    `NEURON6_DECLARE_MODEL(<slug>)`, `NN_Instance_<slug>` and `<SLUG>_*`
-    macros. A leading digit ("3d objects") or a keyword ("int") made the
-    shipped bundle uncompilable."""
-    slug = re.sub(r"[^a-z0-9]+", "_", (name or "").lower()).strip("_") or "model"
+    """Dataset name -> a slug that is a valid C identifier, macro prefix
+    and Arduino sketch name: the export uses it in `#pragma neuron6
+    name=<slug>`, `NEURON6_DECLARE_MODEL(<slug>)`, `NN_Instance_<slug>`,
+    the `<SLUG>_*` macros and the `<slug>/<slug>.ino` sketch folder. A
+    leading digit ("3d objects") or a keyword ("int") made the shipped
+    bundle uncompilable, and sketch names stop at 63 characters."""
+    slug = re.sub(r"[^a-z0-9]+", "_", (name or "").lower()).strip("_")[:40].rstrip("_") or "model"
     if slug[0].isdigit() or slug in _C_KEYWORDS or slug.upper() in _C_KEYWORDS:
         slug = "pk_" + slug
     return slug
@@ -1977,8 +1981,117 @@ def _c_str(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
 
 
-def _write_bundle(out_dir: Path, slug: str, classes: list[str], cfg: TrainConfig,
-                  report: dict, int8_onnx: Path, conf_thres: float) -> None:
+def _c_comment(s: str) -> str:
+    """Printable ASCII that cannot end a C block comment."""
+    return re.sub(r"[^\x20-\x7e]", "?", s or "").replace("*/", "* /")
+
+
+def _sketch(slug: str, dataset_name: str, classes: list[str], cfg: TrainConfig,
+            report: dict, model_file: str) -> str:
+    """The export's sketch: the camera, the model fed at the size and
+    aspect it was trained on, and the core's PixelKit post-processor,
+    which publishes the boxes to Neuro Studio and draws them on the
+    display. Everything that varies comes from <slug>_labels.h."""
+    U = slug.upper()
+    name = _c_comment(dataset_name).strip() or slug
+    shown = [_c_comment(c) for c in classes[:6]]
+    if len(classes) > 6:
+        shown.append(f"and {len(classes) - 6} more")
+    ap = report.get("ap50_int8")
+
+    def para(text: str) -> list[str]:
+        return textwrap.wrap(text, 76, initial_indent="  ", subsequent_indent="  ")
+
+    return "\n".join([
+        "/*",
+        f"  {name} detector",
+        "",
+        *para(f'Finds what the "{name}" dataset was labelled with ({", ".join(shown)}) '
+              "in the camera picture and draws a labelled box around each. The boxes "
+              "stream over USB to Neuro Studio, which shows them on the live video."),
+        "",
+        *para(f"Trained in PixelKit: {MODEL_SPECS[cfg.size]['label']}, {cfg.imgsz}x{cfg.imgsz} "
+              f"input, run {report.get('run')}."
+              + (f" On its validation images the int8 model that runs here scored "
+                 f"AP@0.5 {ap:.3f}." if isinstance(ap, (int, float)) else "")),
+        "",
+        "  The circuit:",
+        "  - Neuro N6 board with an OV5640 camera fitted.",
+        "  - USB cable to a computer running Neuro Studio.",
+        "",
+        *para(f"Keep this folder's files together: the sketch, {slug}_labels.h and "
+              f"{model_file} come from the same export."),
+        "*/",
+        "",
+        "// The camera driver and the post-processing that turns the model's output",
+        "// into labelled boxes.",
+        "#include <OV5640_Arduino.h>",
+        "#include <PostProcess.h>",
+        "",
+        "// The class names, input size and thresholds of this model.",
+        f'#include "{slug}_labels.h"',
+        "",
+        "// The model. This line makes the build compile the file with ST Edge AI and",
+        "// flash its weights alongside the sketch.",
+        f'#pragma neuron6 model="{model_file}" name={slug}',
+        "",
+        "// Declaring the camera selects it. Use \"OV5640 camera(CARRIER_TFT);\" for the",
+        "// TFT carrier, the one with the display.",
+        "OV5640 camera;",
+        "",
+        "// Make the model above available to the sketch.",
+        f"NEURON6_DECLARE_MODEL({slug});",
+        "",
+        "// The post-processor, kept so loop() can read the boxes.",
+        "IPostProcessor *detector = nullptr;",
+        "",
+        "void setup() {",
+        "  VisionConfig cfg;",
+        "",
+        "  // Camera resolution and frame rate.",
+        "  cfg.camera = CAMERA_VGA;",
+        "  cfg.fps = FPS_45;",
+        "",
+        "  // The size of picture this model was trained on.",
+        f"  cfg.nn.width  = {U}_INPUT_W;",
+        f"  cfg.nn.height = {U}_INPUT_H;",
+        "",
+        "  // A centred square, undistorted: PixelKit trained the model on pictures",
+        "  // padded to a square rather than squashed, so squashing the camera frame",
+        "  // would cost accuracy. The boxes are still mapped onto the full picture.",
+        "  cfg.nn.aspect = ASPECT_CROP_CENTER;",
+        "",
+        "  // Send the video to Neuro Studio. TRANSPORT_LCD draws the boxes on the",
+        "  // on-board display instead, which needs the TFT carrier.",
+        "  cfg.transport = TRANSPORT_USB;",
+        "",
+        f"  // Keep boxes scoring at least {U}_CONF_THRESHOLD, the threshold PixelKit",
+        "  // calibrated on the validation images. Raise it for fewer but surer boxes.",
+        f"  detector = PostProcess_PixelKitYOLOX({U}_CONF_THRESHOLD, {U}_NMS_THRESHOLD,",
+        f"                                       {U}_CLASSES, {U}_NUM_CLASSES);",
+        "",
+        "  // Start the camera and the model together.",
+        f"  Vision.begin(&NN_Instance_{slug}, detector, cfg);",
+        "}",
+        "",
+        "void loop() {",
+        "  // Grab a frame, run the model on it, and publish what it found.",
+        "  Vision.run();",
+        "",
+        "  // The boxes are also here to act on: centre and size as fractions of the",
+        "  // model's picture, a score, and the class.",
+        "  const od_pp_outBuffer_t *boxes = nullptr;",
+        "  const int n = PostProcess_ZooResults(detector, &boxes);",
+        "  for (int i = 0; i < n; i++) {",
+        f"    // {U}_CLASSES[boxes[i].class_index] was found, sure to boxes[i].conf.",
+        "  }",
+        "}",
+        "",
+    ])
+
+
+def _write_bundle(out_dir: Path, slug: str, dataset_name: str, classes: list[str],
+                  cfg: TrainConfig, report: dict, int8_onnx: Path, conf_thres: float) -> None:
     guard = f"{slug.upper()}_LABELS_H"
     thr = report.get("threshold") or {}
     if thr.get("calibrated"):
@@ -2004,51 +2117,13 @@ def _write_bundle(out_dir: Path, slug: str, classes: list[str], cfg: TrainConfig
         "",
     ])
     (out_dir / f"{slug}_labels.h").write_text(labels_h, "utf-8")
-
-    U = slug.upper()
-    snippet = "\n".join([
-        f"// PixelKit export - drop {int8_onnx.name} and {slug}_labels.h into your",
-        "// sketch folder. The core compiles the model with the sketch and flashes",
-        "// its weights; PostProcess.h brings the YOLOX decoder.",
-        "//",
-        f'#pragma neuron6 model="{int8_onnx.name}" name={slug}',
-        f'#include "{slug}_labels.h"',
-        "#include <PostProcess.h>",
-        "",
-        f"NEURON6_DECLARE_MODEL({slug});",
-        "",
-        "void setup() {",
-        "  // No built-in post-processor for this network: pass nullptr and run",
-        "  // the YOLOX decoder yourself after each frame (below).",
-        f"  Vision.begin(&NN_Instance_{slug}, nullptr);",
-        f"  app_postprocess_od_yolox_ui_init({U}_CONF_THRESHOLD, {U}_NMS_THRESHOLD,",
-        f"                                   {U}_NUM_CLASSES, (float){U}_INPUT_W);",
-        "}",
-        "",
-        "void loop() {",
-        "  Vision.run();  // one camera frame through the NPU",
-        f"  app_postprocess_od_yolox_ui_run(&NN_Instance_{slug});",
-        "  for (int i = 0; i < yolox_pp_output.nb_detect; i++) {",
-        "    const yolox_det_t &d = yolox_pp_output.pOutBuff[i];",
-        f"    // {U}_CLASSES[d.class_index], d.conf, and d.x_center / d.y_center /",
-        "    // d.width / d.height in [0,1] of the model input.",
-        "  }",
-        "}",
-        "",
-        f"// Input: {cfg.imgsz}x{cfg.imgsz}. The camera feeds the NPU directly: the model",
-        "// is quantised asymmetrically over [0,1] (scale 1/255, zero-point -128),",
-        "// which is exactly what packed RGB888 bytes mean, so nothing converts.",
-        "// Output: ONE raw head tensor, rows [dx, dy, dw, dh, obj, cls...] (obj/cls",
-        "// sigmoided, box terms in grid units); the decoder does the grid decode,",
-        "// thresholding and NMS with the values in the header. Keep the header and",
-        "// the model from the SAME export: the decoder refuses a mismatch (-3).",
-        "",
-    ])
-    (out_dir / f"{slug}_snippet.ino.txt").write_text(snippet, "utf-8")
+    sketch = _sketch(slug, dataset_name, classes, cfg, report, int8_onnx.name)
+    (out_dir / f"{slug}.ino").write_text(sketch, "utf-8")
     _write_json_atomic(out_dir / "report.json", report)
 
+    # A sketch folder: unzip it and open <slug>.ino in the Arduino IDE.
     zpath = out_dir / "export.zip"
     with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in (int8_onnx, out_dir / f"{slug}_labels.h",
-                  out_dir / f"{slug}_snippet.ino.txt", out_dir / "report.json"):
-            zf.write(f, f.name)
+        for f in (out_dir / f"{slug}.ino", int8_onnx, out_dir / f"{slug}_labels.h",
+                  out_dir / "report.json"):
+            zf.write(f, f"{slug}/{f.name}")
