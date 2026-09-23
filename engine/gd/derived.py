@@ -99,7 +99,7 @@ def resync(child_manifest: dict, parent_manifest: dict,
     """Make the child's crops match the parent's current selected detections
     (minus suppressed). Mutates + returns `child_manifest`; adds/removes crop
     files on disk. Never touches the parent."""
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     derived = child_manifest.setdefault("derived", {})
     labels = derived.get("labels") or []
@@ -165,12 +165,15 @@ def resync(child_manifest: dict, parent_manifest: dict,
         if not src.exists():
             continue
         try:
-            im = Image.open(src).convert("RGB")
+            # Upright, like the boxes: a rotated phone photo cropped raw
+            # cut the wrong region, or raised and ended the whole pass.
+            with Image.open(src) as raw:
+                im = ImageOps.exif_transpose(raw).convert("RGB")
+            wp, hp = im.size
+            cb = _crop_box(s["xyxy"], wp, hp, padding, square=use_square)
+            crop = im.crop((int(cb[0]), int(cb[1]), int(round(cb[2])), int(round(cb[3]))))
         except Exception:
             continue
-        wp, hp = im.size
-        cb = _crop_box(s["xyxy"], wp, hp, padding, square=use_square)
-        crop = im.crop((int(cb[0]), int(cb[1]), int(round(cb[2])), int(round(cb[3]))))
         cw, ch = crop.size
         if cw < 2 or ch < 2:
             continue

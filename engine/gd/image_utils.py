@@ -4,7 +4,7 @@ from __future__ import annotations
 import io
 
 import numpy as np
-from PIL import Image as PILImage
+from PIL import Image as PILImage, ImageOps
 
 # Per-channel difference allowed between a "border" pixel and the
 # inferred border colour. Generous enough to absorb JPEG compression
@@ -135,14 +135,17 @@ def maybe_crop_border_bytes(data: bytes, ctype: str | None) -> tuple[bytes, dict
     cropped image re-encoded in its source format. Returns
     (bytes, {width, height}).
     """
-    with PILImage.open(io.BytesIO(data)) as img:
+    with PILImage.open(io.BytesIO(data)) as raw:
+        # Upright first: the size recorded and any crop must be the
+        # picture as shown, not as stored.
+        img = ImageOps.exif_transpose(raw)
         img.load()
         original_size = {"width": img.width, "height": img.height}
         cropped = crop_border(img)
         if cropped is img:
             return data, original_size
 
-        fmt = (img.format or "JPEG").upper()
+        fmt = (raw.format or "JPEG").upper()
         out_buf = io.BytesIO()
         save_kwargs: dict = {}
         if fmt in ("JPEG", "JPG"):

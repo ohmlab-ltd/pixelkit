@@ -295,9 +295,26 @@ import threading as _threading  # noqa: E402
 
 def _pil_from_r2(project: str, filename: str) -> PILImage.Image:
     """Load an image from workspace storage, apply EXIF orientation, return RGB."""
-    data = r2_required().get_bytes(LocalStorage.image_key(project, filename))
-    img = PILImage.open(io.BytesIO(data))
-    return ImageOps.exif_transpose(img).convert("RGB")
+    return _open_upright(r2_required().get_bytes(LocalStorage.image_key(project, filename)))
+
+
+def _open_upright(src: "Path | str | bytes") -> PILImage.Image:
+    """Decode a picture as it is shown: EXIF orientation applied, RGB.
+    Uploads keep their original bytes, while the manifest's sizes, the
+    editor's boxes, the trainer and the exports all use the upright
+    picture, so every decode whose pixels meet a box goes through here."""
+    with PILImage.open(io.BytesIO(src) if isinstance(src, (bytes, bytearray)) else src) as im:
+        return ImageOps.exif_transpose(im).convert("RGB")
+
+
+def _upright_size(im: PILImage.Image) -> tuple[int, int]:
+    """(width, height) as shown, without decoding: EXIF orientations 5-8
+    turn the picture a quarter and swap them."""
+    try:
+        orientation = im.getexif().get(0x0112, 1)
+    except Exception:
+        orientation = 1
+    return (im.height, im.width) if orientation in (5, 6, 7, 8) else (im.width, im.height)
 
 import workspace  # noqa: E402
 
@@ -1811,11 +1828,6 @@ def parse_phrase(label):
     return label, None
 
 
-def image_size(p: Path) -> dict[str, int]:
-    with PILImage.open(p) as img:
-        return {"width": img.width, "height": img.height}
-
-
 # Preference-model code (review checkpoint, logistic-regression trainer,
 # CLIP-augmented features) lived here. Removed - VLM validation alone
 # now decides accept/reject, and auto-label runs through to completion.
@@ -2743,8 +2755,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
     _stage(f"loop: {len(pending)} image(s) to label")
 
     def _load_pil_sync(p: Path) -> "PILImage.Image":
-        with PILImage.open(p) as _im:
-            return _im.convert("RGB")
+        return _open_upright(p)
 
     # Batched per-image manifest writes. Each save_manifest call
     # serialises + writes the WHOLE manifest, which becomes the
@@ -3939,8 +3950,7 @@ async def v2_process_reference(
         # No labels means nothing to detect - fast-path empty result.
         data = await image.read()
         with PILImage.open(io.BytesIO(data)) as pil:
-            pil = pil.convert("RGB")
-            W, H = pil.size
+            W, H = _upright_size(pil)
         return {"width": W, "height": H, "detections": []}
 
     # Read the upload + open as PIL.
@@ -3953,7 +3963,7 @@ async def v2_process_reference(
     _enforce_nsfw_or_451(raw, label="v2-ref-process", file=image.filename or "")
 
     try:
-        image_pil = PILImage.open(io.BytesIO(raw)).convert("RGB")
+        image_pil = _open_upright(raw)
     except Exception as e:
         raise HTTPException(400, f"could not decode image: {e}")
 
@@ -4380,7 +4390,7 @@ async def v2_upload_reference(
     # compute per-label centroids on-the-fly without re-running the
     # encoder on every reference.
     try:
-        image_pil = PILImage.open(io.BytesIO(raw)).convert("RGB")
+        image_pil = _open_upright(raw)
         if not (width and height):
             width, height = image_pil.size
     except Exception:
@@ -4648,7 +4658,7 @@ async def v2_update_reference(project_id: str, reference_id: str, payload: Updat
     image_pil = None
     try:
         if img_path.exists():
-            image_pil = PILImage.open(img_path).convert("RGB")
+            image_pil = _open_upright(img_path)
     except Exception:
         image_pil = None
 
@@ -4877,7 +4887,7 @@ async def v2_upload_import(
 
     if not (width and height):
         try:
-            image_pil = PILImage.open(io.BytesIO(raw)).convert("RGB")
+            image_pil = _open_upright(raw)
             width, height = image_pil.size
         except Exception:
             pass
@@ -7654,7 +7664,7 @@ async def v2_augment_background_upload(
     # main /imports/raw endpoint applies.
     _enforce_nsfw_or_451(raw, label="v2-augment-background-upload")
     try:
-        src = PILImage.open(io.BytesIO(raw)).convert("RGB")
+        src = _open_upright(raw)
     except Exception as e:
         raise HTTPException(400, f"could not decode image: {e}")
     # Cap stored size at long edge 1280 so we don't ship a 24 MP
@@ -7804,7 +7814,7 @@ async def v2_augment_object_overlay_segment(
     # screen applies.
     _enforce_nsfw_or_451(raw, label="v2-augment-object-overlay-segment")
     try:
-        src = PILImage.open(io.BytesIO(raw)).convert("RGBA")
+        src = ImageOps.exif_transpose(PILImage.open(io.BytesIO(raw))).convert("RGBA")
     except Exception as e:
         raise HTTPException(400, f"could not decode image: {e}")
 
@@ -8713,7 +8723,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
             return 0
         try:
             with PILImage.open(src_path) as im:
-                im = im.convert("RGB")
+                im = ImageOps.exif_transpose(im).convert("RGB")
                 src_W, src_H = im.size
                 longest = max(src_W, src_H)
                 # Resize on the way in so the working tensor never
@@ -9419,7 +9429,7 @@ async def v2_augment_preview(project_id: str, payload: AugmentPreviewIn):
     def _run() -> bytes:
         from io import BytesIO
         with PILImage.open(target) as im:
-            im = im.convert("RGB")
+            im = ImageOps.exif_transpose(im).convert("RGB")
             src_W, src_H = im.size
             # Cap the working size so the kernel is cheap; long edge
             # 720 px is plenty for a preview pane and keeps render
@@ -9559,7 +9569,7 @@ async def v2_serve_labelled_preview(project_id: str, import_id: str):
 
     def _render() -> bytes:
         with PILImage.open(src_path) as im:
-            im = im.convert("RGB")
+            im = ImageOps.exif_transpose(im).convert("RGB")
             preview = _render_labelled_preview(im, det_source, project_labels)
         cached_path.parent.mkdir(parents=True, exist_ok=True)
         # Write to a temp file then rename so concurrent requests
@@ -9622,7 +9632,7 @@ async def upload_project_cover(project_id: str, file: UploadFile = File(...)):
         raise HTTPException(400, "empty file")
     try:
         with PILImage.open(io.BytesIO(raw)) as im:
-            im = im.convert("RGB")
+            im = ImageOps.exif_transpose(im).convert("RGB")
             W, H = im.size
             longest = max(W, H)
             cap = 1600
@@ -9777,7 +9787,7 @@ async def serve_cover_thumb(project_id: str, w: int = 480, ai: int = 0):
 
         def _render() -> None:
             with PILImage.open(src_path) as im:
-                im = im.convert("RGB")
+                im = ImageOps.exif_transpose(im).convert("RGB")
                 W, H = im.size
                 longest = max(W, H)
                 if longest > target:
@@ -9839,7 +9849,7 @@ def _load_reference_image_pil(raw: bytes, project_id: str, filename: str):
     v2_serve_reference."""
     if raw:
         try:
-            return PILImage.open(io.BytesIO(raw)).convert("RGB")
+            return _open_upright(raw)
         except Exception as e:
             raise HTTPException(400, f"could not decode image: {e}")
     fn = (filename or "").strip()
@@ -9853,7 +9863,7 @@ def _load_reference_image_pil(raw: bytes, project_id: str, filename: str):
         if not target.exists():
             raise HTTPException(404, f"reference image not found: {fn}")
         try:
-            return PILImage.open(target).convert("RGB")
+            return _open_upright(target)
         except Exception as e:
             raise HTTPException(400, f"could not decode reference image: {e}")
     raise HTTPException(400, "no image bytes and no project_id/filename to load from disk")
@@ -9897,7 +9907,7 @@ async def v2_embed_crops(
     if not raw:
         raise HTTPException(400, "empty image upload")
     try:
-        image_pil = PILImage.open(io.BytesIO(raw)).convert("RGB")
+        image_pil = _open_upright(raw)
     except Exception as e:
         raise HTTPException(400, f"could not decode image: {e}")
     W, H = image_pil.size
@@ -10114,7 +10124,7 @@ def _v2_load_or_backfill_reference_embeddings(project_id: str) -> tuple[dict, di
                 if not p.exists():
                     continue
                 try:
-                    image_pil = PILImage.open(p).convert("RGB")
+                    image_pil = _open_upright(p)
                 except Exception as e:
                     print(f"[v2-centroids] couldn't open {p}: {e}")
                     continue
@@ -10355,7 +10365,7 @@ def _v2_load_or_backfill_patch_tokens(
             if not p.exists():
                 continue
             try:
-                image_pil = PILImage.open(p).convert("RGB")
+                image_pil = _open_upright(p)
             except Exception as e:
                 print(f"[v2-patches] open failed {p}: {e}")
                 continue
@@ -13112,7 +13122,7 @@ def _bake_labelled_preview_sync(
     cached_path = _labelled_preview_path(project_id, import_id)
     try:
         with PILImage.open(src_path) as im:
-            im = im.convert("RGB")
+            im = ImageOps.exif_transpose(im).convert("RGB")
             preview = _render_labelled_preview(im, detections, project_labels)
         cached_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = cached_path.with_suffix(_unique_tmp_suffix())
@@ -13132,7 +13142,7 @@ def _encode_blurhash_from_path(path: "Path") -> str | None:
         import blurhash as _bh
         from PIL import Image as _PIL
         with _PIL.open(path) as im:
-            im = im.convert("RGB")
+            im = ImageOps.exif_transpose(im).convert("RGB")
             im.thumbnail((64, 64))
             try:
                 return _bh.encode(im, 4, 3)
@@ -13241,7 +13251,7 @@ def _compute_cover_blurhash(project_id: str, cover_filename: str, *, is_v2: bool
         import blurhash as _bh
         from PIL import Image as _PIL
         with _PIL.open(img_path) as im:
-            im = im.convert("RGB")
+            im = ImageOps.exif_transpose(im).convert("RGB")
             # Encode at low resolution - blurhash stretches a few
             # components into a smooth gradient, so feeding it a
             # 64-px thumbnail is more than enough and keeps the
@@ -15754,7 +15764,7 @@ async def add_images(project_id: str, images: list[UploadFile] = File(...), user
                 return ("duplicate", fn, sha, existing_hashes[sha])
             try:
                 with PILImage.open(io.BytesIO(data)) as img:
-                    size = {"width": img.width, "height": img.height}
+                    size = dict(zip(("width", "height"), _upright_size(img)))
             except Exception:
                 return ("skipped", fn)
             tmp_path = pending_dir / fn
@@ -16097,7 +16107,7 @@ async def add_images_from_urls(project_id: str, body: ImagesFromUrlsRequest, use
                 print(f"[import_urls] border-crop failed for {url}: {e}")
                 # Fall back to original bytes + measured size.
                 with PILImage.open(io.BytesIO(data)) as img:
-                    size = {"width": img.width, "height": img.height}
+                    size = dict(zip(("width", "height"), _upright_size(img)))
 
             sha = hashlib.sha256(data).hexdigest()
             if sha in existing_hashes:
@@ -18019,7 +18029,7 @@ async def charlie_imports_process(
     if not raw:
         raise HTTPException(400, "empty image upload")
     try:
-        image_pil = PILImage.open(io.BytesIO(raw)).convert("RGB")
+        image_pil = _open_upright(raw)
     except Exception as e:
         raise HTTPException(400, f"could not decode image: {e}")
     W, H = image_pil.size

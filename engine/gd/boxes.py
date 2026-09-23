@@ -14,12 +14,14 @@ def _box_xyxy(b: dict) -> tuple[float, float, float, float] | None:
             return float(b["x0"]), float(b["y0"]), float(b["x1"]), float(b["y1"])
         except (TypeError, ValueError):
             pass
-    v = b.get("box_xyxy")
-    if isinstance(v, list) and len(v) == 4:
-        try:
-            return float(v[0]), float(v[1]), float(v[2]), float(v[3])
-        except (TypeError, ValueError):
-            pass
+    # SAM 3 and model detections carry the box as `box` (xyxy) as well.
+    for key in ("box_xyxy", "box"):
+        v = b.get(key)
+        if isinstance(v, list) and len(v) == 4:
+            try:
+                return float(v[0]), float(v[1]), float(v[2]), float(v[3])
+            except (TypeError, ValueError):
+                pass
     # Segmentation-only detection (e.g. a SAM "road" polygon with no stored
     # bbox): derive the enclosing box from the mask polygons so a detector can
     # still train on it. Without this, seg-class boxes are silently dropped.
