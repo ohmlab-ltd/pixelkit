@@ -6,7 +6,7 @@ import { BlurhashCanvas } from "react-blurhash";
 
 import { LABEL_COLOURS, buildProjectLabelColourMap, colourForLabelStable } from "./OnboardLabelsV2";
 import type { ReferenceImage } from "./OnboardReferencesV2";
-import { BoxEditor, detectionsToBoxes, stripTransientBoxFlags, type EditableBox, type MaskShape, type Validation } from "../BoxEditor";
+import { BoxEditor, detectionsToBoxes, stripTransientBoxFlags, withMasksFrom, type EditableBox, type MaskShape, type Validation } from "../BoxEditor";
 import { ReferenceImageEditor } from "./ReferenceImageEditor";
 import { LabelJobCard, type LabelJobState } from "./LabelJobCard";
 import { requestExplorerRefresh } from "../../lib/appNav";
@@ -1439,6 +1439,14 @@ export function ProjectViewV2Stub({
   // bump, every labelledAt refresh - none of which are user edits).
   // Drained inside the effect after each pass.
   const dirtyImportIdsRef = useRef<Set<string>>(new Set());
+  // When each import was last edited here (performance.now()), and which
+  // have a save in flight: a sync that started before either must not
+  // replace those boxes with the server's older copy.
+  const lastEditAtRef = useRef<Map<string, number>>(new Map());
+  const savesInFlightRef = useRef<Set<string>>(new Set());
+  // Set below, once flushEdits exists: saves the dirty imports 600 ms
+  // after the latest edit.
+  const scheduleFlushRef = useRef<() => void>(() => {});
 
   const updateImport = useCallback((
     id: string,
@@ -1461,6 +1469,8 @@ export function ProjectViewV2Stub({
     // here.
     if (!opts?.hydration && Object.prototype.hasOwnProperty.call(patch, "editedBoxes")) {
       dirtyImportIdsRef.current.add(id);
+      lastEditAtRef.current.set(id, performance.now());
+      scheduleFlushRef.current();
     }
     setImports((cur) => cur.map((m) => {
       if (m.id !== id) return m;
@@ -1471,10 +1481,14 @@ export function ProjectViewV2Stub({
       ) {
         // FE already holds an editedBoxes copy this session - it is
         // authoritative (the auto-PUT pushes it up). Take the rest of
-        // the hydration payload (detections / masks / timings) only.
+        // the hydration payload (detections / masks / timings), and the
+        // masks its boxes lack: a copy from the bulk sync has none.
         const rest = { ...patch };
         delete rest.editedBoxes;
-        return { ...m, ...rest };
+        const editedBoxes = Array.isArray(m.editedBoxes)
+          ? withMasksFrom(m.editedBoxes, patch.editedBoxes)
+          : m.editedBoxes;
+        return { ...m, ...rest, editedBoxes };
       }
       return { ...m, ...patch };
     }));
@@ -2249,39 +2263,7 @@ export function ProjectViewV2Stub({
     // image still looked labelled, and the backend 400'd with "no
     // unlabelled images". Draining the dirty set here (awaited) makes
     // the server agree with what the user sees before the job runs.
-    try {
-      const dirtyIds = Array.from(dirtyImportIdsRef.current);
-      if (dirtyIds.length > 0 && projectId) {
-        const byId = new Map(imports.map((m) => [m.id, m]));
-        await Promise.all(
-          dirtyIds.map(async (did) => {
-            const m = byId.get(did);
-            if (!m || !m.backendId || m.editedBoxes === undefined) return;
-            const hasInflight = m.editedBoxes.some(
-              (b) => b.detecting || b.classifying || b.segmenting,
-            );
-            if (hasInflight) return;
-            const cleaned = m.editedBoxes.map(stripTransientBoxFlags);
-            try {
-              await apiFetch(
-                `/api/v2/projects/${projectId}/imports/${m.backendId}`,
-                {
-                  method: "PUT",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ editedBoxes: cleaned }),
-                },
-              );
-              lastEditedRef.current.set(m.id, JSON.stringify(cleaned));
-              dirtyImportIdsRef.current.delete(did);
-            } catch (e) {
-              console.warn("[label-job] pre-flush edit PUT failed:", e);
-            }
-          }),
-        );
-      }
-    } catch (e) {
-      console.warn("[label-job] pre-flush failed:", e);
-    }
+    await flushEditsRef.current();
     // Flush the project tag list too. addLabel only mutates local state;
     // the PUT that persists tags is 600ms-debounced and the backend reads
     // tags from the manifest, so clicking Start right after typing a new
@@ -2394,14 +2376,18 @@ export function ProjectViewV2Stub({
   // labelled_preview cache-buster ride on the same call.
   const syncAnnotations = useCallback(async (): Promise<void> => {
     if (!projectId) return;
+    const startedAt = performance.now();
     try {
       // cache:no-store, without this the browser may serve a stale
       // /annotations response captured a few seconds back, freezing
       // the dataset gallery on the previous image's detections.
-      // scope=imports drops the refs half we don't read here.
+      // scope=imports drops the refs half we don't read here. No
+      // dedup: joining a request that began before an edit returns
+      // the boxes from before it.
       const annR = await apiFetch(
         `/api/v2/projects/${projectId}/annotations?scope=imports`,
         { cache: "no-store" },
+        { noDedup: true },
       );
       if (!annR.ok) return;
       const annData = (await annR.json()) as {
@@ -2447,16 +2433,21 @@ export function ProjectViewV2Stub({
           // classifying / segmenting) counts as dirty too: the dirty set
           // is drained on every 600ms auto-PUT tick, so between a drain
           // and the gesture's final commit the flag alone under-reports.
+          // Edited or saved since this sync began counts too: the payload
+          // may predate that save.
           const isDirty =
             dirtyImportIdsRef.current.has(m.id) ||
+            savesInFlightRef.current.has(m.id) ||
+            (lastEditAtRef.current.get(m.id) ?? -1) >= startedAt ||
             (Array.isArray(m.editedBoxes) &&
               m.editedBoxes.some((b) => b.detecting || b.classifying || b.segmenting));
           let nextEditedBoxes: EditableBox[] | undefined;
           if (isDirty) {
             nextEditedBoxes = m.editedBoxes;
           } else {
+            // This payload carries no masks: keep the ones held here.
             nextEditedBoxes = Array.isArray(a.editedBoxes)
-              ? a.editedBoxes.map(stripTransientBoxFlags)
+              ? withMasksFrom(a.editedBoxes.map(stripTransientBoxFlags), m.editedBoxes)
               : m.editedBoxes;
             if (
               relabelled &&
@@ -3396,91 +3387,112 @@ export function ProjectViewV2Stub({
   // showing the stale segmented cover until a page refresh.
   // (lastEditedRef is declared earlier so syncAnnotations can also
   // write to it on hydration, see the comment beside its `useRef`.)
+  // First observation of an import seeds its save baseline, so a copy
+  // that came from the server is never PUT straight back at it.
   useEffect(() => {
-    if (!projectId) return;
-    const id = window.setTimeout(() => {
-      // Drain the dirty-import set: only imports whose editedBoxes
-      // changed via updateImport need PUT consideration. On a 1000-
-      // image project this avoids walking the full list on every
-      // unrelated state change (label-job progress, augment counts,
-      // labelledAt cache-buster bumps). Imports that pass through
-      // here for first-observation still seed lastEditedRef below
-      // via the imports walk fallback.
-      const dirtyIds = Array.from(dirtyImportIdsRef.current);
-      dirtyImportIdsRef.current.clear();
-      // Single map lookup over the full imports list for first-time
-      // observation seeding (so we never PUT a hydration-shaped
-      // editedBoxes back at the server it just came from). After
-      // this seeding pass the dirty set is the source of truth.
-      for (const m of imports) {
-        if (!m.backendId) continue;
-        if (observedImportIdsRef.current.has(m.id)) continue;
-        observedImportIdsRef.current.add(m.id);
-        if (m.editedBoxes !== undefined) {
-          lastEditedRef.current.set(m.id, JSON.stringify(m.editedBoxes));
-        }
+    for (const m of imports) {
+      if (!m.backendId) continue;
+      if (observedImportIdsRef.current.has(m.id)) continue;
+      observedImportIdsRef.current.add(m.id);
+      if (m.editedBoxes !== undefined) {
+        lastEditedRef.current.set(m.id, JSON.stringify(m.editedBoxes));
       }
-      const importsById = new Map(imports.map((m) => [m.id, m]));
-      for (const dirtyId of dirtyIds) {
-        const m = importsById.get(dirtyId);
-        if (!m || !m.backendId) continue;
-        // We've seen this id before. Skip until editedBoxes is an
-        // array we can serialise (undefined still means the user
-        // hasn't touched it).
-        if (!m.editedBoxes) continue;
-        // Defer the PUT entirely while any box on this import is
-        // mid-gesture (detecting / classifying / segmenting). The
-        // single atomic state commits in BoxEditor's rebuilt
-        // click-to-detect + add-box flows leave no transient flags
-        // by the time the gesture lands, so a flagged box here means
-        // we're catching it BEFORE that commit - and persisting it
-        // would either ship a placeholder label ("detecting"/"new")
-        // or a half-finished mask. Wait for the next render.
-        const hasInflight = m.editedBoxes.some(
-          (b) => b.detecting || b.classifying || b.segmenting,
-        );
-        if (hasInflight) continue;
-        // Strip transient UI flags (detecting / classifying /
-        // segmenting) before persisting. Belt-and-braces alongside
-        // the hasInflight guard - keeps the wire payload pure even
-        // if a future code path forgets to clear a flag.
-        const cleaned = m.editedBoxes.map(stripTransientBoxFlags);
-        const serialised = JSON.stringify(cleaned);
-        const last = lastEditedRef.current.get(m.id);
-        if (last === serialised) continue;
-        lastEditedRef.current.set(m.id, serialised);
-        const importId = m.backendId;
-        const localId = m.id;
-        apiFetch(`/api/v2/projects/${projectId}/imports/${importId}`, {
+    }
+  }, [imports]);
+
+  // Saving edits. updateImport marks an import dirty and schedules a
+  // flush 600 ms after the latest edit (unrelated state changes, like
+  // upload progress, no longer push it back). A failed save stays dirty
+  // and is retried with backoff instead of being dropped, and whatever
+  // is pending is saved when the view closes or the page is hidden.
+  const importsRef = useRef(imports);
+  importsRef.current = imports;
+  const flushTimerRef = useRef<number | null>(null);
+  const retryDelayRef = useRef(1000);
+  const [saveFailing, setSaveFailing] = useState(false);
+  const flushEditsRef = useRef<(opts?: { keepalive?: boolean }) => Promise<void>>(async () => {});
+  flushEditsRef.current = async (opts) => {
+    if (!projectId) return;
+    const dirtyIds = Array.from(dirtyImportIdsRef.current);
+    dirtyImportIdsRef.current.clear();
+    const importsById = new Map(importsRef.current.map((m) => [m.id, m]));
+    let failed = false;
+    await Promise.all(dirtyIds.map(async (dirtyId) => {
+      const m = importsById.get(dirtyId);
+      if (!m || !m.backendId || !m.editedBoxes) return;
+      // Mid-gesture (detecting / classifying / segmenting): persisting
+      // now would ship a placeholder label or a half-made mask. It
+      // stays dirty and saves once the gesture lands.
+      if (m.editedBoxes.some((b) => b.detecting || b.classifying || b.segmenting)) {
+        dirtyImportIdsRef.current.add(dirtyId);
+        return;
+      }
+      const cleaned = m.editedBoxes.map(stripTransientBoxFlags);
+      const serialised = JSON.stringify(cleaned);
+      const last = lastEditedRef.current.get(m.id);
+      if (last === serialised) return;
+      lastEditedRef.current.set(m.id, serialised);
+      savesInFlightRef.current.add(m.id);
+      const body = JSON.stringify({ editedBoxes: cleaned });
+      let ok = false;
+      try {
+        const r = await apiFetch(`/api/v2/projects/${projectId}/imports/${m.backendId}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ editedBoxes: cleaned }),
-        })
-          .then((r) => {
-            if (!r.ok) {
-              console.warn(`[v2 import-patch] http ${r.status} on ${importId}`);
-              return;
-            }
-            // Force the labelled_preview URL to refresh.
-            const now = Date.now();
-            setImports((cur) =>
-              cur.map((it) =>
-                it.id === localId ? { ...it, labelledAt: now } : it,
-              ),
-            );
-            // Manual edit committed → nudge the dataset stats card.
-            // Label distribution + health factors change with every
-            // box add/remove/relabel; without this bump the card
-            // would only refresh on the next augmentations-generated
-            // tick (which is firing in the background anyway thanks
-            // to the auto-augment-after-edit hook).
-            setStatsRefreshSignal((n) => n + 1);
-          })
-          .catch((e) => console.warn("[v2 import-patch] failed:", e));
+          body,
+          // A page being hidden may not outlive the request; keepalive
+          // carries it through, within the browser's 64 KB allowance.
+          keepalive: !!opts?.keepalive && body.length < 60_000,
+        });
+        ok = r.ok;
+        if (!ok) console.warn(`[v2 import-patch] http ${r.status} on ${m.backendId}`);
+      } catch (e) {
+        console.warn("[v2 import-patch] failed:", e);
+      } finally {
+        savesInFlightRef.current.delete(m.id);
       }
-    }, 600);
-    return () => window.clearTimeout(id);
-  }, [imports, projectId]);
+      if (!ok) {
+        // Unsaved again: restore the baseline and keep it dirty.
+        if (lastEditedRef.current.get(m.id) === serialised) {
+          if (last === undefined) lastEditedRef.current.delete(m.id);
+          else lastEditedRef.current.set(m.id, last);
+        }
+        dirtyImportIdsRef.current.add(dirtyId);
+        failed = true;
+        return;
+      }
+      // Force the labelled_preview URL to refresh, and nudge the stats
+      // card (label distribution + health change with every edit).
+      const now = Date.now();
+      setImports((cur) => cur.map((it) => (it.id === m.id ? { ...it, labelledAt: now } : it)));
+      setStatsRefreshSignal((n) => n + 1);
+    }));
+    if (failed) {
+      setSaveFailing(true);
+      scheduleFlush(retryDelayRef.current);
+      retryDelayRef.current = Math.min(retryDelayRef.current * 2, 30_000);
+    } else if (dirtyIds.length > 0) {
+      setSaveFailing(false);
+      retryDelayRef.current = 1000;
+    }
+  };
+  const scheduleFlush = useCallback((delay = 600) => {
+    if (flushTimerRef.current !== null) window.clearTimeout(flushTimerRef.current);
+    flushTimerRef.current = window.setTimeout(() => {
+      flushTimerRef.current = null;
+      void flushEditsRef.current();
+    }, delay);
+  }, []);
+  scheduleFlushRef.current = scheduleFlush;
+  useEffect(() => {
+    const onHide = () => { void flushEditsRef.current({ keepalive: true }); };
+    window.addEventListener("pagehide", onHide);
+    return () => {
+      window.removeEventListener("pagehide", onHide);
+      if (flushTimerRef.current !== null) window.clearTimeout(flushTimerRef.current);
+      void flushEditsRef.current();  // the view is closing: save what is pending
+    };
+  }, []);
 
   // Renamable project title with 2-step undo.
   const [projectTitle, setProjectTitle] = useState(projectName);
@@ -3513,6 +3525,8 @@ export function ProjectViewV2Stub({
       if (!meta || e.key.toLowerCase() !== "z" || e.shiftKey) return;
       const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
       if (tag === "input" || tag === "textarea") return;
+      // The viewer, painter and Review own Ctrl+Z while they are open.
+      if (document.querySelector('[aria-modal="true"]')) return;
       if (titleHistory.length === 0) return;
       e.preventDefault();
       setTitleHistory((h) => {
@@ -3910,11 +3924,12 @@ export function ProjectViewV2Stub({
         : null;
       setImports((cur) => cur.map((m) => {
         if (m.backendId !== backendId) return m;
-        return {
-          ...m,
-          detections: dets,
-          editedBoxes: cleanedEdited ?? m.editedBoxes,
-        };
+        // A copy held here (perhaps an edit not yet saved) wins; the
+        // server's masks fill in the boxes that lack them.
+        const editedBoxes = Array.isArray(m.editedBoxes)
+          ? withMasksFrom(m.editedBoxes, cleanedEdited)
+          : (cleanedEdited ?? m.editedBoxes);
+        return { ...m, detections: dets, editedBoxes };
       }));
     } catch {
       reviewAnnoFetchedRef.current.delete(backendId);
@@ -4208,6 +4223,18 @@ export function ProjectViewV2Stub({
     window.addEventListener("pixelkit-augmentations-generated", handler);
     return () => window.removeEventListener("pixelkit-augmentations-generated", handler);
   }, [projectId]);
+
+  // Boxes written by a job this view does not track (labelling with a
+  // trained model, from the Train card): bring the gallery up to date.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      if ((e as CustomEvent).detail?.projectId !== projectId) return;
+      void syncAnnotations();
+      setStatsRefreshSignal((n) => n + 1);
+    };
+    window.addEventListener("pixelkit-labels-changed", handler);
+    return () => window.removeEventListener("pixelkit-labels-changed", handler);
+  }, [projectId, syncAnnotations]);
 
   // Belt-and-braces poll: even if the user navigates away from the
   // Augmentations tab during a generate run (so AugmentationsCard
@@ -4620,6 +4647,8 @@ export function ProjectViewV2Stub({
       if (!meta || e.key.toLowerCase() !== "z" || e.shiftKey) return;
       const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
       if (tag === "input" || tag === "textarea") return;
+      // The viewer, painter and Review own Ctrl+Z while they are open.
+      if (document.querySelector('[aria-modal="true"]')) return;
       if (labelHistory.length === 0) return;
       e.preventDefault();
       undoLastLabelOp();
@@ -6128,6 +6157,19 @@ export function ProjectViewV2Stub({
             onClose();
           }}
         />
+      )}
+      {/* Edits that have not reached the engine: fixed, above the image
+          viewer (where editing happens), until a retry lands. */}
+      {saveFailing && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed left-1/2 bottom-8 -translate-x-1/2 z-[1250] flex items-center gap-2.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-4 py-2.5 text-[12px] font-medium text-[var(--warn)]"
+          style={{ boxShadow: "var(--shadow-strong)" }}
+        >
+          <span className="inline-flex rounded-full h-2 w-2 shrink-0 bg-[var(--warn)]" aria-hidden />
+          Some changes have not been saved yet. Retrying…
+        </div>
       )}
       {/* Profanity-filter toast, bottom-centred, auto-dismisses
           after 4.2 s via the flashLabelError timer. Fixed so it
@@ -10396,6 +10438,7 @@ function DatasetViewer({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;  // the editor or painter used this key
       const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
       if (tag === "input" || tag === "textarea") return;
       if (e.key === "Escape") onClose();

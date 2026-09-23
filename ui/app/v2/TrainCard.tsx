@@ -520,6 +520,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
         labelJobId.current = null;
         setLabelsVersion((v) => v + 1);
         void finished(id, "Labelling");
+        window.dispatchEvent(new CustomEvent("pixelkit-labels-changed", { detail: { projectId } }));
       }
       wasTraining.current = active;
       wasLabelling.current = lab;

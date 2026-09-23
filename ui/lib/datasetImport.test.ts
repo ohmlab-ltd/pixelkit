@@ -1,13 +1,15 @@
 // @vitest-environment jsdom
 // jsdom for DOMParser (VOC) + File; the COCO/YOLO parsers are pure.
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
   type CollectedFile,
   detectFormat,
+  jpegOrientation,
   parseDataset,
   parseYamlNames,
   parseYoloLabelText,
+  prepareItemForUpload,
 } from "./datasetImport";
 
 const f = (path: string, text = "", type?: string): CollectedFile => ({
@@ -190,5 +192,101 @@ describe("VOC", () => {
     const ds = await parseDataset([jpg("JPEGImages/a.jpg"), f("Annotations/a.xml", xml)]);
     expect(ds.format).toBe("voc");
     expect(ds.items[0].boxes[0]).toMatchObject({ label: "cat", x0: 1, y0: 2, x1: 5, y1: 6 });
+  });
+});
+
+describe("pairing and orientation regressions", () => {
+  const voc = (fn: string | null, label: string) =>
+    `<annotation>${fn ? `<filename>${fn}</filename>` : ""}<size><width>100</width><height>100</height></size>` +
+    `<object><name>${label}</name><bndbox><xmin>10</xmin><ymin>20</ymin><xmax>50</xmax><ymax>60</ymax></bndbox></object></annotation>`;
+  const pairs = (files: CollectedFile[], ds: Awaited<ReturnType<typeof parseDataset>>) =>
+    ds.items.map((it) => [files.find((cf) => cf.file === it.file)?.path, it.boxes[0]?.label ?? null]);
+
+  it("VOC: split twins pair within their own split", async () => {
+    const files = [
+      jpg("ds/train/JPEGImages/0001.jpg"),
+      jpg("ds/val/JPEGImages/0001.jpg"),
+      f("ds/train/Annotations/0001.xml", voc("0001.jpg", "cat")),
+      f("ds/val/Annotations/0001.xml", voc("0001.jpg", "dog")),
+    ];
+    expect(pairs(files, await parseDataset(files))).toEqual([
+      ["ds/train/JPEGImages/0001.jpg", "cat"],
+      ["ds/val/JPEGImages/0001.jpg", "dog"],
+    ]);
+  });
+
+  it("VOC: twins beside their XMLs, with no <filename>, pair too", async () => {
+    const files = [jpg("ds/train/0001.jpg"), f("ds/train/0001.xml", voc(null, "cat")),
+                   jpg("ds/val/0001.jpg"), f("ds/val/0001.xml", voc(null, "dog"))];
+    expect(pairs(files, await parseDataset(files))).toEqual([
+      ["ds/train/0001.jpg", "cat"],
+      ["ds/val/0001.jpg", "dog"],
+    ]);
+  });
+
+  it("VOC: a.jpg and a.png are both imported", async () => {
+    const files = [jpg("JPEGImages/a.jpg"), f("JPEGImages/a.png", "PNG", "image/png"),
+                   f("Annotations/a.xml", voc("a.jpg", "cat"))];
+    expect(pairs(files, await parseDataset(files))).toEqual([
+      ["JPEGImages/a.jpg", "cat"],
+      ["JPEGImages/a.png", null],
+    ]);
+  });
+
+  it("COCO: a captions file does not take the images' boxes away", async () => {
+    const img = { id: 139, file_name: "000000000139.jpg", width: 640, height: 426 };
+    const captions = { images: [img], annotations: [{ id: 1, image_id: 139, caption: "A room." }] };
+    const instances = {
+      images: [img],
+      annotations: [{ id: 10, image_id: 139, category_id: 1, bbox: [10, 20, 100, 200], iscrowd: 0 }],
+      categories: [{ id: 1, name: "person" }],
+    };
+    const files = [
+      jpg("coco/val2017/000000000139.jpg"),
+      f("coco/annotations/captions_val2017.json", JSON.stringify(captions)),
+      f("coco/annotations/instances_val2017.json", JSON.stringify(instances)),
+    ];
+    const ds = await parseDataset(files);
+    expect(ds.stats.boxes).toBe(1);
+    expect(ds.items[0].boxes[0].label).toBe("person");
+  });
+
+  describe("a photo annotated on its stored, unrotated frame", () => {
+    // A JPEG header whose EXIF says: shown turned a quarter clockwise (6).
+    const exifJpeg = (orientation: number) => {
+      const tiff = [0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00,
+        0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, orientation, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00];
+      const app1 = [0x45, 0x78, 0x69, 0x66, 0x00, 0x00, ...tiff];
+      const len = app1.length + 2;
+      return new Uint8Array([0xff, 0xd8, 0xff, 0xe1, len >> 8, len & 0xff, ...app1, 0xff, 0xda, 0x00, 0x02, 0xff, 0xd9]);
+    };
+    const g = globalThis as unknown as { createImageBitmap?: unknown };
+    let saved: unknown;
+    beforeAll(() => {
+      saved = g.createImageBitmap;
+      g.createImageBitmap = async () => ({ width: 3000, height: 4000, close() {} }); // decoded upright
+    });
+    afterAll(() => {
+      g.createImageBitmap = saved;
+    });
+
+    it("reads the EXIF orientation from the header", async () => {
+      expect(await jpegOrientation(new Blob([exifJpeg(6)]))).toBe(6);
+      expect(await jpegOrientation(new Blob([exifJpeg(8)]))).toBe(8);
+      expect(await jpegOrientation(new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xda])]))).toBe(1);
+    });
+
+    it("turns its boxes with the picture instead of stretching them", async () => {
+      const file = new File([exifJpeg(6)], "IMG_0001.jpg", { type: "image/jpeg" });
+      const out = await prepareItemForUpload({
+        file,
+        originalName: "IMG_0001.jpg",
+        boxes: [{ id: "b", label: "cat", x0: 100, y0: 200, x1: 500, y1: 600, score: null }],
+        width: 4000, // the stored frame, as labelImg reports it
+        height: 3000,
+      }, null);
+      expect(out.boxes[0]).toMatchObject({ x0: 2400, y0: 100, x1: 2800, y1: 500 });
+    });
   });
 });

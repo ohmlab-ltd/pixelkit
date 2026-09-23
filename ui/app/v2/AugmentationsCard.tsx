@@ -1340,6 +1340,9 @@ function CameraSensorBlock({
   // Debounced fetch. Snapshots all five inputs at schedule time;
   // any change re-arms the timer and supersedes the pending call.
   useEffect(() => {
+    // Every run supersedes the request before it, including a run that
+    // ends early (dials back to zero): that late answer must not show.
+    const myReq = ++requestIdRef.current;
     if (!projectId || !activeSource) {
       if (lastBlobRef.current) {
         URL.revokeObjectURL(lastBlobRef.current);
@@ -1360,7 +1363,6 @@ function CameraSensorBlock({
       setPreviewError(null);
       return;
     }
-    const myReq = ++requestIdRef.current;
     const t = window.setTimeout(async () => {
       setPreviewBusy(true);
       setPreviewError(null);
@@ -1577,12 +1579,14 @@ function RandomBlockOcclusionBlock({
   const requestIdRef = useRef(0);
 
   useEffect(() => {
+    // Every run supersedes the request before it, including a run that
+    // ends early (dials back to zero): that late answer must not show.
+    const myReq = ++requestIdRef.current;
     if (!projectId || !activeSource) {
       if (lastBlobRef.current) { URL.revokeObjectURL(lastBlobRef.current); lastBlobRef.current = null; }
       setPreviewUrl(null);
       return;
     }
-    const myReq = ++requestIdRef.current;
     const t = window.setTimeout(async () => {
       setPreviewBusy(true);
       setPreviewError(null);
@@ -1747,6 +1751,9 @@ function SimpleStrengthBlock({
   const requestIdRef = useRef(0);
 
   useEffect(() => {
+    // Every run supersedes the request before it, including a run that
+    // ends early (dials back to zero): that late answer must not show.
+    const myReq = ++requestIdRef.current;
     if (!projectId || !activeSource) {
       if (lastBlobRef.current) { URL.revokeObjectURL(lastBlobRef.current); lastBlobRef.current = null; }
       setPreviewUrl(null);
@@ -1758,7 +1765,6 @@ function SimpleStrengthBlock({
       setPreviewError(null);
       return;
     }
-    const myReq = ++requestIdRef.current;
     const t = window.setTimeout(async () => {
       setPreviewBusy(true);
       setPreviewError(null);
@@ -1890,6 +1896,9 @@ function PerspectiveWarpBlock({
   const requestIdRef = useRef(0);
 
   useEffect(() => {
+    // Every run supersedes the request before it, including a run that
+    // ends early (dials back to zero): that late answer must not show.
+    const myReq = ++requestIdRef.current;
     if (!projectId || !activeSource) {
       if (lastBlobRef.current) { URL.revokeObjectURL(lastBlobRef.current); lastBlobRef.current = null; }
       setPreviewUrl(null);
@@ -1901,7 +1910,6 @@ function PerspectiveWarpBlock({
       setPreviewError(null);
       return;
     }
-    const myReq = ++requestIdRef.current;
     const t = window.setTimeout(async () => {
       setPreviewBusy(true);
       setPreviewError(null);
@@ -2043,6 +2051,9 @@ function ScaleRotationBlock({
   const isIdentity = scaleMin === 1.0 && scaleMax === 1.0 && rotMin === 0 && rotMax === 0;
 
   useEffect(() => {
+    // Every run supersedes the request before it, including a run that
+    // ends early (dials back to zero): that late answer must not show.
+    const myReq = ++requestIdRef.current;
     if (!projectId || !activeSource) {
       if (lastBlobRef.current) { URL.revokeObjectURL(lastBlobRef.current); lastBlobRef.current = null; }
       setPreviewUrl(null);
@@ -2054,7 +2065,6 @@ function ScaleRotationBlock({
       setPreviewError(null);
       return;
     }
-    const myReq = ++requestIdRef.current;
     const t = window.setTimeout(async () => {
       setPreviewBusy(true);
       setPreviewError(null);
@@ -2278,12 +2288,14 @@ function BackgroundRandomisationBlock({
   const bgKey = useMemo(() => backgrounds.map((b) => b.id).join("|"), [backgrounds]);
 
   useEffect(() => {
+    // Every run supersedes the request before it, including a run that
+    // ends early (dials back to zero): that late answer must not show.
+    const myReq = ++requestIdRef.current;
     if (!projectId || !activeSource || backgrounds.length === 0) {
       if (lastBlobRef.current) { URL.revokeObjectURL(lastBlobRef.current); lastBlobRef.current = null; }
       setPreviewUrl(null);
       return;
     }
-    const myReq = ++requestIdRef.current;
     const t = window.setTimeout(async () => {
       setPreviewBusy(true);
       setPreviewError(null);
@@ -2614,12 +2626,14 @@ function ObjectOverlayBlock({
   // and at least one segmented overlay.
   const overlayKey = useMemo(() => overlays.map((o) => o.id).join("|"), [overlays]);
   useEffect(() => {
+    // Every run supersedes the request before it, including a run that
+    // ends early (dials back to zero): that late answer must not show.
+    const myReq = ++requestIdRef.current;
     if (!projectId || !activeSource || overlays.length === 0 || scale <= 0) {
       if (lastBlobRef.current) { URL.revokeObjectURL(lastBlobRef.current); lastBlobRef.current = null; }
       setPreviewUrl(null);
       return;
     }
-    const myReq = ++requestIdRef.current;
     const t = window.setTimeout(async () => {
       setPreviewBusy(true);
       setPreviewError(null);

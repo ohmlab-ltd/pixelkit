@@ -257,6 +257,8 @@ export function ReviewModeV2({
       const editing = tag === "input" || tag === "textarea"
         || (document.activeElement as HTMLElement | null)?.isContentEditable;
       if (editing) return;
+      // A held key must not rate cards the user never saw.
+      if (e.repeat) return;
       if (e.key === "ArrowLeft") {
         e.preventDefault();
         classify("bad");
@@ -286,6 +288,8 @@ export function ReviewModeV2({
         // title bar, above the status bar, right of the Explorer side
         // bar) on an opaque ground - the app chrome stays visible.
         className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] z-[1200] grid place-items-center bg-[var(--background)] p-6"
+        role="dialog"
+        aria-modal="true"
       >
         <div className="max-w-md rounded-md border border-[var(--line)] bg-[var(--panel)] px-8 py-7 text-center">
           <h2 className="text-[16px] font-medium tracking-tight text-[var(--foreground)]">
@@ -322,6 +326,8 @@ export function ReviewModeV2({
       // shell's content area, its own header/footer chrome. Keyboard
       // (arrows / Esc) and pointer-swipe interactions are unchanged.
       className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] z-[1200] flex flex-col bg-[var(--background)]"
+      role="dialog"
+      aria-modal="true"
       aria-label="Fast review"
     >
       {/* Direction wash, only visible during a pointer drag */}

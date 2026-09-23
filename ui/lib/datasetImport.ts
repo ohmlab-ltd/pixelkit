@@ -26,6 +26,9 @@ export type ImportBox = {
   y1: number;
   score: number | null;
   mask?: { polygons: number[][][] } | null;
+  /** Set for imported polygons: ground truth, which a box move must not
+   *  replace by re-running segmentation (as for a hand-painted mask). */
+  maskEdited?: boolean;
 };
 
 // One image + its annotation, before upload-time preparation. `width`/
@@ -232,6 +235,17 @@ function normPath(p: string): string {
   return p.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
 }
 
+// The folder of a path, normalised ("" at the top).
+function dirOf(p: string): string {
+  const n = normPath(p);
+  const i = n.lastIndexOf("/");
+  return i < 0 ? "" : n.slice(0, i);
+}
+
+function joinPath(dir: string, name: string): string {
+  return dir ? `${dir}/${name}` : name;
+}
+
 // ── COCO ───────────────────────────────────────────────────────────────────
 
 type CocoAnn = {
@@ -249,11 +263,13 @@ type CocoJson = {
 };
 
 function isCocoJson(d: unknown): d is CocoJson {
-  return (
-    !!d &&
-    typeof d === "object" &&
-    Array.isArray((d as CocoJson).images) &&
-    Array.isArray((d as CocoJson).annotations)
+  if (!d || typeof d !== "object") return false;
+  const c = d as CocoJson & { categories?: unknown };
+  if (!Array.isArray(c.images) || !Array.isArray(c.annotations) || !Array.isArray(c.categories)) return false;
+  // Captions files list the same images with no categories and no boxes;
+  // taken as COCO, the one that sorted first left every image with none.
+  return c.annotations.length === 0 || c.annotations.some(
+    (a) => !!a && (Array.isArray((a as { bbox?: unknown }).bbox) || !!(a as { segmentation?: unknown }).segmentation),
   );
 }
 
@@ -405,6 +421,7 @@ async function parseCoco(
           y1,
           score: null,
           mask: polys && polys !== "rle" ? { polygons: polys } : null,
+          ...(polys && polys !== "rle" ? { maskEdited: true } : {}),
         });
         addClass(label);
       });
@@ -694,6 +711,7 @@ async function parseYolo(
         y1,
         score: r.score,
         mask: r.polygon ? { polygons: [r.polygon] } : null,
+        ...(r.polygon ? { maskEdited: true } : {}),
       });
       if (!classSeen.has(label)) {
         classSeen.add(label);
@@ -753,32 +771,55 @@ async function parseVoc(
   files: CollectedFile[],
   onProgress?: (done: number, total: number) => void,
 ): Promise<ParsedDataset> {
-  // Index images by basename stem so an annotation can find its image
-  // regardless of which subdir each lives in (Annotations/ vs JPEGImages/).
-  const imageByStem = new Map<string, CollectedFile>();
-  const imageByName = new Map<string, CollectedFile>();
-  const stemCollisions = new Set<string>();
+  const images: CollectedFile[] = [];
   const xmls: CollectedFile[] = [];
   for (const cf of files) {
     const name = baseName(cf.path);
-    if (/\.xml$/i.test(name)) {
-      xmls.push(cf);
-    } else if (IMAGE_EXT_RE.test(name)) {
-      const stem = stemOf(name).toLowerCase();
-      // Two images sharing a basename stem (e.g. img.jpg + img.png) make the
-      // stem an ambiguous pairing key - record it so stem-only resolution
-      // skips it rather than silently pairing an annotation to the wrong file.
-      if (imageByStem.has(stem)) stemCollisions.add(stem);
-      else imageByStem.set(stem, cf);
-      imageByName.set(name.toLowerCase(), cf);
-    }
+    if (/\.xml$/i.test(name)) xmls.push(cf);
+    else if (IMAGE_EXT_RE.test(name)) images.push(cf);
   }
+  const byPath = new Map(images.map((cf) => [normPath(cf.path), cf]));
+  const group = (key: (cf: CollectedFile) => string) => {
+    const m = new Map<string, CollectedFile[]>();
+    for (const cf of images) {
+      const k = key(cf);
+      const list = m.get(k);
+      if (list) list.push(cf);
+      else m.set(k, [cf]);
+    }
+    return m;
+  };
+  const byName = group((cf) => baseName(cf.path).toLowerCase());
+  const byStem = group((cf) => stemOf(baseName(cf.path)).toLowerCase());
+  const only = (list?: CollectedFile[]) => (list && list.length === 1 ? list[0] : undefined);
+  // An annotation's picture: beside it, or in the image folder next to its
+  // Annotations folder (the VOC layout), by <filename> and then by the
+  // XML's own name; anywhere else only when a single image has that name.
+  // Twins in train/ and val/ pair within their own split, and a name
+  // shared by several images (a.jpg + a.png, split twins) is never guessed.
+  const resolveImage = (xmlPath: string, filename: string): CollectedFile | undefined => {
+    const dir = dirOf(xmlPath);
+    const parent = dirOf(dir);
+    const dirs = [dir, ...["jpegimages", "images"].map((d) => joinPath(parent, d))];
+    const stem = stemOf(filename || baseName(xmlPath)).toLowerCase();
+    if (filename) {
+      for (const d of dirs) {
+        const hit = byPath.get(normPath(joinPath(d, filename)));
+        if (hit) return hit;
+      }
+    }
+    for (const d of dirs) {
+      const here = (byStem.get(stem) ?? []).filter((cf) => dirOf(cf.path) === d);
+      if (here.length === 1) return here[0];
+    }
+    return (filename ? only(byName.get(filename.toLowerCase())) : undefined) ?? only(byStem.get(stem));
+  };
 
   const warnings: string[] = [];
   const items: ImportItem[] = [];
   const classes: string[] = [];
   const classSeen = new Set<string>();
-  const usedStems = new Set<string>();
+  const used = new Set<string>();
   let boxesTotal = 0;
   let dropped = 0;
   let unpairedAnnotations = 0;
@@ -796,20 +837,13 @@ async function parseVoc(
       onProgress?.(++done, total);
       continue;
     }
-    // Resolve the image: exact <filename> match first (incl. extension), then
-    // an UNAMBIGUOUS stem match (a stem shared by >1 image is skipped so an
-    // annotation never pairs to the wrong file/format).
-    const byStem = (s: string) => (stemCollisions.has(s) ? undefined : imageByStem.get(s));
-    const img =
-      (parsed.filename && imageByName.get(parsed.filename.toLowerCase())) ||
-      byStem(stemOf(parsed.filename || baseName(xf.path)).toLowerCase()) ||
-      byStem(stemOf(baseName(xf.path)).toLowerCase());
-    if (!img) {
+    const img = resolveImage(xf.path, parsed.filename);
+    if (!img || used.has(normPath(img.path))) {
       unpairedAnnotations++;
       onProgress?.(++done, total);
       continue;
     }
-    usedStems.add(stemOf(baseName(img.path)).toLowerCase());
+    used.add(normPath(img.path));
 
     const boxes: ImportBox[] = [];
     parsed.objects.forEach((o, i) => {
@@ -853,8 +887,8 @@ async function parseVoc(
   // valid, intentionally-empty training data. Surfaced in stats so the
   // user can spot a pairing problem (e.g. a renamed folder).
   let unpairedImages = 0;
-  for (const [stem, cf] of imageByStem) {
-    if (usedStems.has(stem)) continue;
+  for (const cf of images) {
+    if (used.has(normPath(cf.path))) continue;
     unpairedImages++;
     background++;
     items.push({
@@ -872,8 +906,6 @@ async function parseVoc(
     warnings.push(`${unpairedImages} image(s) had no annotation and were imported as empty background frames.`);
   if (dropped > 0)
     warnings.push(`${dropped} box(es) were unlabelled or degenerate (zero-area) and were dropped.`);
-  if (stemCollisions.size > 0)
-    warnings.push(`${stemCollisions.size} image name(s) were ambiguous (same name, different extension); their annotations may not have paired.`);
   if (items.length === 0)
     warnings.push("No image/annotation pairs were found - check the folder layout.");
 
@@ -941,8 +973,18 @@ export async function prepareItemForUpload(
   const { bitmap, trueW, trueH, viaBitmap } = await decodeImage(item.file);
   try {
     let boxes = item.boxes;
-    const declaredW = item.width || trueW;
-    const declaredH = item.height || trueH;
+    let declaredW = item.width || trueW;
+    let declaredH = item.height || trueH;
+    // Annotated on the stored frame of a photo shown rotated (labelImg and
+    // PIL report that size): the declared size is the decoded one turned a
+    // quarter, and the boxes must turn with the picture, not stretch to it.
+    if (declaredW !== declaredH && declaredW === trueH && declaredH === trueW) {
+      const o = await jpegOrientation(item.file);
+      if (o >= 5 && o <= 8) {
+        boxes = boxes.map((b) => orientBox(b, o, declaredW, declaredH));
+        [declaredW, declaredH] = [declaredH, declaredW];
+      }
+    }
     const sx = trueW / (declaredW || trueW);
     const sy = trueH / (declaredH || trueH);
     if (sx !== 1 || sy !== 1) boxes = boxes.map((b) => scaleBox(b, sx, sy));
@@ -1024,6 +1066,53 @@ async function encodeCanvas(
   if (!blob) throw new Error("image encode failed");
   const name = `${stemOf(sourceName) || "image"}.jpg`;
   return materialise(blob, name);
+}
+
+// EXIF orientation (1-8) of a JPEG, 1 when it has none. Reads the header
+// segments only.
+export async function jpegOrientation(file: Blob): Promise<number> {
+  const v = new DataView(await file.slice(0, 131072).arrayBuffer());
+  if (v.byteLength < 4 || v.getUint16(0) !== 0xffd8) return 1;
+  let off = 2;
+  while (off + 4 <= v.byteLength) {
+    const marker = v.getUint16(off);
+    if ((marker & 0xff00) !== 0xff00 || marker === 0xffda) return 1; // image data: no EXIF
+    const len = v.getUint16(off + 2);
+    if (marker === 0xffe1 && off + 18 <= v.byteLength && v.getUint32(off + 4) === 0x45786966) {
+      const tiff = off + 10;
+      const le = v.getUint16(tiff) === 0x4949;
+      const ifd = tiff + v.getUint32(tiff + 4, le);
+      if (ifd + 2 > v.byteLength) return 1;
+      for (let i = 0, n = v.getUint16(ifd, le); i < n; i++) {
+        const e = ifd + 2 + i * 12;
+        if (e + 12 > v.byteLength) return 1;
+        if (v.getUint16(e, le) === 0x0112) {
+          const o = v.getUint16(e + 8, le);
+          return o >= 1 && o <= 8 ? o : 1;
+        }
+      }
+      return 1;
+    }
+    off += 2 + len;
+  }
+  return 1;
+}
+
+// A box (and its mask) from the stored w x h frame into the upright frame
+// of EXIF orientation o (5-8, the quarter turns).
+function orientBox(b: ImportBox, o: number, w: number, h: number): ImportBox {
+  const turn = ([x, y]: number[]): number[] =>
+    o === 5 ? [y, x] : o === 6 ? [h - y, x] : o === 7 ? [h - y, w - x] : [y, w - x];
+  const [ax, ay] = turn([b.x0, b.y0]);
+  const [bx, by] = turn([b.x1, b.y1]);
+  return {
+    ...b,
+    x0: Math.min(ax, bx),
+    y0: Math.min(ay, by),
+    x1: Math.max(ax, bx),
+    y1: Math.max(ay, by),
+    mask: b.mask ? { polygons: b.mask.polygons.map((ring) => ring.map((pt) => turn(pt))) } : b.mask,
+  };
 }
 
 function scaleBox(b: ImportBox, sx: number, sy: number): ImportBox {

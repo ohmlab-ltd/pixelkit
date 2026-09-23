@@ -71,6 +71,27 @@ export function stripTransientBoxFlags(box: EditableBox): EditableBox {
   return out;
 }
 
+/** `boxes` with masks from `source` filled in, by box id, for boxes that
+    have none and are still where `source` has them (a moved box takes no
+    stale mask). The bulk annotations payload carries no masks: a copy
+    taken from it, then saved on the next edit, deleted every mask. */
+export function withMasksFrom(
+  boxes: EditableBox[],
+  source: EditableBox[] | null | undefined,
+): EditableBox[] {
+  if (!source?.length) return boxes;
+  const byId = new Map(source.map((b) => [b.id, b]));
+  let changed = false;
+  const out = boxes.map((b) => {
+    if (b.mask) return b;
+    const s = byId.get(b.id);
+    if (!s?.mask || s.x0 !== b.x0 || s.y0 !== b.y0 || s.x1 !== b.x1 || s.y1 !== b.y1) return b;
+    changed = true;
+    return { ...b, mask: s.mask, ...(s.maskEdited !== undefined ? { maskEdited: s.maskEdited } : {}) };
+  });
+  return changed ? out : boxes;
+}
+
 type Props = {
   imageUrl: string;
   imageWidth: number;
@@ -1033,9 +1054,16 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
       try {
         const mask = await onBoxDrawn(box);
         stateRef.current.onChange(
-          stateRef.current.boxes.map((b) =>
-            b.id === boxId ? { ...b, segmenting: false, mask: mask ?? null } : b,
-          ),
+          stateRef.current.boxes.map((b) => {
+            if (b.id !== boxId) return b;
+            // Too late: the box moved again, or an undo put it back.
+            if (b.x0 !== box.x0 || b.y0 !== box.y0 || b.x1 !== box.x1 || b.y1 !== box.y1) {
+              return { ...b, segmenting: false };
+            }
+            // No mask (segmenter unavailable or failed): keep the one
+            // the box had, which a move has already carried along.
+            return { ...b, segmenting: false, mask: mask ?? b.mask ?? null };
+          }),
         );
       } catch {
         stateRef.current.onChange(
@@ -1151,7 +1179,9 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
         e.preventDefault();
         removeBox(selectedId);
       }
-      if (e.key === "Escape") {
+      if (e.key === "Escape" && !e.defaultPrevented && (selectedId || editingId || drawMode)) {
+        // Used here, so the viewer behind does not close as well.
+        e.preventDefault();
         setSelectedId(null);
         setEditingId(null);
         setDrawMode(false);
@@ -1203,8 +1233,11 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
         }
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // Capture phase: this listener is re-bound every render, so in the
+    // bubble phase it ran after the viewer's and Esc closed the viewer
+    // before it could be used here.
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   });
 
   const handlesFor = (b: EditableBox): { handle: Handle; cx: number; cy: number; cursor: string }[] => {
@@ -2113,7 +2146,7 @@ export function BoxEditor({ imageUrl, imageWidth, imageHeight, previewUrl = null
                     nx0 = pb.x0; ny0 = pb.y0; nx1 = pb.x1; ny1 = pb.y1;
                   }
                   onChangeUndoable(
-                    boxes.map((b) =>
+                    stateRef.current.boxes.map((b) =>
                       b.id === pb.id
                         ? { ...b, mask: { polygons }, maskEdited: true, x0: nx0, y0: ny0, x1: nx1, y1: ny1 }
                         : b,
@@ -2632,7 +2665,16 @@ function LabelPicker({
     (s) => s.toLowerCase() === q || displayLabelFn(s).toLowerCase() === q,
   );
 
-  const items = [...filtered, ...(showCreate ? [`__create:${q}`] : [])];
+  // What Enter takes by default: a label the text starts, else a new
+  // label named exactly as typed. A word inside a longer label ("light"
+  // in "traffic light") no longer hijacks Enter; arrows still reach all.
+  const startsQ = (s: string) =>
+    s.toLowerCase().startsWith(q) || displayLabelFn(s).toLowerCase().startsWith(q);
+  const prefixed = q ? filtered.filter(startsQ) : filtered;
+  const inside = q ? filtered.filter((s) => !startsQ(s)) : [];
+  const items = showCreate && prefixed.length === 0
+    ? [`__create:${q}`, ...inside]
+    : [...prefixed, ...inside, ...(showCreate ? [`__create:${q}`] : [])];
 
   const commit = (raw: string, isCreate = false) => {
     if (committed.current) return;

@@ -176,21 +176,30 @@ export const MaskPainter = forwardRef<MaskPainterHandle, Props>(function MaskPai
   }, [setBrushSize]);
 
   // Save with Enter, cancel with Escape, matches the rename picker's chord.
+  // Bound once, so it calls the latest commit/cancel through refs: the
+  // first render's copies saved the boxes as they were when painting began.
+  // Capture phase and consumed, with the arrows too: the viewer behind
+  // must not close or change image, which discarded the paint.
+  const commitRef = useRef(commit);
+  commitRef.current = commit;
+  const onCancelRef = useRef(onCancel);
+  onCancelRef.current = onCancel;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (document.activeElement?.tagName || "").toLowerCase();
       if (tag === "input" || tag === "textarea") return;
       if (e.key === "Enter") {
         e.preventDefault();
-        commit();
+        commitRef.current();
       } else if (e.key === "Escape") {
         e.preventDefault();
-        onCancel();
+        onCancelRef.current();
+      } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        e.preventDefault();
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, []);
 
   // The wrapper sits in the same coordinate space as the BoxEditor SVG
