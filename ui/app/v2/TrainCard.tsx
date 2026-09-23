@@ -806,6 +806,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
           {preflight.images && (
             <span className="tabular-nums">
               {preflight.images.train} train · {preflight.images.val} val
+              {preflight.images.background ? `, ${preflight.images.background} of them background` : ""}
               {useAug && preflight.images.augmented > 0 ? ` · ${preflight.images.augmented} augmented copies` : ""}
               {preflight.images.unlabelled > 0 ? ` · ${preflight.images.unlabelled} unlabelled (skipped)` : ""}
               {preflight.classes.length > 0 ? ` · ${preflight.classes.length} classes` : ""}

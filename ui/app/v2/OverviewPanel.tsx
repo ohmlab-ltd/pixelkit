@@ -18,7 +18,7 @@ import type { StoreImport } from "./store/projectStore";
 // live here. Width is capped so it stays natural on very wide screens.
 
 type Stats = {
-  counts?: { imports?: number; with_detections?: number; detections?: number; augmentations?: number; near_duplicates?: number; embeddings_ready?: number };
+  counts?: { imports?: number; with_detections?: number; background?: number; detections?: number; augmentations?: number; near_duplicates?: number; embeddings_ready?: number };
   labels?: { label: string; count: number }[];
   health?: { score?: number; factors?: Record<string, number> };
   variation?: { points: StatsPoint[]; augmentations?: AugmentPoint[]; near_duplicate_ids: string[] };
@@ -252,7 +252,10 @@ export function OverviewPanel({
   const colourFor = (lab: string | null) => (lab ? (labelColours?.[lab] ?? colourForLabelStable(lab)) : "#9ca3af");
 
   // Insights
-  const noDet = typeof withDet === "number" ? Math.max(0, images - withDet) : null;
+  // Background images are annotated: checked, with nothing in them.
+  const noDet = typeof withDet === "number"
+    ? Math.max(0, images - withDet - (full?.counts?.background ?? 0))
+    : null;
   const under = (() => {
     if (dist.length < 2) return null;
     const maxC = dist[0].count;
@@ -278,7 +281,7 @@ export function OverviewPanel({
           ) : noDet > 0 ? (
             <InsightCard tone="warn" title={`${noDet} ${noDet === 1 ? "image has" : "images have"} no detections`} desc="Label or remove them to improve coverage." />
           ) : (
-            <InsightCard tone="good" title="Full coverage" desc="Every image has at least one detection." />
+            <InsightCard tone="good" title="Full coverage" desc="Every image has detections or is marked background." />
           )}
           {dist.length === 0 ? (
             <InsightCard tone="info" title="Label balance" desc="Add detections to see how your labels balance." />

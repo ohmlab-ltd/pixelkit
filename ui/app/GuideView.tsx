@@ -1099,7 +1099,7 @@ function DatasetSection({ go }: { go: (k: GuideSectionKey) => void }) {
           items={[
                         "Image orientation from EXIF metadata is honoured so iPhone photos don&rsquo;t end up sideways.",
             "Upload progress streams into the dataset gallery one tile at a time, with blurred placeholders for in-flight files.",
-            "Up to 100 MB per video, then the file gets split into per-frame images on the server.",
+            "Up to 100 MB per video, split into per-frame images on this machine before upload.",
             "Already have annotations? The <em>Import a labelled dataset</em> step on the home page takes Pascal VOC, COCO or YOLO (folder or zip): every box comes in editable and polygon masks are kept.",
           ]}
         />
@@ -1107,16 +1107,18 @@ function DatasetSection({ go }: { go: (k: GuideSectionKey) => void }) {
 
       <GuideSection n={2} title="Video trim and frame rate">
         <p>
-          Dropping a video opens a small modal before it&rsquo;s sent to the
-          server. Drag the in / out handles to trim, set the frames-per-second
-          rate, and preview how many frames the import will produce. The video
-          is sliced server-side and each frame is treated like a fresh image.
+          Dropping a video opens a small modal before anything is uploaded.
+          Drag the in / out handles to trim, set the frames-per-second rate,
+          and preview how many frames the import will produce. The video is
+          sliced into frames locally and each frame is treated like a fresh
+          image.
         </p>
         <Bullets
           items={[
             "<strong>Trim handles</strong> let you crop to the relevant section of the clip so you don&rsquo;t flood the dataset with near-identical frames.",
-            "<strong>FPS slider</strong> ranges from a single frame per second up to the source frame rate. Lower FPS produces more varied frames.",
+            "<strong>FPS slider</strong> ranges from half a frame to ten frames per second. Lower FPS produces more varied frames.",
             "<strong>Preview count</strong> updates as you drag so you can dial in roughly how many images the import will create.",
+            "<strong>Recordings from the board</strong>. Neuro Studio&rsquo;s Record button saves the Neuro N6 camera&rsquo;s stream as an <em>.mjpeg</em> file. Drop it here like a video: PixelKit splits it into its frames as they are, trimmed in frames and sampled as one frame in N. Pictures from the camera the model will run on are the best training data.",
           ]}
         />
       </GuideSection>
@@ -1172,7 +1174,7 @@ function DatasetSection({ go }: { go: (k: GuideSectionKey) => void }) {
         <Bullets
           items={[
             "<strong>All</strong>. Default. Every tile.",
-            "<strong>Unlabelled</strong>. Images with nothing detected.",
+            "<strong>Unlabelled</strong>. Images with nothing detected, other than those marked background.",
             "<strong>Unrated</strong>. Images you haven&rsquo;t reviewed yet.",
             "<strong>Good / Bad / Unsure</strong>. Whatever verdict you assigned in Review mode.",
           ]}
@@ -1187,7 +1189,8 @@ function DatasetSection({ go }: { go: (k: GuideSectionKey) => void }) {
           Select all, Delete N, and Cancel buttons.
         </p>
         <Callout tone="warn">
-          <Strong>Bulk delete is permanent.</Strong> The selected images, their
+          <Strong>Bulk delete is permanent.</Strong> Select all takes the
+          images the current filter shows. The selected images, their
           labelled-preview thumbnails, and their augmentations are all removed
           in one go.
         </Callout>
@@ -1209,6 +1212,7 @@ function DatasetSection({ go }: { go: (k: GuideSectionKey) => void }) {
             "Esc closes the viewer and returns to the gallery.",
             "Toolbar pills toggle the box, label, and mask display layers, plus the Click-to-detect and Manual labelling modes covered in the Labelling section.",
             "<strong>Clear all annotations</strong>. Wipes every box and mask on the current image in one modal-confirmed click. Useful for restarting from scratch on a difficult shot. Cleared images are treated as unlabelled, so the next Start labelling run will re-label them.",
+            "<strong>Background</strong>. Shown instead of Clear all on an image with no boxes: marks it as checked, with nothing in it to label. It then counts as labelled, labelling runs leave it alone, and training learns from it as a negative example, which is what stops a detector firing on an empty scene. Drawing a box on it unmarks it. Select mode marks many at once (<em>Mark N background</em>), and an imported dataset&rsquo;s images whose annotation lists no objects arrive marked.",
             "<strong>Delete image</strong>. Removes the current image from the dataset entirely (the same as the gallery tile&rsquo;s trash) and moves on to the next one, or closes the viewer if it was the last.",
             "<strong>Live detection count</strong>. The header count next to the resolution reflects the boxes on the canvas, so it updates the moment you add or delete a detection.",
             "Large originals (e.g. 4K) load a fast display version first, then sharpen to full resolution in the background, so the viewer opens quickly and zoom stays crisp.",
@@ -2080,7 +2084,10 @@ function TrainingSection({ go }: { go: (k: GuideSectionKey) => void }) {
           and hands its output to the core&rsquo;s PixelKit post-processor,
           so the boxes appear on Neuro Studio&rsquo;s live video (or on the
           TFT carrier&rsquo;s display) with the class names and the
-          calibrated threshold from the labels header. The core compiles the
+          calibrated threshold from the labels header. While the sketch runs,
+          Neuro Studio shows that threshold as a <strong>confidence</strong>{" "}
+          slider: drag it on your own scene, then write the value you settle
+          on into the labels header. The core compiles the
           model with ST Edge AI and flashes it with the sketch. The same run can
           be started from a terminal with{" "}
           <span className="font-mono">pixelkit train &lt;dataset&gt;</span>;

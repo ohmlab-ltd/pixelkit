@@ -6,12 +6,104 @@
 //
 // Lifted verbatim from V1's ProjectView so both the V1 and V2 drop
 // flows can share the same kernel.
+//
+// Neuro Studio's Record button saves the board's camera stream as
+// .mjpeg: its JPEG frames end to end, with no container and no timing,
+// which no browser plays. Those are split here instead, trimmed in
+// frames rather than seconds, and imported as they are, since every
+// frame already is a JPEG.
 
-export type VideoExtractParams = {
-  start: number;
-  end: number;
-  fps: number;
-};
+// A video is trimmed in seconds and sampled at fps; an .mjpeg recording
+// is trimmed in frame indices and keeps every step-th frame.
+export type VideoExtractParams =
+  | { start: number; end: number; fps: number }
+  | { start: number; end: number; step: number };
+
+export function isMjpeg(file: File): boolean {
+  return /\.mjpe?g$/i.test(file.name);
+}
+
+// What the video import takes: videos, and recordings from the board.
+export function isVideoFile(file: File): boolean {
+  return file.type.startsWith("video/") || isMjpeg(file);
+}
+
+// How many frames an extraction yields.
+export function extractCount(p: VideoExtractParams): number {
+  if ("step" in p) return Math.floor((Math.round(p.end) - Math.round(p.start)) / Math.max(1, Math.round(p.step))) + 1;
+  return Math.max(1, Math.floor((p.end - p.start) * p.fps) + 1);
+}
+
+// [start, end) byte ranges of the JPEGs in a buffer that holds them end
+// to end. Follows each frame's marker segments rather than searching for
+// an end marker, so a thumbnail inside a frame's EXIF, or entropy-coded
+// bytes that happen to spell one, never cut it short. Damaged data is
+// skipped up to the next start of image.
+export function jpegFrameRanges(b: Uint8Array): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  const nextStart = (from: number) => {
+    for (let i = from; i + 2 < b.length; i++) {
+      if (b[i] === 0xff && b[i + 1] === 0xd8 && b[i + 2] === 0xff) return i;
+    }
+    return b.length;
+  };
+  let i = nextStart(0);
+  while (i < b.length) {
+    const end = jpegEnd(b, i);
+    if (end < 0) {
+      i = nextStart(i + 2);
+      continue;
+    }
+    out.push([i, end]);
+    i = nextStart(end);
+  }
+  return out;
+}
+
+// The end (exclusive) of the JPEG starting at `start`, or -1 when it is
+// cut short or malformed.
+function jpegEnd(b: Uint8Array, start: number): number {
+  let p = start + 2;
+  while (p + 1 < b.length) {
+    if (b[p] !== 0xff) return -1;
+    const m = b[p + 1];
+    if (m === 0xff) {
+      p += 1; // fill byte before a marker
+      continue;
+    }
+    if (m === 0xd9) return p + 2; // end of image
+    if (m === 0x01 || (m >= 0xd0 && m <= 0xd7)) {
+      p += 2; // markers without a length
+      continue;
+    }
+    if (p + 3 >= b.length) return -1;
+    p += 2 + ((b[p + 2] << 8) | b[p + 3]);
+    if (m !== 0xda) continue;
+    // Start of scan: entropy-coded data runs to the next marker, which
+    // is an 0xFF not followed by a stuffed 0x00 or a restart marker.
+    while (p + 1 < b.length && !(b[p] === 0xff && b[p + 1] !== 0 && (b[p + 1] < 0xd0 || b[p + 1] > 0xd7))) p++;
+  }
+  return -1;
+}
+
+// The frames of an .mjpeg recording as JPEG blobs (slices of the file,
+// not copies). Cached per file, so the modal and the import share one scan.
+const recordings = new WeakMap<File, Promise<Blob[]>>();
+export function mjpegFrames(file: File): Promise<Blob[]> {
+  let frames = recordings.get(file);
+  if (!frames) {
+    frames = file.arrayBuffer().then((buf) =>
+      jpegFrameRanges(new Uint8Array(buf)).map(([s, e]) => file.slice(s, e, "image/jpeg")),
+    );
+    recordings.set(file, frames);
+  }
+  return frames;
+}
+
+function frameName(file: File, n: number): string {
+  const baseName = file.name.replace(/\.[^.]+$/, "").replace(/\s+/g, "_");
+  return `${baseName}_frame${String(n).padStart(4, "0")}.jpg`;
+}
 
 // Per-frame size + quality ladder, matches lib/resize.ts's defaults so
 // extracted frames never balloon past what the upload pipeline allows
@@ -58,6 +150,18 @@ export async function extractVideoFrames(
   params: VideoExtractParams,
   onProgress: (i: number, total: number) => void,
 ): Promise<File[]> {
+  if ("step" in params) {
+    const frames = await mjpegFrames(file);
+    const step = Math.max(1, Math.round(params.step));
+    const last = Math.min(Math.round(params.end), frames.length - 1);
+    const total = extractCount(params);
+    const out: File[] = [];
+    for (let i = Math.max(0, Math.round(params.start)); i <= last; i += step) {
+      out.push(new File([frames[i]], frameName(file, out.length + 1), { type: "image/jpeg" }));
+      onProgress(out.length, total);
+    }
+    return out;
+  }
   const url = URL.createObjectURL(file);
   const video = document.createElement("video");
   video.src = url;
@@ -93,7 +197,6 @@ export async function extractVideoFrames(
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("Canvas 2D context unavailable");
 
-    const baseName = file.name.replace(/\.[^.]+$/, "").replace(/\s+/g, "_");
     const interval = 1 / Math.max(0.1, params.fps);
     const span = Math.max(0, params.end - params.start);
     const totalFrames = Math.max(1, Math.floor(span * params.fps) + 1);
@@ -124,8 +227,7 @@ export async function extractVideoFrames(
         }, 3000);
       });
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const fname = `${baseName}_frame${String(i + 1).padStart(4, "0")}.jpg`;
-      const framed = await encodeFrameUnderCap(canvas, fname);
+      const framed = await encodeFrameUnderCap(canvas, frameName(file, i + 1));
       if (framed) out.push(framed);
       onProgress(i + 1, totalFrames);
     }

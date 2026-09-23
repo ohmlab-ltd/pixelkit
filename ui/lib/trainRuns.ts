@@ -149,7 +149,8 @@ export type Preflight = {
   blockers: string[];
   warnings: string[];
   classes: PreflightClass[];
-  images: { train: number; val: number; augmented: number; unlabelled: number } | null;
+  // background: how many of train + val are background images (no boxes).
+  images: { train: number; val: number; augmented: number; unlabelled: number; background?: number } | null;
 };
 
 export const IMG_SIZES = [128, 192, 256, 320, 416] as const;

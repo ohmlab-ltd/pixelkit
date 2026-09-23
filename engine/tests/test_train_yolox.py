@@ -288,7 +288,11 @@ def test_export_is_a_sketch_folder_that_runs_the_model(tmp_path):
     assert "OV5640 camera;" in ino
     assert "cfg.nn.width  = BOLTS_INPUT_W;" in ino and "cfg.nn.height = BOLTS_INPUT_H;" in ino
     assert "cfg.nn.aspect = ASPECT_CROP_CENTER;" in ino
-    assert "PostProcess_PixelKitYOLOX(BOLTS_CONF_THRESHOLD, BOLTS_NMS_THRESHOLD," in ino
+    assert "PostProcess_PixelKitYOLOX(confidence, BOLTS_NMS_THRESHOLD," in ino
+    # The threshold starts at the calibrated value and is a live slider.
+    assert "static float confidence = BOLTS_CONF_THRESHOLD;" in ino
+    assert 'n6_tune_float("confidence", &confidence, 0.01f, 0.99f);' in ino
+    assert "if (confidence != applied) {" in ino
     assert "BOLTS_CLASSES, BOLTS_NUM_CLASSES);" in ino
     assert "Vision.begin(&NN_Instance_bolts, detector, cfg);" in ino
     assert "nullptr, cfg" not in ino and "Vision.begin(&NN_Instance_bolts, nullptr" not in ino

@@ -12,7 +12,7 @@ locally. The local API behind the Train card is in [API.md](API.md).
 |---|---|
 | `<slug>_int8.onnx` | the deployable model: full-integer QDQ int8, raw head |
 | `<slug>_labels.h` | `<SLUG>_NUM_CLASSES`, `<SLUG>_INPUT_W/H`, the calibrated `<SLUG>_CONF_THRESHOLD`, `<SLUG>_NMS_THRESHOLD`, `<SLUG>_CLASSES[]` |
-| `<slug>.ino` | the sketch: declares the camera, feeds the model at its input size and binds the core's `PostProcess_PixelKitYOLOX`, which publishes the boxes to Neuro Studio |
+| `<slug>.ino` | the sketch: declares the camera, feeds the model at its input size and binds the core's `PostProcess_PixelKitYOLOX`, which publishes the boxes to Neuro Studio; the confidence threshold is a live slider there |
 | `report.json` | AP@0.5 float vs int8 (overall and per class), threshold sweep, per-class precision/recall, confusion matrix, per-epoch history, input contract, NPU build facts |
 | `export.zip` | a `<slug>/` sketch folder with the sketch, the model, the labels header and `report.json`: unzip it and open the sketch in the Arduino IDE |
 | `failures/`, `failures.json` | the worst val images with misses, spurious boxes and wrong classes drawn |
@@ -28,10 +28,22 @@ that image's generated augmentations (from the Augmentations tab), with
 their transformed boxes. Augmentations of a val image are never used, so
 the val score is never inflated by a copy of a val picture.
 
+Images marked **background** train too, as negatives: pictures of the
+scene with nothing in it, which teach the model where not to fire. A
+fixed camera that reports objects in an empty room needs exactly these.
+Mark an image with no boxes as background in the viewer, or many at once
+from the gallery's Select mode; an imported dataset's images whose
+annotation lists no objects arrive marked. A background image counts as
+labelled, the labelling runs leave it alone, and drawing a box on it
+unmarks it. Images with no boxes that are not marked stay unlabelled
+and are not used.
+
 The split is per class rather than per image: every class with two or
 more images gets at least one val image and keeps at least one train
 image, and each class is held out at the chosen ratio (60 to 90% of its
-images train). It is keyed on filenames, so the same dataset splits the
+images train). Background images are split the same way, as a class of
+their own, so the val score also counts boxes found where there is
+nothing. It is keyed on filenames, so the same dataset splits the
 same way every time. One exception: an image that also shows a class
 with a single image stays in train, because learning that class beats
 measuring another; a class left unmeasured that way is named by the
@@ -41,7 +53,8 @@ scored, labels matched by name. That is the honest number for a camera
 the model has never seen.
 
 Before a run starts, a pre-flight check says what will be used and
-what will go wrong: too few labelled images (blocks), classes with fewer
+what will go wrong: too few labelled images, or background images with
+no boxed image to learn from (blocks), classes with fewer
 than ten boxes, classes the val split cannot measure, objects under 8
 px at the chosen input size, byte-identical images on both sides of the
 split. Warnings are recorded in the report.
@@ -153,6 +166,12 @@ green is the truth, thin blue a correct detection, yellow a miss, red a
 spurious box, orange the right place with the wrong class. That gallery
 is where the next labelling hour should go.
 
+On the board the threshold is not fixed: the exported sketch registers
+it with the core's live tuning (`n6_tune_float`), so Neuro Studio shows
+a **confidence** slider while the sketch runs. Drag it on your own scene
+to trade missed objects against false ones, then write the value into
+`<SLUG>_CONF_THRESHOLD`; the slider itself is not saved on the board.
+
 ## Label with your own model
 
 A finished run can pre-label the dataset's unlabelled images (Label
@@ -196,6 +215,15 @@ float model.
 [--eval-dataset NAME] [--from RUN] [--resume RUN] [--device cuda:1] [--out DIR]`
 runs the same job from a terminal and copies the export out. The
 endpoints are in [API.md](API.md).
+
+## Recording on the board
+
+The camera the model will run on is the best source of training
+pictures. Neuro Studio's Record button saves the board's stream as an
+`.mjpeg` file; drop it on a dataset like a video and PixelKit splits it
+into its frames (no conversion needed), with a trim and a "1 in N
+frames" sample to keep near-identical frames out. Frames where nothing
+is in view are good background images.
 
 ## Importing an existing dataset
 

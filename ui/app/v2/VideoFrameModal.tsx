@@ -8,8 +8,13 @@
 // Flow: parent queues videos → modal mounts → user picks trim + fps →
 // onConfirm fires → parent calls extractVideoFrames (lib/videoFrames)
 // and re-feeds the result into the image upload pipeline.
+//
+// A recording from the board (Neuro Studio's .mjpeg) is frames with no
+// timing and no browser plays it, so it is previewed a frame at a time,
+// trimmed in frames and sampled as one frame in N.
 
 import { useEffect, useRef, useState } from "react";
+import { extractCount, isMjpeg, mjpegFrames, type VideoExtractParams } from "../../lib/videoFrames";
 
 const THUMB_COUNT = 16;
 
@@ -24,8 +29,9 @@ export function VideoFrameModal({
       its progress view + disables every cancellation affordance. */
   extracting: { done: number; total: number } | null;
   onCancel: () => void;
-  onConfirm: (params: { start: number; end: number; fps: number }) => void;
+  onConfirm: (params: VideoExtractParams) => void;
 }) {
+  const recording = isMjpeg(file);
   // Object URL lifecycle is managed inside the effect (not lazy-init
   // useState) so React 18's StrictMode double-mount doesn't revoke
   // the URL the live <video> element is still pointing at, that bug
@@ -33,10 +39,11 @@ export function VideoFrameModal({
   // opened, even on a clean 20 MB MP4.
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => {
+    if (recording) return;
     const url = URL.createObjectURL(file);
     setSrc(url);
     return () => URL.revokeObjectURL(url);
-  }, [file]);
+  }, [file, recording]);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [duration, setDuration] = useState(0);
   const [start, setStart] = useState(0);
@@ -46,6 +53,47 @@ export function VideoFrameModal({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [thumbs, setThumbs] = useState<string[]>([]);
   const isExtracting = !!extracting;
+  // A recording's frames, the one on show, and one frame kept in `step`.
+  const [frames, setFrames] = useState<Blob[] | null>(null);
+  const [shown, setShown] = useState(0);
+  const [frameSrc, setFrameSrc] = useState<string | null>(null);
+  const [step, setStep] = useState(10);
+
+  useEffect(() => {
+    if (!recording) return;
+    let alive = true;
+    mjpegFrames(file).then(
+      (f) => {
+        if (!alive) return;
+        if (f.length === 0) {
+          setLoadError("No JPEG frames found in this recording.");
+          return;
+        }
+        setFrames(f);
+        setDuration(f.length - 1);
+        setEnd(f.length - 1);
+        setLoaded(true);
+      },
+      () => { if (alive) setLoadError("Couldn't read this recording."); },
+    );
+    return () => { alive = false; };
+  }, [file, recording]);
+
+  useEffect(() => {
+    if (!frames) return;
+    const url = URL.createObjectURL(frames[Math.min(shown, frames.length - 1)]);
+    setFrameSrc(url);
+    return () => URL.revokeObjectURL(url);
+  }, [frames, shown]);
+
+  useEffect(() => {
+    if (!frames) return;
+    const n = Math.min(THUMB_COUNT, frames.length);
+    const urls = Array.from({ length: n }, (_, i) =>
+      URL.createObjectURL(frames[Math.round((i / Math.max(1, n - 1)) * (frames.length - 1))]));
+    setThumbs(urls);
+    return () => urls.forEach((u) => URL.revokeObjectURL(u));
+  }, [frames]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -128,17 +176,20 @@ export function VideoFrameModal({
   };
 
   const seek = (t: number) => {
-    if (videoRef.current) videoRef.current.currentTime = t;
+    if (recording) setShown(Math.round(t));
+    else if (videoRef.current) videoRef.current.currentTime = t;
   };
 
   const fmt = (s: number) => {
+    if (recording) return `#${Math.round(s) + 1}`;
     const m = Math.floor(s / 60);
     const r = s - m * 60;
     return `${m}:${r.toFixed(1).padStart(4, "0")}`;
   };
 
-  const frameCount = duration > 0 ? Math.max(1, Math.floor((end - start) * fps) + 1) : 0;
-  const span = end - start;
+  const params: VideoExtractParams = recording ? { start, end, step } : { start, end, fps };
+  const frameCount = loaded ? extractCount(params) : 0;
+  const span = recording ? `${Math.round(end) - Math.round(start) + 1} frames` : fmt(end - start);
 
   return (
     <div
@@ -152,7 +203,7 @@ export function VideoFrameModal({
       <div className="pk-glass pk-pop max-w-2xl w-full rounded-md overflow-hidden">
         <header className="px-6 pt-5 pb-3 flex items-start justify-between gap-4">
           <div>
-            <div className="pk-micro">Video import</div>
+            <div className="pk-micro">{recording ? "Board recording" : "Video import"}</div>
             <h2 className="mt-1 text-[15px] font-medium tracking-tight truncate">
               {file.name}
             </h2>
@@ -169,6 +220,14 @@ export function VideoFrameModal({
 
         <div className="px-6 pb-2">
           <div className="relative rounded-md overflow-hidden bg-[var(--background)] border border-[var(--line)]">
+            {recording && frameSrc && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={frameSrc}
+                alt={`Frame ${shown + 1}`}
+                className="w-full max-h-[50vh] object-contain block bg-[var(--background)]"
+              />
+            )}
             {src && (
             /* eslint-disable-next-line jsx-a11y/media-has-caption */
             <video
@@ -198,7 +257,7 @@ export function VideoFrameModal({
                   <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="animate-spin">
                     <path d="M21 12a9 9 0 1 1-6.2-8.55" />
                   </svg>
-                  Loading video…
+                  {recording ? "Reading recording…" : "Loading video…"}
                 </div>
               </div>
             )}
@@ -217,7 +276,7 @@ export function VideoFrameModal({
             <div className="flex items-center justify-between text-xs text-foreground/55 mb-2">
               <span className="flex items-center gap-2">
                 Trim
-                {loaded && thumbs.length > 0 && thumbs.length < THUMB_COUNT && (
+                {!recording && loaded && thumbs.length > 0 && thumbs.length < THUMB_COUNT && (
                   <span className="inline-flex items-center gap-1.5 text-foreground/40">
                     <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="animate-spin">
                       <path d="M21 12a9 9 0 1 1-6.2-8.55" />
@@ -228,7 +287,7 @@ export function VideoFrameModal({
               </span>
               <span className="font-mono tabular-nums">
                 {fmt(start)}  →  {fmt(end)}
-                <span className="text-foreground/35 ml-2">({fmt(span)})</span>
+                <span className="text-foreground/35 ml-2">({span})</span>
               </span>
             </div>
             <TrimSlider
@@ -245,7 +304,31 @@ export function VideoFrameModal({
             />
           </div>
 
-          {/* Frame rate */}
+          {/* Frame rate; for a recording, one frame kept in `step`. */}
+          {recording ? (
+          <div>
+            <div className="flex items-center justify-between text-xs mb-2">
+              <span className="text-foreground/55">Sample</span>
+              <span className="font-mono tabular-nums text-sm text-foreground/90">
+                {step === 1 ? "every frame" : `1 in ${step} frames`}
+              </span>
+            </div>
+            <input
+              type="range"
+              min={1}
+              max={30}
+              step={1}
+              value={step}
+              onChange={(e) => setStep(parseInt(e.target.value, 10))}
+              disabled={isExtracting}
+              className="w-full accent-[var(--accent)] disabled:opacity-50"
+            />
+            <div className="flex items-center justify-between text-[10px] text-foreground/35 font-mono tabular-nums mt-1">
+              <span>1</span>
+              <span>30</span>
+            </div>
+          </div>
+          ) : (
           <div>
             <div className="flex items-center justify-between text-xs mb-2">
               <span className="text-foreground/55">Sample rate</span>
@@ -266,6 +349,7 @@ export function VideoFrameModal({
               <span>10</span>
             </div>
           </div>
+          )}
         </div>
 
         {isExtracting ? (
@@ -308,7 +392,7 @@ export function VideoFrameModal({
                 Cancel
               </button>
               <button
-                onClick={() => onConfirm({ start, end, fps })}
+                onClick={() => onConfirm(params)}
                 disabled={!loaded || frameCount === 0 || !!loadError}
                 className="rounded-md bg-[var(--accent)] text-[var(--accent-contrast)] px-5 py-2 text-sm font-medium hover:brightness-105 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >

@@ -1033,6 +1033,26 @@ def _workspace_card_sidecar_path(project_id: str) -> Path:
     return project_dir(project_id) / "workspace_card_v1.json"
 
 
+def _import_has_labels(entry: dict) -> bool:
+    """An image carries labels: once the user has edited it, their boxes
+    decide (an image they emptied has none); before that, the labelling
+    pass's own flag, or for imports older than the flag, its detections."""
+    if entry.get("editedBoxesSet"):
+        edited = entry.get("editedBoxes")
+        return isinstance(edited, list) and len(edited) > 0
+    flag = entry.get("labelled")
+    if isinstance(flag, bool):
+        return flag
+    return bool(entry.get("detections"))
+
+
+def _import_is_labelled(entry: dict) -> bool:
+    """Done: it carries labels, or it is marked background (checked, with
+    nothing in it to label), which labelling passes leave alone and
+    training learns from as a negative."""
+    return isinstance(entry, dict) and (bool(entry.get("background")) or _import_has_labels(entry))
+
+
 def _build_workspace_card_payload(project_id: str, manifest: dict) -> dict:
     """Compute the per-project card payload from a manifest. Same fields
     list_projects builds in its loop, minus the per-viewer transforms
@@ -1049,25 +1069,7 @@ def _build_workspace_card_payload(project_id: str, manifest: dict) -> dict:
     if manifest.get("v2"):
         v2_imports = manifest.get("imports") or []
         n_images_v2 = len(v2_imports)
-
-        def _v2_is_labelled(entry: dict) -> bool:
-            if not isinstance(entry, dict):
-                return False
-            # User edits (click-to-detect, add-box, Clear all) are
-            # the authoritative signal once editedBoxesSet flips
-            # True - a labelled=False entry that the user manually
-            # drew boxes on IS labelled; a labelled=True entry the
-            # user emptied via Clear all is NOT.
-            if entry.get("editedBoxesSet"):
-                edited = entry.get("editedBoxes")
-                return isinstance(edited, list) and len(edited) > 0
-            flag = entry.get("labelled")
-            if flag is True:
-                return True
-            if flag is False:
-                return False
-            return bool(entry.get("detections"))
-        n_labelled = sum(1 for e in v2_imports if _v2_is_labelled(e))
+        n_labelled = sum(1 for e in v2_imports if _import_is_labelled(e))
         n_unlabelled = max(0, n_images_v2 - n_labelled)
 
     cover = manifest.get("cover")
@@ -2785,28 +2787,13 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
     # per-image save below.
     force_relabel = bool((job.params or {}).get("force_relabel"))
     for entry in (manifest.get("imports") or []):
-        if not isinstance(entry, dict):
+        # A background image is the user's decision, even on a relabel.
+        # Otherwise user-edited boxes win (_import_has_labels): a "Clear
+        # all" leaves labelled=True but an empty edit, which says "label
+        # this again".
+        if not isinstance(entry, dict) or entry.get("background"):
             continue
-        if force_relabel:
-            pending.append(entry)
-            continue
-        # User-edited boxes win as the source of truth - see
-        # _v2_is_labelled. A "Clear all" in the viewer leaves
-        # labelled=True but flips editedBoxesSet=True with an
-        # empty editedBoxes list, which is the user explicitly
-        # saying "this image is now unlabelled". Without this
-        # branch, clicking Start labelling new images after a
-        # Clear all did nothing because the labelled flag was
-        # still True from the original pass.
-        if entry.get("editedBoxesSet"):
-            edited = entry.get("editedBoxes")
-            is_unlabelled = not (isinstance(edited, list) and len(edited) > 0)
-        else:
-            is_unlabelled = (
-                entry.get("labelled") is False
-                or (entry.get("labelled") is None and not (entry.get("detections") or []))
-            )
-        if is_unlabelled:
+        if force_relabel or not _import_has_labels(entry):
             pending.append(entry)
     # Process pending in the same order the FE gallery shows them
     # (createdAt DESC - newest at top-left, oldest at bottom-right).
@@ -5644,11 +5631,15 @@ async def v2_upload_import_raw_batch(
                 _labels = [b["label"] for b in _clean]
             except Exception as _be:
                 print(f"[v2-import-raw-batch] box parse failed for item {idx}: {_be}")
-                _clean, _dropped, _labels = [], 0, []
+                _parsed, _clean, _dropped, _labels = None, [], 0, []
             entry["detections"] = []
             entry["editedBoxes"] = _clean
             entry["editedBoxesSet"] = True
             entry["labelled"] = True
+            # An annotation that lists no objects declares a background
+            # frame; one whose boxes were all unusable does not.
+            if _parsed == []:
+                entry["background"] = True
 
         return {
             "idempotency_key": idem,
@@ -6025,6 +6016,10 @@ def _compute_blurhash_safe(pil_image) -> str | None:
 class V2ImportPatch(BaseModel):
     editedBoxes: list | None = None
     detections: list | None = None
+    # True marks the image background: checked, with nothing in it to
+    # label. It then carries no boxes, labelling passes skip it and
+    # training uses it as a negative. Saving boxes onto it unmarks it.
+    background: bool | None = None
 
 
 @app.put(
@@ -6048,10 +6043,15 @@ async def v2_update_import(project_id: str, import_id: str, payload: V2ImportPat
         if not manifest:
             raise HTTPException(404, "manifest not found")
         imports = manifest.get("imports") or []
+        edited_boxes = [] if payload.background else payload.editedBoxes
         for i, imp in enumerate(imports):
             if imp.get("id") == import_id:
-                if payload.editedBoxes is not None:
-                    imp["editedBoxes"] = payload.editedBoxes
+                if payload.background:
+                    imp["background"] = True
+                elif payload.background is False or edited_boxes:
+                    imp.pop("background", None)
+                if edited_boxes is not None:
+                    imp["editedBoxes"] = edited_boxes
                     # Mark this import as user-edited. The annotations
                     # endpoint reads this flag to decide whether to
                     # send `editedBoxes` to the FE - without it, an
@@ -8379,6 +8379,7 @@ def _compute_dataset_stats_v2(project_id: str, lite: bool = False) -> dict:
     n_detections = 0
     n_unsure = 0
     n_with_dets = 0
+    n_background = 0
     aug_count = 0
     for imp in imports:
         # An explicit empty editedBoxes (user cleared all boxes, with
@@ -8395,6 +8396,8 @@ def _compute_dataset_stats_v2(project_id: str, lite: bool = False) -> dict:
             used_edited = False
         if dets:
             n_with_dets += 1
+        elif imp.get("background"):
+            n_background += 1  # checked, with nothing in it: annotated too
         for d in dets:
             if not isinstance(d, dict):
                 continue
@@ -8531,7 +8534,7 @@ def _compute_dataset_stats_v2(project_id: str, lite: bool = False) -> dict:
         score_confidence = 1.0
         score_uniqueness = 1.0
     else:
-        score_coverage = n_with_dets / total_imports
+        score_coverage = (n_with_dets + n_background) / total_imports
         if label_counts:
             counts = _np.array(list(label_counts.values()), dtype=_np.float32)
             if counts.sum() > 0 and len(counts) > 1:
@@ -8574,6 +8577,7 @@ def _compute_dataset_stats_v2(project_id: str, lite: bool = False) -> dict:
         "counts": {
             "imports": total_imports,
             "with_detections": n_with_dets,
+            "background": n_background,
             "detections": n_detections,
             "unsure_detections": n_unsure,
             "augmentations": aug_count,
@@ -13619,23 +13623,7 @@ async def list_projects(
         if manifest.get("v2"):
             v2_imports = manifest.get("imports") or []
             n_images_v2 = len(v2_imports)
-
-            def _v2_is_labelled(entry: dict) -> bool:
-                if not isinstance(entry, dict):
-                    return False
-                # See the inner copy above (search this file for
-                # editedBoxesSet) for the rationale.
-                if entry.get("editedBoxesSet"):
-                    edited = entry.get("editedBoxes")
-                    return isinstance(edited, list) and len(edited) > 0
-                flag = entry.get("labelled")
-                if flag is True:
-                    return True
-                if flag is False:
-                    return False
-                return bool(entry.get("detections"))
-
-            n_labelled = sum(1 for e in v2_imports if _v2_is_labelled(e))
+            n_labelled = sum(1 for e in v2_imports if _import_is_labelled(e))
             n_unlabelled = max(0, n_images_v2 - n_labelled)
         else:
             n_images_v2 = None
@@ -14445,6 +14433,7 @@ def _tile_overview(entries: list[dict]) -> list[dict]:
             # the chip rail with no synthetic detection objects.
             "label_stats": label_stats_pool,
             "has_edits": bool(edited),
+            "background": bool(e.get("background")),
             "source": src,
             # Persisted labelling timestamp (epoch ms). Drives the FE's
             # labelled_preview cachebuster (?v=). It MUST be persisted +
@@ -14697,12 +14686,13 @@ def _compute_filter_counts(
         if not isinstance(e, dict):
             continue
         counts["all"] += 1
+        background = bool(e.get("background"))  # done, and nothing to rate
         has_dets = bool(e.get("detections")) or bool(e.get("editedBoxes"))
-        if not has_dets:
+        if not has_dets and not background:
             counts["unlabelled"] += 1
         eid = e.get("id")
         v = verdicts.get(eid) if eid else None
-        if eid and not v and has_dets:
+        if eid and not v and has_dets and not background:
             counts["unrated"] += 1
         if v == "good":
             counts["good"] += 1
@@ -16728,6 +16718,7 @@ async def clear_all_annotations(project_id: str):
             entry["pending"] = True
             entry.pop("editedBoxes", None)
             entry.pop("editedBoxesSet", None)
+            entry.pop("background", None)
             entry.pop("editedAt", None)
             entry.pop("missingObjects", None)
             entry.pop("missingReason", None)
@@ -16855,32 +16846,14 @@ async def schedule_job(
     elif payload.kind == "label_charlie":
         manifest = project_manifest
         force_relabel = bool((payload.params or {}).get("force_relabel"))
-        if force_relabel:
-            # Re-label everything - counts every import.
-            n_images = sum(
-                1 for e in (manifest.get("imports") or []) if isinstance(e, dict)
-            )
-        else:
-            # Mirror the runner's unlabelled filter (see
-            # _run_label_charlie_job around line 3275). Counts
-            # editedBoxesSet=True with empty editedBoxes as
-            # unlabelled too - fixes a bug where "Clear all" on a
-            # tile left labelled=True and the schedule endpoint
-            # 400'd "no unlabelled images" even though the user had
-            # just emptied one.
-            def _is_unlabelled(e: dict) -> bool:
-                if e.get("editedBoxesSet"):
-                    edited = e.get("editedBoxes")
-                    return not (isinstance(edited, list) and len(edited) > 0)
-                return (
-                    e.get("labelled") is False
-                    or (e.get("labelled") is None and not (e.get("detections") or []))
-                )
-            n_images = sum(
-                1
-                for e in (manifest.get("imports") or [])
-                if isinstance(e, dict) and _is_unlabelled(e)
-            )
+        # The runner's own selection (_run_label_charlie_job): every
+        # image but background ones on a relabel, else the unlabelled.
+        n_images = sum(
+            1
+            for e in (manifest.get("imports") or [])
+            if isinstance(e, dict) and not e.get("background")
+            and (force_relabel or not _import_has_labels(e))
+        )
         if n_images == 0:
             raise HTTPException(
                 400,
@@ -18687,25 +18660,14 @@ async def charlie_imports_detect_point(
             pass
 
     # Decide the route: SAM3 for never-labelled tiles, SAM2+VLM for
-    # already-labelled ones. Mirrors _v2_is_labelled so the routing
-    # matches the dataset's badge state.
+    # already-labelled ones, by the same test as the dataset's badges.
     use_sam2_vlm = False
     if project_id and import_id:
         try:
             m_manifest = load_manifest(project_id, copy=False) or {}
             for entry in (m_manifest.get("imports") or []):
                 if isinstance(entry, dict) and entry.get("id") == import_id:
-                    if entry.get("editedBoxesSet"):
-                        edited = entry.get("editedBoxes")
-                        use_sam2_vlm = isinstance(edited, list) and len(edited) > 0
-                    else:
-                        flag = entry.get("labelled")
-                        if flag is True:
-                            use_sam2_vlm = True
-                        elif flag is False:
-                            use_sam2_vlm = False
-                        else:
-                            use_sam2_vlm = bool(entry.get("detections"))
+                    use_sam2_vlm = _import_has_labels(entry)
                     break
         except Exception as e:
             print(f"[charlie/detect_point] manifest lookup failed, defaulting to SAM3: {e}")

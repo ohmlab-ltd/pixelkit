@@ -243,8 +243,10 @@ def _dataset_classes(m: dict) -> list[str]:
 
 def _originals(project_id: str, m: dict, cls_idx: dict[str, int], source: str = "original"
                ) -> tuple[list[Sample], int]:
-    """Labelled originals of one dataset in manifest order. Returns
-    (samples, number of imports with no usable label)."""
+    """Labelled originals of one dataset in manifest order, with the
+    images marked background as samples without boxes (negatives: the
+    model learns to find nothing there). Returns (samples, number of
+    other imports with no usable label)."""
     ds_dir = store.dataset_dir(project_id)
     samples: list[Sample] = []
     unlabelled = 0
@@ -255,7 +257,7 @@ def _originals(project_id: str, m: dict, cls_idx: dict[str, int], source: str = 
         if not fname:
             continue
         boxes, cls = _import_boxes(imp, cls_idx)
-        if not boxes:
+        if not boxes and not imp.get("background"):
             unlabelled += 1
             continue
         path = ds_dir / "images" / fname
@@ -263,7 +265,7 @@ def _originals(project_id: str, m: dict, cls_idx: dict[str, int], source: str = 
             continue
         samples.append(Sample(
             path=path,
-            boxes=np.array(boxes, dtype=np.float32),
+            boxes=np.array(boxes, dtype=np.float32).reshape(-1, 4),
             classes=np.array(cls, dtype=np.float32),
             split="train",
             w=int(imp.get("width") or 0),
@@ -280,7 +282,8 @@ def _augmented(project_id: str, m: dict, parents: dict[str, Sample], cls_idx: di
     """Generated copies under <dataset>/augmentations/<import_id>/ with
     their transformed boxes (the layout server._iter_augmentations
     reads for exports). Each copy inherits its parent's split; copies
-    of val parents are dropped, never scored."""
+    of val parents are dropped, never scored. A copy that lost every
+    box is dropped too, unless its parent is a background image."""
     root = store.dataset_dir(project_id) / "augmentations"
     if not root.is_dir():
         return []
@@ -330,11 +333,11 @@ def _augmented(project_id: str, m: dict, parents: dict[str, Sample], cls_idx: di
                     continue
                 boxes.append(rect)
                 cls.append(cls_idx[label])
-            if not boxes:
+            if not boxes and len(parent_s.boxes):
                 continue
             out.append(Sample(
                 path=jpeg,
-                boxes=np.array(boxes, dtype=np.float32),
+                boxes=np.array(boxes, dtype=np.float32).reshape(-1, 4),
                 classes=np.array(cls, dtype=np.float32),
                 split="train",
                 w=cw, h=ch,
@@ -357,7 +360,9 @@ def stratified_split(samples: list[Sample], train_split: float, seed: int = 0) -
     The one exception: an image that also carries a class with a single
     image stays in train (learning that class beats measuring another),
     so a class whose every image shares a picture with such a singleton
-    can end up unmeasured; the pre-flight check says so."""
+    can end up unmeasured; the pre-flight check says so. Background
+    images (no boxes) are split as a class of their own, so val also
+    measures what the model finds where there is nothing."""
     if not samples:
         return
     if train_split >= 0.999:
@@ -369,7 +374,7 @@ def stratified_split(samples: list[Sample], train_split: float, seed: int = 0) -
             s.split = "val"
         return
     keys = [hashlib.sha1(f"{seed}:{s.name}".encode("utf-8")).hexdigest() for s in samples]
-    img_classes = [sorted({int(c) for c in s.classes.tolist()}) for s in samples]
+    img_classes = [sorted({int(c) for c in s.classes.tolist()}) or [-1] for s in samples]
     total: Counter = Counter()
     for cs in img_classes:
         total.update(cs)
@@ -400,7 +405,7 @@ def load_samples(project_id: str, train_split: float, *, use_augmentations: bool
                  stratify: bool = True, seed: int = 0, eval_project: str | None = None
                  ) -> tuple[list[Sample], list[str], dict]:
     """Labelled images + the class list (dataset tag order) + a summary
-    dict: {"originals", "augmented", "unlabelled", "evalImages",
+    dict: {"originals", "augmented", "unlabelled", "background", "evalImages",
     "evalMissingClasses", "evalIgnoredLabels"}."""
     m = store.load(project_id)
     if not m:
@@ -411,6 +416,7 @@ def load_samples(project_id: str, train_split: float, *, use_augmentations: bool
     cls_idx = {c: i for i, c in enumerate(classes)}
     samples, unlabelled = _originals(project_id, m, cls_idx)
     info: dict = {"originals": len(samples), "augmented": 0, "unlabelled": unlabelled,
+                  "background": sum(1 for s in samples if not len(s.boxes)),
                   "evalImages": 0, "evalMissingClasses": [], "evalIgnoredLabels": []}
 
     eval_samples: list[Sample] = []
@@ -496,6 +502,8 @@ def preflight_samples(samples: list[Sample], classes: list[str], info: dict, cfg
     n_labelled = n_orig_train + sum(1 for s in val_s if s.source == "original")
     if n_labelled < 2 or (not train_s):
         blockers.append(f"training needs at least 2 labelled images, have {n_labelled}")
+    elif not any(len(s.boxes) for s in train_s):
+        blockers.append("no training image has boxes: background images alone teach nothing")
     if cfg.eval_project and not val_s:
         blockers.append("the held-out dataset has no labelled images with this dataset's labels")
     if cfg.eval_project and info.get("evalMissingClasses"):
@@ -575,6 +583,7 @@ def preflight_samples(samples: list[Sample], classes: list[str], info: dict, cfg
             "val": len(val_s),
             "augmented": int(info.get("augmented") or 0),
             "unlabelled": int(info.get("unlabelled") or 0),
+            "background": int(info.get("background") or 0),
         },
         "imgsz": cfg.imgsz,
         "size": cfg.size,
@@ -1615,6 +1624,7 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel) -> dict:
             "classes": classes,
             "images": {"train": len([i for i in train_s if samples[i].source == "original"]),
                        "val": len(val_s), "augmented": int(info.get("augmented") or 0),
+                       "background": int(info.get("background") or 0),
                        "scoredOnTrain": scored_on_train},
             "split": {"ratio": cfg.train_split, "stratified": bool(cfg.stratify and not cfg.eval_project),
                       "evalProject": cfg.eval_project},
@@ -2008,7 +2018,8 @@ def _sketch(slug: str, dataset_name: str, classes: list[str], cfg: TrainConfig,
         "",
         *para(f'Finds what the "{name}" dataset was labelled with ({", ".join(shown)}) '
               "in the camera picture and draws a labelled box around each. The boxes "
-              "stream over USB to Neuro Studio, which shows them on the live video."),
+              "stream over USB to Neuro Studio, which shows them on the live video "
+              "beside a slider for the score a box needs."),
         "",
         *para(f"Trained in PixelKit: {MODEL_SPECS[cfg.size]['label']}, {cfg.imgsz}x{cfg.imgsz} "
               f"input, run {report.get('run')}."
@@ -2045,6 +2056,11 @@ def _sketch(slug: str, dataset_name: str, classes: list[str], cfg: TrainConfig,
         "// The post-processor, kept so loop() can read the boxes.",
         "IPostProcessor *detector = nullptr;",
         "",
+        "// The score a box needs to be kept. Neuro Studio shows it as a slider while",
+        "// the sketch runs: drag it to trade missed objects against false ones on",
+        f"// your own scene, then put the value you settle on in {U}_CONF_THRESHOLD.",
+        f"static float confidence = {U}_CONF_THRESHOLD;",
+        "",
         "void setup() {",
         "  VisionConfig cfg;",
         "",
@@ -2065,9 +2081,11 @@ def _sketch(slug: str, dataset_name: str, classes: list[str], cfg: TrainConfig,
         "  // on-board display instead, which needs the TFT carrier.",
         "  cfg.transport = TRANSPORT_USB;",
         "",
-        f"  // Keep boxes scoring at least {U}_CONF_THRESHOLD, the threshold PixelKit",
-        "  // calibrated on the validation images. Raise it for fewer but surer boxes.",
-        f"  detector = PostProcess_PixelKitYOLOX({U}_CONF_THRESHOLD, {U}_NMS_THRESHOLD,",
+        "  // Keep boxes scoring at least the confidence, which starts at the threshold",
+        "  // PixelKit calibrated on the validation images. Raise it for fewer but",
+        "  // surer boxes.",
+        '  n6_tune_float("confidence", &confidence, 0.01f, 0.99f);',
+        f"  detector = PostProcess_PixelKitYOLOX(confidence, {U}_NMS_THRESHOLD,",
         f"                                       {U}_CLASSES, {U}_NUM_CLASSES);",
         "",
         "  // Start the camera and the model together.",
@@ -2075,6 +2093,14 @@ def _sketch(slug: str, dataset_name: str, classes: list[str], cfg: TrainConfig,
         "}",
         "",
         "void loop() {",
+        "  // A slider move reaches the post-processor here: calling its factory again",
+        "  // changes the settings of the one instance.",
+        f"  static float applied = {U}_CONF_THRESHOLD;",
+        "  if (confidence != applied) {",
+        "    applied = confidence;",
+        f"    PostProcess_PixelKitYOLOX(confidence, {U}_NMS_THRESHOLD, {U}_CLASSES, {U}_NUM_CLASSES);",
+        "  }",
+        "",
         "  // Grab a frame, run the model on it, and publish what it found.",
         "  Vision.run();",
         "",

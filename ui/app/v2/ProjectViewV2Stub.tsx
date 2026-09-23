@@ -43,7 +43,7 @@ import {
   type StoreImport,
 } from "./store/projectStore";
 import { VideoFrameModal } from "./VideoFrameModal";
-import { extractVideoFrames, MAX_VIDEO_BYTES } from "../../lib/videoFrames";
+import { extractCount, extractVideoFrames, isVideoFile, MAX_VIDEO_BYTES } from "../../lib/videoFrames";
 import { ProjectSettingsV2 } from "./ProjectSettingsV2";
 import { ExportModal } from "../ExportModal";
 import { Tooltip } from "../Tooltip";
@@ -197,6 +197,12 @@ function hasRealDetections(arr: unknown): boolean {
     if (det.mask) return true;
   }
   return false;
+}
+
+// What saving an import sends: its boxes and whether it is marked
+// background. Also the baseline an unchanged import is recognised by.
+function editPayload(boxes: EditableBox[], background?: boolean): string {
+  return JSON.stringify({ editedBoxes: boxes, background: !!background });
 }
 
 function compareImportedMediaDesc(a: { id: string; createdAt?: number | string | null }, b: { id: string; createdAt?: number | string | null }): number {
@@ -454,6 +460,7 @@ export function ProjectViewV2Stub({
             // synthetic path below.
             label_stats?: Record<string, number>;
             has_edits?: boolean;
+            background?: boolean;
             labelledAt?: number | null;
           }[];
           imports_total?: number;
@@ -596,6 +603,7 @@ export function ProjectViewV2Stub({
             nAugmentations: imp.n_augmentations ?? 0,
             labelStats,
             detectionCount: nDetections,
+            background: !!imp.background,
             detections: placeholderDetections,
             // Persisted cachebuster from the backend so the segmented
             // labelled-preview survives a cold reopen (see backend
@@ -1471,6 +1479,10 @@ export function ProjectViewV2Stub({
       dirtyImportIdsRef.current.add(id);
       lastEditAtRef.current.set(id, performance.now());
       scheduleFlushRef.current();
+      // The server's pill counts predate this edit (an image cleared or
+      // marked background changes them): count the tiles instead, as a
+      // verdict change does.
+      setFilterCountsOverride(null);
     }
     setImports((cur) => cur.map((m) => {
       if (m.id !== id) return m;
@@ -1490,7 +1502,9 @@ export function ProjectViewV2Stub({
           : m.editedBoxes;
         return { ...m, ...rest, editedBoxes };
       }
-      return { ...m, ...patch };
+      const next = { ...m, ...patch };
+      if (next.background && next.editedBoxes?.length) next.background = false;
+      return next;
     }));
     // Stable identity: updateImport only touches the setImports setter and
     // dirtyImportIdsRef (both stable). Memoising it is critical - it's passed
@@ -1763,8 +1777,8 @@ export function ProjectViewV2Stub({
     // responding"). File objects are cheap disk-backed handles until
     // read, so we keep the originals and read each one lazily, just
     // before its upload, inside the bounded workers below.
-    const droppedImages = dropped.filter(isImageFile);
-    const droppedVideos = dropped.filter((f) => f.type.startsWith("video/"));
+    const droppedVideos = dropped.filter(isVideoFile);
+    const droppedImages = dropped.filter((f) => isImageFile(f) && !isVideoFile(f));
     const skippedCount = dropped.length - droppedImages.length - droppedVideos.length;
     if (skippedCount > 0) {
       console.warn(`[v2 import] skipped ${skippedCount} non-image/video file(s)`);
@@ -2183,7 +2197,8 @@ export function ProjectViewV2Stub({
 
   // Number of imports that haven't been through the labelling job
   // yet, OR have been actively cleared by the user (editedBoxes set
-  // to []). Drives whether the Start button is shown / enabled.
+  // to []), and are not marked background. Drives whether the Start
+  // button is shown / enabled.
   // Counting cleared images here means clicking "Clear all" in the
   // viewer re-arms the Start button, the tile flips to Unlabelled
   // and the button copy reads "new images" automatically.
@@ -2200,14 +2215,15 @@ export function ProjectViewV2Stub({
   // NO_SYNTH_DETS=1, which surfaced as the Start-labelling button
   // showing "all images" / "new images" copy even on fully-labelled
   // datasets.
-  const hasEffectiveBoxes = (m: ImportedMedia): boolean => {
+  const isLabelled = (m: ImportedMedia): boolean => {
+    if (m.background) return true;
     if (m.editedBoxes !== undefined) return (m.editedBoxes?.length ?? 0) > 0;
     if (typeof m.detectionCount === "number") return m.detectionCount > 0;
     if (m.labelStats && Object.keys(m.labelStats).length > 0) return true;
     return (m.detections?.length ?? 0) > 0;
   };
   const unlabelledImportCount = useMemo(
-    () => imports.filter((m) => m.status === "ready" && !hasEffectiveBoxes(m)).length,
+    () => imports.filter((m) => m.status === "ready" && !isLabelled(m)).length,
     [imports],
   );
   // Number of imports that DO have effective boxes, auto detections
@@ -2215,7 +2231,7 @@ export function ProjectViewV2Stub({
   // to pick between "all images" (fresh dataset) and "new images"
   // (some already labelled, others need labelling).
   const labelledImportCount = useMemo(
-    () => imports.filter((m) => m.status === "ready" && hasEffectiveBoxes(m)).length,
+    () => imports.filter((m) => m.status === "ready" && isLabelled(m)).length,
     [imports],
   );
   // (detectedLabelSet + freshLabels are computed below, after the
@@ -2451,6 +2467,7 @@ export function ProjectViewV2Stub({
               : m.editedBoxes;
             if (
               relabelled &&
+              !m.background &&
               Array.isArray(nextEditedBoxes) &&
               nextEditedBoxes.length === 0
             ) {
@@ -2463,10 +2480,7 @@ export function ProjectViewV2Stub({
           // for). For a dirty import we keep the prior baseline so the
           // autosave still sees the edit as pending and PUTs it.
           if (nextEditedBoxes !== undefined && !isDirty) {
-            lastEditedRef.current.set(
-              m.id,
-              JSON.stringify(nextEditedBoxes ?? []),
-            );
+            lastEditedRef.current.set(m.id, editPayload(nextEditedBoxes ?? [], m.background));
           }
           return {
             ...m,
@@ -2976,6 +2990,7 @@ export function ProjectViewV2Stub({
         n_detections?: number;
         label_set?: string[];
         has_edits?: boolean;
+        background?: boolean;
         label_stats?: Record<string, number>;
         labelledAt?: number | null;
       };
@@ -3102,6 +3117,7 @@ export function ProjectViewV2Stub({
             nAugmentations: imp.n_augmentations ?? 0,
             labelStats,
             detectionCount: nDetections,
+            background: !!imp.background,
             // Hint at /annotations status so the gallery doesn't show
             // "Unlabelled" before the real detections arrive, empty
             // arrays from /overview count as "we don't know yet".
@@ -3243,6 +3259,7 @@ export function ProjectViewV2Stub({
               nAugmentations: imp.n_augmentations ?? 0,
               labelStats,
               detectionCount: nDetections,
+              background: !!imp.background,
               detections: placeholderDetections,
             };
           });
@@ -3395,7 +3412,7 @@ export function ProjectViewV2Stub({
       if (observedImportIdsRef.current.has(m.id)) continue;
       observedImportIdsRef.current.add(m.id);
       if (m.editedBoxes !== undefined) {
-        lastEditedRef.current.set(m.id, JSON.stringify(m.editedBoxes));
+        lastEditedRef.current.set(m.id, editPayload(m.editedBoxes, m.background));
       }
     }
   }, [imports]);
@@ -3427,13 +3444,11 @@ export function ProjectViewV2Stub({
         dirtyImportIdsRef.current.add(dirtyId);
         return;
       }
-      const cleaned = m.editedBoxes.map(stripTransientBoxFlags);
-      const serialised = JSON.stringify(cleaned);
+      const body = editPayload(m.editedBoxes.map(stripTransientBoxFlags), m.background);
       const last = lastEditedRef.current.get(m.id);
-      if (last === serialised) return;
-      lastEditedRef.current.set(m.id, serialised);
+      if (last === body) return;
+      lastEditedRef.current.set(m.id, body);
       savesInFlightRef.current.add(m.id);
-      const body = JSON.stringify({ editedBoxes: cleaned });
       let ok = false;
       try {
         const r = await apiFetch(`/api/v2/projects/${projectId}/imports/${m.backendId}`, {
@@ -3453,7 +3468,7 @@ export function ProjectViewV2Stub({
       }
       if (!ok) {
         // Unsaved again: restore the baseline and keep it dirty.
-        if (lastEditedRef.current.get(m.id) === serialised) {
+        if (lastEditedRef.current.get(m.id) === body) {
           if (last === undefined) lastEditedRef.current.delete(m.id);
           else lastEditedRef.current.set(m.id, last);
         }
@@ -3706,7 +3721,7 @@ export function ProjectViewV2Stub({
         (f) =>
           f.type.startsWith("image/") ||
           f.type.startsWith("video/") ||
-          /\.(jpe?g|png|webp|bmp|heic|avif|mp4|mov|webm|mkv)$/i.test(f.name),
+          /\.(jpe?g|png|webp|bmp|heic|avif|mp4|mov|webm|mkv|mjpe?g)$/i.test(f.name),
       );
       if (files.length) void importFilesRef.current?.(files as unknown as FileList);
     };
@@ -5095,7 +5110,7 @@ export function ProjectViewV2Stub({
                 <input
                   ref={headerFileInputRef}
                   type="file"
-                  accept="image/*,video/*"
+                  accept="image/*,video/*,.mjpeg,.mjpg"
                   multiple
                   className="hidden"
                   disabled={!referencesSettled}
@@ -5810,11 +5825,7 @@ export function ProjectViewV2Stub({
           onConfirm={async (params) => {
             const head = videoQueue[0];
             if (!head) return;
-            const expected = Math.max(
-              1,
-              Math.floor((params.end - params.start) * params.fps) + 1,
-            );
-            setVideoExtracting({ done: 0, total: expected });
+            setVideoExtracting({ done: 0, total: extractCount(params) });
             let frames: File[] = [];
             try {
               frames = await extractVideoFrames(head, params, (i, total) => {
@@ -7049,7 +7060,7 @@ function ImportMediaSection({
             : "cursor-pointer border-[var(--line)] bg-[var(--panel)] hover:border-[var(--line-strong)]",
       ].join(" ")}
     >
-      <input ref={fileInputRef} type="file" accept="image/*,video/*" multiple className="hidden" disabled={disabled} onChange={(e) => { handleMediaFiles(e.target.files); if (fileInputRef.current) fileInputRef.current.value = ""; }} />
+      <input ref={fileInputRef} type="file" accept="image/*,video/*,.mjpeg,.mjpg" multiple className="hidden" disabled={disabled} onChange={(e) => { handleMediaFiles(e.target.files); if (fileInputRef.current) fileInputRef.current.value = ""; }} />
 
       <div className="min-w-0 flex-1">
         <div className="text-[13px] font-medium text-[var(--foreground)]">
@@ -7058,7 +7069,7 @@ function ImportMediaSection({
             : (uploading ? "Uploading…" : "Drop images or click to browse")}
         </div>
         <div className="mt-1 font-mono text-[11px] text-[var(--fg-dim)]">
-          jpg · png · webp · gif · heic · avif · bmp · tiff · mp4 · mov · webm · avi · mkv
+          jpg · png · webp · gif · heic · avif · bmp · tiff · mp4 · mov · webm · avi · mkv · mjpeg
         </div>
       </div>
 
@@ -7294,6 +7305,10 @@ type ImportedMedia = {
   // Count of augmentation copies persisted server-side. Gates
   // the per-tile Augmentations icon, only shown when > 0.
   nAugmentations?: number;
+  // Marked background: checked, with nothing in it to label. Counts as
+  // labelled, labelling runs leave it alone, and training uses it as a
+  // negative example. Boxes drawn on it unmark it.
+  background?: boolean;
   // ms-since-epoch the FE last observed this import gaining detections.
   // Appended as a query param on the labelled_preview URL so the
   // browser refetches the freshly-baked JPEG instead of serving the
@@ -7745,10 +7760,10 @@ function DatasetGallery({
       const bid = m.backendId;
       const hasDetections = !!(m.detections && m.detections.length > 0)
         || !!(m.editedBoxes && m.editedBoxes.length > 0);
-      if (verdictFilter === "unlabelled") return !hasDetections;
+      if (verdictFilter === "unlabelled") return !hasDetections && !m.background;
       if (!bid) return false;
       const v = verdicts[bid];
-      if (verdictFilter === "unrated") return !v;
+      if (verdictFilter === "unrated") return !v && !m.background;
       if (verdictFilter === "good") return v === "good";
       if (verdictFilter === "bad") return v === "bad";
       if (verdictFilter === "unsure") return v === "unsure";
@@ -7784,9 +7799,9 @@ function DatasetGallery({
       c.all++;
       const hasDetections = !!(m.detections && m.detections.length > 0)
         || !!(m.editedBoxes && m.editedBoxes.length > 0);
-      if (!hasDetections) c.unlabelled++;
+      if (!hasDetections && !m.background) c.unlabelled++;
       const v = m.backendId ? verdicts[m.backendId] : undefined;
-      if (m.backendId && !v && hasDetections) c.unrated++;
+      if (m.backendId && !v && hasDetections && !m.background) c.unrated++;
       if (v === "good") c.good++;
       else if (v === "bad") c.bad++;
       else if (v === "unsure") c.unsure++;
@@ -7892,13 +7907,26 @@ function DatasetGallery({
   const selectAllVisible = useCallback(() => {
     setSelectedIds((cur) => {
       const next = new Set(cur);
-      // Only operate on persisted backend rows, in-flight uploads
-      // don't have a backendId yet and can't be deleted server-side.
-      for (const m of items) if (m.backendId) next.add(m.id);
+      // What the filter shows, not the whole dataset: a bulk delete
+      // must never reach images the user cannot see. Only persisted
+      // rows, in-flight uploads have no backendId to act on yet.
+      for (const m of filteredItems) if (m.backendId) next.add(m.id);
       return next;
     });
-  }, [items]);
+  }, [filteredItems]);
   const selectedCount = selectedIds.size;
+  // Selected images with no boxes, which can be marked background in
+  // one go (a recording has many frames with nothing in them). Images
+  // with boxes are left alone rather than emptied in bulk.
+  const boxlessSelected = useMemo(() => items.filter((m) =>
+    selectedIds.has(m.id) && m.backendId && !m.background
+    && !(m.editedBoxes !== undefined ? m.editedBoxes.length : (m.detectionCount ?? m.detections?.length ?? 0)),
+  ), [items, selectedIds]);
+  const markSelectedBackground = useCallback(() => {
+    if (!onMediaChange) return;
+    for (const m of boxlessSelected) onMediaChange(m.id, { editedBoxes: [], background: true });
+    exitSelection();
+  }, [boxlessSelected, onMediaChange, exitSelection]);
   const deleteSelected = useCallback(async () => {
     if (selectedCount === 0 || !onRemoveBatch) return;
     setBulkBusy(true);
@@ -8245,6 +8273,17 @@ function DatasetGallery({
             >
               Select all
             </button>
+            {onMediaChange && boxlessSelected.length > 0 && (
+              <button
+                type="button"
+                onClick={markSelectedBackground}
+                disabled={bulkBusy}
+                title="Nothing to label in these: train on them as background (negative) examples"
+                className="rounded-md border border-white/20 bg-white/[0.06] px-3 py-1 text-[11px] text-white/85 hover:border-white/45 hover:text-white transition-colors disabled:opacity-40"
+              >
+                Mark {boxlessSelected.length} background
+              </button>
+            )}
             <button
               type="button"
               onClick={() => void deleteSelected()}
@@ -9616,8 +9655,11 @@ function DatasetThumb({
                   /overview and /annotations responses, even for
                   images that already have boxes on disk. */}
               {detectionCount === 0 && media.detections !== undefined && (
-                <span className="rounded-md bg-black/60 px-2 py-0.5 font-mono text-[10px] font-medium text-amber-200 uppercase tracking-wider backdrop-blur-sm">
-                  Unlabelled
+                <span
+                  className={`rounded-md bg-black/60 px-2 py-0.5 font-mono text-[10px] font-medium uppercase tracking-wider backdrop-blur-sm ${media.background ? "text-white/80" : "text-amber-200"}`}
+                  title={media.background ? "Nothing to label here: trained on as a background example" : undefined}
+                >
+                  {media.background ? "Background" : "Unlabelled"}
                 </span>
               )}
               {detectionCount > 0 && hasUnsureDetection && (
@@ -10714,13 +10756,33 @@ function DatasetViewer({
                 - re-arms the project-level Start labelling button to
                   read "Start labelling new images" via the stub's
                   unlabelledImportCount + labelledImportCount split.
-              Hidden in read-only mode + when there are no boxes to
-              clear (both detections AND editedBoxes empty). */}
+              Hidden in read-only mode. An image with no boxes offers
+              Background instead: nothing in it to label, so it counts
+              as labelled, labelling runs leave it alone and training
+              uses it as a negative example. A box drawn on it unmarks
+              it. */}
           {!readOnly && onMediaChange && (() => {
             const liveBoxCount = media.editedBoxes !== undefined
               ? (media.editedBoxes?.length ?? 0)
               : ((media.detections?.filter((d) => !d.rejected).length) ?? 0);
-            if (liveBoxCount === 0) return null;
+            if (liveBoxCount === 0) return (
+              <button
+                type="button"
+                onClick={() => onMediaChange(media.id, { editedBoxes: [], background: !media.background })}
+                aria-pressed={!!media.background}
+                title={media.background
+                  ? "Marked background: nothing here to label. Click to unmark."
+                  : "Nothing here to label: train on it as a background (negative) example"}
+                className={[
+                  "h-8 inline-flex items-center gap-1.5 rounded-md border px-3 text-[11px] uppercase tracking-wider font-mono transition-colors",
+                  media.background
+                    ? "border-accent/60 bg-accent/10 text-[var(--accent)]"
+                    : "border-[var(--line)] text-foreground/65 hover:border-[var(--line-strong)] hover:text-foreground",
+                ].join(" ")}
+              >
+                Background
+              </button>
+            );
             return (
               <button
                 type="button"

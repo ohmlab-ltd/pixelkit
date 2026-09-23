@@ -23,15 +23,17 @@ without starting one:
   "ok": true,
   "blockers": [],
   "warnings": ["'bolt' has only 7 training box(es): expect poor recall"],
-  "images": {"train": 312, "val": 78, "augmented": 1248, "unlabelled": 4},
+  "images": {"train": 312, "val": 78, "augmented": 1248, "unlabelled": 4, "background": 40},
   "classes": [{"name": "bolt", "trainImages": 6, "valImages": 2, "trainBoxes": 7,
                "valBoxes": 2, "augmentedBoxes": 28, "smallBoxesPct": 0}],
   "imgsz": 256, "size": "nano", "evalProject": null
 }
 ```
 
-`blockers` stop the run (fewer than two labelled images, a held-out
-dataset with none of these labels). `warnings` are recorded in the run's
+`background` is how many of train and val are background images (no
+boxes, trained on as negatives). `blockers` stop the run (fewer than two
+labelled images, no boxed image among them, a held-out dataset with none
+of these labels). `warnings` are recorded in the run's
 report: classes with few boxes, classes the val split cannot measure,
 objects under 8 px at the input size, byte-identical images on both
 sides of the split.
@@ -119,6 +121,20 @@ calibrated threshold unless `conf` is given.
 Detections land in the manifest like the SAM 3 labeller's, so the
 editor, exports and the next training run read them the same way. The
 job's `result` is `{"labelled": n, "run", "conf"}`.
+
+## Background images
+
+```
+PUT /api/v2/projects/{pid}/imports/{importId}  {"background": true}
+```
+
+Marks an image background: checked, with nothing in it to label. Its
+boxes are dropped, it counts as labelled, labelling jobs (both kinds)
+leave it alone, and training uses it as a negative. `{"background":
+false}` unmarks it, and so does saving boxes onto it
+(`{"editedBoxes": [...]}`). The dataset's `/overview` carries the flag
+per image; a labelled-dataset import marks the images whose annotation
+lists no objects.
 
 ## Headless
 

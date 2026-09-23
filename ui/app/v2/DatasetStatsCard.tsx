@@ -935,6 +935,7 @@ function HealthBadge({
   counts: {
     imports: number;
     with_detections: number;
+    background?: number;
     detections: number;
     unsure_detections: number;
     near_duplicates: number;
@@ -1014,7 +1015,7 @@ function HealthBadge({
               <FactorRow
                 name="Coverage"
                 value={factors.coverage}
-                hint={`${counts.with_detections}/${counts.imports} images annotated`}
+                hint={`${counts.with_detections + (counts.background ?? 0)}/${counts.imports} images annotated`}
               />
               <FactorRow
                 name="Confidence"
