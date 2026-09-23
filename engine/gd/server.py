@@ -149,6 +149,7 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, ORJSONResponse, RedirectResponse, Response
 from PIL import Image as PILImage, ImageOps
+from xml.sax.saxutils import escape as _xml_escape
 # Hard ceiling on the pixel count Pillow will accept for any image
 # this process decodes. Without it a 1 KB compressed PNG declaring
 # 50 000 × 50 000 dimensions (a "decompression bomb") would expand to
@@ -298,13 +299,33 @@ def _pil_from_r2(project: str, filename: str) -> PILImage.Image:
     return _open_upright(r2_required().get_bytes(LocalStorage.image_key(project, filename)))
 
 
+def _to_rgb(im: PILImage.Image) -> PILImage.Image:
+    """RGB for any mode. 16- and 32-bit greyscale is scaled to 8 bits
+    first: convert() clamps it, so a mid-grey 16-bit PNG came out white."""
+    if im.mode in ("I;16", "I;16B", "I;16L", "I;16N", "I"):
+        a = np.asarray(im, dtype=np.float64)
+        top = 65535.0 if (im.mode != "I" or a.max() > 255) else 255.0
+        return PILImage.fromarray(np.clip(a * (255.0 / top), 0, 255).astype(np.uint8), "L").convert("RGB")
+    return im.convert("RGB")
+
+
+def _check_jpeg_whole(raw: bytes) -> None:
+    """Raise when a JPEG stops early. Upload keeps JPEG bytes as they are
+    and read only the header, so a truncated file was stored and failed
+    every later decode. Decoding at 1/8 scale (JPEG's DCT scaling) still
+    reads every scan, for a fraction of a full decode."""
+    with PILImage.open(io.BytesIO(raw)) as im:
+        im.draft("RGB", (max(1, im.width // 8), max(1, im.height // 8)))
+        im.load()
+
+
 def _open_upright(src: "Path | str | bytes") -> PILImage.Image:
     """Decode a picture as it is shown: EXIF orientation applied, RGB.
     Uploads keep their original bytes, while the manifest's sizes, the
     editor's boxes, the trainer and the exports all use the upright
     picture, so every decode whose pixels meet a box goes through here."""
     with PILImage.open(io.BytesIO(src) if isinstance(src, (bytes, bytearray)) else src) as im:
-        return ImageOps.exif_transpose(im).convert("RGB")
+        return _to_rgb(ImageOps.exif_transpose(im))
 
 
 def _upright_size(im: PILImage.Image) -> tuple[int, int]:
@@ -913,6 +934,21 @@ def _payload_cache_get_swr(project_id: str, name: str, disk_mtime: float) -> tup
     return payload, cached_mtime >= disk_mtime
 
 
+# Bumped when a project's cached payloads are dropped, so a rebuild that
+# started before the drop does not put its older copy back.
+_PAYLOAD_DROPS: dict[str, int] = {}
+
+
+def _drop_annotation_payloads(project_id: str) -> None:
+    """Forget the cached annotations after an edit. Served stale (the
+    cache revalidates in the background) they gave the editor the boxes
+    from before its own save, which its next save wrote back."""
+    with _PAYLOAD_CACHE_LOCK:
+        _PAYLOAD_DROPS[project_id] = _PAYLOAD_DROPS.get(project_id, 0) + 1
+        for name in ("annotations", "annotations:imports"):
+            _PAYLOAD_CACHE.pop((project_id, name), None)
+
+
 def _payload_cache_put(project_id: str, name: str, disk_mtime: float, payload: dict) -> None:
     if disk_mtime <= 0:
         return
@@ -936,10 +972,14 @@ async def _payload_revalidate(project_id: str, name: str, builder) -> None:
         if key in _PAYLOAD_REVALIDATE_IN_FLIGHT:
             return
         _PAYLOAD_REVALIDATE_IN_FLIGHT.add(key)
+        drops = _PAYLOAD_DROPS.get(project_id, 0)
     try:
         mtime = _manifest_disk_mtime(project_id)
         payload = await asyncio.to_thread(builder)
-        _payload_cache_put(project_id, name, mtime, payload)
+        with _PAYLOAD_CACHE_LOCK:
+            dropped_since = _PAYLOAD_DROPS.get(project_id, 0) != drops
+        if not dropped_since:
+            _payload_cache_put(project_id, name, mtime, payload)
     except Exception as e:
         print(f"[payload-cache] revalidate failed for {project_id}/{name}: {e}")
     finally:
@@ -5103,7 +5143,7 @@ async def v2_upload_import_raw(
                 except Exception:
                     pass
             else:
-                _norm = ImageOps.exif_transpose(_im).convert("RGB")
+                _norm = _to_rgb(ImageOps.exif_transpose(_im))
                 width, height = _norm.size
                 _buf = io.BytesIO()
                 _norm.save(_buf, "JPEG", quality=90)
@@ -5114,6 +5154,11 @@ async def v2_upload_import_raw(
                 )
     except Exception as _e:
         raise HTTPException(400, f"cannot decode image: {_e}")
+    if store_bytes is raw:
+        try:
+            await asyncio.to_thread(_check_jpeg_whole, raw)
+        except Exception as _e:
+            raise HTTPException(400, f"damaged or truncated image: {_e}")
 
     imports_dir = proj / "images"
     imports_dir.mkdir(exist_ok=True)
@@ -5475,11 +5520,13 @@ async def v2_upload_import_raw_batch(
                     except Exception:
                         pass
                 else:
-                    _norm = ImageOps.exif_transpose(_im).convert("RGB")
+                    _norm = _to_rgb(ImageOps.exif_transpose(_im))
                     width, height = _norm.size
                     _buf = io.BytesIO()
                     _norm.save(_buf, "JPEG", quality=90)
                     store_bytes = _buf.getvalue()
+            if store_bytes is raw:
+                _check_jpeg_whole(raw)
         except Exception as _e:
             return {"idempotency_key": idem, "status": "failed", "error": f"cannot decode image: {_e}"}
 
@@ -6024,6 +6071,7 @@ async def v2_update_import(project_id: str, import_id: str, payload: V2ImportPat
                 manifest["imports"] = imports
                 manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 save_manifest(project_id, manifest, cache_by_ref=True)
+                _drop_annotation_payloads(project_id)
                 # The labelled preview was rendered from the previous
                 # detection set - drop it AND queue an immediate re-
                 # bake so the next gallery thumb request hits a warm
@@ -6220,6 +6268,7 @@ def _invalidate_project_payloads(project_id: str) -> None:
     original count because the stale cache responded faster than the
     background revalidate."""
     with _PAYLOAD_CACHE_LOCK:
+        _PAYLOAD_DROPS[project_id] = _PAYLOAD_DROPS.get(project_id, 0) + 1
         keys = [k for k in _PAYLOAD_CACHE if k[0] == project_id]
         for k in keys:
             _PAYLOAD_CACHE.pop(k, None)
@@ -17648,7 +17697,7 @@ def _build_voc_xml(
             continue
         obj_blocks.append(
             "  <object>\n"
-            f"    <name>{label}</name>\n"
+            f"    <name>{_xml_escape(label)}</name>\n"
             "    <pose>Unspecified</pose>\n"
             "    <truncated>0</truncated>\n"
             "    <difficult>0</difficult>\n"
@@ -17663,7 +17712,7 @@ def _build_voc_xml(
     return (
         "<annotation>\n"
         f"  <folder>images</folder>\n"
-        f"  <filename>{img_name}</filename>\n"
+        f"  <filename>{_xml_escape(img_name)}</filename>\n"
         "  <size>\n"
         f"    <width>{W}</width>\n"
         f"    <height>{H}</height>\n"
@@ -19399,9 +19448,10 @@ async def import_legacy_endpoint(payload: LegacyImportIn):
     """Convert SaaS-era data (backup zip or old backend dir) into the
     workspace. Runs import_legacy.py's run() in a worker thread - the
     desktop menu waits on this request (localhost, no timeout)."""
-    src = Path((payload.path or "").strip()).expanduser()
-    if not str(src):
+    raw_path = (payload.path or "").strip()
+    if not raw_path:  # Path("") is "." - the engine's own folder
         raise HTTPException(400, "empty path")
+    src = Path(raw_path).expanduser()
     if not src.exists():
         raise HTTPException(400, f"path not found: {src}")
 
@@ -19418,6 +19468,8 @@ async def import_legacy_endpoint(payload: LegacyImportIn):
         await asyncio.to_thread(mod.run, src)
     except HTTPException:
         raise
+    except SystemExit as e:  # the script's "nothing to import here"
+        raise HTTPException(400, f"legacy import failed: {e}")
     except Exception as e:  # surfaced verbatim in the desktop dialog
         raise HTTPException(500, f"legacy import failed: {e}")
     # The id->path index scans once per process; without this the imported
@@ -19893,6 +19945,25 @@ async def snapshots_restore(project_id: str, snapshot_id: str):
                 for n in names
                 if n.startswith("annotations/") and n.endswith(".json") and n.count("/") == 1
             }
+        # Pictures deleted after the snapshot are gone from disk: their
+        # records would come back as broken tiles, and exports would
+        # list annotations for files they cannot include.
+        m_new = store._loads(new_manifest)
+        live = {"imports": d / "images", "references": d / "references"}
+        gone: set[str] = set()
+        for key, folder in live.items():
+            kept = []
+            for e in m_new.get(key) or []:
+                fn = (e or {}).get("filename") if isinstance(e, dict) else None
+                if fn and (folder / fn).is_file():
+                    kept.append(e)
+                elif isinstance(e, dict) and e.get("id"):
+                    gone.add(str(e["id"]))
+            if key in m_new:
+                m_new[key] = kept
+        if gone:
+            anns = {fn: b for fn, b in anns.items() if Path(fn).stem not in gone}
+            new_manifest = store._dumps(m_new)
         # Current state is snapshotted first so a restore is always undoable.
         safety = _snapshot_write(d)
         ann_dir = d / "annotations"
@@ -19912,7 +19983,12 @@ async def snapshots_restore(project_id: str, snapshot_id: str):
         # manifest RAM cache - drop both so no writer trusts stale state.
         store.forget(project_id)
         invalidate_manifest_cache(project_id)
-        return {"ok": True, "restored": snapshot_id, "safetySnapshot": safety["id"]}
+        _invalidate_project_payloads(project_id)
+        for e in m_new.get("imports") or []:  # previews show the restored labels
+            if isinstance(e, dict) and e.get("id"):
+                _invalidate_labelled_preview(project_id, str(e["id"]))
+        return {"ok": True, "restored": snapshot_id, "safetySnapshot": safety["id"],
+                "dropped": len(gone)}
 
     # Same write lock every other manifest writer takes: a concurrent
     # flush between our file swap and its save would otherwise revert
