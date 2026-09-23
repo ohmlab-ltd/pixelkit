@@ -331,13 +331,16 @@ export function canvasToPolygons(canvas: HTMLCanvasElement, threshold = 64): num
     if (!inside[i] && !reached[i]) inside[i] = 1;
   }
 
-  // Edge midpoints, indexed clockwise from the top edge.
-  // 0 = top, 1 = right, 2 = bottom, 3 = left.
+  // Edge midpoints in image coordinates, indexed clockwise from the top
+  // edge (0 top, 1 right, 2 bottom, 3 left). Sample (cx, cy) is the centre
+  // of pixel (cx, cy), at (cx + 0.5, cy + 0.5) in the image: without that
+  // half pixel every outline sat up-left of the paint, and each
+  // open-and-save grew the mask.
   const edge = (cx: number, cy: number, e: number): [number, number] => {
-    if (e === 0) return [cx + 0.5, cy];
-    if (e === 1) return [cx + 1, cy + 0.5];
-    if (e === 2) return [cx + 0.5, cy + 1];
-    return [cx, cy + 0.5]; // e === 3
+    if (e === 0) return [cx + 1, cy + 0.5];
+    if (e === 1) return [cx + 1.5, cy + 1];
+    if (e === 2) return [cx + 1, cy + 1.5];
+    return [cx + 0.5, cy + 1]; // e === 3
   };
 
   // For each of the 16 marching-squares codes, list the edge pairs that
