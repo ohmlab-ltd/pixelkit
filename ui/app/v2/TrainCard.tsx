@@ -8,8 +8,9 @@
 // would use and what would go wrong, the runs list with live curves
 // while one trains, and per run the training curves, the calibrated
 // threshold, per-class precision/recall, the confusion matrix, the
-// worst val images, plus the actions: N6 export, label images with
-// the model, resume an interrupted run, cancel, delete.
+// worst val images and every val image beside its ground truth, plus
+// the actions: N6 export, label images with the model, resume an
+// interrupted run, cancel, delete.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -36,6 +37,7 @@ import {
 } from "@/lib/trainRuns";
 
 import { GlassDialog } from "./GlassDialog";
+import { PredictionsCompare } from "./PredictionsCompare";
 
 type ActiveJob = {
   id: string;
@@ -206,6 +208,7 @@ function RunDetails({
       : Object.keys(rep?.per_class_int8 ?? rep?.per_class_fp32 ?? {}).map((name) => ({ name }));
   const [showAllFailures, setShowAllFailures] = useState(false);
   const [zoomed, setZoomed] = useState<string | null>(null);
+  const [comparing, setComparing] = useState(false);
   const failures = rep?.failures ?? [];
   const shown = showAllFailures ? failures : failures.slice(0, 8);
   const failureUrl = (file: string) => `${API_BASE}/api/v2/projects/${projectId}/models/${detail.run}/failures/${file}`;
@@ -323,6 +326,18 @@ function RunDetails({
       )}
       {rep && rows.length > 0 && rep.failures && rep.failures.length === 0 && (
         <p className="text-[11.5px] text-foreground/45">No errors on the val split at this threshold.</p>
+      )}
+      {detail.hasPredictions && (
+        <button
+          type="button"
+          onClick={() => setComparing(true)}
+          className="justify-self-start text-[11.5px] text-foreground/60 underline-offset-2 hover:text-foreground hover:underline"
+        >
+          Compare every val image with its ground truth
+        </button>
+      )}
+      {comparing && (
+        <PredictionsCompare projectId={projectId} run={detail.run} onClose={() => setComparing(false)} />
       )}
 
       {(rep?.warnings?.length || rep?.notes?.length || detail.live?.notes?.length) ? (

@@ -455,8 +455,9 @@ a Resume button.
 Each finished run has Details: the curves, the confidence threshold
 (calibrated on the val split for the best F1 and written into the
 labels header), per-class precision and recall at that threshold, a
-confusion matrix, and a gallery of the val images the model got most
-wrong (missed, spurious, wrong class). Label images runs the exported
+confusion matrix, a gallery of the val images the model got most
+wrong (missed, spurious, wrong class), and every val image beside its
+ground truth. Label images runs the exported
 model over the dataset's unlabelled images so you can review and
 correct instead of drawing from scratch; hand-edited images are never
 touched. The same run can be started from a terminal with
@@ -2069,6 +2070,7 @@ function TrainingSection({ go }: { go: (k: GuideSectionKey) => void }) {
             "<strong>AP50 float and int8</strong>. Accuracy on the held-out split for the float model and for the exact int8 file you deploy, with the per-class numbers in Details.",
             "<strong>The threshold line</strong>. The calibrated confidence threshold and its F1; Details shows per-class precision and recall at that threshold and the confusion matrix (truth by prediction, with a background row and column for spurious boxes and misses).",
             "<strong>Worst images</strong>. The val images with the most errors, drawn: green is the truth, thin blue a correct detection, yellow a miss, red a spurious box, orange the right place with the wrong class. Click one to enlarge it. That gallery is where the next labelling hour should go.",
+            "<strong>Compare every val image with its ground truth</strong>. Every val image twice, side by side: the truth it was scored against, and what the exported int8 model reports at the shipped threshold, in the same colours, worst first. Arrow keys step through them.",
             "<strong>The NPU line</strong>. <em>Fully on NPU</em> means zero software epochs; otherwise it says how many of the compiler&rsquo;s epochs run on the CPU instead. Weights are shown against the board&rsquo;s flash pool.",
             "<strong>Rejected</strong>. If the compiler refuses the model the run is kept with the reason instead of shipping something that cannot build.",
             "<strong>Label images</strong>. Runs the exported model over the dataset&rsquo;s unlabelled images at its calibrated threshold, so you review and correct instead of drawing from scratch. Hand-edited images are never touched. Review, correct, retrain.",

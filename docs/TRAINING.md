@@ -16,6 +16,7 @@ locally. The local API behind the Train card is in [API.md](API.md).
 | `report.json` | AP@0.5 float vs int8 (overall and per class), threshold sweep, per-class precision/recall, confusion matrix, per-epoch history, input contract, NPU build facts |
 | `export.zip` | a `<slug>/` sketch folder with the sketch, the model, the labels header and `report.json`: unzip it and open the sketch in the Arduino IDE |
 | `failures/`, `failures.json` | the worst val images with misses, spurious boxes and wrong classes drawn |
+| `predictions.json` | every val image's ground truth beside the int8 model's boxes at the shipped threshold, in the image's pixels |
 | `history.json` | per-epoch loss and AP@0.5, written as the run trains |
 | `neuron6/` | ST Edge AI compiler log and generate report |
 | `<slug>_fp32.onnx`, `best.pt` | the float model and checkpoint, for re-export or inspection |
@@ -164,7 +165,10 @@ per-class precision and recall at that threshold, a confusion matrix
 boxes and misses) and a gallery of the val images with the most errors:
 green is the truth, thin blue a correct detection, yellow a miss, red a
 spurious box, orange the right place with the wrong class. That gallery
-is where the next labelling hour should go.
+is where the next labelling hour should go. Beyond the worst few, Details
+can show every val image twice, side by side: the ground truth it was
+scored against, and what the int8 model reports at the shipped
+threshold.
 
 On the board the threshold is not fixed: the exported sketch registers
 it with the core's live tuning (`n6_tune_float`), so Neuro Studio shows

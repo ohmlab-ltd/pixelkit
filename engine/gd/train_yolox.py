@@ -601,14 +601,19 @@ def preflight(project_id: str, cfg: TrainConfig) -> dict:
 
 # ── preprocessing ────────────────────────────────────────────────────
 
+def _letterbox_fit(w: int, h: int, size: int) -> tuple[float, int, int]:
+    """Where letterbox() puts a w x h picture: (scale, dx, dy)."""
+    scale = min(size / w, size / h)
+    return scale, (size - int(round(w * scale))) // 2, (size - int(round(h * scale))) // 2
+
+
 def letterbox(img: np.ndarray, size: int) -> tuple[np.ndarray, float, int, int]:
     """RGB uint8 -> (size,size,3) with 114 padding. Returns (img, scale, dx, dy)."""
     h, w = img.shape[:2]
-    scale = min(size / w, size / h)
+    scale, dx, dy = _letterbox_fit(w, h, size)
     nw, nh = int(round(w * scale)), int(round(h * scale))
     resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
     out = np.full((size, size, 3), 114, dtype=np.uint8)
-    dx, dy = (size - nw) // 2, (size - nh) // 2
     out[dy : dy + nh, dx : dx + nw] = resized
     return out, scale, dx, dy
 
@@ -725,9 +730,7 @@ def _letterboxed_rgb(s: Sample, size: int) -> np.ndarray | None:
 def _gt_letterbox(s: Sample, imgsz: int) -> np.ndarray:
     """Ground truth of a sample in the model's letterbox space: (m,5)."""
     hh, ww = _dims(s)
-    scale = min(imgsz / ww, imgsz / hh)
-    dx = (imgsz - int(round(ww * scale))) // 2
-    dy = (imgsz - int(round(hh * scale))) // 2
+    scale, dx, dy = _letterbox_fit(ww, hh, imgsz)
     g = s.boxes * scale
     g[:, [0, 2]] += dx
     g[:, [1, 3]] += dy
@@ -1602,6 +1605,8 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel) -> dict:
             lambda i: _letterboxed_rgb(samples[val_s[i]], cfg.imgsz),
             failures_dir, limit=cfg.failure_limit)
         _write_json_atomic(out_dir / "failures.json", gallery)
+        _write_json_atomic(out_dir / "predictions.json",
+                           _val_predictions(samples, val_s, preds, gts, conf, cfg, project_id, classes))
 
         _check_cancel(cancel)
         neuron6 = _verify_neuron6(int8_onnx, out_dir, slug) if cfg.verify_neuron6 else {
@@ -1964,6 +1969,40 @@ def _score_onnx(path: Path, samples, val_s, cfg: TrainConfig, classes: list[str]
         gts.append(_gt_letterbox(samples[si], cfg.imgsz))
     mean, per_class = ap50(preds, gts, len(classes))
     return mean, per_class, preds, gts
+
+
+def _val_predictions(samples: list[Sample], val_s: list[int], preds: list[np.ndarray],
+                     gts: list[np.ndarray], conf: float, cfg: TrainConfig, project_id: str,
+                     classes: list[str]) -> dict:
+    """Each val image's truth beside what the shipped model reports on it
+    (the boxes at the calibrated threshold), in the image's own pixels,
+    for the side-by-side view. A prediction's `kind` says how it fared
+    (tp, wrong class, fp) and a truth box nothing found is `missed`, by
+    the same matching as the report's numbers."""
+    import train_eval
+
+    images = []
+    for k, si in enumerate(val_s):
+        s = samples[si]
+        h, w = _dims(s)
+        scale, dx, dy = _letterbox_fit(w, h, cfg.imgsz)
+        off = np.array([dx, dy, dx, dy], dtype=np.float32)
+        pred = np.asarray(preds[k], dtype=np.float32).reshape(-1, 6)
+        gt = np.asarray(gts[k], dtype=np.float32).reshape(-1, 5)
+        matches = train_eval.match_image(pred, gt, conf)
+        kind = {pi: kd for kd, pi, _gi in matches if pi >= 0}
+        missed = {gi for kd, _pi, gi in matches if kd == "fn"}
+        gbox = np.round((gt[:, :4] - off) / scale, 1).tolist()
+        pbox = np.round((pred[:, :4] - off) / scale, 1).tolist()
+        images.append({
+            "project": cfg.eval_project if s.source == "eval" else project_id,
+            "image": s.name, "width": w, "height": h,
+            "truth": [{"box": gbox[gi], "class": int(g[4]), "missed": gi in missed}
+                      for gi, g in enumerate(gt)],
+            "predicted": [{"box": pbox[pi], "class": int(p[5]), "score": round(float(p[4]), 3),
+                           "kind": kind[pi]} for pi, p in enumerate(pred) if pi in kind],
+        })
+    return {"conf": conf, "classes": classes, "images": images}
 
 
 # ── the Neuro N6 bundle ─────────────────────────────────────────────

@@ -19582,6 +19582,7 @@ def _run_entry(run_dir: Path, active: bool) -> dict | None:
                                                                 and not thr.get("precision")))}
                       if isinstance(thr, dict) else None),
         "failuresCount": len((rep or {}).get("failures") or []),
+        "hasPredictions": (run_dir / "predictions.json").is_file(),
         "warningsCount": len((rep or {}).get("warnings") or []),
         # ST Edge AI verification summary (PK-1.3): present when the
         # compiler ran, so the card can say "0 SW epochs, 898 kB".
@@ -19706,6 +19707,26 @@ async def trained_model_export(project_id: str, run_id: str):
         media_type="application/zip",
         filename=f"{name}-neuron6-{run_id}.zip",
     )
+
+
+@app.get(
+    "/api/v2/projects/{project_id}/models/{run_id}/predictions",
+    dependencies=[Depends(require_project_read_access)],
+)
+async def trained_model_predictions(project_id: str, run_id: str):
+    """Each val image's truth beside the shipped model's boxes
+    (predictions.json), for the side-by-side view."""
+    import train_yolox as _ty
+
+    if not _RUN_ID_RE.fullmatch(run_id):
+        raise HTTPException(400, "bad run id")
+    if not store.dataset_exists(project_id):
+        raise HTTPException(404, "project not found")
+    run_dir = _ty.find_run_dir(project_id, run_id)
+    path = (run_dir / "predictions.json") if run_dir is not None else None
+    if path is None or not path.is_file():
+        raise HTTPException(404, "no predictions for this run")
+    return FileResponse(path, media_type="application/json")
 
 
 @app.get(

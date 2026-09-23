@@ -81,8 +81,8 @@ Newest first. Each entry: `run`, `model` (`yolox_nano` / `yolox_tiny`),
 `ap50Fp32`, `ap50Int8`, `threshold` (`conf`, `f1`, `precision`,
 `recall`, `calibrated`, `fallback`: the default was written because the
 model found nothing on val), `neuron6` (the ST Edge AI build summary),
-`hasExport`, `failuresCount`, `initRun`, `resumed`, and, for a run in
-progress, `history`.
+`hasExport`, `failuresCount`, `hasPredictions`, `initRun`, `resumed`,
+and, for a run in progress, `history`.
 
 ```
 GET /api/v2/projects/{pid}/models/{run}
@@ -97,9 +97,17 @@ The same entry plus `report` (the run's `report.json`: `classes`,
 ```
 GET /api/v2/projects/{pid}/models/{run}/export            -> export.zip
 GET /api/v2/projects/{pid}/models/{run}/failures/{file}   -> annotated JPEG
+GET /api/v2/projects/{pid}/models/{run}/predictions       -> predictions.json
 POST /api/v2/projects/{pid}/models/{run}/resume  {"device": "cuda:1"}   -> a train job
 DELETE /api/v2/projects/{pid}/models/{run}
 ```
+
+`predictions.json` holds every val image beside its truth, in the
+image's pixels: `{"conf", "classes", "images": [{"project", "image",
+"width", "height", "truth": [{"box", "class", "missed"}], "predicted":
+[{"box", "class", "score", "kind"}]}]}`, where `kind` is `tp`, `wrong`
+(right place, wrong class) or `fp`, at the shipped threshold `conf`.
+`project` is the held-out dataset for a run scored on one.
 
 `export.zip` is a `<slug>/` sketch folder: the sketch, the int8 ONNX, the
 labels header (with the calibrated `_CONF_THRESHOLD`) and `report.json`; see

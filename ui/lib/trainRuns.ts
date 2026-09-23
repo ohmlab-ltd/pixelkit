@@ -77,10 +77,47 @@ export type TrainedRun = {
   resumed?: boolean;
   threshold?: ThresholdSummary | null;
   failuresCount?: number;
+  hasPredictions?: boolean;
   warningsCount?: number;
   neuron6?: Neuron6Summary | null;
   history?: HistoryRow[] | null;
 };
+
+// predictions.json: each val image's truth beside what the exported model
+// reports on it at the shipped threshold, in the image's own pixels. A
+// prediction's kind is how it fared; a truth box nothing found is missed.
+export type TruthBox = { box: number[]; class: number; missed: boolean };
+export type PredictedBox = { box: number[]; class: number; score: number; kind: "tp" | "wrong" | "fp" };
+export type ValPrediction = {
+  project: string;
+  image: string;
+  width: number;
+  height: number;
+  truth: TruthBox[];
+  predicted: PredictedBox[];
+};
+export type RunPredictions = { conf: number; classes: string[]; images: ValPrediction[] };
+
+export function errorCounts(p: ValPrediction): { missed: number; wrong: number; spurious: number } {
+  return {
+    missed: p.truth.filter((t) => t.missed).length,
+    wrong: p.predicted.filter((b) => b.kind === "wrong").length,
+    spurious: p.predicted.filter((b) => b.kind === "fp").length,
+  };
+}
+
+// Worst first, weighed as the report's gallery is (a miss or a wrong
+// class counts double a spurious box), then in val order.
+export function worstFirst(images: ValPrediction[]): ValPrediction[] {
+  const weight = (p: ValPrediction) => {
+    const e = errorCounts(p);
+    return 2 * e.missed + 2 * e.wrong + e.spurious;
+  };
+  return images
+    .map((p, i) => ({ p, i, w: weight(p) }))
+    .sort((a, b) => b.w - a.w || a.i - b.i)
+    .map((x) => x.p);
+}
 
 export type ClassReportRow = {
   name: string;

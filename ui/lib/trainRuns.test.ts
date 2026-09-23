@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   confusionShade,
   curveGeometry,
+  errorCounts,
   etaFromProgressText,
   fmtRunDate,
   isThresholdFallback,
@@ -11,7 +12,9 @@ import {
   sizeLabel,
   statusLabel,
   thresholdNote,
+  worstFirst,
   type HistoryRow,
+  type ValPrediction,
 } from "./trainRuns";
 
 describe("trainRuns helpers", () => {
@@ -106,5 +109,28 @@ describe("trainRuns helpers", () => {
     expect(etaFromProgressText("loss 3.2 · 2 h 05 min left")).toBe("2 h 05 min");
     expect(etaFromProgressText("loss 3.2")).toBeNull();
     expect(etaFromProgressText(null)).toBeNull();
+  });
+
+  it("ranks val images worst first, a miss or a wrong class over a spurious box", () => {
+    const img = (image: string, missed: number, wrong: number, spurious: number): ValPrediction => ({
+      project: "p",
+      image,
+      width: 10,
+      height: 10,
+      truth: [
+        ...Array.from({ length: missed }, () => ({ box: [0, 0, 1, 1], class: 0, missed: true })),
+        { box: [0, 0, 1, 1], class: 0, missed: false },
+      ],
+      predicted: [
+        ...Array.from({ length: wrong }, () => ({ box: [0, 0, 1, 1], class: 1, score: 0.9, kind: "wrong" as const })),
+        ...Array.from({ length: spurious }, () => ({ box: [0, 0, 1, 1], class: 0, score: 0.6, kind: "fp" as const })),
+        { box: [0, 0, 1, 1], class: 0, score: 0.8, kind: "tp" as const },
+      ],
+    });
+    expect(errorCounts(img("a", 1, 2, 3))).toEqual({ missed: 1, wrong: 2, spurious: 3 });
+    const ranked = worstFirst([img("clean", 0, 0, 0), img("fp3", 0, 0, 3), img("fn2", 2, 0, 0),
+                               img("wrong1", 0, 1, 0), img("fp2", 0, 0, 2)]);
+    // fn2 weighs 4, fp3 3, then wrong1 and fp2 both 2 in val order, clean last.
+    expect(ranked.map((p) => p.image)).toEqual(["fn2", "fp3", "wrong1", "fp2", "clean"]);
   });
 });

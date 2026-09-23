@@ -342,6 +342,21 @@ def test_interrupt_resume_and_label_with_the_model(client):
         assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
     assert client.get(f"/api/v2/projects/{pid}/models/{run_id}/failures/..%2Freport.json").status_code in (400, 404)
     assert client.get(f"/api/v2/projects/{pid}/models/{run_id}/failures/99_nope.jpg").status_code == 404
+    # Every val image beside its truth, in the image's own pixels: the
+    # truth there is the dataset's boxes back from the letterbox.
+    assert entry["hasPredictions"] is True
+    r = client.get(f"/api/v2/projects/{pid}/models/{run_id}/predictions")
+    assert r.status_code == 200
+    preds = r.json()
+    assert preds["classes"] == ["dog", "cat"] and preds["conf"] == thr["conf"]
+    assert len(preds["images"]) == report["images"]["val"]
+    labelled = ([10, 10, 40, 40], [50, 20, 90, 60])
+    for img in preds["images"]:
+        assert img["project"] == pid and (img["width"], img["height"]) == (96, 64)
+        assert img["truth"] and all(any(np.allclose(t["box"], b, atol=0.6) for b in labelled)
+                                    for t in img["truth"])
+        assert all(p["kind"] in ("tp", "wrong", "fp") and p["score"] >= thr["conf"]
+                   for p in img["predicted"])
     # Nothing to resume once finished.
     assert client.post(f"/api/v2/projects/{pid}/models/{run_id}/resume", json={}).status_code in (400, 409)
 
@@ -382,6 +397,36 @@ def test_interrupt_resume_and_label_with_the_model(client):
     r = client.delete(f"/api/v2/projects/{pid}/models/{run_id}")
     assert r.status_code == 200 and not run_dir.exists()
     assert client.get(f"/api/v2/projects/{pid}/models").json()["models"] == []
+
+
+def test_val_predictions_are_in_image_pixels_with_how_each_box_fared():
+    from train_yolox import Sample, TrainConfig, _val_predictions
+
+    s = Sample(path=Path("a.jpg"), boxes=np.zeros((0, 4), np.float32), classes=np.zeros(0, np.float32),
+               split="val", w=96, h=64, name="a.jpg", measured=True)
+    scale, dy = 64 / 96, 10  # a 96x64 picture letterboxed to 64: 64x43 at y 10
+
+    def lb(b):
+        return [b[0] * scale, b[1] * scale + dy, b[2] * scale, b[3] * scale + dy]
+
+    gt = np.array([[*lb([10, 10, 40, 40]), 0], [*lb([50, 20, 90, 60]), 1]], np.float32)
+    pred = np.array([[*lb([11, 10, 40, 41]), 0.9, 0],    # the first object, right class
+                     [*lb([60, 0, 95, 12]), 0.8, 1],     # nothing there
+                     [*lb([50, 20, 90, 60]), 0.3, 1]],   # the second, below the threshold
+                    np.float32)
+    out = _val_predictions([s], [0], [pred], [gt], 0.5, TrainConfig(imgsz=64), "pid", ["dog", "cat"])
+    assert out["conf"] == 0.5 and out["classes"] == ["dog", "cat"]
+    (img,) = out["images"]
+    assert (img["project"], img["image"], img["width"], img["height"]) == ("pid", "a.jpg", 96, 64)
+    assert np.allclose(img["truth"][0]["box"], [10, 10, 40, 40], atol=0.1)
+    assert [t["missed"] for t in img["truth"]] == [False, True]
+    assert [(p["kind"], p["class"], p["score"]) for p in img["predicted"]] == [("tp", 0, 0.9), ("fp", 1, 0.8)]
+    assert np.allclose(img["predicted"][1]["box"], [60, 0, 95, 12], atol=0.1)
+    # A held-out image is served from its own dataset.
+    s.source = "eval"
+    out = _val_predictions([s], [0], [pred], [gt], 0.5, TrainConfig(imgsz=64, eval_project="held"), "pid",
+                           ["dog", "cat"])
+    assert out["images"][0]["project"] == "held"
 
 
 def test_train_params_are_clamped(app_module):
