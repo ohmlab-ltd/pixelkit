@@ -650,6 +650,9 @@ async def _bg_load_charlie() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     device = _resolve_device()
+    # Threads (crop-dataset resyncs) reach the per-dataset write locks
+    # through this loop.
+    state["loop"] = asyncio.get_running_loop()
 
     # GPU serialization lock for V2 pipelines. Multiple concurrent
     # /api/v2/references/process or /api/v2/imports/process requests
@@ -1094,12 +1097,12 @@ def _write_workspace_card_sidecar(project_id: str) -> None:
         payload = _build_workspace_card_payload(project_id, m)
         p = _workspace_card_sidecar_path(project_id)
         p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".json.tmp")
+        tmp = store.tmp_path(p)
         if _orjson is not None:
             tmp.write_bytes(_orjson.dumps(payload))
         else:
             tmp.write_text(json.dumps(payload))
-        tmp.replace(p)
+        store.replace(tmp, p)
     except Exception as e:
         print(f"[workspace-card-sidecar] write failed for {project_id}: {e}")
 
@@ -1164,12 +1167,12 @@ def _write_overview_sidecar(project_id: str) -> None:
         )
         p = _overview_sidecar_path(project_id)
         p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".json.tmp")
+        tmp = store.tmp_path(p)
         if _orjson is not None:
             tmp.write_bytes(_orjson.dumps(payload))
         else:
             tmp.write_text(json.dumps(payload))
-        tmp.replace(p)
+        store.replace(tmp, p)
     except Exception as e:
         print(f"[overview-sidecar] write failed for {project_id}: {e}")
 
@@ -1258,12 +1261,12 @@ def _write_initial_sidecar(project_id: str) -> None:
         }
         p = _initial_sidecar_path(project_id)
         p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".json.tmp")
+        tmp = store.tmp_path(p)
         if _orjson is not None:
             tmp.write_bytes(_orjson.dumps(payload))
         else:
             tmp.write_text(json.dumps(payload))
-        tmp.replace(p)
+        store.replace(tmp, p)
     except Exception as e:
         print(f"[initial-sidecar] write failed for {project_id}: {e}")
 
@@ -1628,10 +1631,27 @@ def resync_child(child_id: str) -> bool:
     return True
 
 
+async def _resync_child_locked(child_id: str) -> bool:
+    """resync_child under the child's write lock, the crop work in a
+    thread. Unlocked, an edit saved in the child during the pass was
+    reverted and a crop deleted during it came back."""
+    lock = await _manifest_write_lock(child_id)
+    async with lock:
+        return await asyncio.to_thread(resync_child, child_id)
+
+
+def _resync_child_from_thread(child_id: str) -> bool:
+    """_resync_child_locked for the timer and background threads."""
+    loop = state.get("loop")
+    if loop is None or loop.is_closed():
+        return resync_child(child_id)
+    return asyncio.run_coroutine_threadsafe(_resync_child_locked(child_id), loop).result()
+
+
 def resync_children(parent_id: str) -> None:
     for cid in _children_of(parent_id):
         try:
-            resync_child(cid)
+            _resync_child_from_thread(cid)
         except Exception as e:
             print(f"[derived] resync of child {cid} failed: {e}", flush=True)
 
@@ -4292,7 +4312,7 @@ async def v2_derive_project(
     # swallowed silently) so a failed crop pass is diagnosable.
     def _initial_crop() -> None:
         try:
-            resync_child(child_id)
+            _resync_child_from_thread(child_id)
         except Exception as e:
             print(f"[derived] initial crop pass failed for {child_id}: {e}", flush=True)
     _threading.Thread(target=_initial_crop, daemon=True).start()
@@ -4308,7 +4328,7 @@ async def v2_resync_child(project_id: str, user: str = Depends(current_user)):
     m = load_manifest(project_id, copy=False)
     if not (m.get("derived") or {}).get("parentProjectId"):
         raise HTTPException(400, "not a derived (child) project")
-    if not resync_child(project_id):
+    if not await _resync_child_locked(project_id):
         raise HTTPException(500, "resync failed")
     updated = load_manifest(project_id, copy=False)
     return {"ok": True, "n_images": len(updated.get("imports") or [])}
@@ -6572,7 +6592,7 @@ async def _serve_import_view(project_id: str, filename: str, src_path: Path, tar
                     im = im.resize((max(1, round(W * scale)), max(1, round(H * scale))), PILImage.LANCZOS)
             tmp = cached_path.with_suffix(_unique_tmp_suffix())
             im.save(tmp, format="JPEG", quality=85, optimize=True, progressive=True)
-            tmp.replace(cached_path)
+            store.replace(tmp, cached_path)
 
         lock = _thumb_render_lock(project_id, f"view_{name_hash}_{target}")
         async with lock:
@@ -8125,9 +8145,9 @@ def _compute_and_store_image_embedding(project_id: str, import_id: str, raw_byte
         out_path = _image_embedding_path(project_id, import_id)
         # Write atomically - write to temp + rename so a half-baked
         # file never gets read by a concurrent stats request.
-        tmp = out_path.with_suffix(".bin.tmp")
+        tmp = store.tmp_path(out_path)
         tmp.write_bytes(vec.astype("float32", copy=False).tobytes())
-        tmp.replace(out_path)
+        store.replace(tmp, out_path)
         return True
     except Exception as e:
         print(f"[v2-img-embed] {import_id} failed: {e}")
@@ -8591,12 +8611,12 @@ def _persist_dataset_stats(project_id: str, lite: bool) -> dict:
         # Write atomically - temp file + rename so a crash mid-write
         # can't leave half a stats file on disk that the next read
         # would then parse-fail on.
-        tmp = p.with_suffix(".json.tmp")
+        tmp = store.tmp_path(p)
         if _orjson is not None:
             tmp.write_bytes(_orjson.dumps(payload))
         else:
             tmp.write_text(json.dumps(payload))
-        tmp.replace(p)
+        store.replace(tmp, p)
     except Exception as e:
         print(f"[stats-sidecar] write failed for {project_id}: {e}")
     return payload
@@ -9082,6 +9102,12 @@ async def _run_augment_generate_job(job, emit, cancel_event):
 class AugmentGenerateIn(BaseModel):
     perImageMode: str = "1"
     config: dict = {}
+
+
+def _dataset_job_active(project_id: str) -> bool:
+    """Any job queued or running on this dataset."""
+    return any(j.project == project_id and j.status in ("queued", "running")
+               for j in state["jobs"].jobs.values())
 
 
 def _augment_job_active(project_id: str) -> bool:
@@ -9646,7 +9672,7 @@ async def v2_serve_labelled_preview(project_id: str, import_id: str):
         # interleave bytes.
         tmp = cached_path.with_suffix(_unique_tmp_suffix())
         preview.save(tmp, format="JPEG", quality=72, optimize=True, progressive=True)
-        tmp.replace(cached_path)
+        store.replace(tmp, cached_path)
         return cached_path.read_bytes()
 
     # Per-(project, import) lock: only one render at a time, others
@@ -9798,6 +9824,8 @@ async def serve_cover_thumb(project_id: str, w: int = 480, ai: int = 0):
         cover = manifest.get("cover")
         if not cover:
             raise HTTPException(404, "project has no cover")
+        if cover != Path(cover).name or cover in (".", ".."):
+            raise HTTPException(404, "project has no cover")
 
         # Try references first (V2), fall back to imports (V1 + early-V2
         # cover-from-import flow). The first existing path wins.
@@ -9877,7 +9905,7 @@ async def serve_cover_thumb(project_id: str, w: int = 480, ai: int = 0):
                     im = _upscale_cover_if_small(im, target)
             tmp = cached_path.with_suffix(_unique_tmp_suffix())
             im.save(tmp, format="JPEG", quality=78, optimize=True, progressive=True)
-            tmp.replace(cached_path)
+            store.replace(tmp, cached_path)
 
         # Per-project render lock so two parallel first-requests don't
         # both PIL-render the same cover and stomp on each other's
@@ -10335,7 +10363,7 @@ def _v2_save_patch_store(project_id: str, store: dict[str, "np.ndarray"]) -> Non
     import numpy as _np
     p = _v2_patch_store_path(project_id)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.parent / f"{p.stem}.{os.getpid()}.tmp.npz"
+    tmp = p.parent / f"{p.stem}.{os.getpid()}.{_uuid.uuid4().hex[:8]}.tmp.npz"
     _np.savez_compressed(tmp, **store)
     tmp.replace(p)
 
@@ -13194,7 +13222,7 @@ def _bake_labelled_preview_sync(
         cached_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = cached_path.with_suffix(_unique_tmp_suffix())
         preview.save(tmp, format="JPEG", quality=72, optimize=True, progressive=True)
-        tmp.replace(cached_path)
+        store.replace(tmp, cached_path)
     except Exception as e:
         print(f"[labelled-preview] bake failed for {project_id}/{import_id}: {e}")
 
@@ -13905,13 +13933,23 @@ async def container_delete(container_id: str, user: str = Depends(current_user))
         raise HTTPException(404, "project not found")
     if not containers.can_manage(c, user):
         raise HTTPException(403, "requires owner")
+    ids = list(c.get("dataset_ids") or [])
+    if any(_dataset_job_active(did) for did in ids):
+        raise HTTPException(409, "a job is running on one of this project's datasets")
+    # Move the dataset folders out first: if one cannot move (a file in
+    # use), nothing is detached and the project stays as it was.
+    try:
+        containers.delete_container(container_id)
+    except OSError as e:
+        raise HTTPException(409, f"{e}; close it and try again")
     # Detach datasets (they survive as standalone) rather than delete them.
-    for did in (c.get("dataset_ids") or []):
-        m = load_manifest(did)
-        if m and (m.get("container_id") or "") == container_id:
-            m["container_id"] = ""
-            save_manifest(did, m)
-    containers.delete_container(container_id)
+    for did in ids:
+        lock = await _manifest_write_lock(did)
+        async with lock:
+            m = load_manifest(did)
+            if m and (m.get("container_id") or "") == container_id:
+                m["container_id"] = ""
+                save_manifest(did, m)
     add_event("container_delete", container=container_id, actor=user)
     return {"ok": True}
 
@@ -13965,20 +14003,21 @@ async def container_add_dataset(container_id: str, dataset_id: str, user: str = 
         raise HTTPException(404, "dataset not found")
     if (m.get("owner") or "").strip().lower() != user.lower():
         raise HTTPException(403, "not your dataset")
-    m["container_id"] = container_id
-    m["private"] = bool(c.get("private"))  # inherit Project privacy
-    m["max_input_size"] = containers.clamp_max_input(c.get("max_input_size"))  # inherit Project ceiling
-    save_manifest(dataset_id, m)
+    lock = await _manifest_write_lock(dataset_id)
+    async with lock:
+        m = load_manifest(dataset_id)
+        m["container_id"] = container_id
+        m["private"] = bool(c.get("private"))  # inherit Project privacy
+        m["max_input_size"] = containers.clamp_max_input(c.get("max_input_size"))  # inherit Project ceiling
+        save_manifest(dataset_id, m)
+        # Keep the workspace tree mirroring the logical nesting: the dataset
+        # folder physically moves into the project's folder (cosmetic only -
+        # identity lives in the JSONs). Not while a job holds its paths.
+        if not _dataset_job_active(dataset_id):
+            store.move_dataset(dataset_id, container_id)
     if dataset_id not in (c.get("dataset_ids") or []):
         c.setdefault("dataset_ids", []).append(dataset_id)
         containers.save_container(c)
-    # Keep the workspace tree mirroring the logical nesting: the dataset
-    # folder physically moves into the project's folder (cosmetic only -
-    # identity lives in the JSONs, so a failed move is harmless).
-    try:
-        store.move_dataset(dataset_id, container_id)
-    except Exception as e:
-        print(f"[containers] folder move failed for {dataset_id}: {e}")
     add_event("dataset_add", container=container_id, dataset=dataset_id, actor=user)
     return {"ok": True}
 
@@ -13995,15 +14034,17 @@ async def container_remove_dataset(container_id: str, dataset_id: str, user: str
     # may remove their OWN dataset - but an editor can't pull out someone else's.
     if not (containers.can_manage(c, user) or (ds_owner and ds_owner == (user or "").strip().lower())):
         raise HTTPException(403, "requires the Project owner or the dataset's creator")
-    if m and (m.get("container_id") or "") == container_id:
-        m["container_id"] = ""
-        save_manifest(dataset_id, m)
+    if m:
+        lock = await _manifest_write_lock(dataset_id)
+        async with lock:
+            m = load_manifest(dataset_id)
+            if (m.get("container_id") or "") == container_id:
+                m["container_id"] = ""
+                save_manifest(dataset_id, m)
+            if not _dataset_job_active(dataset_id):
+                store.move_dataset(dataset_id, None)
     c["dataset_ids"] = [d for d in (c.get("dataset_ids") or []) if d != dataset_id]
     containers.save_container(c)
-    try:
-        store.move_dataset(dataset_id, None)
-    except Exception as e:
-        print(f"[containers] folder move failed for {dataset_id}: {e}")
     add_event("dataset_remove", container=container_id, dataset=dataset_id, actor=user)
     return {"ok": True}
 
@@ -15227,8 +15268,9 @@ async def update_project(project_id: str, payload: UpdateProjectIn):
         raise HTTPException(404)
     from profanity import assert_clean
 
-    manifest = load_manifest(project_id)
     data = payload.model_dump(exclude_none=True)
+    if "cover" in payload.model_fields_set and payload.cover is None:
+        data["cover"] = None  # "reset to the default cover": dropped with the Nones before
 
     # Validate every persisted text input. Tags + box labels feed back
     # into the model prompt and the user-facing UI, so banned terms
@@ -15250,46 +15292,64 @@ async def update_project(project_id: str, payload: UpdateProjectIn):
     # Sanitise label colour overrides: drop anything that isn't a
     # plain #rrggbb hex string. Keeps the manifest schema tight and
     # avoids stray HTML / colour functions making it into FE styles.
-    new_label_colours = data.get("labelColours")
+    new_label_colours = data.pop("labelColours", None)
+    colours: dict[str, str] | None = None
     if isinstance(new_label_colours, dict):
-        clean: dict[str, str] = {}
+        colours = {}
         for k, v in new_label_colours.items():
             if not isinstance(k, str) or not isinstance(v, str):
                 continue
             vs = v.strip()
-            if len(vs) == 7 and vs.startswith("#") and all(c in "0123456789abcdefABCDEF" for c in vs[1:]):
-                clean[k.strip().lower()] = "#" + vs[1:].lower()
-        # Merge into existing rather than replace, so the FE can PUT
-        # only the deltas (e.g. when a user edits a single label).
-        merged = dict(manifest.get("labelColours") or {})
-        merged.update(clean)
-        # An explicit empty string would clear an override - strip
-        # any keys with an empty value out of the merged map.
-        for k, v in list(clean.items()):
-            if v == "" or v == "#":
-                merged.pop(k, None)
-        data["labelColours"] = merged
+            if vs in ("", "#"):
+                colours[k.strip().lower()] = ""  # clears that override
+            elif len(vs) == 7 and vs.startswith("#") and all(c in "0123456789abcdefABCDEF" for c in vs[1:]):
+                colours[k.strip().lower()] = "#" + vs[1:].lower()
 
-    # Capture which images had their editedBoxes change so we can re-bake
-    # the preview JPEGs after the manifest is saved. Compare per-image to
-    # avoid re-baking on no-op saves (the FE does a debounced PUT every
-    # ~500ms when other fields change).
+    # The cover names a picture of this dataset: cover_thumb joins it into
+    # a path, so anything else read files from elsewhere on the disk.
+    cover = data.get("cover")
+    if cover:
+        proj = project_dir(project_id)
+        if (cover != Path(cover).name or cover in (".", "..")
+                or not any((proj / sub / cover).is_file() for sub in ("images", "references"))):
+            raise HTTPException(400, "cover must be one of this dataset's pictures")
+
+    # Read, merge and save under the dataset's write lock: unlocked, a
+    # save racing an upload or another edit reverted the other one.
     rebake_images: list[str] = []
-    new_edited = data.get("editedBoxes")
-    if isinstance(new_edited, dict):
-        old_edited = manifest.get("editedBoxes") or {}
-        for img_name, new_boxes in new_edited.items():
-            if old_edited.get(img_name) != new_boxes:
-                rebake_images.append(img_name)
+    lock = await _manifest_write_lock(project_id)
+    async with lock:
+        manifest = load_manifest(project_id)
+        if colours is not None:
+            # Merge into existing rather than replace, so the FE can PUT
+            # only the deltas (e.g. when a user edits a single label).
+            merged = dict(manifest.get("labelColours") or {})
+            for k, v in colours.items():
+                if v:
+                    merged[k] = v
+                else:
+                    merged.pop(k, None)
+            data["labelColours"] = merged
 
-    manifest.update(data)
-    # Picking a dataset image (or reference) as the cover supersedes any
-    # previously-uploaded custom cover, so clear the flag and let the picked
-    # filename drive cover_thumb again.
-    if data.get("cover"):
-        manifest["cover_uploaded"] = False
-    manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    save_manifest(project_id, manifest)
+        # Capture which images had their editedBoxes change so we can re-bake
+        # the preview JPEGs after the manifest is saved. Compare per-image to
+        # avoid re-baking on no-op saves (the FE does a debounced PUT every
+        # ~500ms when other fields change).
+        new_edited = data.get("editedBoxes")
+        if isinstance(new_edited, dict):
+            old_edited = manifest.get("editedBoxes") or {}
+            for img_name, new_boxes in new_edited.items():
+                if old_edited.get(img_name) != new_boxes:
+                    rebake_images.append(img_name)
+
+        manifest.update(data)
+        # Picking a dataset image (or reference) as the cover supersedes any
+        # previously-uploaded custom cover, so clear the flag and let the picked
+        # filename drive cover_thumb again.
+        if data.get("cover"):
+            manifest["cover_uploaded"] = False
+        manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        save_manifest(project_id, manifest)
     # Drop the SWR payload cache + on-disk sidecars so the very next
     # /overview read computes from the freshly-saved manifest instead
     # of serving a pre-PUT snapshot. Without this a fast page refresh
@@ -15738,10 +15798,12 @@ async def rename_project(project_id: str, payload: RenameIn):
     assert_clean(new_name, field="project name")
     if not project_dir(project_id).exists():
         raise HTTPException(404)
-    manifest = load_manifest(project_id)
-    manifest["name"] = new_name
-    manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    save_manifest(project_id, manifest)
+    lock = await _manifest_write_lock(project_id)
+    async with lock:
+        manifest = load_manifest(project_id)
+        manifest["name"] = new_name
+        manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        save_manifest(project_id, manifest)
     return {"id": project_id, "name": new_name}
 
 
@@ -19675,7 +19737,7 @@ def _snapshot_write(d: Path) -> dict:
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         for name, b in payload:
             zf.writestr(name, b)
-    os.replace(tmp, path)
+    store.replace(tmp, path)
     return {
         "id": snap_id,
         "createdAt": datetime.now(timezone.utc).isoformat(),
@@ -19773,14 +19835,14 @@ async def snapshots_restore(project_id: str, snapshot_id: str):
         for p in ann_dir.glob("*.json"):
             p.unlink()
         for fn, b in anns.items():
-            tmp = ann_dir / (fn + ".tmp")
+            tmp = store.tmp_path(ann_dir / fn)
             tmp.write_bytes(b)
-            os.replace(tmp, ann_dir / fn)
-        tmp = d / "dataset.json.tmp"
+            store.replace(tmp, ann_dir / fn)
+        tmp = store.tmp_path(d / "dataset.json")
         tmp.write_bytes(new_manifest)
         # dataset.json last: its mtime is the manifest-cache validity
         # stamp, so the cached copy self-invalidates on the next load.
-        os.replace(tmp, d / "dataset.json")
+        store.replace(tmp, d / "dataset.json")
         # The files changed behind store.save()'s digest cache and the
         # manifest RAM cache - drop both so no writer trusts stale state.
         store.forget(project_id)

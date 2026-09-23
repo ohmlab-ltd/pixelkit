@@ -9,7 +9,6 @@ change. Bytes are read/written directly; "presigned URLs" no longer exist
 """
 from __future__ import annotations
 
-import os
 import shutil
 from pathlib import Path
 from typing import Iterable
@@ -55,17 +54,17 @@ class LocalStorage:
     def put_bytes(self, key: str, data: bytes, content_type: str | None = None) -> None:
         path = self.resolve(key)
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+        tmp = store.tmp_path(path)
         tmp.write_bytes(data)
-        os.replace(tmp, path)
+        store.replace(tmp, path)
 
     def put_fileobj(self, key: str, fileobj, content_type: str | None = None) -> None:
         path = self.resolve(key)
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+        tmp = store.tmp_path(path)
         with open(tmp, "wb") as f:
             shutil.copyfileobj(fileobj, f)
-        os.replace(tmp, path)
+        store.replace(tmp, path)
 
     def get_bytes(self, key: str) -> bytes:
         return self.resolve(key).read_bytes()

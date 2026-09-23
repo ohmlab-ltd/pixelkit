@@ -38,6 +38,7 @@ import os
 import re
 import shutil
 import threading
+import time
 import unicodedata
 import uuid
 from pathlib import Path
@@ -92,11 +93,33 @@ def _safe_id(raw: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", str(raw))[:80]
 
 
+def tmp_path(path: Path) -> Path:
+    """A temp file beside `path`, unique to this write. A pid-only name
+    was shared by every thread of the process, so two writers of one
+    file collided (and failed with WinError 32 on Windows)."""
+    return path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+
+
+def replace(src: Path, dst: Path, attempts: int = 20) -> None:
+    """os.replace that rides out Windows sharing violations: replacing a
+    file another thread is reading or replacing fails with PermissionError
+    for a moment. The temp file is removed if it never lands."""
+    for i in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                Path(src).unlink(missing_ok=True)
+                raise
+            time.sleep(0.01 * (i + 1))
+
+
 def _atomic_write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+    tmp = tmp_path(path)
     tmp.write_bytes(data)
-    os.replace(tmp, path)
+    replace(tmp, path)
 
 
 # ---------------------------------------------------------------- scanning
@@ -213,19 +236,32 @@ def delete_dataset(pid: str) -> None:
         shutil.rmtree(d, ignore_errors=True)
 
 
+def _relocate(path: Path, parent: Path) -> Path:
+    """Move a dataset folder under `parent` with a plain rename, or leave it
+    where it is and return its current path. shutil.move fell back to copy
+    then delete when a file inside was open (Windows), deleted part of the
+    source and then failed, losing that dataset's labels and images."""
+    target = _unique_child(parent, path.name)
+    try:
+        os.rename(path, target)
+    except OSError as e:
+        print(f"[store] {path.name} stays where it is (could not move it: {e})")
+        return path
+    return target
+
+
 def move_dataset(pid: str, container_id: str | None) -> Path:
     """Physically move a dataset folder into (or out of) a project folder.
-    Folder location is cosmetic - the logical link stays in the JSONs."""
+    Folder location is cosmetic - the logical link stays in the JSONs - so
+    a move that cannot happen leaves the folder where it is."""
     _ensure_scanned()
     with _LOCK:
         d = dataset_dir(pid)
         parent = _CONTAINERS.get(container_id or "") or workspace.projects_dir()
         if d.parent == parent:
             return d
-        target = _unique_child(parent, d.name)
-        shutil.move(str(d), str(target))
-        _DATASETS[pid] = target
-        return target
+        _DATASETS[pid] = _relocate(d, parent)
+        return _DATASETS[pid]
 
 
 def rename_dataset_dir(pid: str, new_name: str) -> Path:
@@ -386,14 +422,21 @@ def delete_container_dir(cid: str) -> None:
     deletes datasets explicitly when that's intended)."""
     _ensure_scanned()
     with _LOCK:
-        d = _CONTAINERS.pop(cid, None)
+        d = _CONTAINERS.get(cid)
         if not d or not d.exists():
+            _CONTAINERS.pop(cid, None)
             return
+        stuck = []
         for pid, path in list(_DATASETS.items()):
             if path.parent == d:
-                target = _unique_child(workspace.projects_dir(), path.name)
-                shutil.move(str(path), str(target))
-                _DATASETS[pid] = target
+                _DATASETS[pid] = _relocate(path, workspace.projects_dir())
+                if _DATASETS[pid] == path:
+                    stuck.append(path.name)
+        if stuck:
+            # Deleting the folder now would delete these datasets with it.
+            raise OSError(f"could not move {', '.join(stuck)} out of the project folder "
+                          "(a file inside is in use)")
+        _CONTAINERS.pop(cid, None)
     shutil.rmtree(d, ignore_errors=True)
 
 

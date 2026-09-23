@@ -85,11 +85,11 @@ def save_container(container: dict, *, bump_updated: bool = True) -> None:
         container["updated"] = _now_iso()
     d = store.create_container_dir(cid, container.get("name") or "untitled")
     p = d / "project.json"
-    tmp = p.with_suffix(".json.tmp")
+    tmp = store.tmp_path(p)
     with _lock:
         with tmp.open("w", encoding="utf-8") as f:
             json.dump(container, f, indent=2)
-        os.replace(tmp, p)
+        store.replace(tmp, p)
 
 
 def create_container(
