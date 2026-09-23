@@ -16,9 +16,11 @@ download / may we access the repo".
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import threading
+from pathlib import Path
 from typing import Any
 
 import workspace
@@ -147,12 +149,22 @@ def is_downloaded(name: str) -> bool:
 
     spec = REGISTRY[name]
     try:
-        snapshot_download(
+        snap = Path(snapshot_download(
             spec["repo"], local_files_only=True, allow_patterns=_ALLOW_PATTERNS,
-        )
-        return True
+        ))
     except Exception:
         return False
+    # The snapshot folder exists once the first small file lands, so an
+    # interrupted download looked complete. Complete means the weights:
+    # every shard the index lists, or the single weights file.
+    index = snap / "model.safetensors.index.json"
+    if index.is_file():
+        try:
+            shards = set(json.loads(index.read_text("utf-8"))["weight_map"].values())
+        except (OSError, ValueError, KeyError):
+            return False
+        return bool(shards) and all((snap / s).is_file() for s in shards)
+    return any(p.is_file() for p in snap.glob("*.safetensors"))
 
 
 def _loaded(name: str) -> bool:

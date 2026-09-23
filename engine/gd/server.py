@@ -695,6 +695,7 @@ async def lifespan(app: FastAPI):
         os.environ.get("PK_DISABLE_MODELS", "").lower() in ("1", "true", "yes", "on")
         or (device == "cpu" and not cpu_forced)
     )
+    state["models_disabled"] = models_disabled
     if models_disabled:
         print(
             f"[server] models disabled (device={device}"
@@ -2030,7 +2031,9 @@ def _charlie_segment_specific_with_fallback(
         if any(_charlie_box_iou(gb, d.get("box") or []) > 0.5 for d in dets):
             continue  # already covered by a real-label detection
         g["gd_label"] = None      # references decide; don't bias on "object"
+        g["gd_variant"] = None    # every label reader falls back to this key
         g["gd_score"] = None
+        g["generic"] = True
         dets.append(g)
         added += 1
     if added:
@@ -2576,7 +2579,7 @@ async def _run_label_charlie_job(job, emit, cancel_event):
     # SAM3 and make labelling crawl. They resume + drain when the job ends.
     _pause_bg_embeddings()
     try:
-        await _run_label_charlie_job_impl(job, emit, cancel_event)
+        return await _run_label_charlie_job_impl(job, emit, cancel_event)
     finally:
         _resume_bg_embeddings()
         _SIDECAR_REFRESH_SUPPRESSED.discard(job.project)
@@ -2686,7 +2689,15 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
     if dataset_type == "specific":
         try:
             _stage("setup: loading reference embeddings")
-            by_label, by_label_siglip, _dirty = _v2_load_or_backfill_reference_embeddings(job.project)
+            # A backfill runs DINOv2: in a thread and under the GPU gate,
+            # or every request (progress included) froze until it ended.
+            async with state["gpu_lock"]:
+                by_label, by_label_siglip, _dirty = await asyncio.to_thread(
+                    _v2_load_or_backfill_reference_embeddings, job.project)
+            # Only labels the dataset still has: a reference left over
+            # from a deleted label must not bring it back.
+            by_label = {k: v for k, v in by_label.items() if str(k).lower() in label_display}
+            by_label_siglip = {k: v for k, v in by_label_siglip.items() if str(k).lower() in label_display}
             _stage(f"setup: reference embeddings ready (dino={sum(len(v) for v in by_label.values())} siglip={sum(len(v) for v in by_label_siglip.values())})")
             refs_by_label_arr = _v2_stack_refs(by_label)
             refs_by_label_siglip_arr = _v2_stack_refs(by_label_siglip)
@@ -2771,6 +2782,8 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
 
     job.n_images = len(pending)
     n_done = 0
+    n_failed = 0
+    first_error = ""
     loop = asyncio.get_running_loop()
     _stage(f"loop: {len(pending)} image(s) to label")
 
@@ -2937,12 +2950,14 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
     # Prefetch: kick off PIL decode for the first valid entry before the
     # loop starts so the GPU never waits for disk I/O on image 0. After
     # that, each iteration starts the next decode before acquiring the
-    # GPU lock so PIL's CPU work overlaps GPU inference.
-    _prefetch_fut: "asyncio.Future | None" = None
+    # GPU lock so PIL's CPU work overlaps GPU inference. The decode is
+    # keyed by its import: when that image is skipped (deleted mid-job),
+    # the next one must not be labelled from its pixels.
+    _prefetch: "tuple[str, asyncio.Future] | None" = None
     for _pe in pending:
         _pfn = _pe.get("filename")
-        if _pfn and (imports_dir / _pfn).exists():
-            _prefetch_fut = loop.run_in_executor(None, _load_pil_sync, imports_dir / _pfn)
+        if _pfn and _pe.get("id") and (imports_dir / _pfn).exists():
+            _prefetch = (_pe["id"], loop.run_in_executor(None, _load_pil_sync, imports_dir / _pfn))
             break
 
     for _pending_idx, entry in enumerate(pending):
@@ -2973,21 +2988,24 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
         # freshly decoded. Running in executor keeps the event loop
         # free during the PIL decode (~20-100 ms for large images).
         try:
-            if _prefetch_fut is not None:
-                pil = await _prefetch_fut
-                _prefetch_fut = None
+            if _prefetch is not None and _prefetch[0] == import_id:
+                pil = await _prefetch[1]
             else:
+                if _prefetch is not None:
+                    _prefetch[1].cancel()  # decoded for an image that was skipped
                 pil = await loop.run_in_executor(None, _load_pil_sync, path)
         except Exception as e:
             print(f"[label-charlie] {import_id}: failed to decode: {e}")
-            _prefetch_fut = None
+            n_failed += 1
+            first_error = first_error or f"could not read {filename}: {e}"
+            _prefetch = None
             continue
 
         # Start decoding the NEXT image NOW, before we touch the GPU,
         # so PIL's CPU work runs concurrently with GPU inference and
         # the event loop doesn't stall on disk I/O at the top of the
         # next iteration.
-        _prefetch_fut = None
+        _prefetch = None
         for _ni in range(_pending_idx + 1, len(pending)):
             _ne = pending[_ni]
             _nfn = _ne.get("filename")
@@ -2995,7 +3013,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
                 continue
             _np = imports_dir / _nfn
             if _np.exists():
-                _prefetch_fut = loop.run_in_executor(None, _load_pil_sync, _np)
+                _prefetch = (_ne["id"], loop.run_in_executor(None, _load_pil_sync, _np))
                 break
 
         _stage(f"image {n_done + 1}/{len(pending)}: waiting for GPU lock")
@@ -3062,6 +3080,8 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
                     )
         except Exception as e:
             print(f"[label-charlie] {import_id}: GPU inference failed: {e}")
+            n_failed += 1
+            first_error = first_error or f"labelling {filename} failed: {e}"
             continue
 
         # Cancel landed mid-image (tiled runs are ~7× the work, so this is
@@ -3265,6 +3285,10 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
                     if not d.get("pred_label"):
                         d["pred_label"] = d.get("embed_nearest_label")
 
+        # A generic fallback box the references never labelled (no
+        # embedding, DINOv2 not loaded) has no label to store.
+        detections = [d for d in detections if not (d.get("generic") and not d.get("pred_label"))]
+
         # General-path NMS. SAM3 is run once per label so the
         # cross-label dedupe the specific path needs doesn't apply
         # here. But the same-label path occasionally fires duplicate
@@ -3369,6 +3393,13 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
         _invalidate_project_payloads(job.project)
     except Exception as e:
         print(f"[label-charlie] payload invalidation failed: {e}")
+
+    # Per-image failures are logged and skipped; a run in which none
+    # succeeded (the model unloaded under it, every file unreadable) must
+    # not report "done".
+    if n_failed and not n_done and not cancel_event.is_set():
+        raise RuntimeError(f"no image could be labelled ({n_failed} failed): {first_error}")
+    return {"labelled": n_done, "failed": n_failed}
 
     # Sidecar suppression is lifted + the final rebuild fired by the
     # wrapper's finally block (so it runs even if the job raised).
@@ -9104,6 +9135,16 @@ class AugmentGenerateIn(BaseModel):
     config: dict = {}
 
 
+# Jobs that rewrite a dataset's labels. Two at once (or a rename during
+# one) overwrote each other: each flushes from its own snapshot.
+_LABEL_WRITERS = ("label_charlie", "label_model", "purge_label")
+
+
+def _label_job_active(project_id: str) -> bool:
+    return any(j.project == project_id and j.kind in _LABEL_WRITERS
+               and j.status in ("queued", "running") for j in state["jobs"].jobs.values())
+
+
 def _dataset_job_active(project_id: str) -> bool:
     """Any job queued or running on this dataset."""
     return any(j.project == project_id and j.status in ("queued", "running")
@@ -9652,11 +9693,7 @@ async def v2_serve_labelled_preview(project_id: str, import_id: str):
     # Edited boxes (with masks) win over the raw GD detections - that
     # mirrors what the user sees in the gallery thumb (kept boxes
     # only). Falls back to detections when no edits have been made.
-    edited = imp.get("editedBoxes")
-    if isinstance(edited, list) and edited:
-        det_source = edited
-    else:
-        det_source = imp.get("detections") or []
+    det_source = _preview_source(imp, imp.get("detections") or [])
 
     loop = asyncio.get_running_loop()
 
@@ -10953,7 +10990,9 @@ async def v2_reference_quality(project_id: str):
     if not project_dir(project_id).exists():
         raise HTTPException(404)
     try:
-        by_label, _by_label_siglip, _dirty = _v2_load_or_backfill_reference_embeddings(project_id)
+        async with state["gpu_lock"]:
+            by_label, _by_label_siglip, _dirty = await asyncio.to_thread(
+                _v2_load_or_backfill_reference_embeddings, project_id)
     except Exception as e:
         print(f"[v2-ref-quality] load failed: {e}")
         return {"references": {}}
@@ -13199,6 +13238,15 @@ def _unique_tmp_suffix() -> str:
     return f".{os.getpid()}.{_uuid.uuid4().hex[:8]}.tmp.jpg"
 
 
+def _preview_source(imp: "dict | None", detections: list) -> list:
+    """What a labelled preview draws: the user's boxes once the image has
+    been edited (an image emptied by hand stays empty), else `detections`."""
+    edited = (imp or {}).get("editedBoxes")
+    if isinstance(edited, list) and (edited or (imp or {}).get("editedBoxesSet")):
+        return edited
+    return detections
+
+
 def _bake_labelled_preview_sync(
     project_id: str,
     import_id: str,
@@ -13215,6 +13263,11 @@ def _bake_labelled_preview_sync(
     drop-zone progress indicator gets to update at network speed.
     """
     cached_path = _labelled_preview_path(project_id, import_id)
+    # The record as it is now: an image edited by hand (before or during a
+    # labelling run) shows its edits, not the auto boxes just computed.
+    with _MANIFEST_CACHE_LOCK:
+        imp = _MANIFEST_IMPORT_INDEX.get(project_id, {}).get(import_id)
+    detections = _preview_source(imp, detections)
     try:
         with PILImage.open(src_path) as im:
             im = ImageOps.exif_transpose(im).convert("RGB")
@@ -16405,6 +16458,8 @@ async def rename_label(project_id: str, body: RenameLabelRequest):
         # which made fixing a label's casing impossible.)
         return {"ok": True, "renamed": 0}
 
+    if _label_job_active(project_id):
+        raise HTTPException(409, "the dataset is being labelled; rename the label when that finishes")
     # Same write lock as every other whole-manifest mutator: an
     # unlocked load→rename→save racing a labelling-job flush would
     # revert the flushed images wholesale.
@@ -16484,6 +16539,8 @@ async def container_rename_label(container_id: str, body: RenameLabelRequest):
         return {"ok": True, "renamed": 0, "datasetsTouched": 0}
 
     ds_ids = list(c.get("dataset_ids") or [])
+    if any(_label_job_active(pid) for pid in ds_ids):
+        raise HTTPException(409, "a dataset in this project is being labelled; rename when that finishes")
 
     def _one(pid: str) -> int:
         m = load_manifest(pid)
@@ -16674,6 +16731,9 @@ async def schedule_job(
     proj = project_dir(payload.project)
     if not proj.exists():
         raise HTTPException(404, "project not found")
+    if payload.kind in _LABEL_WRITERS and _label_job_active(payload.project):
+        raise HTTPException(409, "this dataset is already being labelled or having a label deleted; "
+                                 "wait for that to finish")
     # copy=False - we only read owner + counts here. Deepcopying a
     # 30MB manifest just to schedule a job was ~300-500ms of dead
     # weight before the label_charlie job runner even picks up.
@@ -19177,6 +19237,8 @@ async def models_download(name: str):
 async def models_load(name: str):
     if name not in models_mgr.REGISTRY:
         raise HTTPException(404, f"unknown model: {name}")
+    if state.get("models_disabled"):
+        raise HTTPException(409, "models are disabled in this engine")
     if not models_mgr.is_downloaded(name):
         raise HTTPException(409, f"{name} weights not downloaded yet")
     if state.get("device") == "cpu" and _configured_device() != "cpu":
@@ -19190,15 +19252,19 @@ async def models_load(name: str):
 
 @app.post("/api/models/{name}/unload")
 async def models_unload(name: str):
-    if name == "sam3":
-        import pipeline_charlie
+    if name != "sam3":
+        raise HTTPException(400, f"unload not supported for: {name}")
+    # Unloading under a run failed every remaining image silently.
+    if any(j.kind == "label_charlie" and j.status in ("queued", "running")
+           for j in state["jobs"].jobs.values()):
+        raise HTTPException(409, "a labelling run is using SAM 3; unload it when that finishes")
+    import pipeline_charlie
+    async with state["gpu_lock"]:  # after any forward pass in flight
         pipeline_charlie.clear_sam3()
         state["charlie"] = None
-    else:
-        raise HTTPException(400, f"unload not supported for: {name}")
     import gc as _gc
     _gc.collect()
-    if torch.cuda.is_available():
+    if str(state.get("device") or "").startswith("cuda"):
         torch.cuda.empty_cache()
     elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
         torch.mps.empty_cache()

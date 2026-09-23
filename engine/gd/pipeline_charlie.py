@@ -277,18 +277,30 @@ _MODEL = None
 _PROCESSOR = None
 
 
+def _model_device() -> "torch.device":
+    """Where SAM 3 runs. The backend helpers key on this, not on what the
+    machine has: synchronising CUDA with the model on the CPU creates a
+    context on GPU 0, taking memory from whoever is using it."""
+    try:
+        return torch.device(getattr(_MODEL, "device", None) or "cpu")
+    except (TypeError, RuntimeError):
+        return torch.device("cpu")
+
+
 def _device_sync() -> None:
-    """Barrier for accurate timings on whichever backend is active."""
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+    """Barrier for accurate timings on the model's backend."""
+    dev = _model_device()
+    if dev.type == "cuda":
+        torch.cuda.synchronize(dev)
+    elif dev.type == "mps":
         torch.mps.synchronize()
 
 
 def _device_empty_cache() -> None:
-    if torch.cuda.is_available():
+    dev = _model_device()
+    if dev.type == "cuda":
         torch.cuda.empty_cache()
-    elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+    elif dev.type == "mps":
         torch.mps.empty_cache()
 
 
@@ -1526,6 +1538,7 @@ def segment_labels(
                 vision_embeds, original_sizes, pixel_values,
                 threshold=threshold,
                 mask_threshold=mask_threshold,
+                min_relative_area=min_relative_area,
             )
         else:
             raw, predict_ms, post_ms, dropped_tiny = _segment_one_label(
@@ -1846,6 +1859,7 @@ def _segment_one_label_with_cached_vision(
     *,
     threshold: float | None = None,
     mask_threshold: float | None = None,
+    min_relative_area: float | None = None,
 ) -> tuple[list[tuple], float, float, int]:
     """Per-label SAM3 forward that re-uses a cached vision_embeds when
     available, then runs the standard post-process + filter passes
@@ -1919,9 +1933,10 @@ def _segment_one_label_with_cached_vision(
         kept_floor = [h for h in hits if h[3] >= min_area_px]
         dropped_tiny += len(hits) - len(kept_floor)
 
-        if len(kept_floor) > 1:
+        eff_min_relative = SAM3_MIN_RELATIVE_AREA if min_relative_area is None else float(min_relative_area)
+        if len(kept_floor) > 1 and eff_min_relative > 0:
             max_area = max(h[3] for h in kept_floor)
-            rel_floor = int(max_area * SAM3_MIN_RELATIVE_AREA)
+            rel_floor = int(max_area * eff_min_relative)
             kept_rel = [h for h in kept_floor if h[3] >= rel_floor]
             dropped_tiny += len(kept_floor) - len(kept_rel)
         else:
