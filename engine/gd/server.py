@@ -3824,6 +3824,25 @@ async def _run_purge_label_job(job, emit, cancel_event):
         m_now = load_manifest(job.project) or {}
         tags = m_now.get("tags") or []
         m_now["tags"] = [t for t in tags if str(t).strip().lower() != target_key]
+        # References teach the labeller the label; left in place they
+        # brought the deleted label back on the next run. A reference
+        # that was only about this label is dropped (its picture stays
+        # on disk, so a snapshot restore still finds it).
+        kept_refs = []
+        for ref in m_now.get("references") or []:
+            if not isinstance(ref, dict):
+                continue
+            dets = [d for d in (ref.get("detections") or [])
+                    if not (isinstance(d, dict) and _label_of(d) == target_key)]
+            if str(ref.get("label") or "").strip().lower() == target_key:
+                if not dets:
+                    continue
+                ref["label"] = _box_label(dets[0])
+            ref["detections"] = dets
+            kept_refs.append(ref)
+        if "references" in m_now:
+            m_now["references"] = kept_refs
+        _relabel_augmentations(job.project, lambda lab: None if lab.strip().lower() == target_key else lab)
         colours = m_now.get("labelColours") or {}
         if target_key in colours:
             colours.pop(target_key, None)
@@ -7191,6 +7210,77 @@ def _apply_matrix_to_box(
     return [min(xs), min(ys), max(xs), max(ys)]
 
 
+def _clip_box_to(box: "list[float]", w: float, h: float) -> "list[float] | None":
+    """A box clipped to a w x h picture, or None when less than 2 px of it
+    is left on either axis (warped out of the frame)."""
+    x0, y0 = max(0.0, float(box[0])), max(0.0, float(box[1]))
+    x1, y1 = min(float(w), float(box[2])), min(float(h), float(box[3]))
+    return [x0, y0, x1, y1] if x1 - x0 >= 2.0 and y1 - y0 >= 2.0 else None
+
+
+def _clip_poly_to(poly: "list[list[float]]", w: float, h: float) -> "list[list[float]]":
+    """A polygon clipped to a w x h picture (Sutherland-Hodgman, one edge
+    at a time); [] when nothing of it is left."""
+    def cut(points, inside, cross):
+        out = []
+        for i, cur in enumerate(points):
+            prev = points[i - 1]
+            if inside(cur):
+                if not inside(prev):
+                    out.append(cross(prev, cur))
+                out.append(cur)
+            elif inside(prev):
+                out.append(cross(prev, cur))
+        return out
+
+    def at_x(x):
+        return lambda a, b: [x, a[1] + (x - a[0]) * (b[1] - a[1]) / (b[0] - a[0])]
+
+    def at_y(y):
+        return lambda a, b: [a[0] + (y - a[1]) * (b[0] - a[0]) / (b[1] - a[1]), y]
+
+    pts = [[float(p[0]), float(p[1])] for p in poly if isinstance(p, (list, tuple)) and len(p) >= 2]
+    for inside, cross in ((lambda p: p[0] >= 0.0, at_x(0.0)), (lambda p: p[0] <= w, at_x(float(w))),
+                          (lambda p: p[1] >= 0.0, at_y(0.0)), (lambda p: p[1] <= h, at_y(float(h)))):
+        if len(pts) < 3:
+            return []
+        pts = cut(pts, inside, cross)
+    return pts if len(pts) >= 3 else []
+
+
+def _relabel_augmentations(project_id: str, relabel: "Callable[[str], str | None]") -> int:
+    """Apply `relabel` to every augmented copy's boxes: it returns the new
+    name, the same name, or None to drop the box. Keeps generated copies
+    in step with a label rename or delete. Returns the boxes changed."""
+    root = _augmentations_dir(project_id)
+    changed = 0
+    for path in sorted(root.glob("*/annotations.json")) if root.exists() else []:
+        try:
+            data = json.loads(path.read_text("utf-8"))
+        except Exception:
+            continue
+        n_before = changed
+        copies = data.get("copies") or {}
+        for name, dets in copies.items():
+            if not isinstance(dets, list):
+                continue
+            kept = []
+            for d in dets:
+                if not isinstance(d, dict):
+                    continue
+                label = str(d.get("label") or "")
+                new = relabel(label)
+                if new != label:
+                    changed += 1
+                if new is not None:
+                    d["label"] = new
+                    kept.append(d)
+            copies[name] = kept
+        if changed != n_before:
+            store._atomic_write(path, json.dumps(data).encode("utf-8"))
+    return changed
+
+
 def _aug_apply_perspective_warp(
     img: "torch.Tensor",
     strength: float,
@@ -8769,20 +8859,17 @@ async def _run_augment_generate_job(job, emit, cancel_event):
                     ]
                     if len(scaled) >= 3:
                         polys_work.append(scaled)
-            bx = d.get("box_xyxy") or d.get("box") or []
+            # Every box shape the dataset holds: hand-drawn and imported
+            # boxes are x0/y0/x1/y1, auto-labels `box`. Reading only the
+            # latter shipped edited images' copies with no labels at all.
+            xyxy = _box_xyxy(d)
             box_work: list[float] = []
-            if isinstance(bx, (list, tuple)) and len(bx) >= 4:
-                box_work = [
-                    float(bx[0]) * sx, float(bx[1]) * sy,
-                    float(bx[2]) * sx, float(bx[3]) * sy,
-                ]
-            label = (
-                d.get("label")
-                or d.get("predLabel")
-                or d.get("pred_label")
-                or ""
-            )
-            prepared_dets.append({"label": str(label), "polys": polys_work, "box": box_work})
+            if xyxy is not None:
+                box_work = [xyxy[0] * sx, xyxy[1] * sy, xyxy[2] * sx, xyxy[3] * sy]
+            label = _box_label(d)
+            if not label or not (box_work or polys_work):
+                continue
+            prepared_dets.append({"label": label, "polys": polys_work, "box": box_work})
         anno_per_copy: dict[str, list[dict]] = {}
         saved_count = 0
         with torch.no_grad():
@@ -8830,12 +8917,22 @@ async def _run_augment_generate_job(job, emit, cancel_event):
                         )
                     copy_annos: list[dict] = []
                     for det in prepared_dets:
-                        warped_polys = _apply_matrix_to_polys(det["polys"], cur_matrix)
-                        warped_box = _apply_matrix_to_box(det["box"], cur_matrix)
+                        # Clipped to the picture: a warp can carry part of
+                        # an object, or all of it, out of the frame.
+                        warped_polys = [q for q in (_clip_poly_to(p, work_W, work_H)
+                                                    for p in _apply_matrix_to_polys(det["polys"], cur_matrix)) if q]
+                        warped_box = (_clip_box_to(_apply_matrix_to_box(det["box"], cur_matrix), work_W, work_H)
+                                      if det["box"] else None)
+                        if warped_box is None and not warped_polys:
+                            continue
+                        if warped_box is None:  # a mask without a box: its extent
+                            xs = [pt[0] for q in warped_polys for pt in q]
+                            ys = [pt[1] for q in warped_polys for pt in q]
+                            warped_box = _clip_box_to([min(xs), min(ys), max(xs), max(ys)], work_W, work_H)
                         copy_annos.append({
                             "label": det["label"],
                             "polys": warped_polys,
-                            "box": warped_box,
+                            "box": warped_box or [],
                         })
                     anno_per_copy[f"{k:02d}.jpg"] = copy_annos
                     out_np = (out.clamp(0.0, 1.0) * 255.0 + 0.5).byte().permute(1, 2, 0).cpu().numpy()
@@ -8876,52 +8973,13 @@ async def _run_augment_generate_job(job, emit, cancel_event):
                 except Exception as e:
                     print(f"[augment_generate] copy {k} for {filename} ({import_id}) failed: {e}")
         try:
-            anno_path = out_dir / "annotations.json"
-            with open(anno_path, "w") as f:
-                json.dump({
-                    "width": int(work_W),
-                    "height": int(work_H),
-                    "copies": anno_per_copy,
-                }, f)
+            store._atomic_write(out_dir / "annotations.json", json.dumps({
+                "width": int(work_W),
+                "height": int(work_H),
+                "copies": anno_per_copy,
+            }).encode("utf-8"))
         except Exception as e:
             print(f"[augment_generate] annotations.json write for {import_id} failed: {e}")
-        # Mirror the augmented copies + annotations to R2 so a remote
-        # training rig (no access to this box's disk) can pull them as
-        # extra training samples - see training.collect_augmentation_items.
-        # Done FIRE-AND-FORGET on the background executor so these uploads
-        # never block image generation or the progress counter (this was
-        # making generation crawl + stick at 0/XXX). Disk stays the source
-        # of truth for export; the rig only needs them by training time.
-        if R2 is not None:
-            _anno_bytes: "bytes | None" = None
-            try:
-                _anno_bytes = anno_path.read_bytes()
-            except Exception:
-                _anno_bytes = None
-
-            def _upload_aug_to_r2(proj=job.project, iid=import_id,
-                                  copy_names=list(anno_per_copy.keys()),
-                                  anno_bytes=_anno_bytes, odir=out_dir) -> None:
-                try:
-                    if anno_bytes is not None:
-                        R2.put_bytes(
-                            f"projects/{proj}/augmentations/{iid}/annotations.json",
-                            anno_bytes, content_type="application/json",
-                        )
-                    for cn in copy_names:
-                        cp = odir / cn
-                        if cp.exists():
-                            R2.put_bytes(
-                                f"projects/{proj}/augmentations/{iid}/{cn}",
-                                cp.read_bytes(), content_type="image/jpeg",
-                            )
-                except Exception as e:
-                    print(f"[augment_generate] R2 upload for {iid} failed: {e}")
-
-            try:
-                _BG_IMAGE_EXECUTOR.submit(_upload_aug_to_r2)
-            except Exception as e:
-                print(f"[augment_generate] R2 upload submit failed for {import_id}: {e}")
         # Surface progress on the job object so the FE's
         # /augment/job/active poll picks it up - assigning here means
         # the counter updates in the same tick the thread finishes,
@@ -9026,6 +9084,11 @@ class AugmentGenerateIn(BaseModel):
     config: dict = {}
 
 
+def _augment_job_active(project_id: str) -> bool:
+    return any(j.project == project_id and j.kind == "augment_generate"
+               and j.status in ("queued", "running") for j in state["jobs"].jobs.values())
+
+
 @app.post(
     "/api/v2/projects/{project_id}/augment/generate",
     dependencies=[Depends(require_project_owner)],
@@ -9033,6 +9096,10 @@ class AugmentGenerateIn(BaseModel):
 async def v2_augment_generate(project_id: str, payload: AugmentGenerateIn):
     if not project_dir(project_id).exists():
         raise HTTPException(404, "project not found")
+    # Clearing or regenerating wipes the folder a running generation is
+    # still writing into; its copies would come back after the clear.
+    if _augment_job_active(project_id):
+        raise HTTPException(409, "augmentations are being generated; wait for that run or cancel it")
     manifest = load_manifest(project_id) or {}
     imports = manifest.get("imports") or []
     if not imports:
@@ -16286,6 +16353,8 @@ async def rename_label(project_id: str, body: RenameLabelRequest):
             raise HTTPException(404)
 
         renamed = _rename_label_fields(manifest, old, new)
+        renamed += _relabel_augmentations(
+            project_id, lambda lab: new if lab.strip().lower() == old.strip().lower() else lab)
 
         manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         save_manifest(project_id, manifest)
@@ -16359,6 +16428,7 @@ async def container_rename_label(container_id: str, body: RenameLabelRequest):
         if not m:
             return 0
         n = _rename_label_fields(m, old, new)
+        n += _relabel_augmentations(pid, lambda lab: new if lab.strip().lower() == old.strip().lower() else lab)
         if n:
             m["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             save_manifest(pid, m)
@@ -17025,6 +17095,10 @@ def _iter_augmentations(project_id: str, manifest: dict):
                 box = det.get("box") or []
                 if not (isinstance(box, (list, tuple)) and len(box) == 4):
                     continue
+                if canvas_w > 0 and canvas_h > 0:
+                    box = _clip_box_to(box, canvas_w, canvas_h)
+                    if box is None:
+                        continue
                 adapted = {
                     "x0": float(box[0]),
                     "y0": float(box[1]),
@@ -17032,7 +17106,9 @@ def _iter_augmentations(project_id: str, manifest: dict):
                     "y1": float(box[3]),
                     "label": det.get("label") or "",
                 }
-                polys = det.get("polys") or []
+                polys = [p for p in (det.get("polys") or []) if isinstance(p, list)]
+                if polys and canvas_w > 0 and canvas_h > 0:
+                    polys = [q for q in (_clip_poly_to(p, canvas_w, canvas_h) for p in polys) if q]
                 if polys:
                     adapted["mask"] = {"polygons": polys}
                 yield export_name, parent, canvas_w, canvas_h, adapted, import_id, copy_name
