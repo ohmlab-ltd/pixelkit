@@ -82,7 +82,14 @@ export async function collectInput(files: File[]): Promise<CollectedFile[]> {
   if (files.length === 1 && /\.zip$/i.test(files[0].name)) {
     return collectFromZip(files[0]);
   }
-  return files.map((f) => ({ path: relPath(f), file: f }));
+  return files
+    .map((f) => ({ path: relPath(f), file: f }))
+    .filter(({ path }) => !isMacDebris(path));
+}
+
+// Finder's __MACOSX/ folders and ._x resource forks: no image, no labels.
+function isMacDebris(path: string): boolean {
+  return /(^|\/)__MACOSX\//i.test(path) || baseName(path).startsWith("._");
 }
 
 function relPath(f: File): string {
@@ -100,7 +107,7 @@ async function collectFromZip(zip: File): Promise<CollectedFile[]> {
       buf,
       {
         filter: (file) =>
-          IMAGE_EXT_RE.test(file.name) || /\.(xml|json|txt|yaml|yml)$/i.test(file.name),
+          IMAGE_EXT_RE.test(file.name) || /\.(xml|json|txt|yaml|yml|names)$/i.test(file.name),
       },
       (err, data) => (err ? reject(err) : resolve(data)),
     );
@@ -112,7 +119,7 @@ async function collectFromZip(zip: File): Promise<CollectedFile[]> {
     // Finder zips carry __MACOSX/._x.jpg resource forks that decode as
     // nothing; skip them. A zero-byte .txt is a legitimate empty YOLO
     // label ("no objects"), so only images need bytes.
-    if (/(^|\/)__MACOSX\//i.test(path) || name.startsWith("._")) continue;
+    if (isMacDebris(path)) continue;
     if (data.byteLength === 0 && !/\.txt$/i.test(name)) continue;
     const type = mimeForName(name);
     out.push({
@@ -170,7 +177,9 @@ export async function parseDataset(
   files: CollectedFile[],
   onProgress?: (done: number, total: number) => void,
 ): Promise<ParsedDataset> {
-  if (detectFormat(files) === "voc") return parseVoc(files, onProgress);
+  // An unrelated .xml (a settings or metadata file) must not turn a COCO
+  // or YOLO dataset into an empty VOC import.
+  if (detectFormat(files) === "voc" && (await hasVocXml(files))) return parseVoc(files, onProgress);
   const cocoJsons = await findCocoJsons(files);
   if (cocoJsons.length > 0) return parseCoco(files, cocoJsons, onProgress);
   if (files.some((cf) => /\.txt$/i.test(baseName(cf.path)))) return parseYolo(files, onProgress);
@@ -178,6 +187,21 @@ export async function parseDataset(
     "Couldn't recognise this dataset. Supported layouts: Pascal VOC (Annotations/*.xml next to images), " +
       "COCO (a JSON with images + annotations), or YOLO (labels/*.txt with classes.txt or data.yaml).",
   );
+}
+
+async function hasVocXml(files: CollectedFile[]): Promise<boolean> {
+  for (const cf of files) {
+    if (/\.xml$/i.test(baseName(cf.path)) && /<annotation[\s>]/i.test(await readText(cf.file))) return true;
+  }
+  return false;
+}
+
+// Text in the encoding the byte-order mark names (some Windows tools save
+// VOC XML as UTF-16), UTF-8 otherwise.
+async function readText(file: Blob): Promise<string> {
+  const b = new Uint8Array(await file.arrayBuffer());
+  const enc = b[0] === 0xff && b[1] === 0xfe ? "utf-16le" : b[0] === 0xfe && b[1] === 0xff ? "utf-16be" : "utf-8";
+  return new TextDecoder(enc).decode(b);
 }
 
 // ── Shared image index (COCO / YOLO pairing) ───────────────────────────────
@@ -327,6 +351,7 @@ async function parseCoco(
   let background = 0;
   let duplicates = 0;
   let rleMasks = 0;
+  let crowd = 0;
 
   const addClass = (label: string) => {
     if (!classSeen.has(label)) {
@@ -381,6 +406,12 @@ async function parseCoco(
 
       const boxes: ImportBox[] = [];
       (annsByImage.get(String(im.id)) ?? []).forEach((a, i) => {
+        // iscrowd=1 marks a crowd region (one outline around many people),
+        // not an object; converters such as Ultralytics' skip them.
+        if (a.iscrowd === 1) {
+          crowd++;
+          return;
+        }
         const label =
           catName.get(String(a.category_id)) ??
           (a.category_id != null ? String(a.category_id).trim().toLowerCase() : "");
@@ -457,6 +488,8 @@ async function parseCoco(
     warnings.push(`${dropped} annotation(s) were unlabelled or degenerate (zero-area) and were dropped.`);
   if (rleMasks > 0)
     warnings.push(`${rleMasks} RLE-encoded mask(s) were imported as boxes only (polygon masks are kept).`);
+  if (crowd > 0)
+    warnings.push(`${crowd} crowd region(s) (iscrowd) were skipped: they outline a group, not one object.`);
   if (idx.collisions.size > 0)
     warnings.push(`${idx.collisions.size} image name(s) were ambiguous (same name, different extension); their annotations may not have paired.`);
   if (items.length === 0) warnings.push("No image/annotation pairs were found - check the folder layout.");
@@ -619,10 +652,11 @@ async function parseYolo(
   for (const cf of files) {
     const n = baseName(cf.path).toLowerCase();
     if (n === "classes.txt" || n === "obj.names") {
-      names = (await cf.file.text())
-        .split(/\r?\n/)
-        .map((s) => s.trim().toLowerCase())
-        .filter((s) => s.length > 0);
+      // A line's position is its class id: a blank line in the middle is
+      // an unnamed class, not a gap to close (that shifted every later id).
+      const lines = (await cf.file.text()).split(/\r?\n/).map((s) => s.trim().toLowerCase());
+      while (lines.length && !lines[lines.length - 1]) lines.pop();
+      names = lines.map((s, i) => s || `class_${i}`);
       if (names.length) {
         namesSource = n;
         break;
@@ -823,6 +857,7 @@ async function parseVoc(
   let boxesTotal = 0;
   let dropped = 0;
   let unpairedAnnotations = 0;
+  let unreadable = 0;
   let annotated = 0;
   let background = 0;
 
@@ -831,9 +866,13 @@ async function parseVoc(
   for (const xf of xmls) {
     let parsed: VocXml;
     try {
-      parsed = parseVocXml(await xf.file.text());
+      parsed = parseVocXml(await readText(xf.file));
     } catch {
-      unpairedAnnotations++; // unreadable annotation - count + skip
+      // Unreadable: its picture is left out rather than imported as an
+      // empty (negative) frame it is not.
+      const img = resolveImage(xf.path, "");
+      if (img) used.add(normPath(img.path));
+      unreadable++;
       onProgress?.(++done, total);
       continue;
     }
@@ -902,6 +941,8 @@ async function parseVoc(
 
   if (unpairedAnnotations > 0)
     warnings.push(`${unpairedAnnotations} annotation file(s) had no matching image and were skipped.`);
+  if (unreadable > 0)
+    warnings.push(`${unreadable} annotation file(s) could not be read; their images were left out.`);
   if (unpairedImages > 0)
     warnings.push(`${unpairedImages} image(s) had no annotation and were imported as empty background frames.`);
   if (dropped > 0)

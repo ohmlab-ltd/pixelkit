@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
   type CollectedFile,
+  collectInput,
   detectFormat,
   jpegOrientation,
   parseDataset,
@@ -288,5 +289,58 @@ describe("pairing and orientation regressions", () => {
       }, null);
       expect(out.boxes[0]).toMatchObject({ x0: 2400, y0: 100, x1: 2800, y1: 500 });
     });
+  });
+});
+
+describe("importer regressions, part two", () => {
+  it("a stray non-VOC .xml does not hijack a YOLO dataset", async () => {
+    const files = [jpg("ds/images/a.jpg"), f("ds/labels/a.txt", "0 0.5 0.5 0.2 0.2\n"),
+                   f("ds/classes.txt", "bolt\n"), f("ds/settings.xml", "<config><x>1</x></config>")];
+    const ds = await parseDataset(files);
+    expect(ds.format).toBe("yolo");
+    expect(ds.items[0].boxes[0].label).toBe("bolt");
+  });
+
+  it("reads UTF-16 VOC XML, and leaves out an image whose XML cannot be read", async () => {
+    const xml = "<annotation><filename>a.jpg</filename><object><name>cat</name>" +
+      "<bndbox><xmin>1</xmin><ymin>2</ymin><xmax>5</xmax><ymax>6</ymax></bndbox></object></annotation>";
+    const u16 = new Uint8Array(2 + xml.length * 2);
+    u16[0] = 0xff; u16[1] = 0xfe;
+    for (let i = 0; i < xml.length; i++) u16[2 + i * 2] = xml.charCodeAt(i);
+    const files: CollectedFile[] = [
+      jpg("JPEGImages/a.jpg"), { path: "Annotations/a.xml", file: new File([u16], "a.xml") },
+      jpg("JPEGImages/b.jpg"), f("Annotations/b.xml", "<annotation><object><name>dog"),
+    ];
+    const ds = await parseDataset(files);
+    expect(ds.items.map((it) => [it.originalName, it.boxes[0]?.label ?? null])).toEqual([["a.jpg", "cat"]]);
+    expect(ds.warnings.join(" ")).toMatch(/could not be read/);
+  });
+
+  it("skips COCO crowd regions", async () => {
+    const coco = {
+      images: [{ id: 1, file_name: "a.jpg", width: 100, height: 100 }],
+      annotations: [
+        { id: 1, image_id: 1, category_id: 1, bbox: [1, 1, 10, 10], iscrowd: 0 },
+        { id: 2, image_id: 1, category_id: 1, bbox: [0, 0, 90, 90], iscrowd: 1 },
+      ],
+      categories: [{ id: 1, name: "person" }],
+    };
+    const ds = await parseDataset([jpg("a.jpg"), f("instances.json", JSON.stringify(coco))]);
+    expect(ds.items[0].boxes).toHaveLength(1);
+    expect(ds.warnings.join(" ")).toMatch(/crowd/);
+  });
+
+  it("a blank line in classes.txt keeps the later class ids", async () => {
+    const files = [jpg("images/a.jpg"), f("labels/a.txt", "2 0.5 0.5 0.2 0.2\n"), f("classes.txt", "cat\n\ndog\n")];
+    const ds = await parseDataset(files);
+    expect(ds.items[0].boxes[0].label).toBe("dog");
+  });
+
+  it("the folder picker drops macOS debris", async () => {
+    const out = await collectInput([
+      new File(["x"], "a.jpg", { type: "image/jpeg" }),
+      new File(["x"], "._a.jpg", { type: "image/jpeg" }),
+    ]);
+    expect(out.map((c) => c.path)).toEqual(["a.jpg"]);
   });
 });
