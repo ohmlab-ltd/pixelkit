@@ -58,12 +58,15 @@ const engine = { external: false, proc: null, exited: false };
 // Engine management
 // ---------------------------------------------------------------------------
 
-function checkHealth() {
+// { state, version }: 'up' when a PixelKit engine answered, 'busy' when
+// something accepted the connection but did not answer in time (a long
+// export or delete can hold the engine's event loop), 'down' otherwise.
+function probeEngine() {
   return new Promise((resolve) => {
     const req = http.get(HEALTH_URL, { timeout: HEALTH_TIMEOUT_MS }, (res) => {
       if (res.statusCode !== 200) {
         res.resume();
-        return resolve(false);
+        return resolve({ state: 'down' });
       }
       // Identity check: something else listening on 8001 must not be
       // adopted as "the engine" just because it answers 200.
@@ -71,19 +74,24 @@ function checkHealth() {
       res.on('data', (c) => (body += c));
       res.on('end', () => {
         try {
-          resolve(JSON.parse(body).app === 'pixelkit');
+          const h = JSON.parse(body);
+          resolve(h.app === 'pixelkit' ? { state: 'up', version: h.version } : { state: 'down' });
         } catch {
-          resolve(false);
+          resolve({ state: 'down' });
         }
       });
-      res.on('error', () => resolve(false));
+      res.on('error', () => resolve({ state: 'down' }));
     });
     req.on('timeout', () => {
       req.destroy();
-      resolve(false);
+      resolve({ state: 'busy' });
     });
-    req.on('error', () => resolve(false));
+    req.on('error', () => resolve({ state: 'down' }));
   });
+}
+
+async function checkHealth() {
+  return (await probeEngine()).state === 'up';
 }
 
 // POST JSON to the engine with no timeout (legacy imports can run for
@@ -181,6 +189,9 @@ function spawnEngine() {
         : {}),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+    // A process group of its own, so stopping it reaches its children.
+    detached: process.platform !== 'win32',
   });
   proc.stdout.pipe(log);
   proc.stderr.pipe(log);
@@ -203,10 +214,14 @@ function spawnEngine() {
 
 // Slim Windows installs set up their Python runtime on first launch.
 // Loops on failure (Retry / Quit); returns false only when the user quits.
-async function runFirstRunBootstrap() {
-  const requirementsPath = app.isPackaged
+function bootstrapRequirementsPath() {
+  return app.isPackaged
     ? path.join(process.resourcesPath, 'engine', 'requirements-win.txt')
     : path.join(__dirname, '..', 'engine', 'requirements-win.txt');
+}
+
+async function runFirstRunBootstrap() {
+  const requirementsPath = bootstrapRequirementsPath();
   const logFile = path.join(path.dirname(engineLogPath()), 'bootstrap.log');
   fs.mkdirSync(path.dirname(logFile), { recursive: true });
 
@@ -242,9 +257,17 @@ async function runFirstRunBootstrap() {
 }
 
 let bootstrapQuit = false;
+let versionMismatch = null;
 
 async function ensureEngine() {
-  if (await checkHealth()) {
+  const running = await probeEngine();
+  if (running.state === 'up') {
+    // An engine left running by another version would serve this UI
+    // an API it does not match.
+    if (running.version && running.version !== app.getVersion()) {
+      versionMismatch = running.version;
+      return false;
+    }
     engine.external = true; // someone else owns it -> never kill it
     return true;
   }
@@ -252,7 +275,7 @@ async function ensureEngine() {
   // Slim Windows install: make sure a runtime exists before spawning.
   if (process.platform === 'win32' && app.isPackaged && !process.env.PIXELKIT_PYTHON) {
     const b = bundledPaths();
-    if (!fs.existsSync(b.python) && !bootstrap.runtimeReady()) {
+    if (!fs.existsSync(b.python) && !bootstrap.runtimeReady(bootstrapRequirementsPath())) {
       const ok = await runFirstRunBootstrap();
       if (!ok) {
         bootstrapQuit = true;
@@ -285,10 +308,12 @@ let restartInFlight = false;
 const restartTimes = []; // timestamps of recent automatic restarts
 
 async function restartEngine() {
-  // Something healthy may already own the port (the user started their
-  // own engine, or ours recovered) - adopt it instead of spawning into
-  // a guaranteed bind failure.
+  if (shuttingDown) return false;
+  // Something healthy may already own the port - adopt it instead of
+  // spawning into a guaranteed bind failure. If it is our own process
+  // that recovered, it stays ours, so Quit still stops it.
   if (await checkHealth()) {
+    if (engine.proc && !engine.external && !engine.exited) return true;
     engine.proc = null;
     engine.exited = false;
     engine.external = true;
@@ -299,6 +324,7 @@ async function restartEngine() {
   if (engine.proc && !engine.external && !engine.exited) {
     await stopOwnedEngine();
   }
+  if (shuttingDown) return false;
   spawnEngine();
   const deadline = Date.now() + STARTUP_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -312,15 +338,26 @@ async function restartEngine() {
 function startCrashWatch() {
   if (crashWatchTimer) clearInterval(crashWatchTimer);
   let misses = 0;
+  let busySince = 0;
   crashWatchTimer = setInterval(async () => {
     if (shuttingDown || restartInFlight) return;
     if (!mainWindow || mainWindow.isDestroyed()) return;
 
     const ownedDead = Boolean(engine.proc) && !engine.external && engine.exited;
-    const healthy = ownedDead ? false : await checkHealth();
-    if (healthy) {
+    const state = ownedDead ? 'down' : (await probeEngine()).state;
+    if (state === 'up') {
       misses = 0;
+      busySince = 0;
       return;
+    }
+    // Connected but slow: a long export or delete holds the engine's
+    // event loop. Killing it then lost the work in progress, so a busy
+    // engine gets two minutes before it counts as hung.
+    if (state === 'busy') {
+      if (!busySince) busySince = Date.now();
+      if (Date.now() - busySince < 120000) return;
+    } else {
+      busySince = 0;
     }
     misses += 1;
     if (!ownedDead && misses < 3) return; // ride out transient blips
@@ -363,21 +400,40 @@ function startCrashWatch() {
   }, 5000);
 }
 
+// Kill the engine and everything it started (the ST Edge AI compiler,
+// training workers): on Windows the process tree, elsewhere its process
+// group. Killing python.exe alone left its children running.
+function killEngineTree(proc, signal) {
+  try {
+    if (process.platform === 'win32') {
+      spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { windowsHide: true });
+    } else {
+      process.kill(-proc.pid, signal);
+    }
+  } catch {
+    /* already gone */
+  }
+}
+
 function stopOwnedEngine() {
   return new Promise((resolve) => {
     const proc = engine.proc;
     if (!proc || engine.external || engine.exited) return resolve();
-    const timer = setTimeout(resolve, SHUTDOWN_GRACE_MS);
-    proc.once('exit', () => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
       clearTimeout(timer);
       resolve();
-    });
-    try {
-      proc.kill('SIGTERM');
-    } catch {
-      clearTimeout(timer);
-      resolve();
-    }
+    };
+    // Past the grace period a hung engine is killed outright: left
+    // alone it kept the port, and the next launch could not start.
+    const timer = setTimeout(() => {
+      killEngineTree(proc, 'SIGKILL');
+      setTimeout(finish, 1000);
+    }, SHUTDOWN_GRACE_MS);
+    proc.once('exit', finish);
+    killEngineTree(proc, 'SIGTERM');
   });
 }
 
@@ -451,8 +507,13 @@ function portOccupied() {
 
 function showSplashError(kind) {
   const logFile = engineLogPath().replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
   const body =
-    kind === 'port'
+    kind === 'version'
+      ? '<h1>PixelKit</h1>' +
+        `<p class="err">A PixelKit engine from version ${esc(versionMismatch)} is still running.</p>` +
+        `<p>Quit it (or the PixelKit window that started it) and open PixelKit ${esc(app.getVersion())} again.</p>`
+      : kind === 'port'
       ? '<h1>PixelKit</h1>' +
         '<p class="err">Port 8001 is in use by another application.</p>' +
         '<p>Close whatever is listening on 127.0.0.1:8001 and start PixelKit again.</p>'
@@ -740,6 +801,8 @@ app.whenReady().then(async () => {
         if (mainWindow && !mainWindow.isDestroyed()) checkForUpdates(mainWindow);
       }, 5000);
     }
+  } else if (versionMismatch) {
+    showSplashError('version');
   } else if (!bootstrapQuit) {
     // Startup timed out: reap our own spawn first, both to avoid a
     // zombie engine behind the error splash and so the port probe
@@ -767,11 +830,13 @@ app.on('window-all-closed', () => {
 let shuttingDown = false;
 app.on('will-quit', (event) => {
   if (shuttingDown) return;
+  // From here nothing spawns: a restart in flight (stopping the old
+  // engine) must not start a new one that outlives the app.
+  shuttingDown = true;
   // Quitting mid-bootstrap: kill the tar/pip child so a multi-GB
   // install doesn't keep running headless and race the next launch.
   bootstrap.abort();
   if (engine.proc && !engine.external && !engine.exited) {
-    shuttingDown = true;
     event.preventDefault();
     stopOwnedEngine().then(() => app.exit(0));
   }

@@ -15712,6 +15712,22 @@ def _refresh_embeddings_sync(project_id: str, image_names: list[str] | None = No
         return {"computed": 0, "removed": 0, "error": str(e)}
 
 
+def _rmtree_retrying(path: Path, attempts: int = 6) -> None:
+    """rmtree that rides out a background writer (a sidecar refresh, a
+    preview bake) dropping a file into the folder while it is removed:
+    Windows then fails with "directory not empty" or "in use"."""
+    for i in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            if i == attempts - 1:
+                raise
+            time.sleep(0.2 * (i + 1))
+
+
 @app.delete(
     "/api/projects/{project_id}",
     # DESTROY is creator-only: a Project editor (or even the Project owner) can't
@@ -15758,7 +15774,10 @@ async def delete_project(project_id: str):
                 j.status = "cancelled"
                 if j.finished_at is None:
                     j.finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        shutil.rmtree(p)
+        # Off the event loop: a large dataset takes seconds to remove,
+        # and a blocked loop made the desktop shell think the engine had
+        # died and restart it.
+        await asyncio.to_thread(_rmtree_retrying, p)
         removed = True
         invalidate_manifest_cache(project_id)
         if R2 is not None:
@@ -17734,7 +17753,9 @@ def _build_voc_xml(
     "/api/projects/{project_id}/export",
     dependencies=[Depends(require_project_read_access)],
 )
-async def export_project(
+# A plain def on purpose: FastAPI runs it in its threadpool, so zipping a
+# large dataset does not stall every other request.
+def export_project(
     project_id: str,
     format: str,
     include_images: bool = True,

@@ -16,6 +16,7 @@
 'use strict';
 
 const { spawn, spawnSync } = require('child_process');
+const crypto = require('crypto');
 const fs = require('fs');
 const https = require('https');
 const path = require('path');
@@ -27,6 +28,9 @@ const PBS_PINNED_URL =
 const PBS_LATEST_API =
   'https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest';
 const PBS_ASSET_MATCH = ['cpython-3.12', 'x86_64-pc-windows-msvc-install_only.tar.gz'];
+
+// A download or probe with no bytes for this long has stalled.
+const STALL_MS = 60000;
 
 const TORCH_CUDA_INDEX = 'https://download.pytorch.org/whl/cu126';
 const TORCH_CPU_INDEX = 'https://download.pytorch.org/whl/cpu';
@@ -41,10 +45,26 @@ function runtimePython() {
   return path.join(runtimeRoot(), 'py', 'python.exe');
 }
 
-function runtimeReady() {
-  return (
-    fs.existsSync(path.join(runtimeRoot(), 'runtime.json')) && fs.existsSync(runtimePython())
-  );
+function requirementsHash(requirementsPath) {
+  return crypto.createHash('sha256').update(fs.readFileSync(requirementsPath)).digest('hex');
+}
+
+function readMarker() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(runtimeRoot(), 'runtime.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+// Ready when the runtime was installed for THESE requirements: the
+// marker alone let an upgrade start on the old packages (runtimes made
+// by v0.2.1 have no onnx/onnxruntime, so training failed at export).
+function runtimeReady(requirementsPath) {
+  const marker = readMarker();
+  if (!marker || !fs.existsSync(runtimePython())) return false;
+  if (!requirementsPath || !fs.existsSync(requirementsPath)) return true;
+  return marker.requirements === requirementsHash(requirementsPath);
 }
 
 // ---------------------------------------------------------------------------
@@ -77,6 +97,7 @@ function httpGet(url, { json = false, hops = 0 } = {}) {
         });
       }
     );
+    req.setTimeout(STALL_MS, () => req.destroy(new Error(`no response from ${url}`)));
     req.on('error', reject);
   });
 }
@@ -109,6 +130,9 @@ function download(url, dest, onProgress, hops = 0) {
         res.on('error', reject);
       }
     );
+    // A stalled connection (no bytes for STALL_MS) fails the download so
+    // the splash offers Retry instead of waiting forever.
+    req.setTimeout(STALL_MS, () => req.destroy(new Error('download stalled')));
     req.on('error', reject);
   });
 }
@@ -133,9 +157,9 @@ function abort() {
   }
 }
 
-function run(cmd, args, { onLine, log } = {}) {
+function run(cmd, args, { onLine, log, cwd } = {}) {
   return new Promise((resolve, reject) => {
-    const proc = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    const proc = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     _activeChild = proc;
     let lastLines = [];
     const handle = (buf) => {
@@ -167,7 +191,7 @@ function run(cmd, args, { onLine, log } = {}) {
 
 function hasNvidiaGpu() {
   try {
-    return spawnSync('nvidia-smi', ['-L'], { windowsHide: true }).status === 0;
+    return spawnSync('nvidia-smi', ['-L'], { windowsHide: true, timeout: 20000 }).status === 0;
   } catch {
     return false;
   }
@@ -214,7 +238,11 @@ async function ensureWindowsRuntime({ requirementsPath, onStatus, log }) {
   const root = runtimeRoot();
   const py = runtimePython();
 
-  if (runtimeReady()) return py;
+  if (runtimeReady(requirementsPath)) return py;
+  // An earlier runtime with torch in place only needs the requirements
+  // that changed; the multi-GB torch install is skipped.
+  const upgrading = !!readMarker() && fs.existsSync(py) &&
+    spawnSync(py, ['-c', 'import torch'], { windowsHide: true, timeout: 120000 }).status === 0;
   if (!fs.existsSync(requirementsPath)) {
     throw new Error(`engine requirements not found at ${requirementsPath}`);
   }
@@ -262,7 +290,10 @@ async function ensureWindowsRuntime({ requirementsPath, onStatus, log }) {
     // remote host:file archive and fails.
     const systemTar = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
     const tarCmd = fs.existsSync(systemTar) ? systemTar : 'tar';
-    await run(tarCmd, ['-xzf', tarPath, '-C', root], { log });
+    // Relative names from inside the runtime folder: tar.exe cannot open
+    // absolute paths outside the system code page, so first run never
+    // finished for user names like Łukasz or 测试用户.
+    await run(tarCmd, ['-xzf', path.basename(tarPath)], { log, cwd: root });
     // The tarball's top-level directory is "python/".
     fs.renameSync(path.join(root, 'python'), pyDir);
     fs.rmSync(tarPath, { force: true });
@@ -272,15 +303,17 @@ async function ensureWindowsRuntime({ requirementsPath, onStatus, log }) {
   // 2. PyTorch (the big one) ------------------------------------------------
   const cuda = hasNvidiaGpu();
   const flavour = cuda ? 'CUDA' : 'CPU';
-  status(`Installing PyTorch (${flavour}${cuda ? ', ~3.5 GB' : ''} - one time)…`);
   const pipBase = ['-m', 'pip', 'install', '--no-warn-script-location', '--disable-pip-version-check'];
-  await run(py, [...pipBase, 'torch', 'torchvision', '--index-url', cuda ? TORCH_CUDA_INDEX : TORCH_CPU_INDEX], {
-    log,
-    onLine: (l) => status(`Installing PyTorch (${flavour}) - ${l.slice(0, 80)}`),
-  });
+  if (!upgrading) {
+    status(`Installing PyTorch (${flavour}${cuda ? ', ~3.5 GB' : ''} - one time)…`);
+    await run(py, [...pipBase, 'torch', 'torchvision', '--index-url', cuda ? TORCH_CUDA_INDEX : TORCH_CPU_INDEX], {
+      log,
+      onLine: (l) => status(`Installing PyTorch (${flavour}) - ${l.slice(0, 80)}`),
+    });
+  }
 
   // 3. Engine dependencies --------------------------------------------------
-  status('Installing engine dependencies…');
+  status(upgrading ? 'Updating engine dependencies…' : 'Installing engine dependencies…');
   await run(py, [...pipBase, '-r', requirementsPath], {
     log,
     onLine: (l) => status(`Installing engine dependencies - ${l.slice(0, 80)}`),
@@ -292,6 +325,7 @@ async function ensureWindowsRuntime({ requirementsPath, onStatus, log }) {
   // VC++ runtime) would otherwise only surface at the end of a training run.
   const check = spawnSync(py, ['-c', 'import torch, transformers, fastapi, cv2, PIL, onnx, onnxruntime'], {
     windowsHide: true,
+    timeout: 300000,
   });
   if (check.status !== 0) {
     throw new Error(`runtime sanity check failed:\n${String(check.stderr || '').slice(-800)}`);
@@ -300,7 +334,12 @@ async function ensureWindowsRuntime({ requirementsPath, onStatus, log }) {
   fs.writeFileSync(
     path.join(root, 'runtime.json'),
     JSON.stringify(
-      { python: path.basename(py), torch: flavour.toLowerCase(), completedAt: new Date().toISOString() },
+      {
+        python: path.basename(py),
+        torch: flavour.toLowerCase(),
+        requirements: requirementsHash(requirementsPath),
+        completedAt: new Date().toISOString(),
+      },
       null,
       2
     )
