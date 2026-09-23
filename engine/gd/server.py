@@ -695,7 +695,6 @@ async def lifespan(app: FastAPI):
         os.environ.get("PK_DISABLE_MODELS", "").lower() in ("1", "true", "yes", "on")
         or (device == "cpu" and not cpu_forced)
     )
-    state["models_disabled"] = models_disabled
     if models_disabled:
         print(
             f"[server] models disabled (device={device}"
@@ -19237,10 +19236,10 @@ async def models_download(name: str):
 async def models_load(name: str):
     if name not in models_mgr.REGISTRY:
         raise HTTPException(404, f"unknown model: {name}")
-    if state.get("models_disabled"):
-        raise HTTPException(409, "models are disabled in this engine")
     if not models_mgr.is_downloaded(name):
         raise HTTPException(409, f"{name} weights not downloaded yet")
+    if os.environ.get("PK_DISABLE_MODELS", "").lower() in ("1", "true", "yes", "on"):
+        raise HTTPException(409, "models are disabled in this engine (PK_DISABLE_MODELS)")
     if state.get("device") == "cpu" and _configured_device() != "cpu":
         raise HTTPException(
             409, "no GPU on this machine (switch Compute to CPU in Settings to force CPU)"
