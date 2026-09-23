@@ -143,3 +143,18 @@ def test_an_interrupted_download_is_not_complete(tmp_path, monkeypatch):
     assert models.is_downloaded("sam3") is False  # a shard is missing
     (tmp_path / "model-00002.safetensors").write_bytes(b"x")
     assert models.is_downloaded("sam3") is True
+
+
+def test_a_drawn_box_takes_what_it_encloses_not_a_neighbour():
+    from pipeline_charlie import _bbox_iou, _inside_fraction
+
+    user = [100, 100, 300, 300]
+    small_inside = [150, 150, 200, 200]  # a loose box around a small object
+    assert _bbox_iou(user, small_inside) < 0.3 and _inside_fraction(small_inside, user) == 1.0
+    neighbour = [280, 100, 480, 300]     # only touches the edge of the box
+    assert _bbox_iou(user, neighbour) < 0.3 and _inside_fraction(neighbour, user) < 0.8
+
+
+def test_queued_embeddings_read_the_picture_when_they_run(app_module, tmp_path):
+    # Queued with a path, not the bytes; a picture deleted meanwhile is skipped.
+    assert app_module._embed_stored_image("p", "i", tmp_path / "deleted.jpg") is False

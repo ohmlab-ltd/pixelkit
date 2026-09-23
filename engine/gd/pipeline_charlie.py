@@ -2096,6 +2096,14 @@ def segment_point(
     return detection, timings
 
 
+def _inside_fraction(inner: list[float], outer: list[float]) -> float:
+    """Share of `inner`'s area that lies inside `outer` (xyxy)."""
+    iw = max(0.0, min(float(inner[2]), float(outer[2])) - max(float(inner[0]), float(outer[0])))
+    ih = max(0.0, min(float(inner[3]), float(outer[3])) - max(float(inner[1]), float(outer[1])))
+    area = max(0.0, float(inner[2]) - float(inner[0])) * max(0.0, float(inner[3]) - float(inner[1]))
+    return (iw * ih) / area if area > 0.0 else 0.0
+
+
 def _bbox_iou(a: list[float], b: list[float]) -> float:
     """Plain xyxy-bbox IoU. Returns 0 when boxes don't overlap or
     when either box is degenerate (zero area)."""
@@ -2196,6 +2204,11 @@ def segment_box(
             iou = _bbox_iou(user_box_inf, hit_box)
             if iou > local_best_iou:
                 local_best_iou = iou
+            # What the user boxed: a hit that matches the box, or one that
+            # sits inside a loose box. Any overlap at all used to win, so a
+            # box around an object SAM 3 missed returned a neighbour.
+            if iou < 0.3 and _inside_fraction(hit_box, user_box_inf) < 0.8:
+                continue
             if iou > best_iou:
                 best_iou = iou
                 best_label = label
@@ -2206,7 +2219,7 @@ def segment_box(
 
     if best_box is None:
         timings["total_ms"] = (time.perf_counter() - t_total) * 1000.0
-        print(f"[charlie] segment_box: no SAM3 detection overlapped user box {box}")
+        print(f"[charlie] segment_box: no SAM3 detection matches user box {box}")
         return None, timings
 
     box_list = best_box if isinstance(best_box, list) else (best_box.tolist() if hasattr(best_box, "tolist") else list(best_box))
@@ -2284,6 +2297,8 @@ def classify_box(
         local_best_score = 0.0
         for hit_box, _mask, hit_score in raw:
             iou = _bbox_iou(user_box_inf, hit_box)
+            if iou < 0.3 and _inside_fraction(hit_box, user_box_inf) < 0.8:
+                continue  # a neighbour, not what the user boxed
             if iou > local_best_iou:
                 local_best_iou = iou
                 local_best_score = float(hit_score)

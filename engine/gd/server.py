@@ -395,7 +395,18 @@ def _gpu_job_guarded(runner):
     return _wrapped
 
 
-async def _run_bg_embedding(project_id: str, import_id: str, raw_bytes: bytes) -> None:
+def _embed_stored_image(project_id: str, import_id: str, path: "Path") -> bool:
+    """Read the stored picture only when its turn comes: queued with its
+    bytes, a bulk import waiting behind a long labelling run pinned every
+    upload in memory."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return False  # deleted while it waited
+    return _compute_and_store_image_embedding(project_id, import_id, data)
+
+
+async def _run_bg_embedding(project_id: str, import_id: str, path: "Path") -> None:
     """Compute + store the whole-image DINOv2 embedding for the stats
     card (variation plot / near-dup / health), OFF the upload hot path.
 
@@ -418,8 +429,8 @@ async def _run_bg_embedding(project_id: str, import_id: str, raw_bytes: bytes) -
             async with state["gpu_lock"].background():
                 await loop.run_in_executor(
                     _BG_IMAGE_EXECUTOR,
-                    _compute_and_store_image_embedding,
-                    project_id, import_id, raw_bytes,
+                    _embed_stored_image,
+                    project_id, import_id, path,
                 )
         finally:
             if sem is not None:
@@ -5319,7 +5330,7 @@ async def v2_upload_import_raw(
     # Whole-image embedding for the stats card, off the hot path. The
     # shared helper bounds concurrency + pauses while a GPU job runs so a
     # bulk-import backlog can't starve labelling of the GPU.
-    asyncio.create_task(_run_bg_embedding(project_id, import_id, store_bytes))
+    asyncio.create_task(_run_bg_embedding(project_id, import_id, imports_dir / stored_name))
 
     # Audit row for the upload. V2 uploads land directly without
     # going through the job ledger, so the per-user usage rollup
@@ -5649,7 +5660,6 @@ async def v2_upload_import_raw_batch(
             "blurhash": _bh,
             "dropped_boxes": _dropped,
             "_entry": entry,
-            "_store_bytes": store_bytes,
             "_labels": _labels,
         }
 
@@ -5733,12 +5743,10 @@ async def v2_upload_import_raw_batch(
             )
         except Exception as e:
             print(f"[v2-import-raw-batch] upload audit failed for {_iid}: {e}")
-        _sb = r.get("_store_bytes")
-        if _sb is not None:
-            # Off-hot-path embedding via the shared bounded/pausable helper
-            # (see _run_bg_embedding) so the batch's embeddings can't pile
-            # onto the GPU and starve a subsequent labelling job.
-            asyncio.create_task(_run_bg_embedding(project_id, _iid, _sb))
+        # Off-hot-path embedding via the shared bounded/pausable helper
+        # (see _run_bg_embedding) so the batch's embeddings can't pile
+        # onto the GPU and starve a subsequent labelling job.
+        asyncio.create_task(_run_bg_embedding(project_id, _iid, project_dir(project_id) / "images" / r["filename"]))
 
     # Strip internal-only keys before returning.
     out = [{k: v for k, v in r.items() if not k.startswith("_")} for r in results]
@@ -8213,9 +8221,7 @@ def _compute_and_store_image_embedding(project_id: str, import_id: str, raw_byte
         import v2_dinov2 as _v2d
         if not _v2d.is_loaded():
             return False
-        from PIL import Image as _PIL
-        import io as _io
-        pil = _PIL.open(_io.BytesIO(raw_bytes)).convert("RGB")
+        pil = _open_upright(raw_bytes)
         vec = _v2d.encode_image(pil)  # (D,) L2-normalised float32
         if vec is None or vec.size == 0:
             return False
