@@ -18,9 +18,10 @@ os.environ["PIXELKIT_WORKSPACE"] = _WS
 # Never let tests read or write the user's real app config (HF token!).
 os.environ["PIXELKIT_CONFIG_DIR"] = tempfile.mkdtemp(prefix="pixelkit-test-cfg-")
 os.environ["PK_DISABLE_MODELS"] = "1"
-# The engine runs on the CPU in tests: the same results on every machine,
-# and no test job lands on a GPU someone else is using.
-os.environ["PK_DEVICE"] = "cpu"
+# No GPU in tests: the same results on every machine, and no test job
+# lands on a GPU someone else is using. "-1" hides them (an empty value
+# does not on Windows); set before anything initialises CUDA.
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 os.environ.pop("HF_TOKEN", None)
 
 
