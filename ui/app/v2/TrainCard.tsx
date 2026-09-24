@@ -687,7 +687,9 @@ export function TrainCard({ projectId }: { projectId: string }) {
     await loadDetail(run);
   };
 
-  const doneRuns = (runs ?? []).filter((r) => r.status === "done");
+  // A run can start from a finished run of its own size only: the other
+  // size shares almost none of its weights.
+  const doneRuns = (runs ?? []).filter((r) => r.status === "done" && r.size === size);
   const blockers = preflight?.blockers ?? [];
   const warnings = preflight?.warnings ?? [];
   const eta = etaFromProgressText(progressText);
@@ -735,7 +737,11 @@ export function TrainCard({ projectId }: { projectId: string }) {
           Model
           <select
             value={size}
-            onChange={(e) => setSize(e.target.value === "tiny" ? "tiny" : "nano")}
+            onChange={(e) => {
+              const next = e.target.value === "tiny" ? "tiny" : "nano";
+              setSize(next);
+              if (initRun && runs?.find((r) => r.run === initRun)?.size !== next) setInitRun("");
+            }}
             className="rounded-md border border-[var(--line)] bg-[var(--surface)] px-2 py-1 text-[12px] outline-none focus:border-[var(--line-strong)]"
           >
             <option value="nano">Nano (smallest)</option>

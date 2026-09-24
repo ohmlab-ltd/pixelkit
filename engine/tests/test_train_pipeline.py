@@ -637,3 +637,20 @@ def test_a_run_on_the_labelling_device_lends_it_between_steps(app_module, monkey
     assert result["run"] == "r1"
     assert order == (["step", "click", "step"] if shares else ["step"])
     assert gate._free
+
+
+def test_a_run_starts_only_from_a_run_of_its_own_size(client):
+    import store
+    from train_yolox import init_run_problem
+
+    pid, _ = _dataset(client, "Sizes", n=4)
+    rd = store.dataset_dir(pid) / "models" / "yolox_nano" / "20990101T000001Z"
+    rd.mkdir(parents=True)
+    assert "no saved weights" in init_run_problem(rd, "nano")
+    (rd / "best.pt").write_bytes(b"weights")
+    assert init_run_problem(rd, "nano") is None
+    assert "Tiny run cannot start from a Nano run" in init_run_problem(rd, "tiny")
+
+    r = client.post("/api/jobs", json={"kind": "train_yolox", "project": pid,
+                                       "params": {"size": "tiny", "initRun": rd.name}})
+    assert r.status_code == 400 and "same size" in r.json()["detail"]

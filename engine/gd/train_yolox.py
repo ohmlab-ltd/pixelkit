@@ -981,6 +981,20 @@ class Cancelled(Exception):
     pass
 
 
+def init_run_problem(run_dir: Path | None, size: str) -> str | None:
+    """Why a run of `size` cannot start from the run in `run_dir`, or
+    None when it can. A run of the other size shares almost no weight
+    shapes (65 of Tiny's 5 M values fit Nano's), so it would start from
+    nothing: not even the COCO checkpoint it replaces."""
+    if run_dir is None or not (run_dir / "best.pt").is_file():
+        return "cannot start from that run: it has no saved weights"
+    if run_dir.parent.name != MODEL_SPECS[size]["dir"]:
+        other = next((s for s, spec in MODEL_SPECS.items() if spec["dir"] == run_dir.parent.name), "other")
+        return (f"a {size.capitalize()} run cannot start from a {other.capitalize()} run: "
+                "pick a run of the same size, or the COCO checkpoint")
+    return None
+
+
 def find_run_dir(project_id: str, run_id: str) -> Path | None:
     """<dataset>/models/<model dir>/<run> for whichever size produced it."""
     if not run_id or not RUN_ID_RE.fullmatch(run_id):
@@ -1404,8 +1418,9 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel, gpu_turn=No
         pretrained_used = bool(ck.get("pretrained"))
     elif cfg.init_run:
         prev = find_run_dir(project_id, cfg.init_run)
-        if prev is None or not (prev / "best.pt").is_file():
-            raise ValueError("cannot start from that run: it has no saved weights")
+        problem = init_run_problem(prev, cfg.size)
+        if problem:
+            raise ValueError(problem)
         init_info = _load_run_weights(model, prev)
         if init_info["classes"] and init_info["classes"] != classes:
             notes.append(f"started from run {prev.name}, whose labels differ: "

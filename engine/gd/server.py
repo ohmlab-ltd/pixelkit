@@ -16932,9 +16932,10 @@ async def schedule_job(
                 raise HTTPException(409, "that run is still training in another process")
         init_run = str(prm.get("initRun") or "").strip()
         if init_run:
-            rd = _ty.find_run_dir(payload.project, init_run)
-            if rd is None or not (rd / "best.pt").is_file():
-                raise HTTPException(400, "cannot start from that run: it has no saved weights")
+            problem = _ty.init_run_problem(_ty.find_run_dir(payload.project, init_run),
+                                           _train_cfg_from_params(prm, "cpu").size)
+            if problem:
+                raise HTTPException(400, problem)
         eval_project = str(prm.get("evalProject") or "").strip()
         if eval_project:
             if eval_project == payload.project:
