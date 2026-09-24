@@ -4623,14 +4623,18 @@ async def v2_upload_reference(
                 squares.append(v2_dinov2.center_square_crop(crop))
                 indices.append(i)
             if squares:
-                vecs = v2_dinov2.encode_images_batch(squares)
-                # SigLIP2 ensemble: encode the same crops via SigLIP
-                # and store alongside the DINOv2 embedding. The
-                # resolver scores both independently and combines.
-                sig_vecs = (
-                    v2_siglip.encode_images_batch(squares)
-                    if v2_siglip.is_loaded() else None
-                )
+                def _encode():
+                    # SigLIP2 ensemble: encode the same crops via SigLIP
+                    # and store alongside the DINOv2 embedding. The
+                    # resolver scores both independently and combines.
+                    return (v2_dinov2.encode_images_batch(squares),
+                            v2_siglip.encode_images_batch(squares) if v2_siglip.is_loaded() else None)
+
+                # In a thread under the GPU gate, as /references/embed_crops
+                # does: on the event loop the encode froze every request
+                # (seconds on a CPU) and ran beside other work on the card.
+                async with state["gpu_lock"].interactive():
+                    vecs, sig_vecs = await asyncio.get_running_loop().run_in_executor(None, _encode)
                 for k, i in enumerate(indices):
                     det_list[i]["embedding"] = [round(float(x), 6) for x in vecs[k].tolist()]
                     det_list[i]["embed_version"] = v2_dinov2.EMBED_VERSION
