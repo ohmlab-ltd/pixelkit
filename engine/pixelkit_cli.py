@@ -448,8 +448,10 @@ def main() -> None:
             pass
     ap = argparse.ArgumentParser(prog="pixelkit", description=__doc__)
     sub = ap.add_subparsers(dest="command")
+    # SUPPRESS: without it the subcommand's default would overwrite a
+    # port given before it (`pixelkit --port 8011 serve` ran on 8001).
     sub.add_parser("serve", help="start the engine (default)").add_argument(
-        "--port", type=int, default=8001
+        "--port", type=int, default=argparse.SUPPRESS
     )
     sub.add_parser("doctor", help="environment checks")
     lp = sub.add_parser("label", help="headless batch labelling of an image folder")
