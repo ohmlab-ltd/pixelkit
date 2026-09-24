@@ -6951,7 +6951,7 @@ def _aug_apply(
         # corner factor = 1 - 2·k1 → 0.45 at full deflection, so
         # the corner pixel samples from source r≈0.45 - a clear,
         # action-cam-style bulge.
-        k1 = float(lens_distortion) / 10.0 * 0.55
+        k1 = _lens_k1(lens_distortion)
         ys = torch.linspace(-1.0, 1.0, H, device=x.device, dtype=x.dtype)
         xs = torch.linspace(-1.0, 1.0, W, device=x.device, dtype=x.dtype)
         grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
@@ -7316,19 +7316,68 @@ def _apply_matrix_to_point(M: "list[list[float]]", x: float, y: float) -> "tuple
     return nx, ny
 
 
+def _lens_k1(strength: float) -> float:
+    """Barrel coefficient of the lens-distortion dial (0..10 -> 0..0.55),
+    shared by _aug_apply and the annotations that follow its warp."""
+    return max(0.0, float(strength)) / 10.0 * 0.55
+
+
+def _lens_forward_point(
+    x: float, y: float, lens: "tuple[int, int, float]",
+) -> "tuple[float, float, bool]":
+    """Where _aug_apply's barrel warp carries source pixel (x, y), for
+    lens = (W, H, k1), and whether the picture shows it there. The
+    kernel samples output point u from source u * (1 - k1 * |u|^2),
+    both in [-1, 1] with corners aligned, so the output point solves
+    r - k1 * r^3 = |p| along p's direction (Newton, on the branch where
+    that rises; callers clip what lands outside the frame). Past that
+    branch's top (the fold, inside the frame above strength 3) the
+    picture shows the point nowhere: it goes to the fold, the edge of
+    what the picture does show."""
+    W, H, k1 = lens
+    px, py = 2.0 * x / (W - 1) - 1.0, 2.0 * y / (H - 1) - 1.0
+    rp = (px * px + py * py) ** 0.5
+    if k1 <= 0 or rp == 0.0:
+        return x, y, True
+    r = r_fold = (1.0 / (3.0 * k1)) ** 0.5
+    shown = rp < r_fold - k1 * r_fold ** 3
+    if shown:
+        r = rp
+        for _ in range(30):
+            step = (r - k1 * r ** 3 - rp) / (1.0 - 3.0 * k1 * r * r)
+            r -= step
+            if abs(step) < 1e-9:
+                break
+    ux, uy = px * r / rp, py * r / rp
+    return (ux + 1.0) * (W - 1) / 2.0, (uy + 1.0) * (H - 1) / 2.0, shown
+
+
+def _warp_points(
+    pts: "list[tuple[float, float]]", M: "list[list[float]] | None",
+    lens: "tuple[int, int, float] | None",
+) -> "list[tuple[float, float]]":
+    """Points through M, then the lens warp; [] when the lens shows none
+    of them."""
+    if M is not None:
+        pts = [_apply_matrix_to_point(M, x, y) for x, y in pts]
+    if not lens:
+        return pts
+    moved = [_lens_forward_point(x, y, lens) for x, y in pts]
+    return [(x, y) for x, y, _ in moved] if any(s for _, _, s in moved) else []
+
+
 def _apply_matrix_to_polys(
     polys: "list[list[list[float]]]", M: "list[list[float]] | None",
+    lens: "tuple[int, int, float] | None" = None,
 ) -> "list[list[list[float]]]":
-    if M is None:
+    """Polygons through M, then the lens warp. A polygon the lens shows
+    nothing of is dropped."""
+    if M is None and not lens:
         return polys
     out: list[list[list[float]]] = []
     for poly in polys:
-        warped: list[list[float]] = []
-        for pt in poly:
-            if len(pt) < 2:
-                continue
-            nx, ny = _apply_matrix_to_point(M, float(pt[0]), float(pt[1]))
-            warped.append([nx, ny])
+        pts = [(float(pt[0]), float(pt[1])) for pt in poly if len(pt) >= 2]
+        warped = [[x, y] for x, y in _warp_points(pts, M, lens)]
         if warped:
             out.append(warped)
     return out
@@ -7336,21 +7385,24 @@ def _apply_matrix_to_polys(
 
 def _apply_matrix_to_box(
     box: "list[float]", M: "list[list[float]] | None",
-) -> "list[float]":
-    if M is None or len(box) < 4:
+    lens: "tuple[int, int, float] | None" = None,
+) -> "list[float] | None":
+    """The extent of a box carried through M (a homography keeps its
+    edges straight, so the corners are enough), then the lens warp,
+    which bends them, so their outline is sampled. None when the lens
+    shows none of it."""
+    if len(box) < 4 or (M is None and not lens):
         return list(box)
-    corners = [
-        (float(box[0]), float(box[1])),
-        (float(box[2]), float(box[1])),
-        (float(box[2]), float(box[3])),
-        (float(box[0]), float(box[3])),
-    ]
-    xs: list[float] = []
-    ys: list[float] = []
-    for x, y in corners:
-        nx, ny = _apply_matrix_to_point(M, x, y)
-        xs.append(nx)
-        ys.append(ny)
+    x0, y0, x1, y1 = (float(v) for v in box[:4])
+    n = 8 if lens else 1
+    ts = [i / n for i in range(n + 1)]
+    outline = ([(x0 + (x1 - x0) * t, y0) for t in ts] + [(x1, y0 + (y1 - y0) * t) for t in ts]
+               + [(x0 + (x1 - x0) * t, y1) for t in ts] + [(x0, y0 + (y1 - y0) * t) for t in ts])
+    pts = _warp_points(outline, M, lens)
+    if not pts:
+        return None
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
     return [min(xs), min(ys), max(xs), max(ys)]
 
 
@@ -9027,6 +9079,9 @@ async def _run_augment_generate_job(job, emit, cancel_event):
                 try:
                     out = base
                     cur_matrix: "list[list[float]] | None" = None
+                    # The camera's lens distortion bends the picture after
+                    # the matrices above: the annotations follow it too.
+                    lens: "tuple[int, int, float] | None" = None
                     if dom_bg_enabled and bg_paths and dets and _aug_should_apply(dom_bg_freq, k, n_copies, g_k):
                         out = _aug_apply_background_randomisation(out, dets, bg_paths, sx, sy, seed_k)
                     if occ_block_enabled and dets and _aug_should_apply(occ_block_freq, k, n_copies, g_k):
@@ -9061,14 +9116,16 @@ async def _run_augment_generate_job(job, emit, cancel_event):
                             low_resolution=cam_params["lr"],
                             lens_glare=cam_params["lg"],
                         )
+                        if _lens_k1(cam_params["ld"]) > 0:
+                            lens = (work_W, work_H, _lens_k1(cam_params["ld"]))
                     copy_annos: list[dict] = []
                     for det in prepared_dets:
                         # Clipped to the picture: a warp can carry part of
                         # an object, or all of it, out of the frame.
                         warped_polys = [q for q in (_clip_poly_to(p, work_W, work_H)
-                                                    for p in _apply_matrix_to_polys(det["polys"], cur_matrix)) if q]
-                        warped_box = (_clip_box_to(_apply_matrix_to_box(det["box"], cur_matrix), work_W, work_H)
-                                      if det["box"] else None)
+                                                    for p in _apply_matrix_to_polys(det["polys"], cur_matrix, lens)) if q]
+                        moved = _apply_matrix_to_box(det["box"], cur_matrix, lens) if det["box"] else None
+                        warped_box = _clip_box_to(moved, work_W, work_H) if moved else None
                         if warped_box is None and not warped_polys:
                             continue
                         if warped_box is None:  # a mask without a box: its extent
