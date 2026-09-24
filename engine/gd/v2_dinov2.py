@@ -113,7 +113,8 @@ def load(device: str = "cpu"):
             processor.do_center_crop = False
         if hasattr(processor, "resample"):
             processor.resample = PILImageResampling.BICUBIC
-        dtype = torch.float16 if device in ("cuda", "mps") else torch.float32
+        # By type: an explicit card ("cuda:1") is still a GPU.
+        dtype = torch.float16 if torch.device(device).type in ("cuda", "mps") else torch.float32
         model = AutoModel.from_pretrained(DINO_MODEL_ID, torch_dtype=dtype).to(device).eval()
         _MODEL = model
         _PROCESSOR = processor
