@@ -560,3 +560,80 @@ def test_label_model_targets_never_touch_hand_edited_images(app_module):
     ]}
     assert [e["id"] for e in app_module._label_model_targets(manifest, False)] == ["a"]
     assert [e["id"] for e in app_module._label_model_targets(manifest, True)] == ["a", "b"]
+
+
+# ── sharing the labelling GPU ────────────────────────────────────────
+
+def test_every_step_offers_the_gpu_and_a_cancel_there_ends_the_epoch(tmp_path):
+    from train_yolox import Cancelled, Sample, _epoch
+
+    p = tmp_path / "t.png"
+    Image.new("RGB", (32, 32), (1, 2, 3)).save(p)
+    samples = [Sample(path=p, boxes=np.array([[2, 2, 20, 20]], np.float32),
+                      classes=np.array([0], np.float32), split="train", w=32, h=32) for _ in range(4)]
+    events = []
+
+    def step_fn(step, imgs, targets):
+        events.append("step")
+        return 1.0
+
+    st = {"batch": 2, "steps": 2, "gpu_turn": lambda: events.append("turn")}
+    _epoch(samples, [0, 1, 2, 3], st, 32, step_fn, None, [])
+    assert events == ["step", "turn", "step", "turn"]
+
+    # A cancel raised while waiting for the card is not an OOM to recover from.
+    def stop():
+        raise Cancelled()
+
+    st["gpu_turn"] = stop
+    with pytest.raises(Cancelled):
+        _epoch(samples, [0, 1, 2, 3], st, 32, step_fn, None, [])
+
+
+@pytest.mark.parametrize("device, shares", [("", True), ("cuda:1", False)])
+def test_a_run_on_the_labelling_device_lends_it_between_steps(app_module, monkeypatch, device, shares):
+    import asyncio
+    import types
+
+    import train_yolox
+
+    server = app_module
+    monkeypatch.setenv("PK_DEVICE", "cpu")
+    monkeypatch.setitem(server.state, "device", "cpu")
+    gate = server.PriorityGPUGate()
+    monkeypatch.setitem(server.state, "gpu_lock", gate)
+    order = []
+
+    def fake_train(project, cfg, progress, cancel, gpu_turn=None):
+        assert (gpu_turn is not None) is shares
+        if shares:
+            while not gate.contended():  # a click waits behind the run
+                time.sleep(0.01)
+            order.append("step")
+            gpu_turn()
+        order.append("step")
+        return {"run": "r1", "model": "yolox_nano", "size": "nano"}
+
+    monkeypatch.setattr(train_yolox, "train", fake_train)
+
+    async def click():
+        async with gate.interactive():
+            order.append("click")
+
+    async def main():
+        async def emit(*_a, **_k):
+            return None
+
+        job = types.SimpleNamespace(project="p", params={"epochs": 1, "device": device} if device
+                                    else {"epochs": 1})
+        run = asyncio.create_task(server._run_train_yolox_job(job, emit, threading.Event()))
+        if shares:
+            while gate._free:  # the run takes the gate first
+                await asyncio.sleep(0.01)
+            await click()
+        return await run
+
+    result = asyncio.run(main())
+    assert result["run"] == "r1"
+    assert order == (["step", "click", "step"] if shares else ["step"])
+    assert gate._free

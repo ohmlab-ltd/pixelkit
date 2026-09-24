@@ -2046,7 +2046,7 @@ function TrainingSection({ go }: { go: (k: GuideSectionKey) => void }) {
             "<strong>Start from</strong>. Continue from an earlier run&rsquo;s weights instead of the COCO checkpoint, for a second pass on a grown dataset.",
             "<strong>Evaluate on</strong>. Score on a separate dataset instead of a held-out split: everything here trains, everything labelled there is scored. The honest number for a camera the model has never seen.",
             "<strong>Pre-flight</strong>. Before you start, the card says how many images and augmentations the run will use and warns about classes with few boxes, classes the val split cannot measure, objects under 8 px at the input size, and identical images on both sides of the split. Too few labelled images blocks the run.",
-            "<strong>GPU</strong>. Training wants a CUDA card or Apple Silicon; it runs on the CPU only when Compute is set to CPU in Settings, and slowly. With a second GPU installed, training uses the card labelling is not on, so labelling stays responsive.",
+            "<strong>GPU</strong>. Training wants a CUDA card or Apple Silicon; it runs on the CPU only when Compute is set to CPU in Settings, and slowly. On one GPU, training pauses between steps for click-to-detect, drawn boxes and auto-labelling, so both carry on, the run a little slower while you label. With a second GPU installed, training uses the card labelling is not on.",
           ]}
         />
       </GuideSection>

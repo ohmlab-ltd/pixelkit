@@ -597,6 +597,21 @@ class PriorityGPUGate:
                 return
         self._free = True
 
+    def contended(self, priority: int = P_JOB) -> bool:
+        """True while work at `priority` or a more urgent one waits for
+        the gate. Safe from any thread (the heap is copied under the
+        GIL); a stale answer only moves a hand-over by one step."""
+        return any(p <= priority and not f.done() for p, _, f in list(self._waiters))
+
+    async def hand_over(self, priority: int = P_JOB) -> None:
+        """For a holder that runs for minutes (training on the labelling
+        device): let whoever waits at `priority` or a more urgent one
+        use the card now, then queue to take the gate back."""
+        if not self.contended(priority):
+            return
+        self._release()
+        await self._acquire(priority)
+
     # Plain `async with gate:` → P_JOB. Keeps every existing
     # `async with state["gpu_lock"]:` site working without changes.
     async def __aenter__(self) -> "PriorityGPUGate":
@@ -3568,9 +3583,10 @@ async def _run_train_yolox_job(job, emit, cancel_event):
     """YOLOX-Nano training + Neuro N6 export (gd/train_yolox.py).
 
     Holds the GPU gate at job priority while training shares the
-    labelling device; a params.device targeting a DIFFERENT CUDA
-    index (multi-GPU boxes) trains outside the gate so labelling
-    stays interactive on the primary card."""
+    labelling device, and hands it over between steps to any click or
+    labelling image waiting for the card, so labelling carries on
+    while a model trains. A params.device targeting a DIFFERENT CUDA
+    index (multi-GPU boxes) trains outside the gate."""
     import train_yolox as _ty
 
     params = job.params or {}
@@ -3612,12 +3628,29 @@ async def _run_train_yolox_job(job, emit, cancel_event):
         except Exception:
             pass  # progress is best-effort
 
+    gate = state["gpu_lock"]
+    shared = train_dev == engine_dev
+
+    def gpu_turn() -> None:
+        # Called by the trainer's thread between two units of GPU work.
+        if not gate.contended():
+            return
+        fut = asyncio.run_coroutine_threadsafe(gate.hand_over(), loop)
+        while True:
+            try:
+                fut.result(timeout=1)
+                return
+            except TimeoutError:
+                if not loop.is_running():  # the engine is shutting down
+                    raise _ty.Cancelled() from None
+
     async def _go():
-        return await asyncio.to_thread(_ty.train, job.project, cfg, prog, cancel_event)
+        return await asyncio.to_thread(_ty.train, job.project, cfg, prog, cancel_event,
+                                       gpu_turn if shared else None)
 
     try:
-        if train_dev == engine_dev:
-            async with state["gpu_lock"]:
+        if shared:
+            async with gate:
                 report = await _go()
         else:
             report = await _go()

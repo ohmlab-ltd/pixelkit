@@ -1119,6 +1119,14 @@ def _check_cancel(cancel) -> None:
         raise Cancelled()
 
 
+def _gpu_turn(st: dict) -> None:
+    """Between two units of GPU work: lend the card if the engine asks
+    (see train(gpu_turn=...))."""
+    turn = st.get("gpu_turn")
+    if turn is not None:
+        turn()
+
+
 def _is_oom(e: BaseException) -> bool:
     oom_cls = getattr(torch.cuda, "OutOfMemoryError", None)
     if oom_cls is not None and isinstance(e, oom_cls):
@@ -1189,6 +1197,7 @@ def _epoch(samples, train_s: list[int], st: dict, imgsz: int, step_fn, cancel, n
                     n += 1
                 else:
                     bad += 1
+                _gpu_turn(st)
         except RuntimeError as e:
             if not _is_oom(e) or batch <= 2:
                 raise
@@ -1263,16 +1272,21 @@ def train(
     cfg: TrainConfig,
     progress: Callable[[dict], None] | None = None,
     cancel=None,
+    gpu_turn: Callable[[], None] | None = None,
 ) -> dict:
     """Train + export. On a cuda:N device the CURRENT device is set for
     this thread only for the duration (the vendored head allocates its
     grids on the current device); it is restored on exit because the
-    thread pool is shared with labelling inference."""
+    thread pool is shared with labelling inference.
+
+    gpu_turn, when given, is called between two units of GPU work (a
+    training step, a val image, a calibration batch): the engine uses
+    it to lend the card to labelling that shares it."""
     device = torch.device(cfg.device)
     if device.type == "cuda" and device.index is not None:
         with torch.cuda.device(device):
-            return _train_impl(project_id, cfg, progress, cancel)
-    return _train_impl(project_id, cfg, progress, cancel)
+            return _train_impl(project_id, cfg, progress, cancel, gpu_turn)
+    return _train_impl(project_id, cfg, progress, cancel, gpu_turn)
 
 
 def _restore_cfg(saved: dict, cfg: TrainConfig) -> TrainConfig:
@@ -1287,7 +1301,7 @@ def _restore_cfg(saved: dict, cfg: TrainConfig) -> TrainConfig:
     return out
 
 
-def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel) -> dict:
+def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel, gpu_turn=None) -> dict:
     t0 = time.time()
     if cfg.size not in MODEL_SPECS:
         raise ValueError(f"unknown model size {cfg.size!r} (nano or tiny)")
@@ -1407,7 +1421,7 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel) -> dict:
     else:
         batch = cfg.batch if cfg.batch > 0 else _auto_batch(device, cfg.imgsz, cfg.size, len(train_s))
     batch = max(2, min(batch, len(train_s)))
-    st = {"batch": batch, "steps": max(1, len(train_s) // batch)}
+    st = {"batch": batch, "steps": max(1, len(train_s) // batch), "gpu_turn": gpu_turn}
 
     pg_bn, pg_w, pg_b = [], [], []
     for m in model.modules():
@@ -1457,6 +1471,7 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel) -> dict:
             out = net(imgs.to(device))
             preds.append(_decode_rows(out, 0.01, cfg.nms_thres, len(classes)))
             gts.append(_gt_letterbox(samples[si], cfg.imgsz))
+            _gpu_turn(st)
         net.train()
         return ap50(preds, gts, len(classes))
 
@@ -1851,9 +1866,11 @@ def _qat_finetune(model: YOLOX, samples, train_s, st: dict, cfg: TrainConfig, de
         model.train()
         for imgs, targets in _batch_iter(samples, seed, batch, cfg.imgsz, train=False):
             model(imgs.to(device), targets.to(device))
+            _gpu_turn(st)
         model.eval()
         for imgs, _t in _batch_iter(samples, seed, batch, cfg.imgsz, train=False):
             model(imgs.to(device))
+            _gpu_turn(st)
     set_calibrate(model, False)
     missing = unseeded(model)
     if missing:
