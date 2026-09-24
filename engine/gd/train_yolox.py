@@ -1297,10 +1297,18 @@ def train(
     training step, a val image, a calibration batch): the engine uses
     it to lend the card to labelling that shares it."""
     device = torch.device(cfg.device)
-    if device.type == "cuda" and device.index is not None:
-        with torch.cuda.device(device):
-            return _train_impl(project_id, cfg, progress, cancel, gpu_turn)
-    return _train_impl(project_id, cfg, progress, cancel, gpu_turn)
+    try:
+        if device.type == "cuda" and device.index is not None:
+            with torch.cuda.device(device):
+                return _train_impl(project_id, cfg, progress, cancel, gpu_turn)
+        return _train_impl(project_id, cfg, progress, cancel, gpu_turn)
+    finally:
+        # The run's model, optimiser and batches are garbage now: hand
+        # their cached memory back to the card (measured: 1.9 GB held
+        # after a Nano run), as the labelling paths do after theirs.
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
 
 def _restore_cfg(saved: dict, cfg: TrainConfig) -> TrainConfig:
