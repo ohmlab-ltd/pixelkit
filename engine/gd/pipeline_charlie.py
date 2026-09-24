@@ -1343,6 +1343,20 @@ def _run_text_with_cached_vision(label: str, vision_embeds, original_sizes, pixe
     return outputs, text_inputs
 
 
+def _keep_relative(hits: list[tuple], min_relative: float, ref_score: float | None) -> list[tuple]:
+    """Drop same-label noise: (box, mask, score, area) hits whose area is
+    under `min_relative` x the label's largest mask. With `ref_score`,
+    only hits scoring at least that set the largest (all of them when
+    none does). The interactive tools pass the batch cut: at their low
+    threshold SAM3 also returns a near-whole-image mask, which as the
+    reference dropped the very object the user boxed or clicked."""
+    if len(hits) <= 1 or min_relative <= 0:
+        return hits
+    ref = [h[3] for h in hits if ref_score is None or h[2] >= ref_score]
+    floor = int(max(ref or [h[3] for h in hits]) * min_relative)
+    return [h for h in hits if h[3] >= floor]
+
+
 def _segment_one_label(
     image: Image.Image,
     label: str,
@@ -1350,6 +1364,7 @@ def _segment_one_label(
     threshold: float | None = None,
     mask_threshold: float | None = None,
     min_relative_area: float | None = None,
+    relative_ref_score: float | None = None,
 ) -> tuple[list[tuple], float, float, int]:
     """One SAM3 forward pass for a single text prompt.
 
@@ -1360,7 +1375,8 @@ def _segment_one_label(
 
     `threshold` / `mask_threshold` / `min_relative_area` override the
     SAM3_* module-level defaults for this single call only - used by
-    the project page's per-run SAM3 knobs.
+    the project page's per-run SAM3 knobs. `relative_ref_score`: see
+    _keep_relative.
     """
     if _MODEL is None or _PROCESSOR is None:
         raise RuntimeError("SAM3 not loaded - call load_sam3() first")
@@ -1436,15 +1452,9 @@ def _segment_one_label(
         # a noise fragment that share-labels with a real object, and
         # dropped. Skipped when the label only fired once (nothing
         # to compare against).
-        if len(kept_floor) > 1 and eff_min_relative > 0:
-            max_area = max(h[3] for h in kept_floor)
-            rel_floor = int(max_area * eff_min_relative)
-            kept_rel = [h for h in kept_floor if h[3] >= rel_floor]
-            n_dropped_rel = len(kept_floor) - len(kept_rel)
-            dropped_tiny += n_dropped_rel
-        else:
-            kept_rel = kept_floor
-            n_dropped_rel = 0
+        kept_rel = _keep_relative(kept_floor, eff_min_relative, relative_ref_score)
+        n_dropped_rel = len(kept_floor) - len(kept_rel)
+        dropped_tiny += n_dropped_rel
 
         # Surface what each pass actually saw / dropped - invaluable
         # when a real label shows up in the SAM3 output but doesn't
@@ -1860,6 +1870,7 @@ def _segment_one_label_with_cached_vision(
     threshold: float | None = None,
     mask_threshold: float | None = None,
     min_relative_area: float | None = None,
+    relative_ref_score: float | None = None,
 ) -> tuple[list[tuple], float, float, int]:
     """Per-label SAM3 forward that re-uses a cached vision_embeds when
     available, then runs the standard post-process + filter passes
@@ -1868,7 +1879,8 @@ def _segment_one_label_with_cached_vision(
 
     `threshold` / `mask_threshold` override the SAM3_* defaults - the
     interactive click-to-detect path uses lower values so a faint
-    object still produces a hit instead of a cancelled gesture."""
+    object still produces a hit instead of a cancelled gesture.
+    `relative_ref_score`: see _keep_relative."""
     import numpy as np
     W, H = image_inf.size
     min_area_px = max(SAM3_MIN_AREA_PX, int(W * H * SAM3_MIN_AREA_FRAC))
@@ -1934,13 +1946,8 @@ def _segment_one_label_with_cached_vision(
         dropped_tiny += len(hits) - len(kept_floor)
 
         eff_min_relative = SAM3_MIN_RELATIVE_AREA if min_relative_area is None else float(min_relative_area)
-        if len(kept_floor) > 1 and eff_min_relative > 0:
-            max_area = max(h[3] for h in kept_floor)
-            rel_floor = int(max_area * eff_min_relative)
-            kept_rel = [h for h in kept_floor if h[3] >= rel_floor]
-            dropped_tiny += len(kept_floor) - len(kept_rel)
-        else:
-            kept_rel = kept_floor
+        kept_rel = _keep_relative(kept_floor, eff_min_relative, relative_ref_score)
+        dropped_tiny += len(kept_floor) - len(kept_rel)
 
         for box_list, mask, score, _area in kept_rel:
             raw.append((box_list, mask, score))
@@ -2034,12 +2041,14 @@ def segment_point(
                 image_inf, label, cached_embeds, cached_sizes, cached_pixels,
                 threshold=SAM3_INTERACTIVE_THRESHOLD,
                 mask_threshold=SAM3_INTERACTIVE_MASK_THRESHOLD,
+                relative_ref_score=SAM3_THRESHOLD,
             )
         else:
             raw, predict_ms, post_ms, _ = _segment_one_label(
                 image_inf, label,
                 threshold=SAM3_INTERACTIVE_THRESHOLD,
                 mask_threshold=SAM3_INTERACTIVE_MASK_THRESHOLD,
+                relative_ref_score=SAM3_THRESHOLD,
             )
         timings["sam3_predict_ms"] += predict_ms
         timings["sam3_post_ms"] += post_ms
@@ -2190,12 +2199,14 @@ def segment_box(
                 image_inf, label, cached_embeds, cached_sizes, cached_pixels,
                 threshold=SAM3_INTERACTIVE_THRESHOLD,
                 mask_threshold=SAM3_INTERACTIVE_MASK_THRESHOLD,
+                relative_ref_score=SAM3_THRESHOLD,
             )
         else:
             raw, predict_ms, post_ms, _ = _segment_one_label(
                 image_inf, label,
                 threshold=SAM3_INTERACTIVE_THRESHOLD,
                 mask_threshold=SAM3_INTERACTIVE_MASK_THRESHOLD,
+                relative_ref_score=SAM3_THRESHOLD,
             )
         timings["sam3_predict_ms"] += predict_ms
         timings["sam3_post_ms"] += post_ms

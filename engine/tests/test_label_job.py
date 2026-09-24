@@ -155,6 +155,25 @@ def test_a_drawn_box_takes_what_it_encloses_not_a_neighbour():
     assert _bbox_iou(user, neighbour) < 0.3 and _inside_fraction(neighbour, user) < 0.8
 
 
+def test_a_faint_whole_image_mask_does_not_filter_out_the_object():
+    from pipeline_charlie import SAM3_THRESHOLD, _keep_relative
+
+    # (box, mask, score, area) at the interactive threshold: the square
+    # the user boxed, a speck, and SAM 3's near-whole-image guess.
+    square = ([20, 120, 70, 170], None, 0.96, 17_000)
+    speck = ([30, 130, 32, 132], None, 0.06, 300)
+    frame = ([0, 0, 1008, 756], None, 0.06, 760_000)
+    hits = [square, speck, frame]
+    # Measured against the whole-image mask, the square was "noise".
+    assert _keep_relative(hits, 0.05, None) == [frame]
+    # Against the largest confident mask it stays; the speck still goes.
+    assert _keep_relative(hits, 0.05, SAM3_THRESHOLD) == [square, frame]
+    # Nothing confident: the largest overall, as before.
+    faint = [speck, frame]
+    assert _keep_relative(faint, 0.05, SAM3_THRESHOLD) == _keep_relative(faint, 0.05, None)
+    assert _keep_relative([square], 0.05, SAM3_THRESHOLD) == [square]
+
+
 def test_queued_embeddings_read_the_picture_when_they_run(app_module, tmp_path):
     # Queued with a path, not the bytes; a picture deleted meanwhile is skipped.
     assert app_module._embed_stored_image("p", "i", tmp_path / "deleted.jpg") is False
