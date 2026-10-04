@@ -22,6 +22,25 @@ locally. The local API behind the Train card is in [API.md](API.md).
 | `<slug>_fp32.onnx`, `best.pt` | the float model and checkpoint, for re-export or inspection |
 | `ckpt_last.pt` | only while a run is unfinished: what Resume continues from |
 
+## Building it for the board
+
+The sketch folder builds in the Arduino IDE (or with arduino-cli) once
+two things are installed:
+
+- **The Neuro N6 core, 0.1.3 or later.** Add
+  `https://raw.githubusercontent.com/ohmlab-ltd/Neuro-N6-Arduino-Core/main/package_ohmlab_index.json`
+  under *File > Preferences > Additional boards manager URLs*, then
+  install **Neuro N6** in the Boards Manager. The sketch checks the
+  version: an older core, or another board, stops the build with that
+  message.
+- **ST Edge AI Core**, which the core runs to compile the model as the
+  sketch builds (found under `C:\ST\STEdgeAI`, or set `NEURON6_STEDGEAI`).
+
+Select the **Neuro N6** board, open `<slug>.ino` and upload. The boxes
+stream to Neuro Studio over USB. On the TFT carrier, declare the camera
+as `OV5640 camera(CARRIER_TFT);` and set the transport to
+`TRANSPORT_LCD` to draw them on the display instead.
+
 ## What trains, and what is measured
 
 The training set is every labelled image the split puts in train, plus
@@ -68,7 +87,10 @@ split. Warnings are recorded in the report.
 | YOLOX-Tiny | 5.1 M | about 5 MB | 1.3 G | Nano's accuracy is not enough; still under 20% of the weights pool |
 
 Both use the same stem, head, quantisation and export path; the compile
-report says what each costs on the board. A run can also start from a
+report says what each costs on the board. Measured on a Neuro N6, the
+NPU runs Nano in 7.4 ms at 256x256 (5.4 ms at 192x192) and Tiny in 31 ms
+at 320x320, and the boxes match PixelKit's int8 predictions on the same
+pictures to within a few pixels. A run can also start from a
 previous run's weights instead of the COCO checkpoint (Start from), for
 a second pass on a grown dataset.
 
@@ -86,7 +108,8 @@ Interrupted and resumes from its last epoch with its own settings; an
 interruption during the int8 fine-tuning restarts that short phase
 from the float result, and a cancel before the first epoch completes
 shows as failed. On a machine with two GPUs the run goes to the card
-labelling is not using. The Train card shows the loss and AP@0.5 curves
+labelling is not using; on one GPU it pauses between steps for SAM 3
+clicks and labelling jobs, so labelling carries on while it trains. The Train card shows the loss and AP@0.5 curves
 as the run trains, with the time left.
 
 ## The input contract

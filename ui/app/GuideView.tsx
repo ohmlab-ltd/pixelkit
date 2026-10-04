@@ -2081,7 +2081,13 @@ function TrainingSection({ go }: { go: (k: GuideSectionKey) => void }) {
       <GuideSection n={4} title="Putting it on the board">
         <p>
           Click <strong>N6 export</strong> to download the zip, unzip it, open
-          the sketch inside in the Arduino IDE and upload it. The sketch
+          the sketch inside in the Arduino IDE and upload it. The IDE needs
+          the Neuro N6 board package, 0.1.3 or later (add{" "}
+          <span className="font-mono break-all">https://raw.githubusercontent.com/ohmlab-ltd/Neuro-N6-Arduino-Core/main/package_ohmlab_index.json</span>{" "}
+          to the Boards Manager URLs and install <strong>Neuro N6</strong>),
+          and ST Edge AI Core, which the core runs to compile the model and
+          flash it with the sketch; on an older core the sketch stops with a
+          message saying so. The sketch
           declares the camera, feeds the model at the size it was trained on
           and hands its output to the core&rsquo;s PixelKit post-processor,
           so the boxes appear on Neuro Studio&rsquo;s live video (or on the
@@ -2089,8 +2095,7 @@ function TrainingSection({ go }: { go: (k: GuideSectionKey) => void }) {
           calibrated threshold from the labels header. While the sketch runs,
           Neuro Studio shows that threshold as a <strong>confidence</strong>{" "}
           slider: drag it on your own scene, then write the value you settle
-          on into the labels header. The core compiles the
-          model with ST Edge AI and flashes it with the sketch. The same run can
+          on into the labels header. The same run can
           be started from a terminal with{" "}
           <span className="font-mono">pixelkit train &lt;dataset&gt;</span>;
           the local endpoints behind the card are documented in the

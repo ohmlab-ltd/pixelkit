@@ -52,9 +52,11 @@ labels header with a confidence threshold calibrated on the validation
 images, and a report (AP@0.5, per-class precision and recall, the images the
 model got most wrong, every validation image beside its ground truth). With
 ST Edge AI Core installed, every export is also compiled for the board's NPU
-and its fit reported. Build the sketch with the Neuro N6 board package and
-ST Edge AI Core; Neuro Studio shows the boxes on the live video, with the
-threshold as a slider. Details in [`docs/TRAINING.md`](docs/TRAINING.md);
+and its fit reported. Build the sketch with the Neuro N6 board package
+(0.1.3 or later) and ST Edge AI Core, as
+[`docs/TRAINING.md`](docs/TRAINING.md#building-it-for-the-board) describes;
+Neuro Studio shows the boxes on the live video, with the threshold as a
+slider. Details in [`docs/TRAINING.md`](docs/TRAINING.md);
 the same runs work headless (`pixelkit train`) and through the local API
 ([`docs/API.md`](docs/API.md)).
 
