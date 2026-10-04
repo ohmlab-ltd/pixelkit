@@ -86,7 +86,7 @@ import secrets
 # Single source of truth for the shipped engine version. Keep in sync with
 # engine/pyproject.toml and desktop/package.json (the release workflow
 # checks all three match the tag).
-PK_VERSION = "0.2.1"
+PK_VERSION = "0.3.0"
 
 
 def _configured_device() -> str:
@@ -730,8 +730,9 @@ async def lifespan(app: FastAPI):
     state["segmenter"] = None   # SAM2 removed - SAM3 covers interactive segmentation
     state["nsfw"] = None        # NSFW gate removed
 
-    # Model loading policy: SAM3 + DINOv2, with the small VLM tiebreak
-    # opt-in (VLM_ENABLED=1). Models load on cuda and mps. Plain CPU is
+    # Model loading policy: SAM3 + DINOv2. No VLM loads here: the VLM
+    # tiebreak runs only through a remote worker (VLM_WORKER_URL, see
+    # vlm_validate.py). Models load on cuda and mps. Plain CPU is
     # too slow to be useful, so it loads models only when the user
     # explicitly chose CPU (PK_DEVICE=cpu or the Settings device picker);
     # otherwise a CPU-only machine boots with the ML endpoints on 503 and

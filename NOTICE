@@ -11,7 +11,6 @@ are licensed by their respective owners - in particular:
   - facebook/sam3 (SAM 3): Meta's SAM License, accepted by each user on
     Hugging Face before download.
   - facebook/dinov2-large: Apache License 2.0.
-  - Qwen/Qwen3-VL-2B-Instruct (optional): Apache License 2.0.
 
 The engine vendors model-definition and loss code from YOLOX
 (https://github.com/Megvii-BaseDetection/YOLOX), Copyright (c) Megvii
