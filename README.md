@@ -3,12 +3,13 @@
 [![ci](https://github.com/ohmlab-ltd/pixelkit/actions/workflows/ci.yml/badge.svg)](https://github.com/ohmlab-ltd/pixelkit/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/ohmlab-ltd/pixelkit)](https://github.com/ohmlab-ltd/pixelkit/releases/latest)
 
-Open-source, local-first dataset auto-labelling for computer vision.
-Text-prompted detection and segmentation with **SAM 3**, an interactive
-annotation editor (boxes, polygon masks, click-to-segment), GPU-accelerated
-augmentations, and YOLO / COCO / Pascal VOC export - all running on your own
-machine, with every image and annotation stored in a workspace folder you
-choose. No accounts, no cloud, no telemetry.
+Open-source, local-first dataset auto-labelling for computer vision, and
+detector training for the OhmLab Neuro N6. Text-prompted detection and
+segmentation with **SAM 3**, an interactive annotation editor (boxes, polygon
+masks, click-to-segment), GPU-accelerated augmentations, YOLO / COCO / Pascal
+VOC export, and YOLOX training with an int8 export ready to build for the
+Neuro N6 - all running on your own machine, with every image and annotation
+stored in a workspace folder you choose. No accounts, no cloud, no telemetry.
 
 > **Status: pre-release, under active development.**
 
@@ -29,16 +30,33 @@ Grab the latest installer from
 - **Linux** - no packaged build yet; run from source (below).
 
 Model weights download separately on first run into your workspace
-(`weights/`): SAM 3 (~1.7 GB, needs a free Hugging Face token - see
-[`docs/HF-TOKEN.md`](docs/HF-TOKEN.md)) and DINOv2 (~0.6 GB, automatic).
+(`weights/`): SAM 3 (~3.4 GB, needs a free Hugging Face token - see
+[`docs/HF-TOKEN.md`](docs/HF-TOKEN.md)) and DINOv2 (~1.2 GB, automatic).
+The first training run downloads Megvii's COCO-pretrained YOLOX checkpoint
+it starts from (~8 MB for Nano).
 
 ## Requirements
 
-| Machine | Labelling |
-|---|---|
-| Windows/Linux + NVIDIA GPU (12 GB VRAM recommended) | Full speed (CUDA) |
-| Apple Silicon Mac (16 GB+ unified memory) | Full speed (Metal) |
-| No supported GPU (incl. AMD/Intel) | App fully works - editor, datasets, import/export, augmentations. AI labelling is off by default; Settings → Compute → CPU enables it in very-slow mode. |
+| Machine | Labelling | Training |
+|---|---|---|
+| Windows/Linux + NVIDIA GPU (12 GB VRAM recommended) | Full speed (CUDA) | Full speed: a Nano run takes minutes |
+| Apple Silicon Mac (16 GB+ unified memory) | Full speed (Metal) | Metal |
+| No supported GPU (incl. AMD/Intel) | App fully works - editor, datasets, import/export, augmentations. AI labelling is off by default; Settings → Compute → CPU enables it in very-slow mode. | The same switch, slowly |
+
+## Train for the Neuro N6
+
+On a labelled dataset, **Train for Neuro N6** trains a YOLOX-Nano or
+YOLOX-Tiny detector and exports it as an Arduino sketch folder: the int8
+model (trained quantisation-aware, so it scores like the float model), a
+labels header with a confidence threshold calibrated on the validation
+images, and a report (AP@0.5, per-class precision and recall, the images the
+model got most wrong, every validation image beside its ground truth). With
+ST Edge AI Core installed, every export is also compiled for the board's NPU
+and its fit reported. Build the sketch with the Neuro N6 board package and
+ST Edge AI Core; Neuro Studio shows the boxes on the live video, with the
+threshold as a slider. Details in [`docs/TRAINING.md`](docs/TRAINING.md);
+the same runs work headless (`pixelkit train`) and through the local API
+([`docs/API.md`](docs/API.md)).
 
 ## Where your data lives
 
@@ -70,14 +88,14 @@ cd desktop && npm ci && npm start
 
 ## Status
 
-Working today: local engine (workspace storage, no accounts, split
-per-image annotation schema), cuda/mps/cpu device layer, model manager +
-HF-token flow, first-run setup, and the Electron desktop shell with a
-slim Windows NSIS installer (first-run runtime bootstrap), update check
-and a tag-driven release workflow. The desktop-shell UI is documented in
-[`docs/DESKTOP-UI.md`](docs/DESKTOP-UI.md). Remaining before v0.1.0:
-a real-hardware QA matrix, macOS signing/notarization, and the
-Vite/`app://` migration.
+Working today: labelling with SAM 3, the annotation editor,
+augmentations, dataset import and export, training and the Neuro N6
+export, headless labelling and training (`pixelkit label`, `pixelkit
+train`) and the local API, and the desktop app with Windows and macOS
+installers, a first-run runtime download and an update check. The
+desktop-shell UI is documented in [`docs/DESKTOP-UI.md`](docs/DESKTOP-UI.md).
+Not yet: signed installers, a Linux package, and training for
+classification, segmentation or pose.
 
 ## License
 
