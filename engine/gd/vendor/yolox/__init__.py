@@ -1,8 +1,11 @@
 # Vendored from Megvii-BaseDetection/YOLOX v0.3.0 (Apache License 2.0,
 # Copyright (c) Megvii Inc.) via the yolox==0.3.0 PyPI sdist. Local
 # changes: loguru replaced with stdlib logging, package-relative
-# imports. Vendored so PixelKit's trainer carries no AGPL code and no
-# extra dependency tree; see NOTICE at the repo root.
+# imports; fake-quant points for quantisation-aware training in
+# network_blocks.py, yolo_pafpn.py, yolo_head.py and yolox.py, and the
+# raw head exported without its grid decode (each modified file says
+# so); qat.py is PixelKit's own. Vendored so PixelKit's trainer carries
+# no AGPL code and no extra dependency tree; see NOTICE at the repo root.
 from .boxes import bboxes_iou, postprocess
 from .yolo_head import YOLOXHead
 from .yolo_pafpn import YOLOPAFPN

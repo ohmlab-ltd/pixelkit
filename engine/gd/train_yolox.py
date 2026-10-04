@@ -2225,10 +2225,20 @@ def _write_bundle(out_dir: Path, slug: str, dataset_name: str, classes: list[str
     sketch = _sketch(slug, dataset_name, classes, cfg, report, int8_onnx.name)
     (out_dir / f"{slug}.ino").write_text(sketch, "utf-8")
     _write_json_atomic(out_dir / "report.json", report)
+    files = [out_dir / f"{slug}.ino", int8_onnx, out_dir / f"{slug}_labels.h", out_dir / "report.json"]
+    # Weights that descend from Megvii's checkpoint, directly or through the
+    # run this one started from, go out with Megvii's notice.
+    if report.get("pretrained") or report.get("initRun"):
+        (out_dir / "NOTICE.txt").write_text(
+            f"{int8_onnx.name} was trained in PixelKit from Megvii's COCO-pretrained\n"
+            "YOLOX checkpoint (https://github.com/Megvii-BaseDetection/YOLOX),\n"
+            "Copyright (c) Megvii Inc., licensed under the Apache License,\n"
+            "Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0). Keep this\n"
+            "notice with the model when you share it.\n", "utf-8")
+        files.append(out_dir / "NOTICE.txt")
 
     # A sketch folder: unzip it and open <slug>.ino in the Arduino IDE.
     zpath = out_dir / "export.zip"
     with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in (out_dir / f"{slug}.ino", int8_onnx, out_dir / f"{slug}_labels.h",
-                  out_dir / "report.json"):
+        for f in files:
             zf.write(f, f"{slug}/{f.name}")

@@ -304,6 +304,14 @@ def test_export_is_a_sketch_folder_that_runs_the_model(tmp_path):
     labels_h = (tmp_path / "bolts_labels.h").read_text("utf-8")
     assert "#define BOLTS_INPUT_W 320" in labels_h and "#define BOLTS_CONF_THRESHOLD 0.42f" in labels_h
 
+    # Weights fine-tuned from Megvii's checkpoint go out with its notice.
+    _write_bundle(tmp_path, "bolts", "Bolts", ["bolt", "nut"], TrainConfig(imgsz=320),
+                  {**report, "pretrained": True}, onnx, 0.42)
+    zf = zipfile.ZipFile(tmp_path / "export.zip")
+    assert "bolts/NOTICE.txt" in zf.namelist()
+    notice = zf.read("bolts/NOTICE.txt").decode("utf-8")
+    assert "bolts_int8.onnx" in notice and "Megvii" in notice and "Apache License" in notice
+
 
 def test_ap50_per_class_is_positional_when_a_class_has_no_val_gt():
     import numpy as np

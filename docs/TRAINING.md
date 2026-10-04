@@ -14,7 +14,7 @@ locally. The local API behind the Train card is in [API.md](API.md).
 | `<slug>_labels.h` | `<SLUG>_NUM_CLASSES`, `<SLUG>_INPUT_W/H`, the calibrated `<SLUG>_CONF_THRESHOLD`, `<SLUG>_NMS_THRESHOLD`, `<SLUG>_CLASSES[]` |
 | `<slug>.ino` | the sketch: declares the camera, feeds the model at its input size and binds the core's `PostProcess_PixelKitYOLOX`, which publishes the boxes to Neuro Studio; the confidence threshold is a live slider there |
 | `report.json` | AP@0.5 float vs int8 (overall and per class), threshold sweep, per-class precision/recall, confusion matrix, per-epoch history, input contract, NPU build facts |
-| `export.zip` | a `<slug>/` sketch folder with the sketch, the model, the labels header and `report.json`: unzip it and open the sketch in the Arduino IDE |
+| `export.zip` | a `<slug>/` sketch folder with the sketch, the model, the labels header and `report.json` (and `NOTICE.txt`, Megvii's Apache-2.0 notice, when the model was trained from the COCO checkpoint): unzip it and open the sketch in the Arduino IDE |
 | `failures/`, `failures.json` | the worst val images with misses, spurious boxes and wrong classes drawn |
 | `predictions.json` | every val image's ground truth beside the int8 model's boxes at the shipped threshold, in the image's pixels |
 | `history.json` | per-epoch loss and AP@0.5, written as the run trains |

@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
+# Modified by Ohm Lab Ltd for PixelKit (2026): fake-quant points for
+# quantisation-aware training (the upsamples and concats).
 
 import torch
 import torch.nn as nn

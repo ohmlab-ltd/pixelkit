@@ -16,6 +16,9 @@ are licensed by their respective owners - in particular:
 The engine vendors model-definition and loss code from YOLOX
 (https://github.com/Megvii-BaseDetection/YOLOX), Copyright (c) Megvii
 Inc., Apache License 2.0, at engine/gd/vendor/yolox/ (from the
-yolox==0.3.0 sdist, with minor import/logging adaptations). Training
-may download Megvii's COCO-pretrained yolox_nano checkpoint at the
-user's request; it carries the same Apache-2.0 license.
+yolox==0.3.0 sdist, modified for quantisation-aware training and the
+raw-head export; each modified file says so). Training downloads
+Megvii's COCO-pretrained yolox_nano or yolox_tiny checkpoint at the
+user's request; it carries the same Apache-2.0 license. A model
+PixelKit trains from it is derived from it: distribute an exported model
+with Megvii's Apache-2.0 license and copyright notice.

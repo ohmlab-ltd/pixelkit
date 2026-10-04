@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
+# Modified by Ohm Lab Ltd for PixelKit (2026): fake-quant points for
+# quantisation-aware training, the raw head exported without the grid decode
+# (the host and the board decode it), and torch.amp.autocast in place of the
+# deprecated torch.cuda.amp.autocast.
 
 import math
 import logging
