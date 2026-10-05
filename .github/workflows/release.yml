@@ -38,12 +38,20 @@ jobs:
         run: cd ui && npm ci && npm run build
       - name: Build installer (unsigned)
         run: cd desktop && npm ci && npx electron-builder --win
+      - name: Release notes from CHANGELOG.md
+        # The tag's "## X.Y.Z" section, CRLF-safe (Windows checkouts); empty
+        # when there is none, which leaves the generated notes alone.
+        shell: bash
+        run: |
+          awk -v v="${GITHUB_REF_NAME#v}" '{ sub(/\r$/, "") }
+            $0 == "## " v { on = 1; next } on && /^## / { exit } on { print }' CHANGELOG.md > notes.md
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
           # Version-less asset name -> releases/latest/download/PixelKit-Setup.exe
           # is a permanent URL (the release's tag carries the version).
           files: desktop/dist/PixelKit-Setup*.exe
+          body_path: notes.md
           generate_release_notes: true
 
   macos:
@@ -61,8 +69,13 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: cd desktop && npm ci && npx electron-builder --mac
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v v="${GITHUB_REF_NAME#v}" '{ sub(/\r$/, "") }
+            $0 == "## " v { on = 1; next } on && /^## / { exit } on { print }' CHANGELOG.md > notes.md
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
           files: desktop/dist/*.dmg
+          body_path: notes.md
           generate_release_notes: true
