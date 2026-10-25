@@ -23,8 +23,8 @@ page.
 
 | Platform | File | Python runtime |
 |---|---|---|
-| Windows 10 or later, x64 | `PixelKit-Setup.exe`, 115 MB | Downloaded on first launch into `%LOCALAPPDATA%\PixelKit\runtime`: about 3.5 GB with CUDA on NVIDIA machines, which needs 9 GB free, and 3 GB free otherwise |
-| macOS 14 or later, Apple Silicon | `PixelKit-arm64.dmg`, 410 MB | Included |
+| Windows 10 or later, x64 | `PixelKit-Setup.exe`, 114 MB | Downloaded on first launch into `%LOCALAPPDATA%\PixelKit\runtime`: about 3.5 GB with CUDA on NVIDIA machines, which needs 9 GB free, and 3 GB free otherwise |
+| macOS 14 or later, Apple Silicon | `PixelKit-arm64.dmg`, 465 MB | Included |
 | Linux | none | Run from source |
 
 The packaged app checks GitHub for a newer release at launch and offers the
