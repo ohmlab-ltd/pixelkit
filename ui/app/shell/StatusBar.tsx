@@ -1,11 +1,6 @@
 "use client";
 
-// Desktop-shell status bar (24px, 12px font, top border).
-// Left: engine health dot (5s /api/health poll) + compute device
-// label + workspace folder name. Right: the app version. Models are
-// invisible in this build (the engine-health dot + device label are
-// enough), and the theme is permanently dark, so there's no model
-// segment and no theme toggle.
+// Shell status bar: engine health, compute device, active jobs, workspace, version.
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
@@ -14,10 +9,9 @@ import { type EngineSettings, fetchEngineSettings } from "@/lib/models";
 import { readProjectMeta } from "@/lib/projectMetaCache";
 
 // Shown until the engine's /api/health reports its real version.
-const VERSION_FALLBACK = "v0.3.0";
+const VERSION_FALLBACK = "v0.4.0";
 
-// Queued/running engine jobs, from GET /api/jobs/active (see gd/jobs.py
-// Job.to_public - progress is {index, total, image, phase}).
+// Entries of GET /api/jobs/active.
 type ActiveJob = {
   id: string;
   kind: string;
@@ -37,8 +31,7 @@ function jobVerb(kind: string): string {
   return words ? words[0].toUpperCase() + words.slice(1) : "Working";
 }
 
-// Percent complete, when derivable: progress.index / progress.total wins,
-// falling back to n_images as the denominator. Null → indeterminate.
+// Percent done, or null when unknown.
 function jobPct(j: ActiveJob): number | null {
   const p = j.progress;
   const total =
@@ -71,26 +64,12 @@ function folderName(path: string | undefined): string | null {
   return parts[parts.length - 1] || null;
 }
 
-function Segment({
-  children,
-  onClick,
-  title,
-}: {
-  children: ReactNode;
-  onClick?: () => void;
-  title?: string;
-}) {
-  const cls =
-    "flex h-full items-center gap-1.5 px-2 hover:bg-[var(--surface-hover)] hover:text-[var(--foreground)] transition-colors";
-  if (onClick) {
-    return (
-      <button type="button" onClick={onClick} title={title} className={cls}>
-        {children}
-      </button>
-    );
-  }
+function Segment({ children, title }: { children: ReactNode; title?: string }) {
   return (
-    <span title={title} className={cls}>
+    <span
+      title={title}
+      className="flex h-full items-center gap-1.5 px-2 hover:bg-[var(--surface-hover)] hover:text-[var(--foreground)] transition-colors"
+    >
       {children}
     </span>
   );
@@ -101,15 +80,9 @@ export function StatusBar() {
   const [version, setVersion] = useState<string | null>(null);
   const [vram, setVram] = useState<VramInfo | null>(null);
   const [settings, setSettings] = useState<EngineSettings | null>(null);
-  // Settings only change on user action (and the workspace path needs a
-  // restart anyway) so one successful fetch is enough; re-fetch only
-  // after the engine has been down, in case it restarted with a new
-  // device/workspace.
+  // Settings are fetched once, and again after each engine outage.
   const settingsFresh = useRef(false);
 
-  // Active-jobs poll for the persistent progress segment: 2 s while
-  // anything is queued/running, 6 s when idle. A setTimeout chain (not
-  // setInterval) so the cadence can flip per-response.
   const [jobs, setJobs] = useState<ActiveJob[]>([]);
   useEffect(() => {
     let cancelled = false;
@@ -123,7 +96,7 @@ export function StatusBar() {
           next = Array.isArray(d.jobs) ? d.jobs : [];
         }
       } catch {
-        next = []; // engine down - the health dot already says so
+        next = []; // engine down
       }
       if (cancelled) return;
       setJobs(next);
@@ -211,7 +184,7 @@ export function StatusBar() {
           return (
             <Segment
               title={jobs
-                .map((j) => `${jobVerb(j.kind)} ${jobProjectName(j.project)} - ${j.status}`)
+                .map((j) => `${jobVerb(j.kind)} ${jobProjectName(j.project)}: ${j.status}`)
                 .join("\n")}
             >
               <span
@@ -243,7 +216,7 @@ export function StatusBar() {
       </span>
       <span className="flex items-stretch">
         <Segment title="PixelKit version">
-          {/* Version keeps its literal casing (lowercase v + suffix). */}
+          {/* normal-case keeps the lower-case v. */}
           <span className="normal-case">{version ? `v${version}` : VERSION_FALLBACK}</span>
         </Segment>
       </span>

@@ -6,10 +6,7 @@ import { createPortal } from "react-dom";
 import { apiFetch } from "../../lib/apiFetch";
 import { requestExplorerRefresh } from "../../lib/appNav";
 
-// SPA navigation to another dataset: push the deep-link URL and fire a
-// synthetic popstate - app/app/page.tsx's popstate handler swaps the
-// open dataset view in place (same mechanism as the Explorer tree).
-// No full page load.
+// Opens a dataset in place: app/app/page.tsx handles the synthetic popstate.
 function openDatasetSpa(projectId: string) {
   if (typeof window === "undefined") return;
   const target = `/app/${projectId}`;
@@ -22,10 +19,6 @@ function openDatasetSpa(projectId: string) {
 type Child = { project_id: string; name: string; labels: string[]; n_images: number };
 type DerivedInfo = { parentProjectId?: string; parentName?: string };
 
-// Suggest a child name from the PARENT dataset's name: title-case each word
-// (preserving existing acronyms like "PPE") and append "Crops". So a dataset
-// called "people" suggests "People Crops", "PPE" suggests "PPE Crops". Skips
-// the suffix if the name already ends in "crop"/"crops".
 function suggestCropName(parentName: string): string {
   const base = (parentName || "").trim();
   if (!base) return "";
@@ -37,36 +30,27 @@ function suggestCropName(parentName: string): string {
   return `${titled} Crops`;
 }
 
-// A small "derived dataset" mark (distinct from the privacy padlock) for the
-// title area + cards. A branch glyph: parent node forking to a child node.
+// Branch glyph marking a derived dataset.
 export function DerivedIcon({ className = "h-4 w-4" }: { className?: string }) {
   return (
     <svg viewBox="0 0 16 16" className={className} fill="none" aria-hidden>
       <circle cx="4" cy="3.2" r="1.7" stroke="currentColor" strokeWidth="1.3" />
       <circle cx="4" cy="12.8" r="1.7" stroke="currentColor" strokeWidth="1.3" />
       <circle cx="12" cy="12.8" r="1.7" stroke="currentColor" strokeWidth="1.3" />
-      {/* Clean edge-to-edge connectors (no lines drawn through the circles).
-          Vertical: top-left circle bottom (4,4.9) to bottom-left circle top
-          (4,11.1). Horizontal: bottom-left circle right edge (5.7,12.8) to
-          bottom-right circle left edge (10.3,12.8), on the bottom circles'
-          centre line so it joins the middle of both. */}
+      {/* Connectors stop at the circle edges. */}
       <path d="M4 4.9V11.1M5.7 12.8H10.3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
     </svg>
   );
 }
 
-// Top-of-Dataset-tab bar. For a normal project: create a cropped child dataset
-// + jump to existing children. For a DERIVED (child) project: a banner showing
-// it's cropped from a parent, with a link to the parent + a manual re-sync.
+// Banner on a derived dataset; child list and create action on any other.
 export function DerivedDatasetsBar({ projectId, labels }: { projectId: string; labels: string[] }) {
   const [children, setChildren] = useState<Child[] | null>(null);
   const [derived, setDerived] = useState<DerivedInfo | null | undefined>(undefined); // undefined = loading
-  const [ownName, setOwnName] = useState(""); // this project's own name (for the suggested child name)
+  const [ownName, setOwnName] = useState("");
   const [open, setOpen] = useState(false);
   const [syncing, setSyncing] = useState(false);
 
-  // Is THIS project a derived child? (overview carries the link.) Also grab the
-  // project's own name so the create-modal can pre-fill a smart child name.
   useEffect(() => {
     let cancelled = false;
     apiFetch(`/api/v2/projects/${projectId}/overview?imports_limit=1`, { cache: "no-store" })
@@ -80,7 +64,6 @@ export function DerivedDatasetsBar({ projectId, labels }: { projectId: string; l
     return () => { cancelled = true; };
   }, [projectId]);
 
-  // Only a parent lists children.
   useEffect(() => {
     if (derived) { setChildren(null); return; }
     let cancelled = false;
@@ -99,9 +82,8 @@ export function DerivedDatasetsBar({ projectId, labels }: { projectId: string; l
     } catch { setSyncing(false); }
   };
 
-  if (derived === undefined) return null; // brief; avoids a flash of the wrong bar
+  if (derived === undefined) return null;
 
-  // ── derived (child) project banner ──
   if (derived) {
     return (
       <section className="mt-3 px-6 lg:px-10">
@@ -110,7 +92,7 @@ export function DerivedDatasetsBar({ projectId, labels }: { projectId: string; l
             <DerivedIcon className="h-3.5 w-3.5" /> Derived dataset
           </span>
           <span className="text-[12px] text-foreground/60">
-            Cropped from <span className="font-medium text-foreground/80">{derived.parentName || "a parent project"}</span> · one label per image · auto-synced
+            Cropped from <span className="font-medium text-foreground/80">{derived.parentName || "a parent dataset"}</span> · one label per image · auto-synced
           </span>
           <div className="ml-auto flex items-center gap-2">
             {derived.parentProjectId && (
@@ -130,9 +112,6 @@ export function DerivedDatasetsBar({ projectId, labels }: { projectId: string; l
     );
   }
 
-  // ── normal/parent project: create + list children ──
-  // Tertiary section on the Overview: a light heading + either compact rows
-  // (when children exist) or a clear empty state, plus the create action.
   const count = children?.length ?? 0;
   const loading = children === null;
   return (
@@ -142,14 +121,10 @@ export function DerivedDatasetsBar({ projectId, labels }: { projectId: string; l
           <div className="min-w-0">
             <h2 className="pk-eyebrow">Derived datasets</h2>
             <p className="mt-1 text-[12px] text-foreground/60">
-              Cropped, one-label-per-image children of this project.
+              Cropped, one-label-per-image children of this dataset.
             </p>
           </div>
-          {/* A project can have MANY derived datasets (different label
-              selections / crop settings), so the create button stays available
-              even once children exist. Hidden only while the list is loading.
-              (Deriving from a derived dataset is blocked server-side, and a
-              child shows the banner above rather than this create UI.) */}
+          {/* A parent can have many derived datasets. */}
           {!loading && (
             <button type="button" onClick={() => setOpen(true)}
               className="h-9 shrink-0 rounded-md bg-[var(--accent)] px-4 text-[13px] font-medium text-[var(--accent-contrast)] transition-colors hover:brightness-105">
@@ -196,24 +171,16 @@ export function DerivedDatasetsBar({ projectId, labels }: { projectId: string; l
 }
 
 function DeriveModal({ projectId, labels, parentName, onClose }: { projectId: string; labels: string[]; parentName: string; onClose: () => void }) {
-  // Pre-fill a smart suggestion from the parent name (e.g. "People Crops"); the
-  // user can still overwrite it freely.
   const [name, setName] = useState(() => suggestCropName(parentName));
   const [sel, setSel] = useState<string[]>(labels);
   const [padding, setPadding] = useState(15);
   const [minSize, setMinSize] = useState(256);
-  // ROI mode: force every crop to a 1:1 square (centred on the detection) so
-  // long/thin objects become square ROIs instead of slivers.
   const [square, setSquare] = useState(false);
-  // Optional fixed size: when on, every crop is resized to exactly the same
-  // N x N size (forces square cropping). Off = crops keep their natural size.
   const [fixedSizeOn, setFixedSizeOn] = useState(false);
   const [fixedSizeVal, setFixedSizeVal] = useState(256);
-  // Label source: "inherit" keeps the parent labels; "new" starts a fresh
-  // vocabulary (crops come in unlabelled, parent label shown as a reference).
+  // "inherit" keeps the parent labels; "new" brings the crops in unlabelled.
   const [labelMode, setLabelMode] = useState<"inherit" | "new">("inherit");
-  // Whether to group the crop dataset (and its parent) under a workspace Project.
-  // On = keep them together in a Project; off = create a standalone dataset.
+  // Groups the crop dataset and its parent in a workspace Project.
   const [createProject, setCreateProject] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -240,8 +207,6 @@ function DeriveModal({ projectId, labels, parentName, onClose }: { projectId: st
         throw new Error(d.detail || `http ${r.status}`);
       }
       const d = await r.json() as { project_id: string };
-      // New child (and possibly a new wrapping Project) exists - refresh
-      // the Explorer tree, close the dialog, and open the child in-app.
       requestExplorerRefresh();
       onClose();
       openDatasetSpa(d.project_id);
@@ -252,15 +217,14 @@ function DeriveModal({ projectId, labels, parentName, onClose }: { projectId: st
   };
 
   if (typeof document === "undefined") return null;
-  // Portal to <body> so a transformed ancestor (e.g. the tab's pk-up entrance
-  // animation) can't break `position: fixed` and push the modal off-screen.
+  // Portalled to <body>: a transformed ancestor breaks `position: fixed`.
   return createPortal(
     <div className="pk-backdrop fixed inset-0 z-[1300] flex items-start justify-center overflow-y-auto p-4 pt-[8vh]" onClick={onClose}>
       <div className="pk-glass pk-pop w-full max-w-md rounded-md p-5" onClick={(e) => e.stopPropagation()}>
         <h3 className="text-[15px] font-medium tracking-tight">Create cropped dataset</h3>
         <p className="mt-1 text-[13px] leading-relaxed text-foreground/55">
-          A new project of <span className="font-medium text-foreground/75">one image per detection</span>, each cropped to its
-          box with a single label. It auto-syncs from this project (one-way: edits here flow down, never back up).
+          A new dataset of <span className="font-medium text-foreground/75">one image per detection</span>, each cropped to its
+          box with a single label. It syncs from this dataset automatically, one way: edits here flow down, never back up.
         </p>
 
         <label className="mt-4 block">
@@ -274,7 +238,7 @@ function DeriveModal({ projectId, labels, parentName, onClose }: { projectId: st
           <div className="mt-1.5 grid grid-cols-2 gap-1.5">
             {([
               { key: "inherit", title: "Keep parent labels", desc: "Crops carry the parent's label." },
-              { key: "new", title: "Create new labels", desc: "Start fresh - crops come in unlabelled." },
+              { key: "new", title: "Create new labels", desc: "Start fresh: crops come in unlabelled." },
             ] as const).map((opt) => {
               const on = labelMode === opt.key;
               return (
@@ -297,7 +261,7 @@ function DeriveModal({ projectId, labels, parentName, onClose }: { projectId: st
             {labelMode === "new" ? "Detections to crop" : "Labels to include"}
           </span>
           <div className="mt-1.5 flex max-h-40 flex-wrap gap-1.5 overflow-y-auto">
-            {labels.length === 0 && <span className="text-[12px] text-foreground/40">This project has no labels yet.</span>}
+            {labels.length === 0 && <span className="text-[12px] text-foreground/40">This dataset has no labels yet.</span>}
             {labels.map((l) => {
               const on = sel.includes(l);
               return (
@@ -312,7 +276,7 @@ function DeriveModal({ projectId, labels, parentName, onClose }: { projectId: st
 
         <div className="mt-4 flex items-center justify-between gap-3">
           <span className="min-w-0">
-            <span className="block text-[12px] font-medium text-foreground/70">ROI mode - square crops</span>
+            <span className="block text-[12px] font-medium text-foreground/70">ROI mode (square crops)</span>
             <span className="mt-0.5 block text-[11px] leading-snug text-foreground/40">Force every crop to an exact 1:1 square (centred on the object) so long, thin objects aren&apos;t cropped to slivers.</span>
           </span>
           <button

@@ -1,24 +1,10 @@
 "use client";
 
-// Dataset export modal. Animated CSS-keyframe entrance (popIn + fadeIn
-// defined in globals.css), light/dark themed via --surface, and the
-// content toggles that drive the backend export endpoint:
-//   - format: yolo / coco / voc
-//   - include_boxes + include_segmentations (at least one required)
-//   - exclude_red / exclude_orange (size-class filtering against the
-//     project's target input shape)
-//   - include_images (originals + augmentations bundled in the zip)
-// Shared between V1 ProjectView and the V2 ProjectViewV2Stub so the
-// two flows stay aligned with no copy-paste drift.
+// Dataset export modal for /api/projects/{id}/export.
 
 import { useEffect, useState } from "react";
-import { capture } from "./lib/analytics";
 
-const API =
-  process.env.NEXT_PUBLIC_API_URL ??
-  (typeof window !== "undefined" && window.location.port === "3000"
-    ? "http://localhost:8001"
-    : "");
+import { API_BASE } from "@/lib/apiFetch";
 
 type ExportFormat = {
   id: "yolo" | "coco" | "voc" | "cvat" | "labelstudio" | "masks";
@@ -37,7 +23,7 @@ const EXPORT_FORMATS: ExportFormat[] = [
   {
     id: "coco",
     name: "COCO",
-    blurb: "Microsoft COCO JSON. The standard for most detection + instance-segmentation trainers.",
+    blurb: "Microsoft COCO JSON. The standard for most detection and instance-segmentation trainers.",
     supportsSegmentation: true,
   },
   {
@@ -49,7 +35,7 @@ const EXPORT_FORMATS: ExportFormat[] = [
   {
     id: "cvat",
     name: "CVAT",
-    blurb: "CVAT images-1.1 XML - re-import your labels into a CVAT instance for team review.",
+    blurb: "CVAT images-1.1 XML, for importing your labels into CVAT.",
     supportsSegmentation: true,
   },
   {
@@ -83,16 +69,11 @@ export function ExportModal({
   const [includeSegmentations, setIncludeSegmentations] = useState<boolean>(true);
   const [excludeRed, setExcludeRed] = useState<boolean>(true);
   const [excludeOrange, setExcludeOrange] = useState<boolean>(false);
-  // Train fraction (0–100). 80/20 is the conventional default; the backend
-  // splits each image deterministically by sha1(filename) so re-exports
-  // always place the same image in the same set.
+  // Train share in percent. The engine splits by sha1(filename), so re-exports match.
   const [trainPct, setTrainPct] = useState<number>(80);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Export progress. Big projects spend ~all the time on the server
-  // packaging the zip, so until bytes start flowing back we show an
-  // elapsed-seconds counter + indeterminate bar; once response.body
-  // is streaming, we flip to a bytes-downloaded readout.
+  // "building" until the response headers arrive, then "downloading".
   const [phase, setPhase] = useState<"building" | "downloading" | null>(null);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [bytesReceived, setBytesReceived] = useState(0);
@@ -101,9 +82,6 @@ export function ExportModal({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      // Don't let Esc dismiss the modal mid-build. The export is still
-      // running on the server even if the modal goes away, but losing
-      // the only place that shows progress is confusing.
       if (busy) return;
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
@@ -113,8 +91,6 @@ export function ExportModal({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, busy]);
 
-  // Tick the elapsed-seconds counter every 500 ms while busy so the
-  // user can see something is actually happening on long builds.
   useEffect(() => {
     if (!busy) return;
     const startedAt = Date.now();
@@ -125,15 +101,12 @@ export function ExportModal({
     return () => window.clearInterval(id);
   }, [busy]);
 
-  // beforeunload guard. Browsers ignore the custom string but still
-  // surface a generic "Leave site?" prompt, which is exactly what
-  // we want here, the export is running on the server and closing
-  // the tab aborts the download.
+  // Browsers ignore the custom text but still show their own leave prompt.
   useEffect(() => {
     if (!busy) return;
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
       e.preventDefault();
-      e.returnValue = "Your export is still building. Closing this tab will cancel it.";
+      e.returnValue = "Your export is still building. Leaving now will cancel it.";
       return e.returnValue;
     };
     window.addEventListener("beforeunload", onBeforeUnload);
@@ -142,17 +115,12 @@ export function ExportModal({
 
   const fmt = EXPORT_FORMATS.find((f) => f.id === picked) ?? EXPORT_FORMATS[0];
   const fmtSupportsSeg = fmt.supportsSegmentation;
-  // VOC can't carry polygons, so the seg toggle is effectively a no-op
-  // when VOC is picked. Show it disabled (rather than hidden) so the
-  // user understands the constraint instead of silently being ignored.
-  // PNG masks are the inverse: they're BUILT from segmentations, so the
-  // toggle is forced on (the engine 400s a masks export without them).
+  // The engine rejects a PNG masks export without segmentations.
   const effectiveSeg = picked === "masks" || (includeSegmentations && fmtSupportsSeg);
   const canExport = includeBoxes || effectiveSeg;
 
   const triggerExport = async () => {
     if (busy || !canExport) return;
-    capture("dataset_export", { format: picked, project_id: projectId });
     setBusy(true);
     setError(null);
     setPhase("building");
@@ -169,7 +137,7 @@ export function ExportModal({
         input_shape: inputShape || "256x256",
         train_split: String(Math.max(0, Math.min(1, trainPct / 100))),
       });
-      const url = `${API}/api/projects/${projectId}/export?${params.toString()}`;
+      const url = `${API_BASE}/api/projects/${projectId}/export?${params.toString()}`;
       const r = await fetch(url);
       if (!r.ok) {
         let detail = `http ${r.status}`;
@@ -177,14 +145,11 @@ export function ExportModal({
           const body = await r.json();
           detail = (body && (body.detail || body.error)) || detail;
         } catch {
-          // not JSON, leave detail as-is
+          // not JSON
         }
         throw new Error(detail);
       }
-      // Response headers landed → the server has finished building and
-      // is now streaming the zip. Flip the phase + start counting
-      // bytes so the readout switches from "Building…" to a download
-      // progress that ticks.
+      // Headers arrive once the zip is built.
       setPhase("downloading");
       const lenHeader = r.headers.get("content-length");
       const total = lenHeader ? parseInt(lenHeader, 10) : NaN;
@@ -193,9 +158,6 @@ export function ExportModal({
       const match = /filename="([^"]+)"/.exec(cd);
       const filename = match ? match[1] : `export-${picked}.zip`;
 
-      // Stream the body so we can show bytes-received progress on
-      // large exports. Falls back to r.blob() when streaming isn't
-      // available (older browsers, polyfilled fetch).
       let blob: Blob;
       if (r.body && typeof r.body.getReader === "function") {
         const reader = r.body.getReader();
@@ -252,14 +214,14 @@ export function ExportModal({
 
   return (
     <div
-      className="pk-backdrop fixed inset-0 z-[1300] flex items-center justify-center overflow-auto p-6"
+      className="pk-backdrop fixed inset-0 z-[1300] flex overflow-auto p-6"
       role="dialog"
       aria-modal="true"
       onClick={() => { if (!busy) onClose(); }}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="pk-glass pk-pop w-full max-w-2xl mt-8 mb-8 rounded-md overflow-hidden"
+        className="pk-glass pk-pop m-auto w-full max-w-2xl rounded-md overflow-hidden"
       >
         <header className="flex items-center justify-between px-6 py-4 border-b border-[var(--line-soft)]">
           <div>
@@ -270,7 +232,7 @@ export function ExportModal({
             onClick={() => { if (!busy) onClose(); }}
             className="text-2xl leading-none px-2 text-[var(--muted)] hover:text-foreground disabled:opacity-40"
             disabled={busy}
-            aria-label="close"
+            aria-label="Close"
           >
             ×
           </button>
@@ -412,7 +374,7 @@ export function ExportModal({
               onChange={(e) => setIncludeImages(e.target.checked)}
               className="h-4 w-4 accent-[var(--accent)]"
             />
-            <span className="text-sm text-foreground/85">Include image files (originals + augmentations)</span>
+            <span className="text-sm text-foreground/85">Include image files (originals and augmentations)</span>
           </label>
           <p className="text-[11px] text-foreground/40 -mt-1">
             Off: annotations only (filenames reference your local images). On: every photo bundled in the same archive,
@@ -426,13 +388,6 @@ export function ExportModal({
           </div>
         )}
 
-        {/* In-flight progress card. Big projects sit in "Building" for
-            a long time; surface elapsed seconds + an indeterminate bar
-            so the user sees motion. Once response bytes start flowing
-            we flip to a deterministic download bar with byte counts.
-            A standing warning across both phases tells the user not
-            to close the window, the build is happening on the server
-            and the request is what carries the zip back. */}
         {busy && (
           <div className="mx-6 mb-4 rounded-md border border-[var(--line)] bg-[var(--panel)] px-4 py-3.5">
             <div className="flex items-center justify-between gap-3 mb-2">
@@ -465,8 +420,8 @@ export function ExportModal({
               )}
             </div>
             <p className="mt-2.5 text-[11px] text-foreground/55 leading-relaxed">
-              <span className="font-medium text-foreground/80">Don&rsquo;t close this tab.</span>
-              {" "}Large projects can take a few minutes to package on the server. Leaving the page cancels the build and the download won&rsquo;t arrive.
+              <span className="font-medium text-foreground/80">Keep this window open.</span>
+              {" "}Large datasets can take a few minutes to package. Leaving the page cancels the export and the download won&rsquo;t arrive.
             </p>
           </div>
         )}

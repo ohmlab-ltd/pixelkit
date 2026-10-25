@@ -1,16 +1,6 @@
 "use client";
 
-// Train a YOLOX model on this dataset and export it for the Neuro N6.
-//
-// The card is the whole "dataset in, deployable model out" surface:
-// the run options (epochs, input, Nano/Tiny, split, augmentations,
-// warm start, held-out dataset), a pre-flight check of what the run
-// would use and what would go wrong, the runs list with live curves
-// while one trains, and per run the training curves, the calibrated
-// threshold, per-class precision/recall, the confusion matrix, the
-// worst val images and every val image beside its ground truth, plus
-// the actions: N6 export, label images with the model, resume an
-// interrupted run, cancel, delete.
+// Trains a YOLOX model on this dataset and exports it for the Neuro N6.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -51,8 +41,7 @@ type FinishedJob = { status?: string; error?: string | null };
 
 type DatasetOption = { id: string; name: string };
 
-// Tailwind's opacity modifier cannot apply to a bare CSS-variable colour
-// (it needs RGB channels), so tinted backgrounds use color-mix inline.
+// Tailwind's opacity modifier needs RGB channels, so tints use color-mix.
 const tint = (colour: string, pctOf = 15) => `color-mix(in srgb, ${colour} ${pctOf}%, transparent)`;
 
 async function readDetail(r: Response, fallback: string): Promise<string> {
@@ -60,8 +49,6 @@ async function readDetail(r: Response, fallback: string): Promise<string> {
   return body?.detail ?? fallback;
 }
 
-// One line of NPU truth per run: did ST Edge AI build it, how much ran
-// in software, and what it costs against the board's weights pool.
 function Neuron6Line({ n6, rejected }: { n6: Neuron6Summary | null | undefined; rejected?: boolean }) {
   if (rejected || n6?.error) {
     return (
@@ -90,8 +77,6 @@ function Neuron6Line({ n6, rejected }: { n6: Neuron6Summary | null | undefined; 
   );
 }
 
-// Loss (line) and AP@0.5 (dots) per epoch; the dashed line marks where
-// quantisation-aware fine-tuning starts.
 function Curves({ history, total }: { history: HistoryRow[] | null | undefined; total: number | null | undefined }) {
   const g = useMemo(() => curveGeometry(history, total, 320, 96), [history, total]);
   if (!g || !history || history.length === 0) return null;
@@ -193,15 +178,12 @@ function RunDetails({
   status: RunStatus;
 }) {
   const rep = detail.report;
-  // A run in progress: the list's live history is fresher than the
-  // detail fetched when the panel opened.
+  // While training, the list's live history is fresher than this detail.
   const history =
     status === "training" && liveHistory && liveHistory.length > 0
       ? liveHistory
       : rep?.history ?? detail.live?.history ?? detail.history ?? null;
   const thr = rep?.threshold;
-  // Reports from the previous engine version have per-class AP but no
-  // class report: still show what they have.
   const rows: ClassRow[] =
     rep?.classReport && rep.classReport.length > 0
       ? rep.classReport
@@ -351,10 +333,16 @@ function RunDetails({
   );
 }
 
-export function TrainCard({ projectId }: { projectId: string }) {
+export function TrainCard({
+  projectId,
+  refreshSignal = 0,
+}: {
+  projectId: string;
+  /** Changes when the dataset's images or labels change; re-runs the pre-flight. */
+  refreshSignal?: number;
+}) {
   const [runs, setRuns] = useState<TrainedRun[] | null>(null);
-  // Raw string so clearing the field to retype doesn't snap to 1 and
-  // turn "20" into "120"; clamped when read.
+  // Raw text so the field can be cleared while typing; clamped when read.
   const [epochsText, setEpochsText] = useState("50");
   const epochs = Math.max(1, Math.min(500, Number(epochsText) || 50));
   const [imgsz, setImgsz] = useState<number>(256);
@@ -365,12 +353,11 @@ export function TrainCard({ projectId }: { projectId: string }) {
   const [evalProject, setEvalProject] = useState<string>("");
   const [datasets, setDatasets] = useState<DatasetOption[]>([]);
   const [preflight, setPreflight] = useState<Preflight | null>(null);
-  // Bumped when a labelling job on this dataset finishes: the label
-  // counts the pre-flight reports have changed.
+  // Bumped when a labelling job finishes, to re-run the pre-flight.
   const [labelsVersion, setLabelsVersion] = useState(0);
-  const [training, setTraining] = useState(false); // an active train job for THIS dataset
-  const [queued, setQueued] = useState(false); // ...still waiting behind another job
-  const [labelling, setLabelling] = useState(false); // an active label_model job for THIS dataset
+  const [training, setTraining] = useState(false); // train job active for this dataset
+  const [queued, setQueued] = useState(false); // waiting behind another job
+  const [labelling, setLabelling] = useState(false); // label_model job active for this dataset
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [progressText, setProgressText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -381,14 +368,12 @@ export function TrainCard({ projectId }: { projectId: string }) {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const wasTraining = useRef(false);
   const wasLabelling = useRef(false);
-  // Job ids this card started, so a job that fails before it writes a
-  // run folder (no GPU, labels changed) still gets its error shown.
+  // Ids of jobs started here: one that fails before writing a run folder still shows its error.
   const trainJobId = useRef<string | null>(null);
   const labelJobId = useRef<string | null>(null);
   const openRef = useRef<string | null>(null);
   openRef.current = open;
-  // The card is re-rendered, not remounted, on a project switch: a late
-  // response for the previous project must not overwrite this one's list.
+  // Re-rendered, not remounted, on a project switch: stale responses are dropped.
   const fetchSeq = useRef(0);
   const preflightSeq = useRef(0);
 
@@ -401,7 +386,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
         if (seq === fetchSeq.current) setRuns(models);
       }
     } catch {
-      /* engine down; card just shows nothing new */
+      /* engine down */
     }
   }, [projectId]);
 
@@ -442,7 +427,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
     setQueued(false);
     setLabelling(false);
     void refresh();
-    // Other datasets in the workspace, for the held-out picker.
+    // Other datasets with images, for the held-out picker.
     const seq = fetchSeq.current;
     (async () => {
       try {
@@ -451,12 +436,12 @@ export function TrainCard({ projectId }: { projectId: string }) {
         const body = (await r.json()) as unknown;
         const items = (Array.isArray(body) ? body : ((body as { items?: unknown[] }).items ?? [])) as {
           id?: string;
-          project_id?: string;
           name?: string;
+          n_images?: number;
         }[];
         const opts = items
-          .map((it) => ({ id: String(it.id ?? it.project_id ?? ""), name: String(it.name ?? "") }))
-          .filter((it) => it.id && it.id !== projectId);
+          .filter((it) => it.id && it.id !== projectId && (it.n_images ?? 0) > 0)
+          .map((it) => ({ id: String(it.id), name: String(it.name ?? "") }));
         if (seq === fetchSeq.current) setDatasets(opts);
       } catch {
         /* optional */
@@ -464,10 +449,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
     })();
   }, [projectId, refresh]);
 
-  // Watch the global jobs poll for train / label_model jobs on this
-  // dataset so the buttons disable while one runs, the list refreshes
-  // when one ends (and every few seconds during training, for the live
-  // curves), and a job that failed says why.
+  // Polls the active jobs for this dataset's train and label_model jobs.
   useEffect(() => {
     let cancelled = false;
     let timer: number | null = null;
@@ -519,8 +501,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
       }
       if (cancelled) return;
       if (wasTraining.current && !active) {
-        // Just finished: the list, the open panel (live history became
-        // a report), and the job's own verdict.
+        // Finished: the open panel's live history is now a report.
         void refresh();
         const id = trainJobId.current;
         trainJobId.current = null;
@@ -553,9 +534,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
     };
   }, [projectId, refresh, loadDetail]);
 
-  // Pre-flight: what the run would use, debounced on option changes and
-  // re-run when a labelling job changed the counts. Not on every list
-  // refresh: the check reads every image header.
+  // Pre-flight, debounced. Not on every list refresh: it reads every image header.
   useEffect(() => {
     const seq = ++preflightSeq.current;
     const t = window.setTimeout(async () => {
@@ -584,7 +563,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
       }
     }, 350);
     return () => window.clearTimeout(t);
-  }, [projectId, imgsz, split, size, useAug, evalProject, labelsVersion]);
+  }, [projectId, imgsz, split, size, useAug, evalProject, labelsVersion, refreshSignal]);
 
   const postJob = async (kind: "train_yolox" | "label_model", params: Record<string, unknown>) => {
     const r = await apiFetch("/api/jobs", {
@@ -687,8 +666,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
     await loadDetail(run);
   };
 
-  // A run can start from a finished run of its own size only: the other
-  // size shares almost none of its weights.
+  // Same size only: the other size shares almost none of the weights.
   const doneRuns = (runs ?? []).filter((r) => r.status === "done" && r.size === size);
   const blockers = preflight?.blockers ?? [];
   const warnings = preflight?.warnings ?? [];
@@ -733,7 +711,7 @@ export function TrainCard({ projectId }: { projectId: string }) {
             ))}
           </select>
         </label>
-        <label className="flex items-center gap-1.5 text-[12px] text-foreground/60" title="Nano: 0.9 M parameters, under 1 MB of weights. Tiny: 5 M parameters, about 5 MB, more accurate, about six times the compute.">
+        <label className="flex items-center gap-1.5 text-[12px] text-foreground/60" title="Nano: 0.9 M parameters, under 1 MB of weights. Tiny: 5 M parameters, about 5 MB, more accurate, about five times the compute.">
           Model
           <select
             value={size}
@@ -769,12 +747,12 @@ export function TrainCard({ projectId }: { projectId: string }) {
           )}
         </label>
         {doneRuns.length > 0 && (
-          <label className="flex items-center gap-1.5 text-[12px] text-foreground/60" title="Continue from a previous run's weights instead of the COCO checkpoint.">
-            Start from
+          <label className="flex min-w-0 max-w-full items-center gap-1.5 text-[12px] text-foreground/60" title="Continue from a previous run's weights instead of the COCO checkpoint.">
+            <span className="shrink-0">Start from</span>
             <select
               value={initRun}
               onChange={(e) => setInitRun(e.target.value)}
-              className="rounded-md border border-[var(--line)] bg-[var(--surface)] px-2 py-1 text-[12px] outline-none focus:border-[var(--line-strong)]"
+              className="min-w-0 max-w-full rounded-md border border-[var(--line)] bg-[var(--surface)] px-2 py-1 text-[12px] outline-none focus:border-[var(--line-strong)]"
             >
               <option value="">COCO checkpoint</option>
               {doneRuns.map((r) => (

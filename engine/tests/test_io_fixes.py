@@ -1,7 +1,4 @@
-"""Imports and exports that say what they mean: 16-bit greyscale keeps its
-grey, a truncated JPEG is refused, VOC names are escaped, an edit is
-visible to the next read, a restore does not bring back deleted pictures,
-and the legacy import explains a bad path."""
+"""Import and export edge cases."""
 import io
 import json
 import zipfile
@@ -33,7 +30,7 @@ def test_16_bit_greyscale_keeps_its_grey(client):
     assert r.status_code == 200
     img = client.get(f"/api/v2/projects/{pid}/imports/{r.json()['filename']}")
     mean = np.asarray(Image.open(io.BytesIO(img.content)).convert("RGB")).mean()
-    assert 110 < mean < 145, mean  # mid-grey, not the white convert() clamped it to
+    assert 110 < mean < 145, mean  # mid-grey, not white
 
 
 def test_a_truncated_jpeg_is_refused(client):
@@ -82,3 +79,19 @@ def test_the_legacy_import_explains_a_bad_path(client, tmp_path):
     assert client.post("/api/import-legacy", json={"path": "   "}).status_code == 400
     r = client.post("/api/import-legacy", json={"path": str(tmp_path)})
     assert r.status_code == 400 and "no projects/" in r.json()["detail"]
+
+
+def test_a_legacy_import_of_one_project_folder_takes_that_folder_only(client, app_module, tmp_path):
+    import uuid
+    ids = {}
+    for name in ("Wanted", "Sibling"):
+        pid = uuid.uuid4().hex
+        ids[name] = pid
+        d = tmp_path / "projects" / pid
+        (d / "imports").mkdir(parents=True)
+        (d / "imports" / "a.jpg").write_bytes(_jpeg())
+        (d / "manifest.json").write_text(json.dumps({"id": pid, "name": name, "v2": True, "imports": []}))
+    r = client.post("/api/import-legacy", json={"path": str(tmp_path / "projects" / ids["Wanted"])})
+    assert r.status_code == 200, r.text
+    assert app_module.load_manifest(ids["Wanted"])["name"] == "Wanted"
+    assert app_module.load_manifest(ids["Sibling"]) == {}

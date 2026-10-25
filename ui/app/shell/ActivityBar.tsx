@@ -1,11 +1,6 @@
 "use client";
 
-// VS Code-style activity bar: a 48px vertical icon column on the left
-// edge. Explorer / Guide at the top, Settings gear pinned to the
-// bottom. The active item shows a 2px left accent and renders at
-// full opacity; inactive items sit at 55% and lift to 85% on hover.
-// (Models is invisible plumbing now - the engine downloads and loads
-// everything itself, so there is no Models activity.)
+// Activity bar: Explorer and Guide at the top, Settings at the bottom.
 
 import type { ReactNode } from "react";
 
@@ -20,7 +15,6 @@ const STROKE = {
 };
 
 function ExplorerIcon() {
-  // Two stacked file outlines (files/tree explorer).
   return (
     <svg viewBox="0 0 24 24" width={20} height={20} {...STROKE} aria-hidden>
       <path d="M15 3H8a1.5 1.5 0 0 0-1.5 1.5V17A1.5 1.5 0 0 0 8 18.5h9a1.5 1.5 0 0 0 1.5-1.5V6.5L15 3Z" />
@@ -31,7 +25,6 @@ function ExplorerIcon() {
 }
 
 function GuideIcon() {
-  // Open book.
   return (
     <svg viewBox="0 0 24 24" width={20} height={20} {...STROKE} aria-hidden>
       <path d="M12 6.5C10.5 5 8.5 4.5 5.5 4.5c-.6 0-1 .4-1 1v12c0 .6.4 1 1 1 3 0 5 .5 6.5 2 1.5-1.5 3.5-2 6.5-2 .6 0 1-.4 1-1v-12c0-.6-.4-1-1-1-3 0-5 .5-6.5 2Z" />
@@ -90,9 +83,7 @@ export function ActivityBar({
   settingsActive = false,
 }: {
   activity: ActivityKey;
-  /** Fired for the view icons. Explorer always navigates back to the
-   *  workspace (and re-expands a collapsed side bar - collapsing lives
-   *  on the Explorer pane header); Guide switches to the guide view. */
+  /** View icons. Explorer also returns to the workspace and re-expands the side bar. */
   onSelect: (key: ActivityKey) => void;
   onSettings: () => void;
   settingsActive?: boolean;

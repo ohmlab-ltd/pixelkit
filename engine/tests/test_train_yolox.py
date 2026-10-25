@@ -1,4 +1,4 @@
-"""YOLOX training: fast CPU units (no full training loop in CI)."""
+"""YOLOX training units, without a full training loop."""
 import io
 import json
 
@@ -9,7 +9,7 @@ from PIL import Image
 
 
 def test_model_forward_and_loss_are_finite():
-    from train_yolox import TrainConfig, _build_model, _make_batch, Sample
+    from train_yolox import _build_model, _make_batch, Sample
     import tempfile, pathlib
 
     model = _build_model(n_classes=2)
@@ -109,7 +109,7 @@ def test_contract_accepts_and_pins_a_conforming_input(tmp_path):
     from train_yolox import CONTRACT_SCALE, CONTRACT_ZP, _verify_input_contract
 
     p = tmp_path / "ok.onnx"
-    # Slightly off (as real MinMax calibration would be), but within tolerance.
+    # Slightly off, as MinMax calibration is, but within tolerance.
     _toy_qdq_onnx(p, CONTRACT_SCALE * 1.001, CONTRACT_ZP)
     info = _verify_input_contract(p)
     assert info["scale"] == pytest.approx(CONTRACT_SCALE)
@@ -118,8 +118,7 @@ def test_contract_accepts_and_pins_a_conforming_input(tmp_path):
 
 
 def test_contract_refuses_a_symmetric_input(tmp_path):
-    """The failure this whole design exists to prevent: a symmetric input
-    re-encodes to uint8 zp 128, so raw camera bytes read as noise."""
+    """A symmetric input is refused: it re-encodes to uint8 zp 128, so raw camera bytes read as noise."""
     from train_yolox import _verify_input_contract
 
     p = tmp_path / "sym.onnx"
@@ -129,7 +128,7 @@ def test_contract_refuses_a_symmetric_input(tmp_path):
 
 
 def test_contract_refuses_255_range_calibration(tmp_path):
-    """Preprocessing drifting back to [0,255] must fail the export."""
+    """An input calibrated to [0,255] fails the export."""
     from train_yolox import _verify_input_contract
 
     p = tmp_path / "wide.onnx"
@@ -155,7 +154,7 @@ def test_decode_raw_matches_hand_computation():
     assert d[0, 1023, 0] == pytest.approx(31 * 8)
 
 
-# ── QAT (vendor/yolox/qat.py + export fold) ──────────────────────────
+# QAT and the export fold
 
 def test_qat_switch_and_fixed_input_range():
     import torch
@@ -178,10 +177,7 @@ def test_qat_switch_and_fixed_input_range():
 
 
 def test_qat_forward_backward_and_export_fold(tmp_path):
-    """A QAT-instrumented model trains (STE), exports to a QDQ graph, and
-    the fold pass leaves int8 weights, int32 biases and no Constant
-    nodes - the shape the Neural-ART compiler maps fully to hardware."""
-    import numpy as np
+    """A QAT model trains, exports to QDQ, and folds to int8 weights, int32 biases and no Constant nodes."""
     import onnx
     import torch
     from train_yolox import (_build_model, _export_onnx, _fold_weight_quant,
@@ -218,7 +214,7 @@ def test_qat_forward_backward_and_export_fold(tmp_path):
             assert inits[b_dq.input[0]].data_type == onnx.TensorProto.INT32
     info = _verify_input_contract(p)
     assert info["calibrated"] == {"scale": pytest.approx(1 / 255), "zeroPoint": -128}
-    # Every Q/DQ parameter is an initializer (the compiler's requirement).
+    # Every Q/DQ parameter is an initializer, as the compiler requires.
     for n in g.node:
         if n.op_type in ("QuantizeLinear", "DequantizeLinear"):
             assert all(i in inits for i in n.input[1:]), n.name
@@ -248,8 +244,6 @@ def test_qat_export_maps_fully_to_the_npu(tmp_path):
     assert info["epochsHardware"] > 100
 
 
-# ── sweep regressions ────────────────────────────────────────────────
-
 def test_slug_is_a_valid_c_identifier():
     from train_yolox import _c_slug, _c_str
 
@@ -264,10 +258,7 @@ def test_slug_is_a_valid_c_identifier():
 
 
 def test_export_is_a_sketch_folder_that_runs_the_model(tmp_path):
-    """export.zip unzips to <slug>/ holding a complete sketch. The earlier
-    snippet bound no post-processor (Vision.run() then never infers),
-    declared no camera (the core then skips the camera) and left the NN
-    feed at its 256x256 default whatever the model's input size."""
+    """export.zip unzips to <slug>/ holding a complete sketch that runs the model."""
     import zipfile
 
     from train_yolox import TrainConfig, _write_bundle
@@ -280,14 +271,20 @@ def test_export_is_a_sketch_folder_that_runs_the_model(tmp_path):
                   TrainConfig(imgsz=320), report, onnx, 0.42)
 
     names = sorted(zipfile.ZipFile(tmp_path / "export.zip").namelist())
-    assert names == ["bolts/bolts.ino", "bolts/bolts_int8.onnx", "bolts/bolts_labels.h",
-                     "bolts/report.json"]
+    assert names == ["bolts/LICENSE.txt", "bolts/NOTICE.txt", "bolts/bolts.ino",
+                     "bolts/bolts_int8.onnx", "bolts/bolts_labels.h", "bolts/report.json"]
+    # A model trained from scratch is still a modified YOLOX network.
+    notice = (tmp_path / "NOTICE.txt").read_text("utf-8")
+    assert "modified version of YOLOX" in notice and "fine-tuned" not in notice
+    licence = (tmp_path / "LICENSE.txt").read_text("utf-8")
+    assert "Apache License" in licence and "Megvii Inc." in licence
     ino = (tmp_path / "bolts.ino").read_text("utf-8")
     assert '#pragma neuron6 model="bolts_int8.onnx" name=bolts' in ino
     assert '#include "bolts_labels.h"' in ino
     assert "OV5640 camera;" in ino
     assert "cfg.nn.width  = BOLTS_INPUT_W;" in ino and "cfg.nn.height = BOLTS_INPUT_H;" in ino
-    assert "cfg.nn.aspect = ASPECT_CROP_CENTER;" in ino
+    # The board letterboxes the frame with grey 114 bars, as letterbox() does in training.
+    assert "cfg.nn.aspect = ASPECT_LETTERBOX;" in ino and "ASPECT_CROP_CENTER" not in ino
     assert "PostProcess_PixelKitYOLOX(confidence, BOLTS_NMS_THRESHOLD," in ino
     # The threshold starts at the calibrated value and is a live slider.
     assert "static float confidence = BOLTS_CONF_THRESHOLD;" in ino
@@ -309,6 +306,15 @@ def test_export_is_a_sketch_folder_that_runs_the_model(tmp_path):
     assert "#elif !NEURON6_CORE_VERSION_AT_LEAST(0, 1, 3)" in ino
     assert ino.count('#error "This sketch needs the Neuro N6 core 0.1.3 or later"') == 2
     assert ino.index("NEURON6_CORE_VERSION_AT_LEAST") < ino.index("#include <PostProcess.h>")
+    # USB by default; STREAM_OVER_WIFI 1 adds the radio library, an access point and the WiFi transport.
+    assert "#define STREAM_OVER_WIFI 0" in ino
+    assert "#if STREAM_OVER_WIFI\n#include <MayaW476.h>\n#endif" in ino
+    assert ino.index("#define STREAM_OVER_WIFI") < ino.index("#if STREAM_OVER_WIFI")
+    assert "MayaW476.beginAP(MayaW476.getHostname(), MayaW476.devicePassword());" in ino
+    assert "cfg.transport = TRANSPORT_WIFI_SOFTAP;\n#else" in ino
+    assert "cfg.transport = TRANSPORT_USB;\n#endif" in ino
+    assert "Serial.println(MayaW476.devicePassword());" in ino
+    assert ino.count("#if STREAM_OVER_WIFI") == 3 and ino.count("#endif") == 4
     # LF on every OS: the core checks the files it takes in.
     for f in ("bolts.ino", "bolts_labels.h", "report.json"):
         assert b"\r" not in (tmp_path / f).read_bytes(), f
@@ -320,6 +326,7 @@ def test_export_is_a_sketch_folder_that_runs_the_model(tmp_path):
     assert "bolts/NOTICE.txt" in zf.namelist()
     notice = zf.read("bolts/NOTICE.txt").decode("utf-8")
     assert "bolts_int8.onnx" in notice and "Megvii" in notice and "Apache License" in notice
+    assert "fine-tuned from Megvii's COCO-pretrained YOLOX-Nano checkpoint" in notice
 
 
 def test_ap50_per_class_is_positional_when_a_class_has_no_val_gt():
@@ -357,3 +364,285 @@ def test_int32_bias_fold_saturates_instead_of_wrapping(tmp_path):
     inits = {i.name: nh.to_array(i) for i in g2.initializer}
     bq = next(v for k, v in inits.items() if k.endswith("B_q"))
     assert bq.dtype == np.int32 and bq[0] == 2**31 - 1  # saturated high, not INT_MIN
+
+
+def test_board_view_crops_the_centre_square_and_drops_cut_boxes():
+    """_center_square moves boxes into the centre square and drops one mostly cut off."""
+    import random
+
+    import numpy as np
+    from train_yolox import _augment, _center_square
+
+    img = np.zeros((480, 640, 3), np.uint8)
+    boxes = np.array([[300, 200, 340, 240],    # in the square
+                      [10, 10, 60, 60],        # left of it
+                      [40, 300, 100, 360],     # a third in
+                      [60, 300, 120, 360]],    # two thirds in
+                     np.float32)
+    crop, kept, cls = _center_square(img, boxes, np.array([0, 1, 1, 0]))
+    assert crop.shape == (480, 480, 3)
+    assert kept.tolist() == [[220, 200, 260, 240], [0, 300, 40, 360]] and cls.tolist() == [0, 0]
+
+    # Background images, without boxes, go through every augmentation too.
+    for seed in range(50):
+        random.seed(seed)
+        out, b, c = _augment(img, np.zeros((0, 4), np.float32), np.zeros((0,), np.int64))
+        assert b.shape == (0, 4) and len(c) == 0 and out.ndim == 3
+
+
+def test_class_names_with_control_characters_stay_inside_their_c_strings(tmp_path):
+    """A label with a CR or another control character still gives a labels header that compiles."""
+    import codecs
+
+    from train_yolox import TrainConfig, _c_str, _write_bundle
+
+    names = ["hex\rnut", "line\nbreak", "tab\tbed", "bell\x07", "a\x017", "del\x7f", "nel\x85",
+             "caf" + chr(0xE9), 'say "hi"' + chr(92)]
+    for n in names:
+        lit = _c_str(n)
+        assert lit.isprintable(), lit
+        # C reads \ooo, \" and \\ as Python's escape decoder does.
+        assert codecs.escape_decode(lit.encode("utf-8"))[0] == n.encode("utf-8"), lit
+    # An octal escape takes at most three digits, so the 7 after it stays a 7.
+    assert _c_str("a\x017") == "a" + chr(92) + "0017"
+
+    onnx = tmp_path / "pk_int8.onnx"
+    onnx.write_bytes(b"onnx")
+    _write_bundle(tmp_path, "pk", "Labels", names, TrainConfig(), {"run": "20260101T000000Z"}, onnx, 0.5)
+    lines = (tmp_path / "pk_labels.h").read_text("utf-8").split("\n")
+    first = lines.index(f"static const char* const PK_CLASSES[{len(names)}] = {{") + 1
+    assert lines[first:first + len(names) + 1] == [f'  "{_c_str(n)}",' for n in names] + ["};"]
+
+
+def test_a_failure_while_zipping_leaves_no_report_and_no_export(tmp_path, monkeypatch):
+    """report.json, which lists a run as done, is written once export.zip is complete."""
+    import zipfile
+
+    from train_yolox import TrainConfig, _write_bundle
+
+    onnx = tmp_path / "pk_int8.onnx"
+    onnx.write_bytes(b"model bytes")
+    report = {"run": "20260101T000000Z", "threshold": {"calibrated": False}}
+    real_write = zipfile.ZipFile.write
+
+    def locked(self, filename, *a, **k):
+        if str(filename).endswith(".onnx"):
+            raise PermissionError(13, "The process cannot access the file")
+        return real_write(self, filename, *a, **k)
+
+    monkeypatch.setattr(zipfile.ZipFile, "write", locked)
+    with pytest.raises(PermissionError):
+        _write_bundle(tmp_path, "pk", "Bundle", ["bolt"], TrainConfig(), report, onnx, 0.5)
+    assert not (tmp_path / "report.json").exists()
+    assert not (tmp_path / "export.zip").exists() and not list(tmp_path.glob("*.tmp"))
+
+    monkeypatch.setattr(zipfile.ZipFile, "write", real_write)
+    _write_bundle(tmp_path, "pk", "Bundle", ["bolt"], TrainConfig(), report, onnx, 0.5)
+    zf = zipfile.ZipFile(tmp_path / "export.zip")
+    assert zf.read("pk/report.json") == (tmp_path / "report.json").read_bytes()
+    assert json.loads((tmp_path / "report.json").read_text("utf-8")) == report
+
+
+# Warm starts: Megvii's COCO checkpoint and earlier runs
+
+class _Response(io.BytesIO):
+    """An HTTP response for urlopen: a body and its Content-Length."""
+
+    def __init__(self, body: bytes, length: int | None = None):
+        super().__init__(body)
+        self.headers = {"Content-Length": str(len(body) if length is None else length)}
+
+
+class _NotWeights:
+    """Pickled into a checkpoint, it needs code to load."""
+
+
+def _focus_checkpoint(path):
+    """A stand-in for yolox_nano.pth: a Focus stem with random weights and BN
+    statistics under Megvii's key names. Returns the Focus stem."""
+    from vendor.yolox.network_blocks import Focus
+
+    g = torch.Generator().manual_seed(0)
+    focus = Focus(3, 16, ksize=3)
+    bn = focus.conv.bn
+    with torch.no_grad():
+        focus.conv.conv.weight.copy_(torch.randn(focus.conv.conv.weight.shape, generator=g) * 0.05)
+        bn.weight.uniform_(0.5, 1.5, generator=g)
+        bn.bias.normal_(0.0, 0.1, generator=g)
+        bn.running_mean.normal_(0.0, 1.0, generator=g)
+        bn.running_var.uniform_(0.5, 2.0, generator=g)
+    bn.eps = 1e-3  # as _build_model sets it
+    state = {f"backbone.backbone.stem.{k}": v for k, v in focus.state_dict().items() if ".fq" not in k}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"model": state, "start_epoch": 300}, path)
+    return focus.eval()
+
+
+@pytest.fixture
+def coco_cache(tmp_path, monkeypatch):
+    """The COCO checkpoint cache in tmp_path. urlopen returns
+    served["response"]() and counts its calls."""
+    import urllib.request
+
+    import workspace
+
+    monkeypatch.setattr(workspace, "weights_dir", lambda: tmp_path)
+    served = {"calls": 0, "response": None}
+
+    def urlopen(url, timeout=None):
+        served["calls"] += 1
+        return served["response"]()
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    return tmp_path / "yolox", served
+
+
+def test_the_coco_stem_sees_the_channel_order_it_was_trained_on(coco_cache, monkeypatch):
+    """The remapped 6x6 stem responds to an RGB [0,1] picture as Megvii's Focus stem does to the BGR [0,255] one."""
+    import hashlib
+
+    import train_yolox as ty
+
+    cache, _served = coco_cache
+    ckpt = cache / "yolox_nano.pth"
+    focus = _focus_checkpoint(ckpt)
+    monkeypatch.setitem(ty.MODEL_SPECS["nano"], "sha256", hashlib.sha256(ckpt.read_bytes()).hexdigest())
+    model = ty._build_model(2)
+    notes = []
+    assert ty._load_pretrained(model, notes=notes) is True and notes == []
+    stem = model.eval().backbone.backbone.stem
+    rgb = torch.randint(0, 256, (1, 3, 64, 64), generator=torch.Generator().manual_seed(1)).float()
+    with torch.no_grad():
+        got = stem(rgb / 255.0)
+        assert torch.allclose(got, focus(rgb.flip(1)), rtol=1e-4, atol=1e-4)
+        # Fed RGB, the Focus stem answers differently: the channel order matters.
+        assert not torch.allclose(got, focus(rgb), rtol=1e-2, atol=1e-2)
+
+
+def test_a_download_cut_short_is_not_cached_and_the_next_run_fetches_again(coco_cache):
+    import train_yolox as ty
+
+    cache, served = coco_cache
+    # Content-Length says 7 MB; the server closes after 1 MB, and read() returns b"".
+    served["response"] = lambda: _Response(b"\x80\x02" + b"x" * (1 << 20), length=7 << 20)
+    notes = []
+    assert ty._load_pretrained(ty._build_model(2), notes=notes) is False
+    assert notes == [f"the COCO checkpoint download stopped at {(1 << 20) + 2} of {7 << 20} bytes: "
+                     "trained from scratch"]
+    assert list(cache.iterdir()) == []  # nothing cached and no temp file left
+    assert ty._load_pretrained(ty._build_model(2)) is False and served["calls"] == 2
+
+    # A complete body that is not the release file is not kept either.
+    served["response"] = lambda: _Response(b"\x80\x02" + b"x" * 1000)
+    notes = []
+    assert ty._load_pretrained(ty._build_model(2), notes=notes) is False
+    assert "failed its checksum" in notes[0] and list(cache.iterdir()) == []
+
+
+def test_a_complete_download_is_checked_cached_and_loaded(coco_cache, monkeypatch, tmp_path_factory):
+    """Two runs downloading at once each use their own temp file; the cached file is the release's."""
+    import hashlib
+    import threading
+
+    import train_yolox as ty
+
+    cache, served = coco_cache
+    src = tmp_path_factory.mktemp("release") / "yolox_nano.pth"
+    _focus_checkpoint(src)
+    body = src.read_bytes()
+    monkeypatch.setitem(ty.MODEL_SPECS["nano"], "sha256", hashlib.sha256(body).hexdigest())
+    both_open = threading.Barrier(2)
+
+    class Slow(_Response):
+        def read(self, n=-1):
+            chunk = super().read(n)
+            if chunk:
+                both_open.wait(timeout=30)  # each run holds its temp file open here
+            return chunk
+
+    served["response"] = lambda: Slow(body)
+    results = []
+    runs = [threading.Thread(target=lambda: results.append(ty._load_pretrained(ty._build_model(2))))
+            for _ in range(2)]
+    for t in runs:
+        t.start()
+    for t in runs:
+        t.join(timeout=60)
+    assert results == [True, True] and served["calls"] == 2
+    assert [p.name for p in cache.iterdir()] == ["yolox_nano.pth"]
+    assert (cache / "yolox_nano.pth").read_bytes() == body
+    # The cached file is used from then on.
+    assert ty._load_pretrained(ty._build_model(2)) is True and served["calls"] == 2
+
+
+def test_a_cached_checkpoint_that_fails_its_checksum_or_its_load_is_deleted(coco_cache, monkeypatch):
+    import train_yolox as ty
+
+    cache, served = coco_cache
+
+    def offline():
+        raise OSError("offline")
+
+    served["response"] = offline
+    cached = cache / "yolox_nano.pth"
+    cache.mkdir()
+    cached.write_bytes(b"not a checkpoint")
+    notes = []
+    assert ty._load_pretrained(ty._build_model(2), notes=notes) is False
+    assert notes == ["the cached COCO checkpoint failed its checksum and was deleted: trained from scratch"]
+    assert not cached.exists()
+    # The next run tries to download it again.
+    notes = []
+    assert ty._load_pretrained(ty._build_model(2), notes=notes) is False and served["calls"] == 1
+    assert notes == ["COCO checkpoint unavailable (offline?): trained from scratch"]
+
+    # With no hash to check, a file torch cannot load as plain weights is deleted.
+    monkeypatch.setitem(ty.MODEL_SPECS["nano"], "sha256", None)
+    for content in (b"not a checkpoint", None):
+        if content is None:
+            torch.save({"model": {}, "extra": _NotWeights()}, cached)
+        else:
+            cached.write_bytes(content)
+        notes = []
+        assert ty._load_pretrained(ty._build_model(2), notes=notes) is False
+        assert "could not be read and was deleted" in notes[0] and not cached.exists()
+
+
+def test_a_warm_start_from_a_run_with_other_labels_matches_class_layers_by_name(tmp_path):
+    from train_yolox import _build_model, _load_run_weights
+
+    def run_with(classes):
+        m = _build_model(len(classes))
+        with torch.no_grad():
+            for conv in m.head.cls_preds:
+                for i in range(len(classes)):
+                    conv.weight[i].fill_(float(i + 1))
+                    conv.bias[i] = 10.0 * (i + 1)
+        d = tmp_path / "yolox_nano" / "-".join(classes)
+        d.mkdir(parents=True)
+        torch.save({"model": m.state_dict(), "classes": classes}, d / "best.pt")
+        return m, d
+
+    old, d = run_with(["cat", "dog", "bird"])
+    new = _build_model(2)
+    fresh = [conv.bias.detach().clone() for conv in new.head.cls_preds]
+    info = _load_run_weights(new, d, ["dog", "fox"])
+    assert info["classes"] == ["cat", "dog", "bird"] and info["reusedClasses"] == ["dog"]
+    for a, b, f in zip(old.head.cls_preds, new.head.cls_preds, fresh):
+        assert torch.equal(b.weight[0], a.weight[1]) and b.bias[0] == a.bias[1]  # dog moved over
+        assert b.bias[1] == f[1]                                                 # fox starts fresh
+    # Layers that do not depend on the labels come over as before.
+    assert torch.equal(new.head.reg_preds[0].weight, old.head.reg_preds[0].weight)
+
+    # The same labels in another order: each channel follows its label.
+    old2, d2 = run_with(["cat", "dog"])
+    new2 = _build_model(2)
+    assert _load_run_weights(new2, d2, ["dog", "cat"])["reusedClasses"] == ["dog", "cat"]
+    for a, b in zip(old2.head.cls_preds, new2.head.cls_preds):
+        assert torch.equal(b.weight[0], a.weight[1]) and torch.equal(b.weight[1], a.weight[0])
+        assert b.bias.tolist() == [20.0, 10.0]
+    # The same labels in the same order load unchanged.
+    new3 = _build_model(2)
+    _load_run_weights(new3, d2, ["cat", "dog"])
+    assert all(torch.equal(a.weight, b.weight) and torch.equal(a.bias, b.bias)
+               for a, b in zip(old2.head.cls_preds, new3.head.cls_preds))

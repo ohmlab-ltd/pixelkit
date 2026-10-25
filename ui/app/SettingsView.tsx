@@ -1,7 +1,6 @@
 "use client";
 
-// Settings - replaces the SaaS ProfileView. Full-screen overlay in the
-// profile slot: workspace, compute device, Hugging Face access, models.
+// Settings overlay: workspace, compute device, Hugging Face access, models.
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
@@ -19,10 +18,7 @@ import {
   setWorkspacePath,
 } from "@/lib/models";
 
-// Passive one-line model status: name + state (ready / downloading
-// NN% with a thin progress bar / waiting for token). No buttons - the
-// engine auto-downloads and auto-loads everything once the HF token
-// exists. Shared with the first-run SetupWizard.
+// One model's download state. Also used by SetupWizard.
 export function ModelStatusRow({
   m,
   tokenConfigured,
@@ -115,16 +111,13 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
       ? settings.gpus[Number(settings.device.split(":")[1] ?? 0)] ?? settings.gpus[0]
       : null;
   const deviceLabel = settings?.device.startsWith("cuda")
-    ? `NVIDIA GPU (CUDA${activeGpu ? ` - ${activeGpu.name}` : ""})`
+    ? `NVIDIA GPU (CUDA${activeGpu ? `, ${activeGpu.name}` : ""})`
     : settings?.device === "mps"
     ? "Apple GPU (Metal)"
     : cpuForced
-    ? "CPU (labelling runs on the CPU - very slow)"
-    : "CPU (no GPU detected - labelling unavailable)";
-  // A bare cuda/mps preference means "use the GPU" and collapses onto
-  // Automatic; cuda:<n> keeps its own row only while several GPUs exist
-  // (with one/none, the row isn't rendered - fall back to highlighting
-  // Automatic rather than leaving nothing selected).
+    ? "CPU (labelling is very slow)"
+    : "CPU (no GPU detected, so labelling is off)";
+  // cuda and mps select Automatic; cuda:<n> has its own row only with several GPUs.
   const pickedDevice: string =
     settings?.devicePreference === "cpu"
       ? "cpu"
@@ -151,11 +144,10 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
           </p>
         )}
 
-        {/* Workspace */}
         <section className="mt-8 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-5">
           <h2 className="pk-micro">Workspace</h2>
           <p className="mt-1 text-[13px] text-foreground/55">
-            Every project, image, annotation and model weight lives in this folder.
+            Every dataset, image, annotation and model weight lives in this folder.
           </p>
           <div className="mt-3 flex gap-2">
             <input
@@ -169,7 +161,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
                   const r = await setWorkspacePath(wsPath.trim());
                   setWsNote(
                     r.restartRequired
-                      ? "Saved - restart PixelKit to switch to the new workspace."
+                      ? "Saved. Restart PixelKit to switch to the new workspace."
                       : "Saved.",
                   );
                 })
@@ -183,7 +175,6 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
           {wsNote && <p className="mt-2 text-[12px] text-foreground/55">{wsNote}</p>}
         </section>
 
-        {/* Compute */}
         <section className="mt-4 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-5">
           <h2 className="pk-micro">Compute</h2>
           <p className="mt-1 text-[13px] text-foreground/55">{deviceLabel}</p>
@@ -209,18 +200,17 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
                         ? "Use the GPU when one is available."
                         : "Use the GPU when one is available. No GPU was detected on this machine, so labelling stays off.",
                     },
-                    // Explicit per-GPU rows only when there's a real choice.
                     ...(settings.gpus.length > 1
                       ? settings.gpus.map((g) => ({
                           value: `cuda:${g.index}`,
-                          title: `GPU ${g.index} - ${g.name}`,
+                          title: `GPU ${g.index}: ${g.name}`,
                           desc: `${g.vramGb} GB VRAM. Pin all labelling to this card.`,
                         }))
                       : []),
                     {
                       value: "cpu",
                       title: "CPU",
-                      desc: "Run labelling on the CPU. Works on any machine, but is very slow - expect minutes per image.",
+                      desc: "Run labelling on the CPU. Works on any machine, but is very slow: expect minutes per image.",
                     },
                   ].map((opt) => {
                     const selected = pickedDevice === opt.value;
@@ -232,7 +222,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
                           act(async () => {
                             await setDevicePreference(opt.value as DevicePreference);
                             setDevNote(
-                              "Saved - restart PixelKit to switch compute device.",
+                              "Saved. Restart PixelKit to switch the compute device.",
                             );
                           });
                         }}
@@ -266,7 +256,6 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
             ))}
         </section>
 
-        {/* Hugging Face */}
         <section className="mt-4 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-5">
           <h2 className="pk-micro">Hugging Face access</h2>
           <p className="mt-1 text-[13px] text-foreground/55">
@@ -289,7 +278,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
                   setToken("");
                   if (r.sam3Access === false)
                     throw new Error(
-                      "Token valid, but SAM 3 access is missing - accept the license at huggingface.co/facebook/sam3.",
+                      "Token valid, but SAM 3 access is missing. Accept the license at huggingface.co/facebook/sam3.",
                     );
                 }, "Token validated and saved.")
               }
@@ -309,9 +298,6 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
           </div>
         </section>
 
-        {/* Models - passive status only. The engine downloads and
-            loads everything itself once the HF token exists; there is
-            nothing for the user to click here. */}
         <section className="mt-4 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-5">
           <h2 className="pk-micro">Models</h2>
           <p className="mt-1 text-[13px] text-foreground/55">

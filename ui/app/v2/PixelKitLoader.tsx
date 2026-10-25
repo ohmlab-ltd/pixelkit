@@ -1,30 +1,21 @@
 "use client";
 
-// Pixelkit loading indicator. The "P" body is static; the 10 small
-// particle squares scattered around it pulse + drift outward and back
-// like dust disintegrating off the letterform. Used wherever the app
-// is waiting on the engine (dataset creation, project load, etc).
-//
-// All animation is pure CSS, no JS animation loop, no requestAnimationFrame
-//, so the loader is cheap to mount/unmount.
+// Loading indicator: the favicon "P" with ten particles pulsing outward.
 
 type ParticleRect = {
   x: number;
   y: number;
   w: number;
   h: number;
-  delay: number;   // stagger so particles don't pulse in unison
-  vx: number;      // outward drift unit-vector x (away from P centre)
-  vy: number;      // outward drift unit-vector y
+  delay: number;   // s
+  vx: number;      // unit drift vector, away from the P centre
+  vy: number;
 };
 
-// Centre of the P (rough centroid of the static "P" rectangles).
+// Approximate centre of the P, in viewBox units.
 const CX = 170;
 const CY = 245;
 
-// Helper, given a rectangle's (x, y, w, h) compute the unit drift
-// vector pointing from the P's centre to the rectangle's centre, so
-// the particle moves AWAY from the P during its pulse.
 function buildParticle(x: number, y: number, w: number, h: number, delay: number): ParticleRect {
   const px = x + w / 2;
   const py = y + h / 2;
@@ -34,8 +25,7 @@ function buildParticle(x: number, y: number, w: number, h: number, delay: number
   return { x, y, w, h, delay, vx: dx / len, vy: dy / len };
 }
 
-// Particles taken from pixelkit-favicon.svg (the 10 small floating
-// squares, NOT the 6 rectangles that make up the P body itself).
+// The ten particle squares of pixelkit-favicon.svg.
 const PARTICLES: ParticleRect[] = [
   buildParticle(283.03, 157.35, 40.54, 40.54, 0.0),
   buildParticle(323.57, 197.89, 37.84, 37.84, 0.15),
@@ -66,7 +56,7 @@ export function PixelKitLoader({
         role="img"
         style={{ overflow: "visible" }}
       >
-        {/* Static P, exactly the same six rectangles as the favicon. */}
+        {/* The favicon's six P rectangles. */}
         <g fill="#ff7900">
           <rect x={56} y={119.51} width={75.68} height={335.14} />
           <rect x={56} y={119.51} width={227.03} height={75.68} />
@@ -76,9 +66,6 @@ export function PixelKitLoader({
           <rect x={56} y={270.86} width={151.35} height={75.68} />
         </g>
 
-        {/* Animated particle squares, each one drifts outward + fades
-            on a 1.8 s cycle, staggered by `delay` so the cloud reads
-            as a continuous shimmer rather than a single pulse. */}
         <g fill="#ff7900">
           {PARTICLES.map((p, i) => (
             <rect
@@ -95,10 +82,6 @@ export function PixelKitLoader({
           ))}
         </g>
 
-        {/* Per-particle keyframes embedded in <style> so the unique
-            translate vector lands inside the SVG without polluting
-            the global CSS. Each keyframe pulses the particle outward
-            along its drift unit-vector by ~32 px and fades it. */}
         <style>{PARTICLES.map((p, i) => keyframesFor(i, p)).join("\n")}</style>
       </svg>
       {message ? (

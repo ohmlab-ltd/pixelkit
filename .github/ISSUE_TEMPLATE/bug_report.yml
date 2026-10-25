@@ -1,18 +1,13 @@
 name: Bug report
-description: Something in PixelKit doesn't work as documented
+description: Something in PixelKit does not work as documented
 labels: [bug]
 body:
-  - type: markdown
-    attributes:
-      value: |
-        Thanks for the report. The engine log usually tells the whole story —
-        grabbing it first makes most bugs one-round-trip fixes.
   - type: input
     id: version
     attributes:
       label: PixelKit version
-      description: Bottom-right of the status bar (e.g. v0.2.1).
-      placeholder: v0.2.1
+      description: Shown at the right of the status bar.
+      placeholder: v0.4.0
     validations:
       required: true
   - type: dropdown
@@ -29,8 +24,8 @@ body:
   - type: textarea
     id: what
     attributes:
-      label: What happened, and what did you expect?
-      description: Steps to reproduce if you have them.
+      label: What happened, and what was expected?
+      description: Steps to reproduce, if known.
     validations:
       required: true
   - type: textarea
@@ -38,9 +33,8 @@ body:
     attributes:
       label: Engine log
       description: |
-        Help → Open Engine Log Folder, or find it at
-        `%APPDATA%\PixelKit\logs\engine.log` (Windows) /
-        `~/Library/Logs/PixelKit/engine.log` (macOS).
-        Paste the last ~50 lines (it's local-only — but skim for
-        file paths you'd rather not share).
+        The last 50 lines of the engine log: Help > Open Engine Log Folder, or
+        `%APPDATA%\PixelKit\logs\engine.log` on Windows and
+        `~/Library/Logs/PixelKit/engine.log` on macOS. When the engine runs
+        from a terminal, its output. The log can contain file paths.
       render: text

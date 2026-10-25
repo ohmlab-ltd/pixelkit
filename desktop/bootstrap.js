@@ -1,17 +1,4 @@
-// First-run runtime bootstrap for the slim Windows installer.
-//
-// The NSIS installer ships only the Electron shell, the engine sources and
-// the UI build (~a couple hundred MB). On first launch this module sets up
-// the Python runtime the engine needs, into a per-user directory:
-//
-//   %LOCALAPPDATA%\PixelKit\runtime\py        relocatable CPython
-//   %LOCALAPPDATA%\PixelKit\runtime\runtime.json   "install completed" marker
-//
-// Steps: download python-build-standalone CPython -> extract with the
-// system tar.exe (present on Windows 10 1803+) -> pip install torch
-// (CUDA build when nvidia-smi is present, CPU build otherwise) -> pip
-// install the engine requirements -> import sanity check -> marker.
-// pip's wheel cache makes retries and reinstalls cheap.
+// First-run setup of the Windows Python runtime in %LOCALAPPDATA%\PixelKit\runtime.
 
 'use strict';
 
@@ -21,10 +8,10 @@ const fs = require('fs');
 const https = require('https');
 const path = require('path');
 
-// Pinned interpreter (updated deliberately; the fallback query keeps a
-// deleted release from bricking first runs).
 const PBS_PINNED_URL =
   'https://github.com/astral-sh/python-build-standalone/releases/download/20260807/cpython-3.12.13%2B20260807-x86_64-pc-windows-msvc-install_only.tar.gz';
+// As in the release's SHA256SUMS.
+const PBS_PINNED_SHA256 = '6cf2be701aa7e9470454c9c86285c1bcc1832518d63e39c3e34e9d8ea1cbb99f';
 const PBS_LATEST_API =
   'https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest';
 const PBS_ASSET_MATCH = ['cpython-3.12', 'x86_64-pc-windows-msvc-install_only.tar.gz'];
@@ -45,8 +32,14 @@ function runtimePython() {
   return path.join(runtimeRoot(), 'py', 'python.exe');
 }
 
+// Comments and blank lines are left out, so editing them triggers no reinstall.
 function requirementsHash(requirementsPath) {
-  return crypto.createHash('sha256').update(fs.readFileSync(requirementsPath)).digest('hex');
+  const lines = fs
+    .readFileSync(requirementsPath, 'utf8')
+    .split(/\r?\n/)
+    .map((line) => line.replace(/(^|\s)#.*$/, '').trim())
+    .filter(Boolean);
+  return crypto.createHash('sha256').update(lines.join('\n')).digest('hex');
 }
 
 function readMarker() {
@@ -57,19 +50,13 @@ function readMarker() {
   }
 }
 
-// Ready when the runtime was installed for THESE requirements: the
-// marker alone let an upgrade start on the old packages (runtimes made
-// by v0.2.1 have no onnx/onnxruntime, so training failed at export).
+// True when the runtime was installed for these requirements.
 function runtimeReady(requirementsPath) {
   const marker = readMarker();
   if (!marker || !fs.existsSync(runtimePython())) return false;
   if (!requirementsPath || !fs.existsSync(requirementsPath)) return true;
   return marker.requirements === requirementsHash(requirementsPath);
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 function httpGet(url, { json = false, hops = 0 } = {}) {
   return new Promise((resolve, reject) => {
@@ -102,6 +89,16 @@ function httpGet(url, { json = false, hops = 0 } = {}) {
   });
 }
 
+function fileSha256(file) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    fs.createReadStream(file)
+      .on('data', (chunk) => hash.update(chunk))
+      .on('end', () => resolve(hash.digest('hex')))
+      .on('error', reject);
+  });
+}
+
 function download(url, dest, onProgress, hops = 0) {
   return new Promise((resolve, reject) => {
     if (hops > 10) return reject(new Error(`too many redirects for ${url}`));
@@ -130,16 +127,12 @@ function download(url, dest, onProgress, hops = 0) {
         res.on('error', reject);
       }
     );
-    // A stalled connection (no bytes for STALL_MS) fails the download so
-    // the splash offers Retry instead of waiting forever.
     req.setTimeout(STALL_MS, () => req.destroy(new Error('download stalled')));
     req.on('error', reject);
   });
 }
 
-// The currently-running bootstrap child (tar/pip), so a quit mid-install
-// can kill it instead of orphaning a multi-GB pip run that later races a
-// relaunch over the same runtime dir.
+// The running tar or pip child, killed by abort() when the app quits.
 let _activeChild = null;
 
 function abort() {
@@ -178,9 +171,7 @@ function run(cmd, args, { onLine, log, cwd } = {}) {
       if (_activeChild === proc) _activeChild = null;
       reject(e);
     });
-    // 'close', not 'exit': close fires after stdio has drained, so no
-    // buffered pip output can land on the log stream after the caller
-    // has already end()ed it.
+    // 'close', not 'exit': close fires after stdio has drained into the log.
     proc.on('close', (code) => {
       if (_activeChild === proc) _activeChild = null;
       if (code === 0) return resolve();
@@ -197,8 +188,23 @@ function hasNvidiaGpu() {
   }
 }
 
-async function resolveInterpreterUrl() {
-  // Prefer the pin; fall back to the latest release if the pin is gone.
+// The version a requirements file pins for `name`.
+function pinnedVersion(file, name) {
+  const m = fs.readFileSync(file, 'utf8').match(new RegExp(`^${name}==(\\S+)`, 'm'));
+  return m ? m[1] : null;
+}
+
+function installedTorch(py) {
+  const r = spawnSync(py, ['-c', 'import torch; print(torch.__version__)'], {
+    windowsHide: true,
+    timeout: 120000,
+  });
+  return r.status === 0 ? String(r.stdout).trim() : null;
+}
+
+// The pinned interpreter, or the newest release's when the pinned file is
+// gone; either way with the SHA-256 the download must match.
+async function resolveInterpreter() {
   try {
     await new Promise((resolve, reject) => {
       const req = https.request(
@@ -209,10 +215,11 @@ async function resolveInterpreterUrl() {
           res.statusCode < 400 ? resolve() : reject(new Error(`HTTP ${res.statusCode}`));
         }
       );
+      req.setTimeout(STALL_MS, () => req.destroy(new Error(`no response from ${PBS_PINNED_URL}`)));
       req.on('error', reject);
       req.end();
     });
-    return PBS_PINNED_URL;
+    return { url: PBS_PINNED_URL, sha256: PBS_PINNED_SHA256 };
   } catch {
     const rel = await httpGet(PBS_LATEST_API, { json: true });
     const asset = (rel.assets || []).find(
@@ -221,17 +228,15 @@ async function resolveInterpreterUrl() {
         !a.browser_download_url.endsWith('.sha256')
     );
     if (!asset) throw new Error('no matching python-build-standalone asset found');
-    return asset.browser_download_url;
+    const digest = /^sha256:([0-9a-f]{64})$/.exec(asset.digest || '');
+    if (!digest) throw new Error(`no published checksum for ${asset.name}`);
+    return { url: asset.browser_download_url, sha256: digest[1] };
   }
 }
 
 const mb = (n) => Math.round(n / (1024 * 1024));
 
-// ---------------------------------------------------------------------------
-// The bootstrap
-// ---------------------------------------------------------------------------
-
-// Returns the runtime python path; throws with a readable message on failure.
+// Returns the runtime python path; throws a readable message on failure.
 // onStatus(text) drives the splash screen; log is an open WriteStream.
 async function ensureWindowsRuntime({ requirementsPath, onStatus, log }) {
   const status = (t) => onStatus && onStatus(t);
@@ -239,19 +244,14 @@ async function ensureWindowsRuntime({ requirementsPath, onStatus, log }) {
   const py = runtimePython();
 
   if (runtimeReady(requirementsPath)) return py;
-  // An earlier runtime with torch in place only needs the requirements
-  // that changed; the multi-GB torch install is skipped.
-  const upgrading = !!readMarker() && fs.existsSync(py) &&
-    spawnSync(py, ['-c', 'import torch'], { windowsHide: true, timeout: 120000 }).status === 0;
+  const updating = !!readMarker() && fs.existsSync(py);
   if (!fs.existsSync(requirementsPath)) {
     throw new Error(`engine requirements not found at ${requirementsPath}`);
   }
 
   fs.mkdirSync(root, { recursive: true });
 
-  // Disk preflight: CUDA torch unpacks to ~7 GB, CPU ~1.5 GB; demand
-  // headroom up front so the failure is one readable sentence instead
-  // of a pip ENOSPC stack halfway through.
+  // Disk preflight: CUDA torch unpacks to ~7 GB, CPU torch to ~1.5 GB.
   const needGb = hasNvidiaGpu() ? 9 : 3;
   try {
     const { bavail, bsize } = fs.statfsSync(root);
@@ -264,35 +264,31 @@ async function ensureWindowsRuntime({ requirementsPath, onStatus, log }) {
     }
   } catch (e) {
     if (e && /not enough disk space/.test(String(e.message))) throw e;
-    // statfs unsupported -> skip the preflight rather than block install.
+    // statfs unsupported: no preflight.
   }
 
-  // 1. Interpreter ----------------------------------------------------------
   if (!fs.existsSync(py)) {
     status('Locating Python runtime…');
-    const url = await resolveInterpreterUrl();
+    const { url, sha256 } = await resolveInterpreter();
     const tarPath = path.join(root, 'python.tar.gz');
     status('Downloading Python…');
     await download(url, tarPath, (got, total) =>
       status(`Downloading Python… ${mb(got)}${total ? ` / ${mb(total)}` : ''} MB`)
     );
 
-    const size = fs.statSync(tarPath).size;
-    if (size < 5 * 1024 * 1024) {
-      throw new Error(`interpreter download looks corrupt (${mb(size)} MB)`);
+    const got = await fileSha256(tarPath);
+    if (got !== sha256) {
+      fs.rmSync(tarPath, { force: true });
+      throw new Error(`the Python download does not match its published checksum (got ${got})`);
     }
 
     status('Unpacking Python…');
     const pyDir = path.join(root, 'py');
     fs.rmSync(pyDir, { recursive: true, force: true });
-    // Windows 10 1803+ ships bsdtar as System32\tar.exe. Use it by absolute
-    // path: a PATH "tar" may be Git's GNU tar, which reads "C:\..." as a
-    // remote host:file archive and fails.
+    // System32\tar.exe, not PATH tar: GNU tar reads "C:\..." as a remote host:file.
     const systemTar = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
     const tarCmd = fs.existsSync(systemTar) ? systemTar : 'tar';
-    // Relative names from inside the runtime folder: tar.exe cannot open
-    // absolute paths outside the system code page, so first run never
-    // finished for user names like Łukasz or 测试用户.
+    // Relative names: tar.exe cannot open absolute paths outside the system code page.
     await run(tarCmd, ['-xzf', path.basename(tarPath)], { log, cwd: root });
     // The tarball's top-level directory is "python/".
     fs.renameSync(path.join(root, 'python'), pyDir);
@@ -300,29 +296,35 @@ async function ensureWindowsRuntime({ requirementsPath, onStatus, log }) {
     if (!fs.existsSync(py)) throw new Error('python.exe missing after extraction');
   }
 
-  // 2. PyTorch (the big one) ------------------------------------------------
   const cuda = hasNvidiaGpu();
   const flavour = cuda ? 'CUDA' : 'CPU';
-  const pipBase = ['-m', 'pip', 'install', '--no-warn-script-location', '--disable-pip-version-check'];
-  if (!upgrading) {
-    status(`Installing PyTorch (${flavour}${cuda ? ', ~3.5 GB' : ''} - one time)…`);
-    await run(py, [...pipBase, 'torch', 'torchvision', '--index-url', cuda ? TORCH_CUDA_INDEX : TORCH_CPU_INDEX], {
-      log,
-      onLine: (l) => status(`Installing PyTorch (${flavour}) - ${l.slice(0, 80)}`),
-    });
+  const torchRequirements = path.join(
+    path.dirname(requirementsPath),
+    cuda ? 'requirements-win-torch-cuda.txt' : 'requirements-win-torch-cpu.txt'
+  );
+  // Every package must match a hash in its requirements file.
+  const pipBase = [
+    '-m', 'pip', 'install', '--require-hashes', '--no-warn-script-location', '--disable-pip-version-check',
+  ];
+  if (installedTorch(py) !== pinnedVersion(torchRequirements, 'torch')) {
+    status(`Installing PyTorch (${flavour}${cuda ? ', ~3.5 GB' : ''})…`);
+    // Its dependencies come from PyPI with the engine's.
+    await run(
+      py,
+      [...pipBase, '--no-deps', '-r', torchRequirements, '--index-url', cuda ? TORCH_CUDA_INDEX : TORCH_CPU_INDEX],
+      { log, onLine: (l) => status(`Installing PyTorch (${flavour}): ${l.slice(0, 80)}`) }
+    );
   }
 
-  // 3. Engine dependencies --------------------------------------------------
-  status(upgrading ? 'Updating engine dependencies…' : 'Installing engine dependencies…');
+  const depsVerb = updating ? 'Updating' : 'Installing';
+  status(`${depsVerb} engine dependencies…`);
   await run(py, [...pipBase, '-r', requirementsPath], {
     log,
-    onLine: (l) => status(`Installing engine dependencies - ${l.slice(0, 80)}`),
+    onLine: (l) => status(`${depsVerb} engine dependencies: ${l.slice(0, 80)}`),
   });
 
-  // 4. Sanity + marker ------------------------------------------------------
   status('Checking the runtime…');
-  // onnx + onnxruntime are the export stack; a broken ORT install (missing
-  // VC++ runtime) would otherwise only surface at the end of a training run.
+  // Includes the export stack: onnxruntime fails to import without the VC++ runtime.
   const check = spawnSync(py, ['-c', 'import torch, transformers, fastapi, cv2, PIL, onnx, onnxruntime'], {
     windowsHide: true,
     timeout: 300000,

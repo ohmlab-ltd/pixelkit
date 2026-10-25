@@ -1,84 +1,96 @@
 # Workspace format
 
-Everything PixelKit stores lives in one user-chosen folder (default
-`~/PixelKit`, changeable in Settings; `PIXELKIT_WORKSPACE` overrides).
-It is plain files - safe to back up, sync, or read from your own tools.
-This document is the public contract; the implementation is
+PixelKit stores everything in one workspace folder: `~/PixelKit` by default,
+set in Settings or by `PIXELKIT_WORKSPACE`. Its contents are plain files.
+This document is the public contract. The implementation is
 `engine/gd/store.py` and `engine/gd/workspace.py`.
 
 ## Layout
 
 ```
 <workspace>/
-  workspace.json                  # {"app": "pixelkit", "schemaVersion": 1}
-  weights/                        # HF_HOME - model downloads (regenerable)
+  workspace.json              {"app": "pixelkit", "schemaVersion": 1}
+  events.db                   activity and job history (SQLite)
+  weights/                    model downloads, regenerable
+    yolox/                    YOLOX COCO checkpoints
+  _storage/containers/<project id>/cover.jpg
+                              a project's cover
   projects/
-    <project-slug>/               # a Project (container of datasets)
-      project.json                # container metadata (name, dataset ids…)
-      <dataset-slug>/             # one folder per dataset
-        dataset.json              # metadata + labels + per-image index
-        images/                   # ORIGINAL images only, never rewritten
-        annotations/              # one JSON per image (see below)
-        references/               # reference crops ("specific" datasets)
-        augmentations/            # generated variants + transformed anns
-        snapshots/                # annotation snapshots (zips; see below)
-        models/                   # trained models + Neuro N6 exports
-          yolox_nano/<run>/       #   best.pt, <slug>_{fp32,int8}.onnx, labels.h,
-                                  #   <slug>.ino, report.json, export.zip, and
-                                  #   neuron6/ (ST Edge AI log + generate report)
-        thumbs/                   # thumbnails/previews (regenerable cache)
-        exports/                  # export zips land here
-    <dataset-slug>/               # datasets outside any Project sit at root
-      dataset.json
-      ...
+    <project-slug>/           a project: a container of datasets
+      project.json            id, name, dataset ids
+      <dataset-slug>/
+        dataset.json          id, name, labels, settings, per-image index
+        images/               imported images, never rewritten
+        annotations/          one JSON per image
+        references/           reference images
+        augmentations/        generated copies and their annotations
+        augment_backgrounds/  uploaded backgrounds for augmentation
+        snapshots/            annotation snapshots
+        models/
+          yolox_nano/<run>/   trained model and Neuro N6 export
+          yolox_tiny/<run>/
+        cover_upload.jpg      an uploaded cover
+        thumbs/               labelled previews, regenerable
+        image_embeddings/     DINOv2 embeddings, regenerable
+        *_first*.json, workspace_card_v1.json, dataset_stats*.json
+                              payload caches, regenerable
+    <dataset-slug>/           a dataset outside any project
 ```
 
-## Identity and naming
+A run folder's files are listed in [TRAINING.md](TRAINING.md#run-folder).
 
-Folder names are **cosmetic slugs**; identity is the `"id"` field inside
-`project.json` / `dataset.json`. Renaming a folder (or the slug drifting
-from the display name) breaks nothing - the engine indexes by scanning
-for the JSON files at startup. Derived (crop) datasets link to their
-parent by id, so moves/renames survive.
+## Identity
 
-## dataset.json vs annotations/
+Identity is the `"id"` field in `project.json` and `dataset.json`. Folder
+names are slugs with no meaning: the engine finds datasets by scanning for
+these files at startup, so renaming a folder breaks nothing. A derived crop
+dataset refers to its parent by id.
 
-The SaaS build kept one monolithic `manifest.json` holding every box of
-every image. The portable schema splits it:
+## dataset.json and annotations/
 
-- **`dataset.json`** - everything *except* per-image geometry: dataset
-  name/id, labels + colours, thresholds, augmentation config, dataset
-  type, references index, derived-dataset link, and a per-image index
-  (filename, dimensions, blurhash, review flags…).
-- **`annotations/<import_id>.json`** - the geometry for one image:
-  `{detections, editedBoxes, timings}` (boxes, polygon masks, labels,
-  scores, review verdicts).
+- `dataset.json` holds everything except per-image geometry: name and id,
+  labels and colours, thresholds, augmentation settings, the references
+  index, the parent link of a derived dataset, and an index of images with
+  filename, dimensions, blurhash and review flags.
+- `images/` holds each imported image under a generated name. A JPEG file is
+  stored as uploaded; other formats are stored as JPEG at quality 90.
+  Openverse images keep the format they were downloaded in.
+- `annotations/<import_id>.json` holds one image's geometry:
+  `{detections, editedBoxes, timings}`: boxes, polygon masks, labels,
+  scores and review verdicts.
 
-Consequences you can rely on:
-
-- A corrupt write costs one image's annotations, not the dataset.
-- All writes are atomic (tmp file + rename); annotation files are only
-  rewritten when their content changes.
-- Diff/sync tools see per-image churn, not a giant file rewritten on
-  every save.
+Every write is atomic, a temporary file followed by a rename. An annotation
+file is rewritten only when its content changes, and a corrupt file affects
+one image.
 
 ## Snapshots
 
-`snapshots/<UTCstamp>-<hash>.zip` holds a point-in-time copy of
-`dataset.json` + `annotations/` (never images). Created from the
-dataset's settings panel; restoring writes a safety snapshot of the
-current state first, so restores are always undoable. They're plain
-zips - safe to copy out as backups.
+`snapshots/<UTC timestamp>-<hash>.zip` holds a copy of `dataset.json` and
+`annotations/`, without images. Snapshots are created from the dataset's
+settings panel. Restoring one first takes a snapshot of the current state.
 
 ## Caches
 
-`thumbs/` and `weights/` are regenerable - deleting them costs a
-re-download / re-render, never data. `images/` and `annotations/` are
-the ground truth; treat them as the thing you back up.
+`weights/` and, in each dataset, `thumbs/`, `image_embeddings/` and the files
+`overview_first100.json`, `initial_first20.json`, `workspace_card_v1.json`,
+`dataset_stats.json` and `dataset_stats_lite.json` can be deleted; they are
+downloaded or rebuilt. Update on the Augmentations tab makes `augmentations/`
+again, with new random values. The rest is the data to back up:
+`events.db`, `_storage/`, `project.json`, and in each dataset
+`dataset.json`, `images/`, `annotations/`, `references/`,
+`augment_backgrounds/`, `cover_upload.jpg`, `snapshots/` and `models/`.
 
-## App config (not in the workspace)
+Model downloads go to `weights/` unless `HF_HOME` is set in the environment.
 
-Machine-local settings - workspace path, Hugging Face token, device
-choice - live in the OS config dir (`%APPDATA%\PixelKit`,
-`~/Library/Application Support/PixelKit`, `~/.config/pixelkit`), never
-in the workspace, so a synced/shared workspace never leaks your token.
+## App config
+
+Machine-local settings, which include the workspace path, the Hugging Face
+token and the device, are stored outside the workspace:
+
+| OS | Folder |
+|---|---|
+| Windows | `%APPDATA%\PixelKit` |
+| macOS | `~/Library/Application Support/PixelKit` |
+| Linux | `$XDG_CONFIG_HOME/pixelkit` or `~/.config/pixelkit` |
+
+`PIXELKIT_CONFIG_DIR` overrides the folder.

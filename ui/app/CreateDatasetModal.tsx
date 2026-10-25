@@ -1,9 +1,6 @@
 "use client";
 
-// Collect a name for a new dataset created from INSIDE a Project, then hand off
-// to the full V2 onboarding (labels -> references -> upload). The name is
-// entered here, within the project, rather than jumping to the workspace; the
-// parent then animates the project away and starts the onboarding.
+// Asks for a new dataset's name; onContinue starts onboarding.
 import { useEffect, useRef, useState } from "react";
 
 import { GlassDialog } from "./v2/GlassDialog";

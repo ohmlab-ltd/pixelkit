@@ -1,28 +1,6 @@
 "use client";
 
-// Fast image-level triage for the V2 project page. Lifted from V1's
-// ReviewMode and rebuilt to match V2's chrome:
-//
-//   • Image fills the card edge-to-edge (no letterbox gutter on the
-//     primary review surface).
-//   • Annotation list rides the right side so the user can read what
-//     the segmenter picked while triaging the whole image.
-//   • Theme-aware backdrop: dark blur over a dark wash in dark mode,
-//     and the same blur over a white wash with white framing around
-//     the image in light mode.
-//   • Mask polygons + boxes render over the image with per-label
-//     palette tints. Polygon paths preload from the manifest so the
-//     overlay is in place before the JPEG decode finishes.
-//
-// Controls the user can drive:
-//   • Swipe-style buttons:  "← Bad" / "Unsure" / "Good →"
-//   • Arrow keys:           ← (bad) · ↓ (unsure) · → (good)
-//   • Pointer drag:         throw past SWIPE_COMMIT_PX to commit
-//   • Esc:                  closes the overlay
-//
-// Caching: PRELOAD_AHEAD images past the visible deck get an eager
-// off-screen <img> with loading="eager" + fetchPriority="high" so
-// flicking through a long unrated set never waits on the network.
+// Review mode: rates images good, bad or unsure by button, arrow key or swipe.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -30,19 +8,19 @@ import {
   buildProjectLabelColourMap,
   colourForLabelStable,
   readableTextForBg,
-} from "./OnboardLabelsV2";
+} from "./labelColours";
 
-export type Verdict = "good" | "bad" | "unsure";
-export type ReviewScope = "unrated" | "unsure" | "good" | "bad" | "all";
+type Verdict = "good" | "bad" | "unsure";
+type ReviewScope = "unrated" | "unsure" | "good" | "bad" | "all";
 
-export type ReviewDetection = {
-  box?: number[] | null;        // [x0, y0, x1, y1] (intrinsic px)
+type ReviewDetection = {
+  box?: number[] | null;        // [x0, y0, x1, y1], intrinsic px
   pred_label?: string | null;
   polygons?: number[][][] | null; // outer/inner polygons in intrinsic px
   score?: number | null;
 };
 
-export type ReviewItem = {
+type ReviewItem = {
   id: string;
   filename: string;
   preview: string;
@@ -80,40 +58,24 @@ export function ReviewModeV2({
   onVerdict: (id: string, verdict: Verdict) => void;
   onClose: () => void;
   scope?: ReviewScope;
-  /** Project tag list, used for the per-project palette so the
-      review chips line up with the rest of the page. */
+  /** Project labels, for the label palette. */
   projectLabels?: string[];
   labelAliases?: Record<string, string>;
   labelColours?: Record<string, string> | null;
-  /** Called as the user navigates so the parent can pull per-image
-      annotations (mask polygons) for the current + nearby items.
-      Without this, /overview / /initial only carry placeholder
-      detections without masks, and the review canvas renders boxes
-      only, no segmentation. */
+  /** Asks the parent to load mask polygons for an image near the current one. */
   onRequestAnnotations?: (backendId: string) => void;
 }) {
-  // Snapshot the items list at modal open. The parent filters by
-  // verdict (unrated / good / bad / unsure), and committing a
-  // verdict immediately removes the just-rated image from that
-  // filter, which would shift the index by one in the same tick.
-  // Walking a frozen list keeps the deck stable: the user just
-  // moves forward, no "jumps to a different image and then snaps
-  // back" effect. New mask/detection data still flows in because we
-  // overlay it from the live items map on each render.
+  // Items frozen at open: a verdict removes the image from the parent's
+  // filter, which would shift the index. Detection data still merges live.
   const [snapshot] = useState<ReviewItem[]>(() => items);
-  // When fresh detection data arrives via /annotations, merge it
-  // into our snapshot by id so each card picks up its real
-  // polygons + scores without re-snapshotting the list itself.
   const liveById = useMemo(() => {
     const m = new Map<string, ReviewItem>();
     for (const it of items) m.set(it.id, it);
     return m;
   }, [items]);
 
-  // "Least confident first": order the deck by each image's weakest
-  // detection score so borderline predictions get eyes before easy
-  // ones. Images with no scored detections sort last (nothing to
-  // judge by). Off by default; remembered across sessions.
+  // Least confident first: ordered by each image's lowest detection score,
+  // with unscored images last.
   const [byConfidence, setByConfidence] = useState<boolean>(() => {
     try {
       return window.localStorage.getItem("pk-review-confidence-sort") === "1";
@@ -128,10 +90,8 @@ export function ReviewModeV2({
     }
     return min;
   };
-  // The confidence ORDER is frozen when the sort engages, exactly like
-  // the membership snapshot above: neighbouring /annotations fetches
-  // update scores live, and re-sorting on every response would swap the
-  // top card between glance and keypress.
+  // The order is frozen when the sort turns on, so live score updates do
+  // not move the top card.
   const orderRef = useRef<string[] | null>(null);
   const list = useMemo(() => {
     const merged = snapshot.map((r) => liveById.get(r.id) ?? r);
@@ -157,10 +117,9 @@ export function ReviewModeV2({
     try {
       window.localStorage.setItem("pk-review-confidence-sort", next ? "1" : "0");
     } catch {
-      /* private mode etc. - the toggle still works for this session */
+      /* the toggle still works for this session */
     }
-    // Deck reorders: land on the first unrated card of the new order
-    // (index 0 would re-deal already-rated cards in "unrated" scope).
+    // Lands on the first unrated card of the new order.
     const merged = snapshot.map((r) => liveById.get(r.id) ?? r);
     const ordered = next
       ? [...merged].sort((a, b) => minScore(a) - minScore(b))
@@ -171,10 +130,7 @@ export function ReviewModeV2({
   };
   const [animating, setAnimating] = useState<"left" | "right" | null>(null);
   const [drag, setDrag] = useState(0);
-  // Index of the annotation the user is hovering in the sidebar.
-  // Drives a "pulse + brighten" treatment of the matching segmentation
-  // overlay so the user can map a chip in the list back to a region
-  // in the image. Reset on every image advance.
+  // Sidebar annotation under the pointer, highlighted in the image.
   const [hoveredAnnot, setHoveredAnnot] = useState<number | null>(null);
   useEffect(() => setHoveredAnnot(null), [idx]);
   const dragStartRef = useRef<{ x: number; pointerId: number } | null>(null);
@@ -182,12 +138,7 @@ export function ReviewModeV2({
   const current = list[idx];
   const isDone = idx >= list.length;
 
-  // Pull per-image annotations (mask polygons) for the current item
-  // and a small window around it. The list comes through with
-  // placeholder detections from /overview that carry boxes + labels
-  // but no mask polygons, without this fetch the canvas would draw
-  // only the rectangles. Mirrors DatasetViewer's neighbour-prefetch
-  // pattern so flicking through the deck stays smooth.
+  // Requests masks for the current image and its neighbours.
   useEffect(() => {
     if (!onRequestAnnotations) return;
     const want = (it: ReviewItem | undefined) => {
@@ -202,8 +153,6 @@ export function ReviewModeV2({
     want(list[idx - 1]);
   }, [idx, list, onRequestAnnotations]);
 
-  // Stable colour map for this project's labels, same palette the
-  // dataset gallery chips use.
   const colourFor = useMemo(() => {
     const map = buildProjectLabelColourMap(projectLabels ?? [], labelColours ?? null);
     return (lab: string | null): string => {
@@ -214,7 +163,7 @@ export function ReviewModeV2({
   }, [projectLabels, labelColours]);
 
   const displayLabel = (lab: string | null): string => {
-    if (!lab) return ",";
+    if (!lab) return "No label";
     const k = lab.trim().toLowerCase();
     return labelAliases[k] || lab;
   };
@@ -230,7 +179,7 @@ export function ReviewModeV2({
     }, 260);
   };
 
-  // Pointer-drag throw. Same flow for mouse / touch / pen.
+  // Pointer drag, for mouse, touch and pen.
   const onPointerDown = (e: React.PointerEvent) => {
     if (animating) return;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
@@ -257,7 +206,7 @@ export function ReviewModeV2({
       const editing = tag === "input" || tag === "textarea"
         || (document.activeElement as HTMLElement | null)?.isContentEditable;
       if (editing) return;
-      // A held key must not rate cards the user never saw.
+      // A held key must not rate unseen cards.
       if (e.repeat) return;
       if (e.key === "ArrowLeft") {
         e.preventDefault();
@@ -284,9 +233,7 @@ export function ReviewModeV2({
     const unsures = Object.values(verdicts).filter((v) => v === "unsure").length;
     return (
       <div
-        // In-content PAGE: fills the shell's content area (below the
-        // title bar, above the status bar, right of the Explorer side
-        // bar) on an opaque ground - the app chrome stays visible.
+        // Fills the shell's content area, leaving the app chrome visible.
         className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] z-[1200] grid place-items-center bg-[var(--background)] p-6"
         role="dialog"
         aria-modal="true"
@@ -319,12 +266,8 @@ export function ReviewModeV2({
   const tintOpacity = animating ? 0 : Math.min(0.18, tintIntensity * 0.18);
 
   return (
-    // Contained in the shell's content area - the Explorer tree, title
-    // bar and status bar stay visible while reviewing.
     <div
-      // In-content PAGE, not an overlay: opaque ground filling the
-      // shell's content area, its own header/footer chrome. Keyboard
-      // (arrows / Esc) and pointer-swipe interactions are unchanged.
+      // Fills the shell's content area, leaving the app chrome visible.
       className="fixed top-9 bottom-6 right-0 left-[var(--pk-content-left,0px)] z-[1200] flex flex-col bg-[var(--background)]"
       role="dialog"
       aria-modal="true"
@@ -471,9 +414,7 @@ export function ReviewModeV2({
           </div>
         </div>
 
-        {/* Annotation panel on the right. Lists every detection on the
-            current image with its label chip + confidence. Reads as
-            a quiet sidebar, same surface tone as the card behind. */}
+        {/* Annotation panel */}
         <aside className="hidden lg:flex flex-col w-72 border-l border-[var(--line)] bg-[var(--panel)]">
           <div className="px-4 py-3 border-b border-foreground/[0.07] flex items-baseline justify-between gap-2">
             <h3 className="pk-micro text-[var(--fg-soft)]">Annotations</h3>
@@ -603,20 +544,13 @@ function ReviewCanvas({
   item: ReviewItem;
   colourFor: (lab: string | null) => string;
   displayLabel: (lab: string | null) => string;
-  /** Index of the annotation the user is hovering in the sidebar.
-      The matching overlay brightens + animates so the user can
-      visually map a chip back to the region it describes. */
+  /** Sidebar annotation to highlight. */
   highlightIdx?: number | null;
-  /** Mirror image-side hover back up to the parent so the sidebar
-      annotation row matching the segmentation under the cursor
-      lights up at the same time. */
+  /** Reports the annotation under the pointer in the image. */
   onHighlightChange?: (idx: number | null) => void;
 }) {
-  // Use the image's NATURAL dimensions for the SVG viewBox, the
-  // manifest's stored width/height occasionally drift from the actual
-  // file (re-bake, resize) and a mismatch puts the boxes / polygons
-  // in the wrong place. Falls back to manifest dims on first paint,
-  // then snaps to the loaded image's real dims once decode finishes.
+  // The manifest size until the image decodes, then its natural size,
+  // which can differ.
   const [natural, setNatural] = useState<{ w: number; h: number } | null>(() =>
     item.width && item.height ? { w: item.width, h: item.height } : null,
   );
@@ -625,11 +559,7 @@ function ReviewCanvas({
   }, [item.id, item.width, item.height]);
   const W = natural?.w ?? 0;
   const H = natural?.h ?? 0;
-  // Track the container's on-screen size so label fontSize + chip
-  // dimensions can be pinned to screen pixels rather than scaled
-  // with the image. Without this, portrait images get visibly
-  // smaller labels than landscape ones because viewBox->screen
-  // scale changes with aspect ratio under preserveAspectRatio=meet.
+  // Container size, to keep labels in screen pixels.
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [containerSize, setContainerSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
   useEffect(() => {
@@ -642,23 +572,14 @@ function ReviewCanvas({
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-  // Screen-pixels-per-viewBox-unit. With preserveAspectRatio="xMidYMid
-  // meet" the limiting axis sets the scale, so min() of the two
-  // ratios. Used to invert image-space sizes back to screen pixels.
+  // Screen pixels per viewBox unit under xMidYMid meet.
   const pxPerUnit =
     W > 0 && H > 0 && containerSize.w > 0 && containerSize.h > 0
       ? Math.min(containerSize.w / W, containerSize.h / H)
       : 0;
-  // Single SVG renders BOTH the image and the detection overlays so
-  // they share one coordinate system. Previously the image was an
-  // <img> with object-contain and the detections were in a separate
-  // <svg> with preserveAspectRatio="xMidYMid meet", when the
-  // manifest's stored dimensions diverged from the actual file,
-  // those two layers fit-meet'd differently and the overlay landed
-  // off the rendered image. With a single SVG <image>, both are
-  // scaled by the same viewBox transform.
+  // One SVG holds the image and the overlays, so both share the viewBox.
   return (
-    <div ref={containerRef} className="relative w-full h-full select-none bg-white dark:bg-black">
+    <div ref={containerRef} className="relative w-full h-full select-none bg-black">
       {W > 0 && H > 0 ? (
         <svg
           viewBox={`0 0 ${W} ${H}`}
@@ -683,11 +604,7 @@ function ReviewCanvas({
               }
             }}
           />
-          {/* Soft glow filter applied to the hovered detection so it
-              "pops" with a brighter halo, mirroring BoxEditorV2's
-              bx-select-glow. Replaces the previous spotlight-dim
-              approach which read as a pulse because every hover
-              swap re-mounted a big translucent <rect>. */}
+          {/* Glow for the hovered detection */}
           <defs>
             <filter id={`rev-pop-${item.id}`} x="-30%" y="-30%" width="160%" height="160%">
               <feGaussianBlur stdDeviation={2.2} result="b" />
@@ -697,10 +614,7 @@ function ReviewCanvas({
               </feMerge>
             </filter>
           </defs>
-          {/* Render detections sorted by area descending, large
-              boxes paint first so smaller ones stack on top and
-              stay readable / clickable. Matches BoxEditorV2's
-              z-order rule. */}
+          {/* Largest first, so smaller detections paint on top. */}
           {(item.detections ?? [])
             .map((d, i) => ({ d, i }))
             .sort((a, b) => {
@@ -715,9 +629,7 @@ function ReviewCanvas({
             const polys = d.polygons ?? null;
             const colour = colourFor(d.pred_label ?? null);
             const fg = readableTextForBg(colour);
-            // Uniform stroke width across boxes + polygons so every
-            // detection reads as the same line weight regardless of
-            // image scale. vector-effect locks it to screen pixels.
+            // Screen pixels.
             const STROKE_PX = 1.8;
             const LABEL_FONT_PX = 13;
             const labelText = displayLabel(d.pred_label ?? null);
@@ -725,27 +637,18 @@ function ReviewCanvas({
             const padX = fontSize * 0.45;
             const labelH = fontSize * 1.4;
             const isHovered = i === highlightIdx;
-            // Hovered detection brightens its fill + opacity (the
-            // "pop") and gets a soft glow via the filter above. Idle
-            // detections stay at their resting opacity so the page
-            // doesn't pulse on hover.
             const fillRgba = hexToRgba(colour, isHovered ? 0.4 : 0.22);
             const lx = box ? box[0] : 0;
             const ly = box ? box[1] : 0;
             const labelW = labelText.length * fontSize * 0.6 + padX * 2;
-            // Stroke offset for labelY in viewBox units, so the chip
-            // sits flush above/below the box border without overlap.
+            // Stroke width in viewBox units.
             const strokeOffset = pxPerUnit > 0 ? STROKE_PX / pxPerUnit : 0;
             const labelY = ly < labelH ? ly + strokeOffset : ly - labelH;
             return (
               <g
                 key={i}
-                // pointer-events: auto on the overlay group lets the
-                // user hover the segmentation directly to highlight
-                // the matching sidebar annotation. The pointer
-                // events still bubble up to the card so the drag
-                // gesture starts on pointerdown, segmentation hover
-                // doesn't swallow the swipe.
+                // Hovering highlights the sidebar row. Events still bubble
+                // to the card, so a drag starts here too.
                 style={{
                   pointerEvents: "auto",
                   cursor: "default",
@@ -804,10 +707,7 @@ function ReviewCanvas({
           })}
         </svg>
       ) : (
-        // Manifest dimensions missing, fall back to a plain img so
-        // the user still sees the photo while waiting for the natural
-        // size to land (will re-render into the SVG path on next
-        // mount once width/height arrive).
+        // A plain img until the size is known.
         // eslint-disable-next-line @next/next/no-img-element
         <img
           src={item.preview}

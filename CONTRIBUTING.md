@@ -1,51 +1,59 @@
-# Contributing to PixelKit
+# Contributing
 
-Thanks for looking under the hood. The short version: small, tested,
-honestly-described changes are easy to merge.
-
-## Dev setup
+## Development setup
 
 ```bash
-# engine - Python 3.12; CUDA torch optional (CPU works for all non-ML APIs)
-cd engine && pip install -r requirements.txt && python gd/server.py
-# → http://127.0.0.1:8001
+# engine/.venv with PyTorch and the engine, and the UI build
+installers/install.sh           # Windows: installers\install.ps1
 
-# ui - Next.js static export, served by the engine after a build
-cd ui && npm ci && npm run build     # or `npm run dev` on :3000
-
-# desktop shell (optional in dev)
+# Desktop shell, which runs the engine from engine/.venv
 cd desktop && npm ci && npm start
 ```
 
-`pip install -e engine` gives you the `pixelkit` launcher and
-`pixelkit doctor`. Useful env vars: `PIXELKIT_WORKSPACE` (isolate your
-data), `PK_DISABLE_MODELS=1` (run with no ML), `PK_DEVICE=cpu|cuda:N`.
+Python 3.11 or later. CUDA PyTorch is optional: every API that does not run
+a model works on the CPU. The engine looks for `ui/out` when it starts, so
+the UI is built first. The installer adds the `pixelkit` command to
+`engine/.venv`, with `pixelkit doctor` for environment checks.
+
+Environment variables: `PIXELKIT_WORKSPACE` sets the workspace folder,
+`PIXELKIT_CONFIG_DIR` the config folder, `PK_DISABLE_MODELS=1` runs the
+engine without models, `PK_DEVICE=cuda|cuda:N|mps|cpu` selects the device,
+`PIXELKIT_UI_DIR` serves another UI build, `PIXELKIT_PYTHON` sets the Python
+the desktop shell runs the engine with, and `PIXELKIT_NO_UPDATE_CHECK=1`
+turns off the update check.
 
 ## Tests
 
 ```bash
-cd engine && python -m pytest tests/     # fast; models are never loaded
-cd ui && npx tsc --noEmit && npx eslint .
+cd engine && pip install pytest httpx && python -m pytest tests/
+cd ui && npm test && npx tsc --noEmit && npm run lint
 ```
 
-CI runs both on every push/PR, plus an import gate that catches
-transformers releases breaking the SAM 3 classes.
+The engine tests never load a model. CI runs the engine tests, an import
+check of the SAM 3 classes in `transformers`, and the UI build and tests on
+every push to `main` and every pull request.
 
-## Ground rules
+## Rules
 
-- **Workspace format is a public contract** (`docs/WORKSPACE.md`):
-  changes to what's written on disk need a doc update and a migration
-  story in the same PR.
-- The engine must keep working with `PK_DISABLE_MODELS=1` - every
-  dataset/annotation/export API stays model-free.
-- Match the code around you (the UI's design tokens are documented in
-  `docs/DESKTOP-UI.md`); keep comments for the *why*, not the what.
-- Add a regression test when you fix a bug - the suite is small and
-  fast on purpose.
+- The workspace format is a public contract ([docs/WORKSPACE.md](docs/WORKSPACE.md)).
+  A change to what is written on disk updates that document and adds a
+  migration in the same pull request.
+- Every dataset, annotation and export API works with `PK_DISABLE_MODELS=1`.
+- UI code uses the design tokens in [docs/DESKTOP-UI.md](docs/DESKTOP-UI.md).
+- The installers' Python packages are pinned in `engine/requirements-runtime.in`
+  and `engine/requirements-torch.in`. A change to either regenerates the
+  hashed locks with the uv command at the top of each (the macOS lock with
+  `MACOSX_DEPLOYMENT_TARGET=14.0`). `engine/requirements.txt` holds the ranges
+  that source installs and CI use.
+- A bug fix comes with a test that fails without it.
+- Comments and documentation are short, factual, in the present tense and in
+  ASCII.
 
 ## Releases
 
-Maintainers: bump the version stamps in `desktop/package.json`,
-`engine/gd/server.py` (`PK_VERSION`), `engine/pyproject.toml`, and
-`ui/app/shell/StatusBar.tsx`, then push a `vX.Y.Z` tag - the release
-workflow builds and publishes both installers.
+Set the version in `desktop/package.json`, `engine/pyproject.toml`,
+`PK_VERSION` in `engine/gd/server.py` and `VERSION_FALLBACK` in
+`ui/app/shell/StatusBar.tsx`, rename the `## Unreleased` section of
+`CHANGELOG.md` to `## X.Y.Z`, then push a `vX.Y.Z` tag. The release workflow
+builds both installers and publishes them with that section, followed by
+GitHub's generated notes, as the release notes.

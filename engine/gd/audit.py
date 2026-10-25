@@ -1,19 +1,10 @@
-"""Local SQLite event log - job history + project activity.
-
-The portable build keeps this for two things only: rehydrating finished-job
-history across restarts (JobManager.hydrate_from_audit) and the per-project
-activity feed. The SaaS billing/demo/telemetry rollups are gone.
-
-The DB lives in the workspace (events.db). SQLite is stdlib - no extra
-dependency.
-"""
+"""SQLite event log in the workspace: job history and project activity."""
 from __future__ import annotations
 
 import json
 import sqlite3
 import threading
 from datetime import datetime, timezone
-from pathlib import Path
 
 import workspace
 
@@ -74,19 +65,20 @@ def list_events(kind: str | None = None, limit: int = 200) -> list[dict]:
     return out
 
 
+# The event kinds the engine writes; an events.db can hold others.
+ACTIVITY_KINDS = ("job", "container_create", "container_delete", "dataset_add", "dataset_remove",
+                  "project_duplicate")
+
+
 def list_activity(container_id: str, dataset_ids: list[str], limit: int = 100) -> list[dict]:
-    """Project activity feed: recent events that belong to a container -- either
-    a container-level event (data.container == container_id) or an event on one
-    of its datasets (data.project / data.dataset in dataset_ids). Normalised so
-    the FE renders a uniform timeline. The ACTOR is the originator (data.actor,
-    falling back to data.user/username) -- never the container owner."""
+    """Recent events of a container or of its `dataset_ids`, newest first."""
     ids = {d for d in (dataset_ids or []) if d}
     cur = _get_conn().cursor()
-    # Scan a recent window and filter in Python (same approach as the usage
-    # rollups). Cheap enough at this scale; index by container later if needed.
     cur.execute("SELECT ts, kind, data FROM events ORDER BY ts DESC LIMIT 3000")
     out: list[dict] = []
     for ts, kind, blob in cur.fetchall():
+        if kind not in ACTIVITY_KINDS:
+            continue
         try:
             d = json.loads(blob)
         except Exception:
@@ -99,13 +91,10 @@ def list_activity(container_id: str, dataset_ids: list[str], limit: int = 100) -
             "ts": ts,
             "kind": kind,
             "job_kind": d.get("job_kind"),
-            "actor": d.get("actor") or d.get("user") or d.get("username"),
             "container": c,
             "dataset": p,
             "status": d.get("status"),
             "n_images": d.get("n_images"),
-            "member": d.get("member"),
-            "role": d.get("role"),
             "name": d.get("name"),
         })
         if len(out) >= limit:

@@ -1,21 +1,26 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { BlurhashCanvas } from "react-blurhash";
 
 import { apiFetch } from "../../lib/apiFetch";
-import { colourForLabelStable } from "./OnboardLabelsV2";
+import { colourForLabelStable } from "./labelColours";
 import { FactorRadar, FACTOR_ORDER, FACTOR_INFO, factorColour } from "./HealthRadar";
 import { VariationPlot, type StatsPoint, type AugmentPoint } from "./DatasetStatsCard";
 import { TrainCard } from "./TrainCard";
-import type { StoreImport } from "./store/projectStore";
 
-// Project Overview body. Answers "how is this project doing?" at a glance:
-// 5 stat cards (incl. a Health card) -> Insights & suggestions -> Recent images
-// + Recent activity side by side -> a bottom analytics row (Dataset health
-// spider + factors / Label distribution / Image variation). The Derived
-// datasets strip is rendered by the parent below. No dataset/upload controls
-// live here. Width is capped so it stays natural on very wide screens.
+// Overview tab of a dataset.
+
+// The fields of an import this panel reads.
+type OverviewImport = {
+  id: string;
+  filename?: string;
+  preview: string;
+  blurhash?: string | null;
+  createdAt?: number | string | null;
+  labelStats?: Record<string, number>;
+  labelledAt?: number;
+};
 
 type Stats = {
   counts?: { imports?: number; with_detections?: number; background?: number; detections?: number; augmentations?: number; near_duplicates?: number; embeddings_ready?: number };
@@ -82,9 +87,6 @@ function Card({ title, action, children }: { title: string; action?: React.React
   );
 }
 
-// Quiet tool-style section header: 11px uppercase mono, optional count,
-// optional right-aligned action. No accent decoration - the accent is
-// reserved for the primary action / active states.
 function SectionHeader({ children, count, action }: { children: React.ReactNode; count?: number; action?: React.ReactNode }) {
   return (
     <div className="mb-3 flex items-baseline justify-between gap-3">
@@ -112,9 +114,6 @@ function HeaderLink({ onClick, children }: { onClick?: () => void; children: Rea
 }
 
 function InsightCard({ tone, title, desc, onClick }: { tone: "warn" | "good" | "info"; title: string; desc: string; onClick?: () => void }) {
-  // Tone drives the icon colour + its chip wash so a warning reads at a glance
-  // without a loud full-card tint - amber = attention, emerald = healthy,
-  // neutral = still computing.
   const palette =
     tone === "warn"
       ? { text: "text-[var(--warn)]", chip: "bg-foreground/[0.05]" }
@@ -149,12 +148,14 @@ function InsightCard({ tone, title, desc, onClick }: { tone: "warn" | "good" | "
   return <div className={base}>{inner}</div>;
 }
 
+export function healthLabel(score: number | undefined): string {
+  if (typeof score !== "number") return "";
+  return score >= 75 ? "Healthy" : score >= 45 ? "Fair" : "Needs work";
+}
+
 export function OverviewPanel({
   imports,
   importsTotal,
-  // `labels` (the label names) is still accepted by callers but the panel no
-  // longer renders a Labels count - that moved to the hero stat strip - so it's
-  // intentionally not destructured here.
   labelColours,
   projectId,
   refreshSignal = 0,
@@ -165,38 +166,42 @@ export function OverviewPanel({
   onOpenReferences,
   onOpenDataset,
   onJumpToImport,
+  onHealthScore,
 }: {
-  imports: StoreImport[];
+  imports: OverviewImport[];
   importsTotal: number | null;
-  labels: string[];
   labelColours?: Record<string, string> | null;
   projectId: string | null | undefined;
   refreshSignal?: number;
   refs?: RefImage[];
-  /** Hidden for derived datasets - they don't manage their own
-      references. Everywhere else the section shows (references are
-      optional on any dataset). */
+  /** False for derived datasets, which have no references of their own. */
   showReferences?: boolean;
   seedStats: Stats;
   onOpenHealth: () => void;
   onOpenReferences?: () => void;
   onOpenDataset?: () => void;
-  onJumpToImport?: (id: string) => void;
+  /** Shows the image in the Dataset gallery; kind "augmentation" for a copy's dot. */
+  onJumpToImport?: (id: string, kind?: "image" | "augmentation") => void;
+  /** Receives the full statistics' health score whenever it changes; none for a dataset with no images. */
+  onHealthScore?: (score: number | undefined) => void;
 }) {
-  // Seed from a localStorage cache so the health bars, spider and variation
-  // plot paint INSTANTLY (possibly slightly stale) on load, then refresh in the
-  // background. Avoids the ~1s blank-then-pop when waiting on /dataset-stats.
+  // Seeded from a localStorage cache, then refreshed from /dataset-stats.
   const statsKey = projectId ? `pk_stats:${projectId}` : null;
   const [full, setFull] = useState<Stats>(() => {
     if (typeof window === "undefined" || !statsKey) return null;
     try { const raw = window.localStorage.getItem(statsKey); return raw ? (JSON.parse(raw) as Stats) : null; } catch { return null; }
   });
+  const seededFor = useRef(projectId);
   useEffect(() => {
     if (!projectId || !statsKey) return;
     let alive = true;
-    // Re-seed from cache when the project changes (the initial state only ran
-    // for the first projectId).
-    try { const raw = window.localStorage.getItem(statsKey); if (raw && alive) setFull(JSON.parse(raw) as Stats); } catch {}
+    // A different dataset starts from its own cache, or from nothing.
+    if (seededFor.current !== projectId) {
+      seededFor.current = projectId;
+      let cached: Stats = null;
+      try { const raw = window.localStorage.getItem(statsKey); cached = raw ? (JSON.parse(raw) as Stats) : null; } catch {}
+      setFull(cached);
+    }
     apiFetch(`/api/v2/projects/${projectId}/dataset-stats?v=${refreshSignal}`, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
@@ -208,8 +213,15 @@ export function OverviewPanel({
     return () => { alive = false; };
   }, [projectId, statsKey, refreshSignal]);
 
+  const fullScore = full?.counts?.imports === 0 ? undefined : full?.health?.score;
+  useEffect(() => {
+    onHealthScore?.(fullScore);
+  }, [fullScore, onHealthScore]);
+
   const images = importsTotal ?? imports.length;
-  const score = full?.health?.score ?? seedStats?.health?.score;
+  // No images: no score, coverage or duplicates to report.
+  const empty = (full ?? seedStats)?.counts?.imports === 0;
+  const score = empty ? undefined : full?.health?.score ?? seedStats?.health?.score;
   const factors = full?.health?.factors;
   const withDet = full?.counts?.with_detections;
   const nearDups = full?.counts?.near_duplicates;
@@ -248,11 +260,10 @@ export function OverviewPanel({
 
   const factorVals = FACTOR_ORDER.map((k) => ({ key: k as string, value: Math.max(0, Math.min(1, factors?.[k] ?? 0)) }));
   const statsLoading = full === null;
-  const healthLabel = typeof score === "number" ? (score >= 75 ? "Healthy" : score >= 45 ? "Fair" : "Needs work") : "";
+  const healthText = healthLabel(score);
   const colourFor = (lab: string | null) => (lab ? (labelColours?.[lab] ?? colourForLabelStable(lab)) : "#9ca3af");
 
-  // Insights
-  // Background images are annotated: checked, with nothing in them.
+  // Background images are checked and empty, so they count as covered.
   const noDet = typeof withDet === "number"
     ? Math.max(0, images - withDet - (full?.counts?.background ?? 0))
     : null;
@@ -265,18 +276,21 @@ export function OverviewPanel({
 
   return (
     <section className="space-y-7 px-6 pt-5 pb-12 lg:px-10">
-      {/* Insights - fast rule-based signals. */}
       <div>
         <SectionHeader>Insights</SectionHeader>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-          {statsLoading || nearDups == null ? (
+          {empty ? (
+            <InsightCard tone="info" title="Duplicates" desc="Add images to check them for near-duplicates." />
+          ) : statsLoading || nearDups == null ? (
             <InsightCard tone="info" title="Duplicates" desc="Checking your images for near-duplicates." />
           ) : nearDups > 0 ? (
             <InsightCard tone="warn" title={`${nearDups} near-duplicate ${nearDups === 1 ? "image" : "images"}`} desc="Open dataset health to review and remove them." onClick={onOpenHealth} />
           ) : (
             <InsightCard tone="good" title="No duplicates" desc="Your images all look distinct." />
           )}
-          {noDet == null ? (
+          {empty ? (
+            <InsightCard tone="info" title="Detection coverage" desc="Add images to see which have detections." />
+          ) : noDet == null ? (
             <InsightCard tone="info" title="Detection coverage" desc="Checking which images have detections." />
           ) : noDet > 0 ? (
             <InsightCard tone="warn" title={`${noDet} ${noDet === 1 ? "image has" : "images have"} no detections`} desc="Label or remove them to improve coverage." />
@@ -293,7 +307,6 @@ export function OverviewPanel({
         </div>
       </div>
 
-      {/* Dataset health - the focal panel: big score + radar + factor bars. */}
       <div>
         <SectionHeader action={<HeaderLink onClick={onOpenHealth}>Open health →</HeaderLink>}>Dataset health</SectionHeader>
         <button
@@ -301,7 +314,11 @@ export function OverviewPanel({
           onClick={onOpenHealth}
           className="pk-card pk-card-hover w-full rounded-md p-4 text-left outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] sm:p-5"
         >
-          {typeof score !== "number" ? (
+          {empty ? (
+            <div className="flex items-center justify-center py-12 text-sm text-foreground/50">
+              Add images to see the dataset&rsquo;s health.
+            </div>
+          ) : typeof score !== "number" ? (
             <div className="flex items-center justify-center gap-2.5 py-12 text-sm text-foreground/50">
               <span className="h-4 w-4 animate-spin rounded-full border-2 border-foreground/20 border-t-[var(--accent)]" />
               Computing dataset health…
@@ -315,7 +332,7 @@ export function OverviewPanel({
                     {Math.round(score)}
                     <span className="ml-1 align-top text-sm font-medium text-foreground/40">/100</span>
                   </div>
-                  <div className="pk-eyebrow mt-2" style={{ color: factorColour((score ?? 0) / 100) }}>{healthLabel}</div>
+                  <div className="pk-eyebrow mt-2" style={{ color: factorColour((score ?? 0) / 100) }}>{healthText}</div>
                 </div>
               </div>
               <div className="grid flex-1 grid-cols-1 gap-x-8 gap-y-3.5 sm:grid-cols-2">
@@ -336,14 +353,12 @@ export function OverviewPanel({
         </button>
       </div>
 
-      {/* References - optional on every dataset (hidden only for derived
-          datasets, which don't manage their own). */}
       {showReferences && (
         <div>
           <SectionHeader count={refs.length} action={onOpenReferences ? <HeaderLink onClick={onOpenReferences}>View all →</HeaderLink> : undefined}>References</SectionHeader>
           <div className="pk-card rounded-md p-4">
             {refs.length === 0 ? (
-              <p className="text-[13px] text-foreground/55">No reference images yet - optional, but a few clear examples per label improve label matching.</p>
+              <p className="text-[13px] text-foreground/55">No reference images yet. They are optional, but a few clear examples per label improve label matching.</p>
             ) : (
               <div className="grid grid-cols-4 gap-2.5 sm:grid-cols-6 lg:grid-cols-10">
                 {refs.slice(0, 10).map((r, i) => (
@@ -365,7 +380,6 @@ export function OverviewPanel({
         </div>
       )}
 
-      {/* Composition - how the dataset breaks down across labels + visual variety. */}
       <div>
         <SectionHeader>Composition</SectionHeader>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -391,22 +405,26 @@ export function OverviewPanel({
           <Card title="Image variation" action={typeof full?.counts?.embeddings_ready === "number" && (full?.counts?.embeddings_ready ?? 0) > 0 ? (
             <span className="text-[11px] text-foreground/45">{full?.counts?.embeddings_ready}/{full?.counts?.imports ?? images} embedded</span>
           ) : undefined}>
-            <div className="mx-auto w-full max-w-[260px]">
-              <VariationPlot
-                points={variation?.points ?? []}
-                augmentations={variation?.augmentations ?? []}
-                colourFor={colourFor}
-                nearDuplicateIds={new Set(variation?.near_duplicate_ids ?? [])}
-                computing={(full?.counts?.imports ?? 0) > 0 && (full?.counts?.embeddings_ready ?? 0) < (full?.counts?.imports ?? 0)}
-                totalImports={full?.counts?.imports ?? images}
-                embeddingsReady={full?.counts?.embeddings_ready ?? 0}
-              />
-            </div>
+            {empty ? (
+              <p className="m-auto text-[13px] text-foreground/55">No images yet.</p>
+            ) : (
+              <div className="mx-auto w-full max-w-[260px]">
+                <VariationPlot
+                  points={variation?.points ?? []}
+                  augmentations={variation?.augmentations ?? []}
+                  colourFor={colourFor}
+                  nearDuplicateIds={new Set(variation?.near_duplicate_ids ?? [])}
+                  onJumpToImport={onJumpToImport}
+                  computing={(full?.counts?.imports ?? 0) > 0 && (full?.counts?.embeddings_ready ?? 0) < (full?.counts?.imports ?? 0)}
+                  totalImports={full?.counts?.imports ?? images}
+                  embeddingsReady={full?.counts?.embeddings_ready ?? 0}
+                />
+              </div>
+            )}
           </Card>
         </div>
       </div>
 
-      {/* Recent - newest images + the activity feed. */}
       <div>
         <SectionHeader action={onOpenDataset ? <HeaderLink onClick={onOpenDataset}>View all →</HeaderLink> : undefined}>Recent</SectionHeader>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
@@ -433,7 +451,7 @@ export function OverviewPanel({
           <div className="lg:col-span-1">
             {projectId && (
               <div className="mb-4">
-                <TrainCard projectId={projectId} />
+                <TrainCard projectId={projectId} refreshSignal={refreshSignal} />
               </div>
             )}
             <Card title="Activity">

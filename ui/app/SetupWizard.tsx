@@ -1,11 +1,6 @@
 "use client";
 
-// First-run setup: HF token -> models download themselves -> ready.
-// Shown by the workspace shell whenever SAM3 isn't usable yet;
-// skippable - manual annotation works with no models at all. There
-// are NO per-model buttons: once a valid token exists the engine
-// auto-downloads and auto-loads everything, this card just shows the
-// passive progress and flips to "All set" when both weights are in.
+// First-run setup: a Hugging Face token, then automatic model downloads.
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
@@ -33,7 +28,7 @@ export function SetupWizard({ onClose }: { onClose: () => void }) {
     try {
       setStatus(await fetchModelsStatus());
     } catch {
-      /* engine restarting - keep the last snapshot */
+      /* engine restarting: the last snapshot stays */
     }
   }, []);
 
@@ -53,10 +48,14 @@ export function SetupWizard({ onClose }: { onClose: () => void }) {
       const res = await setHfToken(token.trim());
       if (res.sam3Access === false) {
         setTokenError(
-          "Token accepted, but it can't access facebook/sam3 yet - open the model page and accept Meta's license, then re-validate.",
+          "Token accepted, but it can't access facebook/sam3 yet. Open the model page, accept Meta's license, then validate again.",
         );
       } else {
-        setTokenOk(`Signed in as ${res.username ?? "you"} - SAM 3 access confirmed.`);
+        setTokenOk(
+          res.username
+            ? `Signed in as ${res.username}. SAM 3 access confirmed.`
+            : "Signed in. SAM 3 access confirmed.",
+        );
       }
       refresh();
     } catch (e) {
@@ -71,9 +70,7 @@ export function SetupWizard({ onClose }: { onClose: () => void }) {
   const allReady = !!s && s.models.sam3.downloaded && s.models.dinov2.downloaded;
 
   return (
-    // Outer layer scrolls; the inner grid centres the card when it fits and
-    // top-aligns it when the window is short (e.g. the 700px Electron
-    // minimum) so no section is clipped off-screen.
+    // Two layers so a short window scrolls instead of clipping the card.
     <div className="pk-backdrop fixed inset-0 z-[500] overflow-y-auto">
       <div className="grid min-h-full place-items-center p-4">
       <div className="pk-glass w-full max-w-xl rounded-lg p-6">
@@ -81,7 +78,7 @@ export function SetupWizard({ onClose }: { onClose: () => void }) {
         <p className="mt-2 text-sm text-foreground/60">
           PixelKit labels images locally with SAM&nbsp;3. The weights download once into your
           workspace{s ? ` (${s.freeDiskGb} GB free)` : ""}. You can skip this and annotate
-          by hand - set it up any time from Settings.
+          by hand, then set it up any time from Settings.
         </p>
 
         {needsToken && (
@@ -135,7 +132,7 @@ export function SetupWizard({ onClose }: { onClose: () => void }) {
               {needsToken ? "2 · " : ""}Model weights
             </h3>
             <p className="mt-1.5 text-[13px] leading-relaxed text-foreground/60">
-              Models are built in and managed automatically - PixelKit downloads and
+              Models are built in and managed automatically. PixelKit downloads and
               loads them itself.
             </p>
             <div className="mt-3 space-y-3">
@@ -158,7 +155,7 @@ export function SetupWizard({ onClose }: { onClose: () => void }) {
             {allReady ? "Close" : "Skip for now"}
           </button>
           {allReady && (
-            <span className="text-sm text-[var(--ok)]">All set - labelling is live.</span>
+            <span className="text-sm text-[var(--ok)]">All set. Labelling is ready.</span>
           )}
         </div>
       </div>

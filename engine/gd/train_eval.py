@@ -1,21 +1,7 @@
-"""Post-training evaluation extras for a detector run (numpy + cv2 only).
+"""Post-training evaluation for a detector run.
 
-Everything here works on the same (preds, gts) lists the AP@0.5 scorer
-uses: preds[i] is an (n, 6) array of x0, y0, x1, y1, score, cls rows for
-image i and gts[i] an (m, 5) array of x0, y0, x1, y1, cls, both in the
-model's letterbox space, with preds kept down to a very low score so a
-threshold can be chosen afterwards.
-
-  match_image          greedy IoU matching of one image at a threshold
-  calibrate_threshold  the confidence threshold that maximises F1 on val
-  class_report         per-class TP/FP/FN, precision, recall at a threshold
-  confusion_matrix     (classes + background) x (classes + background)
-  rank_failures        the val images the model gets most wrong
-  render_failure       an annotated JPEG for one of them
-
-The numbers are computed on the predictions of the EXPORTED int8 model,
-because that is what ships; the float model only serves as a reference.
-"""
+preds[i] is an (n, 6) array of x0, y0, x1, y1, score, cls rows and gts[i]
+an (m, 5) array of x0, y0, x1, y1, cls, both in letterbox space."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -23,12 +9,6 @@ from typing import Callable
 
 import cv2
 import numpy as np
-
-# What a matched box can be. "wrong" is a box the model found at the
-# right place with the wrong class: it counts as a false positive of the
-# predicted class AND a miss of the true class, and lands off-diagonal
-# in the confusion matrix.
-KINDS = ("tp", "wrong", "fp", "fn")
 
 
 def _iou_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -47,17 +27,10 @@ def _iou_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
 def match_image(pred: np.ndarray, gt: np.ndarray, conf: float, iou_thr: float = 0.5
                 ) -> list[tuple[str, int, int]]:
-    """Greedy matching of one image's predictions (score >= conf, best
-    first) to its ground truth.
-
-    Returns (kind, pred_index, gt_index) triples; -1 stands for "none".
-    Two passes, each in score order: first every prediction takes the
-    best-IoU unmatched box of ITS OWN class when one overlaps at
-    >= iou_thr (a "dog" over both a dog and a cat is a correct dog, and
-    a stronger "cat" box on the same dog does not steal it), then the
-    leftovers take the best-IoU unmatched box of any class ("wrong"),
-    and the rest are false positives. Ground truth nobody took is a
-    miss."""
+    """Greedy matching, best score first, of one image's predictions at or
+    above `conf` to its ground truth: same-class matches at `iou_thr` first,
+    then any class ("wrong"). Returns (kind, pred_index, gt_index) triples,
+    -1 for none."""
     pred = np.asarray(pred, dtype=np.float32).reshape(-1, 6)
     gt = np.asarray(gt, dtype=np.float32).reshape(-1, 5)
     keep = np.where(pred[:, 4] >= conf)[0]
@@ -110,7 +83,7 @@ def _counts(preds, gts, conf: float, n_classes: int, iou_thr: float = 0.5):
             pc = int(pred[pi, 5]) if pi >= 0 else -1
             gc = int(gt[gi, 4]) if gi >= 0 else -1
             if not (0 <= pc < n_classes or pc == -1) or not (0 <= gc < n_classes or gc == -1):
-                continue  # a row with a class id outside the dataset: ignore
+                continue  # class id outside the dataset
             if kind == "tp":
                 tp[pc] += 1
                 cm[gc, pc] += 1
@@ -136,20 +109,11 @@ def _prf(tp: float, fp: float, fn: float) -> tuple[float, float, float]:
 
 def calibrate_threshold(preds, gts, n_classes: int, *, lo: float = 0.05, hi: float = 0.95,
                         step: float = 0.02, fallback: float = 0.25) -> dict:
-    """Sweep the confidence threshold and keep the one with the best
-    micro-averaged F1 over the val split (all classes pooled, so a
-    frequent class weighs more, which is what a single decoder
-    threshold on the board experiences). When several thresholds tie
-    for the best F1 (a plateau, which is the normal shape on a small val
-    split) the middle of the plateau is chosen, so on unseen frames a
-    slightly weaker or stronger score does not fall off either edge.
-
-    Returns {"conf", "f1", "precision", "recall", "sweep": [...],
-    "calibrated": bool}. When the model finds nothing at any threshold
-    (F1 0 everywhere) the documented default is returned instead and
-    "calibrated" is False."""
+    """The confidence threshold with the best F1 over all classes pooled, at
+    the middle of a tie. With F1 0 everywhere it returns `fallback` and
+    "calibrated": False."""
     sweep = []
-    exact = []  # unrounded f1 per sweep row, for the argmax
+    exact = []  # unrounded f1, for the argmax
     t = lo
     while t <= hi + 1e-9:
         conf = round(t, 4)
@@ -164,8 +128,7 @@ def calibrate_threshold(preds, gts, n_classes: int, *, lo: float = 0.05, hi: flo
                 "sweep": sweep, "calibrated": False, "fallback": True}
     top = max(exact)
     plateau = [i for i, f in enumerate(exact) if abs(f - top) < 1e-9]
-    # Contiguous run of the best rows that contains the first best row;
-    # its middle is the pick.
+    # The first contiguous run of best rows.
     run = [plateau[0]]
     for i in plateau[1:]:
         if i == run[-1] + 1:
@@ -178,9 +141,8 @@ def calibrate_threshold(preds, gts, n_classes: int, *, lo: float = 0.05, hi: flo
 
 
 def class_report(preds, gts, conf: float, classes: list[str]) -> list[dict]:
-    """Per-class counts at a threshold. `support` is the number of
-    ground-truth boxes; a class with support 0 reports None for recall
-    (it was not measured) and its precision counts pure false alarms."""
+    """Per-class counts at a threshold. `support` is the ground-truth box
+    count; with support 0, recall is None."""
     n = len(classes)
     tp, fp, fn, _cm = _counts(preds, gts, conf, n)
     out = []
@@ -199,18 +161,15 @@ def class_report(preds, gts, conf: float, classes: list[str]) -> list[dict]:
 
 
 def confusion_matrix(preds, gts, conf: float, n_classes: int) -> list[list[int]]:
-    """Rows are the truth, columns the prediction; the last row/column
-    is background (a false positive sits in the background row, a miss
-    in the background column)."""
+    """Rows are truth, columns prediction; the last row and column are
+    background."""
     _tp, _fp, _fn, cm = _counts(preds, gts, conf, n_classes)
     return cm.tolist()
 
 
 def rank_failures(preds, gts, conf: float, limit: int = 24, iou_thr: float = 0.5) -> list[dict]:
-    """The val images with the most errors at a threshold, worst first.
-    Each entry: {"index", "fn", "fp", "wrong", "matches"} where matches
-    are the (kind, pred_index, gt_index) triples for rendering. Images
-    the model got entirely right are not listed."""
+    """Val images with errors at a threshold, worst first, as {"index",
+    "fn", "fp", "wrong", "matches"}."""
     rows = []
     for i, (pred, gt) in enumerate(zip(preds, gts)):
         m = match_image(pred, gt, conf, iou_thr)
@@ -220,14 +179,12 @@ def rank_failures(preds, gts, conf: float, limit: int = 24, iou_thr: float = 0.5
         if n_fn + n_fp + n_wrong == 0:
             continue
         rows.append({"index": i, "fn": n_fn, "fp": n_fp, "wrong": n_wrong, "matches": m})
-    # Misses and misclassifications weigh double: a spurious box is the
-    # cheaper mistake on a device that mostly wants to know something
-    # is there.
+    # Misses and "wrong" matches weigh double.
     rows.sort(key=lambda r: (-(2 * r["fn"] + 2 * r["wrong"] + r["fp"]), -r["fn"], r["index"]))
     return rows[:limit]
 
 
-# Colours (RGB) for the annotated failure images.
+# RGB colours for the failure images.
 _COL_GT = (40, 200, 90)        # ground truth, thin
 _COL_TP = (70, 130, 240)       # correct detection, thin
 _COL_FP = (230, 60, 60)        # spurious detection
@@ -238,10 +195,8 @@ _COL_WRONG = (250, 130, 30)    # right place, wrong class
 def render_failure(img_rgb: np.ndarray, pred: np.ndarray, gt: np.ndarray,
                    matches: list[tuple[str, int, int]], classes: list[str],
                    out_path: Path, view: int = 384) -> dict:
-    """Draw one val image's errors and write a JPEG. `img_rgb` is the
-    letterboxed model input; boxes are in the same space. Returns the
-    items drawn: [{"kind", "class", "score", "box"}] with the box in the
-    letterbox space so the UI can list them next to the picture."""
+    """Draw one val image's errors on its letterboxed input and write a
+    JPEG. Returns the items drawn, boxes in letterbox space."""
     pred = np.asarray(pred, dtype=np.float32).reshape(-1, 6)
     gt = np.asarray(gt, dtype=np.float32).reshape(-1, 5)
     h, w = img_rgb.shape[:2]
@@ -263,7 +218,6 @@ def render_failure(img_rgb: np.ndarray, pred: np.ndarray, gt: np.ndarray,
                         (20, 20, 20), 1, cv2.LINE_AA)
 
     items: list[dict] = []
-    # Ground truth and correct detections first (thin), errors on top.
     for g in gt:
         _rect(g[:4], _COL_GT, 1)
     for kind, pi, gi in matches:
@@ -298,10 +252,9 @@ def render_failure(img_rgb: np.ndarray, pred: np.ndarray, gt: np.ndarray,
 def write_failure_gallery(preds, gts, conf: float, classes: list[str], names: list[str],
                           load_letterboxed: Callable[[int], np.ndarray | None],
                           out_dir: Path, limit: int = 24) -> list[dict]:
-    """rank_failures + render_failure for the worst `limit` val images.
-    `names[i]` labels image i (its filename); `load_letterboxed(i)`
-    returns the letterboxed RGB input for image i (None to skip).
-    Writes <out_dir>/NN_<slug>.jpg and returns the gallery manifest."""
+    """Render the worst `limit` val images to <out_dir>/NN_<stem>.jpg and
+    return the gallery manifest. `load_letterboxed(i)` returns image i's
+    letterboxed RGB, or None to skip it."""
     import re
 
     gallery = []

@@ -1,6 +1,8 @@
-// Generated from lib/words.txt, list of object names used as ambient
-// background fodder during the V2 labels stage. Keep in sync with the
-// .txt file when regenerating.
+// Generated from lib/words.txt: object names shown in the background of the onboarding labels stage.
+// Lines 1 to 837 of words.txt are LVIS v1 category names (https://www.lvisdataset.org;
+// Gupta, Dollar and Girshick, CVPR 2019), licensed under CC BY 4.0
+// (https://creativecommons.org/licenses/by/4.0/), with underscores replaced by spaces,
+// qualifiers in parentheses removed and some names left out. The rest are PixelKit's.
 export const WORDS: readonly string[] = [
   "aerosol can",
   "air conditioner",

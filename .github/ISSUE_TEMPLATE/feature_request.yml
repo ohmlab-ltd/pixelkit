@@ -5,17 +5,17 @@ body:
   - type: textarea
     id: problem
     attributes:
-      label: What are you trying to do?
-      description: The task or workflow, not the button — knowing the goal often reveals a better shape than the first idea.
+      label: What is the task?
+      description: The task or workflow, rather than a specific control.
     validations:
       required: true
   - type: textarea
     id: proposal
     attributes:
-      label: What would you like PixelKit to do?
+      label: What should PixelKit do?
     validations:
       required: true
   - type: input
     id: workaround
     attributes:
-      label: How do you handle it today?
+      label: How is it done today?

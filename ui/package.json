@@ -5,7 +5,6 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
     "lint": "next lint",
     "test": "vitest run --passWithNoTests",
     "test:cov": "vitest run --coverage --passWithNoTests"
@@ -14,13 +13,10 @@
     "@swc/helpers": "^0.5.5",
     "blurhash": "^2.0.5",
     "fflate": "^0.8.3",
-    "msgpackr": "^2.0.1",
     "next": "14.2.35",
     "react": "^18",
     "react-blurhash": "^0.3.0",
-    "react-dom": "^18",
-    "sse.js": "^2.8.0",
-    "zustand": "^4.5.7"
+    "react-dom": "^18"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.9.1",

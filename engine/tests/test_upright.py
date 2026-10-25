@@ -1,8 +1,4 @@
-"""Pictures are read upright wherever their pixels meet a box. Uploads
-keep their original bytes, so a phone photo stored landscape with EXIF
-orientation 6 is shown portrait, and its boxes are portrait coordinates;
-the labelling job, crops, previews and augmentations used to read it
-landscape and put everything in the wrong place."""
+"""Images with EXIF orientation are read upright wherever their pixels meet a box."""
 import io
 import json
 import time

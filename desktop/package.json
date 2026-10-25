@@ -1,7 +1,7 @@
 {
   "name": "pixelkit-desktop",
   "productName": "PixelKit",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "PixelKit desktop shell (Electron wrapper around the local PixelKit engine)",
   "private": true,
   "main": "main.js",
@@ -13,9 +13,9 @@
     "icon": "node -e \"require('sharp')('../ui/public/pixelkit-favicon.svg',{density:512}).resize(1024,1024,{fit:'contain',background:{r:0,g:0,b:0,alpha:0}}).png().toFile('build/icon.png')\""
   },
   "devDependencies": {
-    "electron": "^33.0.0",
-    "electron-builder": "^25.1.8",
-    "sharp": "^0.35.3"
+    "electron": "^43.7.9",
+    "electron-builder": "^26.17.0",
+    "sharp": "^0.35.5"
   },
   "build": {
     "appId": "co.ohmlab.pixelkit",
@@ -42,6 +42,14 @@
         {
           "from": "runtime",
           "to": "runtime"
+        },
+        {
+          "from": "node_modules/electron/dist/LICENSE",
+          "to": "LICENSE.electron.txt"
+        },
+        {
+          "from": "node_modules/electron/dist/LICENSES.chromium.html",
+          "to": "LICENSES.chromium.html"
         }
       ]
     },
@@ -68,12 +76,20 @@
         "to": "engine/gd",
         "filter": [
           "**/*.py",
-          "**/*.mpool"
+          "**/LICENSE"
         ]
       },
       {
         "from": "../engine/requirements-win.txt",
         "to": "engine/requirements-win.txt"
+      },
+      {
+        "from": "../engine/requirements-win-torch-cuda.txt",
+        "to": "engine/requirements-win-torch-cuda.txt"
+      },
+      {
+        "from": "../engine/requirements-win-torch-cpu.txt",
+        "to": "engine/requirements-win-torch-cpu.txt"
       },
       {
         "from": "../engine/import_legacy.py",
@@ -82,6 +98,22 @@
       {
         "from": "../ui/out",
         "to": "ui"
+      },
+      {
+        "from": "../LICENSE",
+        "to": "LICENSE.txt"
+      },
+      {
+        "from": "../NOTICE",
+        "to": "NOTICE.txt"
+      },
+      {
+        "from": "../THIRD-PARTY-NOTICES.md",
+        "to": "THIRD-PARTY-NOTICES.md"
+      },
+      {
+        "from": "../ui/app/fonts/OFL.txt",
+        "to": "licenses/Geist-OFL.txt"
       }
     ]
   }

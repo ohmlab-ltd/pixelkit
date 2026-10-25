@@ -1,31 +1,11 @@
 "use client";
 
-// Floating "back to top" affordance. Appears once the surrounding
-// scroll container has been scrolled past ~400 px and slides off again
-// when the user is near the top.
-//
-// Scroll container discovery: the desktop shell scrolls its panes
-// (content pane / dataset overlay), not the window, so on mount this
-// walks up from its own DOM position to the nearest scrollable
-// ancestor (overflow-y auto/scroll) and listens there. When none is
-// found - e.g. the standalone /guide route where the page itself
-// scrolls - it falls back to the window, preserving the old
-// behaviour.
-//
-// Render this component ONLY from the place that knows it should be
-// visible (e.g. inside the workspace branch in /app/page.tsx) and gate
-// visibility via the parent conditional.
-//
-// Positioning: pinned to the TOP-CENTRE of the viewport (not the
-// bottom-right corner) so it sits where the user's eye lands after
-// scrolling, with a blurred-glass backdrop so it reads clearly over
-// busy gallery content underneath.
+// Floating "Back to top" button. It follows the nearest scrollable ancestor,
+// or the window when there is none.
 
 import { useEffect, useRef, useState } from "react";
 
-// Trigger threshold in px. Set low enough that even a modest amount
-// of scrolling reveals the button, earlier value of 800 meant a
-// short workspace grid never crossed it on common laptop heights.
+// px of scroll before the button shows.
 const THRESHOLD = 400;
 
 function findScrollContainer(from: HTMLElement | null): HTMLElement | null {
@@ -75,8 +55,7 @@ export function ScrollToTop() {
       className="fixed left-1/2 top-14 z-[1100] -translate-x-1/2 inline-flex items-center gap-2 rounded-md border border-foreground/15 px-4 py-2 text-[12px] uppercase tracking-[0.18em] font-mono text-[var(--foreground)] hover:bg-foreground/[0.05] transition-colors"
       style={{
         opacity: show ? 1 : 0,
-        // The shell title bar is 36 px; anchor just below it. Reveal
-        // animation slides DOWN from the chrome's underside.
+        // top-14 clears the 36 px shell title bar.
         transform: `translateX(-50%) translateY(${show ? "0" : "-8px"})`,
         pointerEvents: show ? "auto" : "none",
         transition: "opacity 220ms ease, transform 220ms ease",

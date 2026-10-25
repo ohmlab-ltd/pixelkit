@@ -19,8 +19,7 @@ describe("canvasToPolygons", () => {
     // Pixels 10..19 painted: the extent is [10, 20) on both axes.
     let polys = canvasToPolygons(canvas(40, 40, (x, y) => (x >= 10 && x < 20 && y >= 10 && y < 20 ? 255 : 0)));
     expect(bbox(polys)).toEqual([10, 10, 20, 20]);
-    // Re-opening fills the saved polygon (exact coverage for this square);
-    // saving again must give the same outline, not one a pixel larger.
+    // Each re-open and save must keep the outline, not grow it by a pixel.
     const cover = (px: number, lo: number, hi: number) => Math.max(0, Math.min(px + 1, hi) - Math.max(px, lo));
     for (let i = 0; i < 3; i++) {
       const [x0, y0, x1, y1] = bbox(polys);

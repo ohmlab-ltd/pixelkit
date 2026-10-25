@@ -1,24 +1,17 @@
-"""Import SaaS-era PixelKit data into a portable workspace.
+"""Import a PixelKit server backup into a workspace.
 
-Converts the old backend layout -
+Input, a folder or a backup zip that contains it:
 
     <src>/containers/<id>/project.json
     <src>/projects/<uuid>/manifest.json
-    <src>/projects/<uuid>/imports/            (original images, V2)
+    <src>/projects/<uuid>/imports/            original images
     <src>/projects/<uuid>/references|augmentations|image_embeddings/
-
-- into the workspace schema (per-project folders, dataset.json +
-annotations/ split, originals under images/). Also accepts the nightly
-backup zips (which contain a projects/ tree).
 
 Usage:
     python import_legacy.py <src-dir-or-backup.zip> [--workspace <dir>]
 
-Notes:
-  - dataset/container ids are preserved, so derived-dataset links and
-    container membership survive.
-  - V1 datasets whose image bytes lived only in R2 can't be pulled from
-    here - copy those images into <src>/projects/<id>/images/ first.
+Dataset and project ids are kept. Images missing from <src> must first be
+copied into <src>/projects/<id>/images/.
 """
 from __future__ import annotations
 
@@ -57,14 +50,23 @@ def run(src: Path, workspace_override: str | None = None) -> None:
         tmp = tempfile.TemporaryDirectory(prefix="pixelkit-import-")
         print(f"extracting {src.name} ...")
         with zipfile.ZipFile(src) as zf:
+            # Refused when it would not fit with 1 GB to spare; zipfile stops
+            # each member at its declared size.
+            need = sum(i.file_size for i in zf.infolist())
+            free = shutil.disk_usage(tmp.name).free
+            if need > free - (1 << 30):
+                tmp.cleanup()
+                raise SystemExit(f"{src.name} unpacks to {need >> 20} MB and {free >> 20} MB is free")
             zf.extractall(tmp.name)
         src = Path(tmp.name)
 
     containers_dir = src / "containers"
     projects_dir = src / "projects"
+    project_dirs: list[Path] | None = None
     if not projects_dir.is_dir() and (src / "manifest.json").is_file():
-        # src pointed straight at a single old project folder
+        # src is one project folder: import it alone, not its siblings.
         projects_dir = src.parent
+        project_dirs = [src]
     if not projects_dir.is_dir() and not containers_dir.is_dir():
         raise SystemExit(f"no projects/ or containers/ under {src}")
 
@@ -86,7 +88,7 @@ def run(src: Path, workspace_override: str | None = None) -> None:
 
     n_datasets = 0
     if projects_dir.is_dir():
-        for d in sorted(projects_dir.iterdir()):
+        for d in project_dirs if project_dirs is not None else sorted(projects_dir.iterdir()):
             mj = d / "manifest.json"
             if not d.is_dir() or not mj.is_file():
                 continue
@@ -94,29 +96,24 @@ def run(src: Path, workspace_override: str | None = None) -> None:
             if not m:
                 continue
             pid = str(m.get("id") or d.name)
-            # Identity lives in the JSON: an id-less legacy manifest
-            # would save fine but be dropped by the next index scan
-            # (invisible dataset). Stamp the fallback id in.
+            # The index scan skips a dataset.json without an id.
             m["id"] = pid
             if store.dataset_exists(pid):
                 print(f"  = dataset {m.get('name')!r} already present, skipping")
                 continue
             container_id = str(m.get("container_id") or "") or None
             ddir = store.create_dataset_dir(pid, m.get("name") or pid, container_id)
-            # originals: V2 kept them in imports/; a few layouts used images/
+            # Originals are in imports/ or images/.
             for src_name in ("imports", "images"):
                 sdir = d / src_name
                 if sdir.is_dir():
                     for f in sdir.iterdir():
                         if f.is_file():
                             shutil.copy2(f, ddir / "images" / f.name)
-            for extra in ("references", "augmentations", "augment_overlays",
-                          "augment_backgrounds", "image_embeddings", "outputs"):
+            for extra in ("references", "augmentations", "augment_backgrounds", "image_embeddings"):
                 sdir = d / extra
                 if sdir.is_dir():
                     shutil.copytree(sdir, ddir / extra, dirs_exist_ok=True)
-            # store.save() decomposes the manifest into dataset.json +
-            # per-image annotations/ automatically.
             store.save(pid, m)
             n_imgs = sum(1 for _ in (ddir / "images").iterdir())
             n_datasets += 1
@@ -129,7 +126,7 @@ def run(src: Path, workspace_override: str | None = None) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("src", help="old backend dir (containing projects/ / containers/) or backup zip")
+    ap.add_argument("src", help="backup folder, with projects/ or containers/, or backup zip")
     ap.add_argument("--workspace", help="target workspace (default: the configured one)")
     args = ap.parse_args()
     run(Path(args.src).expanduser(), args.workspace)

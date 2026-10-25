@@ -1,34 +1,19 @@
-"""Filesystem dataset store - the portable build's database.
+"""Filesystem dataset store.
 
-On-disk layout (all under <workspace>/projects/):
+Layout under <workspace>/projects/:
 
-    <project-slug>/                 # a Project (container of datasets)
-        project.json                # container metadata
-        <dataset-slug>/             # one folder per dataset
-            dataset.json            # metadata + labels + per-image index
-            images/                 # original images, nothing else
-            annotations/            # one JSON per image: boxes/masks/labels
-            outputs/ references/ augmentations/ thumbs/ ...
-    <dataset-slug>/                 # dataset not (yet) in a project
-        dataset.json
-        ...
+    <project-slug>/                 # a project
+        project.json
+        <dataset-slug>/             # a dataset
+            dataset.json            # metadata, labels, per-image index
+            images/                 # original images
+            annotations/            # one JSON per image
+            references/ augmentations/ thumbs/
+    <dataset-slug>/                 # a dataset in no project, same layout
 
-The SaaS build kept one giant manifest.json per dataset holding every box of
-every image. Here that splits into:
-  - dataset.json  - everything EXCEPT per-image geometry. Each record in
-    manifest["imports"] keeps its metadata (filename, dims, blurhash,
-    labelled flags, ...) but loses the heavy keys.
-  - annotations/<import_id>.json - the geometry: {detections, editedBoxes,
-    timings} exactly as they sat in the import record.
-
-load() recomposes the exact in-memory manifest shape the rest of the engine
-expects, so 20k lines of callers don't change. save() decomposes, writing
-only annotation files whose content actually changed (digest cache) -
-labelling jobs save after every image, so a full rewrite of N files per save
-would be O(N^2) over a job.
-
-Folder names are cosmetic slugs; identity lives in the JSON ("id" field).
-An in-process index (id -> Path) is built by scanning at first use.
+load() joins dataset.json and annotations/ into one manifest; save() splits it
+and writes only changed annotation files. Folder names are slugs; the "id"
+field is the identity.
 """
 from __future__ import annotations
 
@@ -51,7 +36,7 @@ try:
 
     def _loads(data: bytes):
         return orjson.loads(data)
-except Exception:  # pragma: no cover - orjson is a hard dep, but stay safe
+except Exception:  # pragma: no cover
     def _dumps(obj) -> bytes:
         return json.dumps(obj, sort_keys=True, indent=2).encode("utf-8")
 
@@ -60,8 +45,7 @@ except Exception:  # pragma: no cover - orjson is a hard dep, but stay safe
 
 import workspace
 
-# Per-import keys that move into annotations/<id>.json. Everything else in an
-# import record is index metadata and stays in dataset.json.
+# Import-record keys stored in annotations/<id>.json; the rest stay in dataset.json.
 ANNOTATION_KEYS = ("detections", "editedBoxes", "timings")
 
 _LOCK = threading.RLock()
@@ -70,9 +54,12 @@ _DATASETS: dict[str, Path] = {}
 _CONTAINERS: dict[str, Path] = {}
 # pid -> {import_id -> digest of last-written annotation payload}
 _ANN_DIGESTS: dict[str, dict[str, bytes]] = {}
+# Bumped as each save() starts and ends; a load() keeps the digests it read
+# only when no save overlapped it.
+_SAVE_GEN: dict[str, int] = {}
 
 
-# ---------------------------------------------------------------- slugs
+# Slugs
 
 def slugify(name: str) -> str:
     s = unicodedata.normalize("NFKD", str(name or "")).encode("ascii", "ignore").decode()
@@ -94,16 +81,12 @@ def _safe_id(raw: str) -> str:
 
 
 def tmp_path(path: Path) -> Path:
-    """A temp file beside `path`, unique to this write. A pid-only name
-    was shared by every thread of the process, so two writers of one
-    file collided (and failed with WinError 32 on Windows)."""
+    """A temp file beside `path`, unique to this write."""
     return path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
 
 
 def replace(src: Path, dst: Path, attempts: int = 20) -> None:
-    """os.replace that rides out Windows sharing violations: replacing a
-    file another thread is reading or replacing fails with PermissionError
-    for a moment. The temp file is removed if it never lands."""
+    """os.replace, retried on Windows sharing violations."""
     for i in range(attempts):
         try:
             os.replace(src, dst)
@@ -115,6 +98,19 @@ def replace(src: Path, dst: Path, attempts: int = 20) -> None:
             time.sleep(0.01 * (i + 1))
 
 
+def read_bytes(path: Path, attempts: int = 20) -> bytes:
+    """Path.read_bytes, retried on Windows sharing violations: a concurrent
+    replace() of the same file briefly refuses readers."""
+    for i in range(attempts):
+        try:
+            return path.read_bytes()
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(0.01 * (i + 1))
+    raise AssertionError("unreachable")
+
+
 def _atomic_write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = tmp_path(path)
@@ -122,11 +118,11 @@ def _atomic_write(path: Path, data: bytes) -> None:
     replace(tmp, path)
 
 
-# ---------------------------------------------------------------- scanning
+# Scanning
 
 def _read_id(path: Path) -> str | None:
     try:
-        return str(_loads(path.read_bytes()).get("id") or "") or None
+        return str(_loads(read_bytes(path)).get("id") or "") or None
     except Exception:
         return None
 
@@ -170,15 +166,14 @@ def rescan() -> None:
 
 
 def forget(pid: str) -> None:
-    """Drop the annotation digests for one dataset. Callers that swap
-    annotation files on disk behind save()'s back (snapshot restore)
-    must call this, or save()'s unchanged-content skip will trust
-    stale digests and leave the swapped files unwritten."""
+    """Drop a dataset's annotation digests. Call it after replacing its
+    annotation files on disk, or save() skips rewriting them."""
     with _LOCK:
         _ANN_DIGESTS.pop(pid, None)
+        _SAVE_GEN[pid] = _SAVE_GEN.get(pid, 0) + 1
 
 
-# ---------------------------------------------------------------- datasets
+# Datasets
 
 def dataset_exists(pid: str) -> bool:
     _ensure_scanned()
@@ -215,8 +210,7 @@ def create_dataset_dir(pid: str, name: str, container_id: str | None = None) -> 
 
 
 def reserve_dataset_dir(pid: str, name: str, container_id: str | None = None) -> Path:
-    """Register a dataset folder path WITHOUT creating it - for flows like
-    duplicate that need shutil.copytree (dst must not pre-exist)."""
+    """Register a dataset folder path without creating it, for shutil.copytree."""
     _ensure_scanned()
     with _LOCK:
         if pid in _DATASETS:
@@ -237,10 +231,8 @@ def delete_dataset(pid: str) -> None:
 
 
 def _relocate(path: Path, parent: Path) -> Path:
-    """Move a dataset folder under `parent` with a plain rename, or leave it
-    where it is and return its current path. shutil.move fell back to copy
-    then delete when a file inside was open (Windows), deleted part of the
-    source and then failed, losing that dataset's labels and images."""
+    """Rename a dataset folder under `parent`, or leave it and return its path.
+    Not shutil.move: its copy fallback can delete part of the source and fail."""
     target = _unique_child(parent, path.name)
     try:
         os.rename(path, target)
@@ -251,9 +243,8 @@ def _relocate(path: Path, parent: Path) -> Path:
 
 
 def move_dataset(pid: str, container_id: str | None) -> Path:
-    """Physically move a dataset folder into (or out of) a project folder.
-    Folder location is cosmetic - the logical link stays in the JSONs - so
-    a move that cannot happen leaves the folder where it is."""
+    """Move a dataset folder into or out of a project folder.
+    Membership is in the JSON, so a failed move leaves the folder where it is."""
     _ensure_scanned()
     with _LOCK:
         d = dataset_dir(pid)
@@ -264,29 +255,14 @@ def move_dataset(pid: str, container_id: str | None) -> Path:
         return _DATASETS[pid]
 
 
-def rename_dataset_dir(pid: str, new_name: str) -> Path:
-    """Best-effort folder rename to track a dataset rename."""
-    _ensure_scanned()
-    with _LOCK:
-        d = dataset_dir(pid)
-        target = _unique_child(d.parent, slugify(new_name))
-        try:
-            d.rename(target)
-        except OSError:
-            return d
-        _DATASETS[pid] = target
-        return target
-
-
-# ---------------------------------------------------------------- manifests
+# Manifests
 
 def _annotations_dir(d: Path) -> Path:
     return d / "annotations"
 
 
 def manifest_stamp(pid: str) -> float:
-    """Change stamp for cache invalidation: dataset.json mtime (save()
-    always rewrites dataset.json, so any change bumps it)."""
+    """dataset.json mtime, which every save() changes."""
     try:
         return (dataset_dir(pid) / "dataset.json").stat().st_mtime
     except (KeyError, OSError):
@@ -298,11 +274,15 @@ def load(pid: str) -> dict | None:
         d = dataset_dir(pid)
     except KeyError:
         return None
+    with _LOCK:
+        gen = _SAVE_GEN.get(pid, 0)
     dj = d / "dataset.json"
     try:
-        manifest = _loads(dj.read_bytes())
+        raw = read_bytes(dj)
     except FileNotFoundError:
         return None
+    try:
+        manifest = _loads(raw)
     except Exception:
         return None
     ann_dir = _annotations_dir(d)
@@ -310,15 +290,17 @@ def load(pid: str) -> dict | None:
     imports = manifest.get("imports")
     if isinstance(imports, list):
         for imp in imports:
+            if not isinstance(imp, dict):
+                continue
             iid = str(imp.get("id") or "")
             if not iid:
                 continue
             path = ann_dir / f"{_safe_id(iid)}.json"
+            # Any other read error propagates: an image loaded without its
+            # annotations could be saved back without them.
             try:
-                raw = path.read_bytes()
+                raw = read_bytes(path)
             except FileNotFoundError:
-                continue
-            except OSError:
                 continue
             try:
                 ann = _loads(raw)
@@ -329,20 +311,27 @@ def load(pid: str) -> dict | None:
                     imp[key] = ann[key]
             digests[iid] = hashlib.blake2b(_dumps(ann), digest_size=16).digest()
     with _LOCK:
-        _ANN_DIGESTS[pid] = digests
-    # One-way upgrade: the V1 dataset view is gone, every dataset renders
-    # through the V2 path. Ancient SaaS-era manifests (and hand-rolled
-    # folders) get the flag in memory here and on disk at next save.
+        if _SAVE_GEN.get(pid, 0) == gen:
+            _ANN_DIGESTS[pid] = digests
+    # Every dataset uses the V2 view; the flag reaches disk at the next save.
     manifest["v2"] = True
     return manifest
 
 
 def save(pid: str, manifest: dict) -> None:
-    d = dataset_dir(pid)  # KeyError for unknown ids - callers create first
+    d = dataset_dir(pid)  # KeyError for an unknown id
     ann_dir = _annotations_dir(d)
     with _LOCK:
+        _SAVE_GEN[pid] = _SAVE_GEN.get(pid, 0) + 1
         digests = _ANN_DIGESTS.setdefault(pid, {})
+    try:
+        _save_files(d, ann_dir, manifest, digests)
+    finally:
+        with _LOCK:
+            _SAVE_GEN[pid] = _SAVE_GEN.get(pid, 0) + 1
 
+
+def _save_files(d: Path, ann_dir: Path, manifest: dict, digests: dict[str, bytes]) -> None:
     slim = dict(manifest)
     imports = manifest.get("imports")
     live_files: set[str] = set()
@@ -364,12 +353,10 @@ def save(pid: str, manifest: dict) -> None:
                 if digests.get(iid) != digest:
                     _atomic_write(ann_dir / f"{_safe_id(iid)}.json", payload)
                     digests[iid] = digest
-            elif iid in digests:
-                # geometry got dropped from the record - remove the file
+            elif iid in digests or (ann_dir / f"{_safe_id(iid)}.json").exists():
                 (ann_dir / f"{_safe_id(iid)}.json").unlink(missing_ok=True)
                 digests.pop(iid, None)
         slim["imports"] = slim_imports
-        # imports removed from the dataset take their annotation files along
         if ann_dir.is_dir():
             for f in ann_dir.iterdir():
                 if f.suffix == ".json" and f.name not in live_files:
@@ -378,7 +365,7 @@ def save(pid: str, manifest: dict) -> None:
     _atomic_write(d / "dataset.json", _dumps(slim))
 
 
-# ---------------------------------------------------------------- containers
+# Containers
 
 def container_exists(cid: str) -> bool:
     _ensure_scanned()
@@ -417,9 +404,7 @@ def create_container_dir(cid: str, name: str) -> Path:
 
 
 def delete_container_dir(cid: str) -> None:
-    """Delete a container folder. Datasets inside move up to unfiled first -
-    deleting a project must not silently destroy its datasets (the caller
-    deletes datasets explicitly when that's intended)."""
+    """Delete a container folder after moving its datasets out to the top level."""
     _ensure_scanned()
     with _LOCK:
         d = _CONTAINERS.get(cid)
@@ -433,7 +418,6 @@ def delete_container_dir(cid: str) -> None:
                 if _DATASETS[pid] == path:
                     stuck.append(path.name)
         if stuck:
-            # Deleting the folder now would delete these datasets with it.
             raise OSError(f"could not move {', '.join(stuck)} out of the project folder "
                           "(a file inside is in use)")
         _CONTAINERS.pop(cid, None)

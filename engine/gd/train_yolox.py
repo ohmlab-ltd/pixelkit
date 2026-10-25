@@ -1,57 +1,9 @@
-"""YOLOX training + int8 ONNX export for the Neuro N6.
+"""YOLOX training and int8 ONNX export for the Neuro N6.
 
-Everything runs locally against one PixelKit dataset:
-
-    run = train(project_id, TrainConfig(...), progress=cb, cancel=ev)
-
-  1. Builds YOLOX-Nano or YOLOX-Tiny (vendor/yolox, Apache-2.0) with
-     the dataset's class count; warm-starts from Megvii's COCO
-     checkpoint (downloaded once into <workspace>/weights/yolox/) or
-     from a previous PixelKit run (cfg.init_run).
-  2. Trains on the dataset's labelled images plus its generated
-     augmentations (which follow their parent image's split, so no
-     synthetic copy of a val image is ever trained on). The split is
-     stratified per class (every class with two or more images gets a
-     val example) or, with cfg.eval_project, a whole second dataset is
-     the held-out set. Light augmentation (hflip + HSV + scale jitter),
-     SGD + cosine schedule, AMP on CUDA, batch sized from free VRAM and
-     halved on an out-of-memory error. A checkpoint is written every
-     epoch so an interrupted run resumes (cfg.resume_run).
-  3. Evaluates VOC-style AP@0.5 per class on the val split (no
-     pycocotools dependency) and records a per-epoch history.
-  4. Exports a float ONNX reference (raw head), then fine-tunes for
-     qat_epochs with int8 simulated throughout the graph
-     (vendor/yolox/qat.py) and exports the QDQ int8 ONNX straight from
-     that model (qat_epochs=0 falls back to percentile PTQ). Both are
-     re-scored on the val split so report.json states the float->int8
-     delta honestly. On the int8 predictions it then calibrates the
-     confidence threshold (best F1 on val), writes per-class
-     precision/recall at that threshold, a confusion matrix and a
-     gallery of the worst val images (train_eval.py).
-  5. Compiles the int8 export with ST Edge AI when it is installed
-     (neuron6_verify.py) and writes the Neuro N6 bundle: model +
-     labels.h + a complete sketch + report.json, and export.zip holding
-     them as a sketch folder, under
-     <dataset>/models/<yolox_nano|yolox_tiny>/<run>/.
-
-INPUT CONTRACT (Neuro N6 platform contract, not a model choice). The
-DCMIPP DMAs packed interleaved RGB888 straight into the model's input
-buffer, and stedgeai is told `--input-data-type uint8
---inputs-ch-position chlast`. That re-encoding is only correct when the
-graph input is quantised ASYMMETRICALLY over [0,1]: scale 1/255,
-zero-point -128 (int8) == uint8 zero-point 0. So the network is trained
-on [0,1] tensors (RGB, letterboxed with 114/255 gray), the QAT graph
-pins its input fake-quant to exactly those parameters, and
-_verify_input_contract() checks the written file and refuses a model
-whose calibrated input range is not a sub-range of [0,1] - that failure
-is silent on device, and stedgeai rejects an unquantised input outright.
-
-OUTPUT: raw head rows, decoded on the M55 (see yolox_pp.c), because
-YOLOX's in-graph decode exports dynamic-shape ops (ScatterND/Expand/
-Where) that ST Edge AI cannot shape-infer. Rows are
-[dx, dy, dw, dh, obj, cls...] with obj/cls already sigmoided and the
-box terms in grid units.
-"""
+Input contract: int8, scale 1/255, zero-point -128, so the board's uint8
+RGB888 reads as [0,1] RGB, letterboxed with 114/255 gray. Output: raw head
+rows dx, dy, dw, dh, obj and one cls per class; obj and cls are sigmoided,
+the box terms in grid units."""
 from __future__ import annotations
 
 import gc
@@ -65,6 +17,7 @@ import re
 import textwrap
 import threading
 import time
+import unicodedata
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import urllib.request
@@ -77,6 +30,7 @@ import cv2
 import numpy as np
 import torch
 
+import aug_source
 import store
 import workspace
 from vendor.yolox import YOLOX, YOLOPAFPN, YOLOXHead, postprocess
@@ -85,29 +39,26 @@ from vendor.yolox.qat import ActFQ, set_qat
 
 _RELEASE = "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/"
 
-# The two sizes that fit the board comfortably. Nano is the depthwise
-# 0.9 M-parameter network (923 kB of int8 weights on VOC); Tiny is the
-# standard-conv 5 M-parameter one (about 5 MB of weights, 4x the MACs)
-# for datasets where Nano's accuracy is not enough. Both share the
-# stride-2 conv stem, the raw head and the whole export path.
+# Nano has 0.9 M parameters, Tiny 5 M and about 5x the MACs. sha256 is that of the
+# release file at `url`.
 MODEL_SPECS: dict[str, dict] = {
     "nano": {"label": "YOLOX-Nano", "width": 0.25, "depth": 0.33, "depthwise": True,
              "dir": "yolox_nano", "file": "yolox_nano.pth", "url": _RELEASE + "yolox_nano.pth",
+             "sha256": "cd28f55fbbc1829f99d9ac9b38a16d259a22889739c8728ea877610201feff7b",
              "mb_per_image": 70.0},
     "tiny": {"label": "YOLOX-Tiny", "width": 0.375, "depth": 0.33, "depthwise": False,
              "dir": "yolox_tiny", "file": "yolox_tiny.pth", "url": _RELEASE + "yolox_tiny.pth",
+             "sha256": "9de513de589ac98bb92d3bca53b5af7b9acfa9b0bacb831f7999d0f7afaee8f0",
              "mb_per_image": 150.0},
 }
 MODEL_DIRS = tuple(spec["dir"] for spec in MODEL_SPECS.values())
 RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
-# The first Neuro N6 core with PostProcess_PixelKitYOLOX and the version
-# macro the exported sketch checks.
+# First Neuro N6 core with PostProcess_PixelKitYOLOX; the exported sketch checks it.
 CORE_MIN = (0, 1, 3)
-PRETRAINED_URL = MODEL_SPECS["nano"]["url"]  # back-compat name
 
 
 def _split_for(name: str, train_split: float) -> str:
-    """The exporters' hash split (server._split_for), used when
+    """The exporters' hash split, as server._split_for; used when
     stratification is off."""
     if train_split >= 0.999:
         return "train"
@@ -118,54 +69,39 @@ def _split_for(name: str, train_split: float) -> str:
 @dataclass
 class TrainConfig:
     epochs: int = 50
-    imgsz: int = 256           # square input, matches the dataset input-shape setting
-    batch: int = 0             # 0 = sized from free VRAM (_auto_batch)
-    lr: float = 0.01           # scaled by batch/64 like upstream
+    imgsz: int = 256           # square input side, px
+    batch: int = 0             # 0 = sized from free VRAM
+    lr: float = 0.01           # scaled by batch/64
     train_split: float = 0.8
     device: str = "cuda"
     pretrained: bool = True
     size: str = "nano"         # MODEL_SPECS key
-    # None = calibrate on the val split (the threshold with the best F1
-    # on the int8 model's predictions); a number pins it.
+    # None = the threshold with the best F1 on the int8 val predictions.
     conf_thres: float | None = None
     nms_thres: float = 0.45
-    # Quantisation-aware fine-tuning after the float run. Measured on
-    # VOC2007: post-training quantisation of this depthwise backbone
-    # loses 8-17 AP@0.5 points whatever the calibration (per-tensor
-    # activation ranges are outlier-dominated; weights quantise for
-    # free), so the network is fine-tuned with int8 simulated in the
-    # graph and exported straight from that. 0 = PTQ only.
+    # Quantisation-aware fine-tuning epochs after the float run. 0 = PTQ only.
     qat_epochs: int = 8
-    # PTQ fallback (qat_epochs=0): percentile calibration on natural
-    # images was the best of the calibrators tried (MinMax -17, moving
-    # average -11, percentile 99.9 on 200 images -8 points).
+    # PTQ calibration, used when qat_epochs is 0.
     calib_images: int = 200
     calib_percentile: float = 99.9
     seed: int = 0
     warmup_epochs: int = 3
-    # Compile the int8 export with ST Edge AI when it is installed and
-    # record epochs / weights / pool headroom in report.json. When the
-    # compiler is present and rejects the model, the export is refused.
+    # Compile with ST Edge AI when installed; a model it rejects is not exported.
     verify_neuron6: bool = True
-    # Train on the dataset's generated augmentations too (train split
-    # parents only).
+    # Also train on generated augmentations of train-split images.
     use_augmentations: bool = True
-    # Per-class stratified split (off = the exporters' hash split).
+    # Per-class split; off = the exporters' hash split.
     stratify: bool = True
-    # Warm start from a previous run of this dataset (run id) instead of
-    # the COCO checkpoint.
+    # Run id to warm-start from instead of the COCO checkpoint.
     init_run: str | None = None
-    # A second dataset (id) that is the held-out set: everything in this
-    # dataset trains, everything labelled in that one scores. Its labels
-    # are matched to this dataset's by name.
+    # Held-out dataset id: all of this one trains. Labels match by name.
     eval_project: str | None = None
-    # Continue an interrupted run (run id): its checkpoint restores the
-    # weights, optimiser, history and the run's own settings.
+    # Run id to resume: weights, optimiser, history and settings.
     resume_run: str | None = None
     checkpoint_every: int = 1
-    # How many of the worst val images to render into the gallery.
+    # Worst val images rendered into the gallery.
     failure_limit: int = 24
-    # Fixed run id (tests); None = timestamp.
+    # None = timestamp.
     run_id: str | None = None
 
 
@@ -185,9 +121,8 @@ class Sample:
 
 
 def _box_xyxy(b: dict) -> tuple[float, float, float, float] | None:
-    """Mirror of the export builders' reader: flat x0..y1 keys
-    (editedBoxes), a `box` list (V2 auto detections - the resolver's
-    canonical output), or a legacy `box_xyxy` list."""
+    """A box from flat x0..y1 keys, a `box_xyxy` list or a `box` list, as the
+    export builders read it."""
     try:
         if all(k in b for k in ("x0", "y0", "x1", "y1")):
             x0, y0, x1, y1 = float(b["x0"]), float(b["y0"]), float(b["x1"]), float(b["y1"])
@@ -214,17 +149,29 @@ def _box_label(b: dict) -> str:
     return ""
 
 
-def _import_boxes(imp: dict, cls_idx: dict[str, int]) -> tuple[list, list]:
-    boxes_src = imp.get("editedBoxes") if imp.get("editedBoxesSet") else (
-        imp.get("editedBoxes") or imp.get("detections")
-    )
+def _import_boxes(imp: dict, cls_idx: dict[str, int], ignored: Counter | None = None
+                  ) -> tuple[list, list]:
+    """An import's boxes as the exports read them (server._image_index): its
+    edited boxes once edited, else the detections the labeller did not
+    reject. Boxes whose label is not a class are counted in `ignored`."""
+    edited = imp.get("editedBoxes")
+    if isinstance(edited, list) and (edited or imp.get("editedBoxesSet")):
+        boxes_src = edited
+    else:
+        dets = imp.get("detections")
+        boxes_src = ([d for d in dets if isinstance(d, dict) and not d.get("rejected")]
+                     if isinstance(dets, list) else [])
     boxes, cls = [], []
-    for b in boxes_src or []:
+    for b in boxes_src:
         if not isinstance(b, dict):
             continue
         rect = _box_xyxy(b)
+        if rect is None:
+            continue
         label = _box_label(b)
-        if rect is None or label not in cls_idx:
+        if label not in cls_idx:
+            if label and ignored is not None:
+                ignored[label] += 1
             continue
         boxes.append(rect)
         cls.append(cls_idx[label])
@@ -244,12 +191,10 @@ def _dataset_classes(m: dict) -> list[str]:
     return out
 
 
-def _originals(project_id: str, m: dict, cls_idx: dict[str, int], source: str = "original"
-               ) -> tuple[list[Sample], int]:
-    """Labelled originals of one dataset in manifest order, with the
-    images marked background as samples without boxes (negatives: the
-    model learns to find nothing there). Returns (samples, number of
-    other imports with no usable label)."""
+def _originals(project_id: str, m: dict, cls_idx: dict[str, int], source: str = "original",
+               ignored: Counter | None = None) -> tuple[list[Sample], int]:
+    """Labelled and background images of one dataset in manifest order.
+    Returns (samples, count of other imports with no usable label)."""
     ds_dir = store.dataset_dir(project_id)
     samples: list[Sample] = []
     unlabelled = 0
@@ -259,7 +204,7 @@ def _originals(project_id: str, m: dict, cls_idx: dict[str, int], source: str = 
         fname = imp.get("filename")
         if not fname:
             continue
-        boxes, cls = _import_boxes(imp, cls_idx)
+        boxes, cls = _import_boxes(imp, cls_idx, ignored)
         if not boxes and not imp.get("background"):
             unlabelled += 1
             continue
@@ -281,16 +226,16 @@ def _originals(project_id: str, m: dict, cls_idx: dict[str, int], source: str = 
 
 
 def _augmented(project_id: str, m: dict, parents: dict[str, Sample], cls_idx: dict[str, int]
-               ) -> list[Sample]:
-    """Generated copies under <dataset>/augmentations/<import_id>/ with
-    their transformed boxes (the layout server._iter_augmentations
-    reads for exports). Each copy inherits its parent's split; copies
-    of val parents are dropped, never scored. A copy that lost every
-    box is dropped too, unless its parent is a background image."""
+               ) -> tuple[list[Sample], int]:
+    """Generated copies of train-split images under
+    <dataset>/augmentations/<import_id>/, and the number of images whose
+    copies are out of date and left out. A copy that lost every box is
+    dropped unless its parent is a background image."""
     root = store.dataset_dir(project_id) / "augmentations"
     if not root.is_dir():
-        return []
+        return [], 0
     out: list[Sample] = []
+    stale = 0
     for imp in m.get("imports") or []:
         if not isinstance(imp, dict):
             continue
@@ -311,6 +256,9 @@ def _augmented(project_id: str, m: dict, parents: dict[str, Sample], cls_idx: di
         try:
             data = json.loads(anno_path.read_text("utf-8"))
         except (OSError, ValueError):
+            continue
+        if not aug_source.is_current(data, imp):
+            stale += 1
             continue
         try:
             cw, ch = int(data.get("width") or 0), int(data.get("height") or 0)
@@ -349,23 +297,14 @@ def _augmented(project_id: str, m: dict, parents: dict[str, Sample], cls_idx: di
                 parent=parent,
                 import_id=str(import_id),
             ))
-    return out
+    return out, stale
 
 
 def stratified_split(samples: list[Sample], train_split: float, seed: int = 0) -> None:
-    """Assign train/val per class rather than per image.
+    """Assign train/val per class rather than per image, repeatably for a seed.
 
-    Every class with two or more images gets at least one val image
-    and keeps at least one train image; the val share of each class is
-    round(n * (1 - train_split)). Images are visited rarest-class first
-    in a hash order keyed on filename and seed, so the result does not
-    depend on upload order and repeats exactly for the same dataset.
-    The one exception: an image that also carries a class with a single
-    image stays in train (learning that class beats measuring another),
-    so a class whose every image shares a picture with such a singleton
-    can end up unmeasured; the pre-flight check says so. Background
-    images (no boxes) are split as a class of their own, so val also
-    measures what the model finds where there is nothing."""
+    A class with n >= 2 images gets round(n * (1 - train_split)) val images,
+    at least one, and keeps one in train. Background images are a class."""
     if not samples:
         return
     if train_split >= 0.999:
@@ -393,8 +332,7 @@ def stratified_split(samples: list[Sample], train_split: float, seed: int = 0) -
     for i in order:
         cs = img_classes[i]
         need = any(val_count[c] < want[c] for c in cs)
-        # Never let a class lose its last train image to another class's
-        # val quota.
+        # A class never loses its last train image to another class's quota.
         room = all(val_count[c] < total[c] - 1 for c in cs)
         if cs and need and room:
             samples[i].split = "val"
@@ -404,12 +342,23 @@ def stratified_split(samples: list[Sample], train_split: float, seed: int = 0) -
             samples[i].split = "train"
 
 
+def _restore_split(samples: list[Sample], saved: dict) -> tuple[int, int]:
+    """Give each image the split it had when the run started; an image added
+    since trains. Returns (images added, images gone) since then."""
+    val = {str(n) for n in saved.get("val") or []}
+    known = val | {str(n) for n in saved.get("train") or []}
+    for s in samples:
+        s.split = "val" if s.name in val else "train"
+    names = {s.name for s in samples}
+    return len(names - known), len(known - names)
+
+
 def load_samples(project_id: str, train_split: float, *, use_augmentations: bool = True,
-                 stratify: bool = True, seed: int = 0, eval_project: str | None = None
-                 ) -> tuple[list[Sample], list[str], dict]:
-    """Labelled images + the class list (dataset tag order) + a summary
-    dict: {"originals", "augmented", "unlabelled", "background", "evalImages",
-    "evalMissingClasses", "evalIgnoredLabels"}."""
+                 stratify: bool = True, seed: int = 0, eval_project: str | None = None,
+                 saved_split: dict | None = None) -> tuple[list[Sample], list[str], dict]:
+    """Returns (samples, classes in dataset tag order, summary counts).
+    `saved_split`, a resumed run's {"train": [...], "val": [...]} file names,
+    replaces the split."""
     m = store.load(project_id)
     if not m:
         raise ValueError("dataset not found")
@@ -417,9 +366,12 @@ def load_samples(project_id: str, train_split: float, *, use_augmentations: bool
     if not classes:
         raise ValueError("dataset has no labels")
     cls_idx = {c: i for i, c in enumerate(classes)}
-    samples, unlabelled = _originals(project_id, m, cls_idx)
+    ignored: Counter = Counter()
+    samples, unlabelled = _originals(project_id, m, cls_idx, ignored=ignored)
     info: dict = {"originals": len(samples), "augmented": 0, "unlabelled": unlabelled,
                   "background": sum(1 for s in samples if not len(s.boxes)),
+                  # Box counts by label, most first.
+                  "ignoredLabels": dict(sorted(ignored.items(), key=lambda kv: (-kv[1], kv[0]))),
                   "evalImages": 0, "evalMissingClasses": [], "evalIgnoredLabels": []}
 
     eval_samples: list[Sample] = []
@@ -438,6 +390,8 @@ def load_samples(project_id: str, train_split: float, *, use_augmentations: bool
         info["evalImages"] = len(eval_samples)
         info["evalMissingClasses"] = [c for i, c in enumerate(classes) if i not in present]
         info["evalIgnoredLabels"] = sorted(t for t in _dataset_classes(em) if t not in cls_idx)
+    elif saved_split is not None:
+        info["splitAdded"], info["splitGone"] = _restore_split(samples, saved_split)
     elif stratify:
         stratified_split(samples, train_split, seed)
     else:
@@ -446,15 +400,14 @@ def load_samples(project_id: str, train_split: float, *, use_augmentations: bool
 
     if use_augmentations:
         parents = {s.name: s for s in samples}
-        aug = _augmented(project_id, m, parents, cls_idx)
+        aug, info["augmentedStale"] = _augmented(project_id, m, parents, cls_idx)
         info["augmented"] = len(aug)
         samples = samples + aug
     return samples + eval_samples, classes, info
 
 
 def split_summary(samples: list[Sample], classes: list[str]) -> list[dict]:
-    """Per-class image and box counts by split (originals and
-    augmented copies counted separately for train)."""
+    """Per-class image and box counts by split, augmented boxes apart."""
     rows = []
     for ci, name in enumerate(classes):
         r = {"name": name, "trainImages": 0, "valImages": 0, "trainBoxes": 0,
@@ -475,7 +428,7 @@ def split_summary(samples: list[Sample], classes: list[str]) -> list[dict]:
     return rows
 
 
-# ── pre-flight ───────────────────────────────────────────────────────
+# Pre-flight
 
 def _file_fingerprint(path: Path) -> str | None:
     try:
@@ -489,12 +442,8 @@ def _file_fingerprint(path: Path) -> str | None:
 
 def preflight_samples(samples: list[Sample], classes: list[str], info: dict, cfg: TrainConfig
                       ) -> dict:
-    """What will go wrong before spending an hour finding out.
-
-    Blockers stop the run; warnings are shown and recorded in the
-    report. Checks: enough images, every class represented, objects
-    that vanish at the chosen input size, classes the val split cannot
-    measure, identical images on both sides of the split."""
+    """Checks before training. Blockers stop the run; warnings go into the
+    report."""
     blockers: list[str] = []
     warnings: list[str] = []
     train_s = [s for s in samples if s.split == "train"]
@@ -523,8 +472,14 @@ def preflight_samples(samples: list[Sample], classes: list[str], info: dict, cfg
         warnings.append(f"only {len(val_s)} val image(s): accuracy figures will be noisy")
     if info.get("unlabelled"):
         warnings.append(f"{info['unlabelled']} image(s) have no boxes and are not used")
+    if info.get("ignoredLabels"):
+        warnings.append(f"{sum(info['ignoredLabels'].values())} box(es) with labels not in this "
+                        "dataset are left out: " + ", ".join(list(info["ignoredLabels"])[:8]))
+    if info.get("augmentedStale"):
+        warnings.append(f"{info['augmentedStale']} image(s) changed after their augmentations "
+                        "were made, so those copies are left out: click Update on the "
+                        "Augmentations tab to remake them")
 
-    # Per class.
     for r in rows:
         if r["trainBoxes"] == 0 and r["augmentedBoxes"] == 0:
             warnings.append(f"'{r['name']}' has no training boxes: the model cannot learn it")
@@ -534,9 +489,7 @@ def preflight_samples(samples: list[Sample], classes: list[str], info: dict, cfg
         if val_s and r["valBoxes"] == 0 and r["trainBoxes"] > 0:
             warnings.append(f"'{r['name']}' has no val boxes: its accuracy is not measured")
 
-    # Objects too small for the input size: the letterbox scale is
-    # imgsz / longest side, and a box under 8 px on its short side is
-    # below what the stride-8 head can localise.
+    # A box under 8 px on its short side is below what the stride-8 head localises.
     small: Counter = Counter()
     per_class: Counter = Counter()
     for s in train_s:
@@ -558,7 +511,6 @@ def preflight_samples(samples: list[Sample], classes: list[str], info: dict, cfg
                                         / per_class[classes.index(r['name'])]))
                               if per_class[classes.index(r["name"])] else 0)
 
-    # Identical files on both sides of the split leak val into train.
     if val_s and n_orig_train:
         fp_train: dict[str, str] = {}
         for s in train_s:
@@ -585,6 +537,7 @@ def preflight_samples(samples: list[Sample], classes: list[str], info: dict, cfg
             "train": n_orig_train,
             "val": len(val_s),
             "augmented": int(info.get("augmented") or 0),
+            "augmentedStale": int(info.get("augmentedStale") or 0),
             "unlabelled": int(info.get("unlabelled") or 0),
             "background": int(info.get("background") or 0),
         },
@@ -602,7 +555,7 @@ def preflight(project_id: str, cfg: TrainConfig) -> dict:
     return preflight_samples(samples, classes, info, cfg)
 
 
-# ── preprocessing ────────────────────────────────────────────────────
+# Preprocessing
 
 def _letterbox_fit(w: int, h: int, size: int) -> tuple[float, int, int]:
     """Where letterbox() puts a w x h picture: (scale, dx, dy)."""
@@ -622,11 +575,8 @@ def letterbox(img: np.ndarray, size: int) -> tuple[np.ndarray, float, int, int]:
 
 
 def _dims(s: Sample) -> tuple[int, int]:
-    """(h, w) of a sample as the trainer will see it: decoded once and
-    cached. The manifest's dims are not trusted here because an
-    EXIF-rotated JPEG can be recorded unrotated by one import path and
-    decoded rotated by cv2, which would put the val ground truth on the
-    wrong axis."""
+    """(h, w) as decoded, cached. The manifest can hold an EXIF-rotated
+    JPEG's dims unrotated."""
     if s.measured and s.h > 0 and s.w > 0:
         return s.h, s.w
     img = _read_rgb(s.path)
@@ -638,9 +588,7 @@ def _dims(s: Sample) -> tuple[int, int]:
 
 
 def _read_rgb(path: Path) -> np.ndarray | None:
-    """Decode an image file; None for anything unreadable (missing,
-    empty, truncated, not an image). Callers skip None samples, so one
-    bad file never ends a run."""
+    """Decode an image file to RGB; None when unreadable."""
     try:
         data = np.fromfile(str(path), dtype=np.uint8)
     except OSError:
@@ -656,24 +604,43 @@ def _read_rgb(path: Path) -> np.ndarray | None:
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
+def _center_square(img: np.ndarray, boxes: np.ndarray, cls: np.ndarray
+                   ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Centre square of the picture; a box is kept if 60% of it stays inside."""
+    h, w = img.shape[:2]
+    s = min(h, w)
+    x0, y0 = (w - s) // 2, (h - s) // 2
+    img = img[y0:y0 + s, x0:x0 + s].copy()
+    if len(boxes):
+        area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+        boxes = boxes - np.array([x0, y0, x0, y0], dtype=boxes.dtype)
+        boxes = boxes.clip(0, s - 1)
+        kept = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+        keep = (kept >= 0.6 * np.maximum(area, 1e-6)) & (boxes[:, 2] - boxes[:, 0] > 2) \
+            & (boxes[:, 3] - boxes[:, 1] > 2)
+        boxes, cls = boxes[keep], cls[keep]
+    return img, boxes, cls
+
+
 def _augment(img: np.ndarray, boxes: np.ndarray, cls: np.ndarray
              ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     h, w = img.shape[:2]
-    # hflip
+    if h != w and random.random() < 0.3:
+        img, boxes, cls = _center_square(img, boxes, cls)
+        h, w = img.shape[:2]
     if random.random() < 0.5:
         img = img[:, ::-1].copy()
         if len(boxes):
             boxes = boxes.copy()
             boxes[:, [0, 2]] = w - boxes[:, [2, 0]]
-    # HSV jitter (on RGB via HSV roundtrip)
     if random.random() < 0.8:
         hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV).astype(np.int16)
         hsv[..., 0] = (hsv[..., 0] + random.randint(-8, 8)) % 180
         hsv[..., 1] = np.clip(hsv[..., 1] * random.uniform(0.7, 1.3), 0, 255)
         hsv[..., 2] = np.clip(hsv[..., 2] * random.uniform(0.7, 1.3), 0, 255)
         img = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
-    # scale jitter around centre
-    if random.random() < 0.5 and len(boxes):
+    # Scale jitter, background images included.
+    if random.random() < 0.5:
         s = random.uniform(0.75, 1.25)
         M = cv2.getRotationMatrix2D((w / 2, h / 2), 0, s)
         img = cv2.warpAffine(img, M, (w, h), borderValue=(114, 114, 114))
@@ -701,7 +668,7 @@ def _make_batch(samples: list[Sample], idxs: list[int], size: int, train: bool,
         if train:
             img, boxes, cls = _augment(img, boxes, cls)
         img, scale, dx, dy = letterbox(img, size)
-        # [0,1], not [0,255]: see the input contract in the module docstring.
+        # [0,1], not [0,255]: the input contract in the module docstring.
         imgs[bi] = img.astype(np.float32).transpose(2, 0, 1) / 255.0
         j = 0
         for k in range(len(boxes)):
@@ -710,10 +677,7 @@ def _make_batch(samples: list[Sample], idxs: list[int], size: int, train: bool,
             x0, y0, x1, y1 = boxes[k] * scale
             x0, x1 = x0 + dx, x1 + dx
             y0, y1 = y0 + dy, y1 + dy
-            # Clip to the canvas: a box (partly) outside the picture, as
-            # an augmentation warp or a sloppy import can produce, must
-            # not reach the head (a box with no anchor near it crashes
-            # its matching; a negative coordinate hides a later box).
+            # Clipped to the canvas: a box with no anchor near it crashes the head's matching.
             x0, x1 = max(0.0, x0), min(float(size), x1)
             y0, y1 = max(0.0, y0), min(float(size), y1)
             if x1 - x0 < 2.0 or y1 - y0 < 2.0:
@@ -744,10 +708,8 @@ def _gt_letterbox(s: Sample, imgsz: int) -> np.ndarray:
 
 def _batch_iter(samples: list[Sample], order: list[int], batch: int, size: int,
                 train: bool, workers: int = 4, lookahead: int = 6):
-    """Yield (imgs, targets) batches with decode + augment running on a
-    thread pool ahead of the consumer. cv2 releases the GIL, so this
-    overlaps the CPU pipeline with the GPU step instead of serialising
-    them (VOC2007: 30 s/epoch of loading otherwise)."""
+    """Yield (imgs, targets) batches prepared ahead on a thread pool; cv2
+    releases the GIL."""
     chunks = [order[i:i + batch] for i in range(0, len(order), batch)]
     chunks = [c for c in chunks if c]
     if not chunks:
@@ -765,7 +727,7 @@ def _batch_iter(samples: list[Sample], order: list[int], batch: int, size: int,
             yield fut.result()
 
 
-# ── evaluation: VOC AP@0.5, no pycocotools ──────────────────────────
+# Evaluation: VOC AP@0.5
 
 def _voc_ap(recall: np.ndarray, precision: np.ndarray) -> float:
     mrec = np.concatenate([[0.0], recall, [1.0]])
@@ -780,9 +742,8 @@ def ap50(preds: list[np.ndarray], gts: list[np.ndarray], n_classes: int,
          iou_thr: float = 0.5) -> tuple[float, list[float | None]]:
     """preds[i]: (n,6) x0,y0,x1,y1,score,cls per image; gts[i]: (m,5) x0..y1,cls.
 
-    Returns (mean over classes that have ground truth, per-class list of
-    length n_classes with None where a class has no ground truth). The
-    list is positional so callers can zip it with the class names."""
+    Returns (mean over classes with ground truth, per-class AP indexed by
+    class, None where a class has no ground truth)."""
     per_class: list[float | None] = []
     for c in range(n_classes):
         rows = []  # (score, is_tp)
@@ -811,7 +772,7 @@ def ap50(preds: list[np.ndarray], gts: list[np.ndarray], n_classes: int,
                 else:
                     rows.append((p[4], 0))
         if n_gt == 0:
-            per_class.append(None)  # keep the list positional
+            per_class.append(None)
             continue
         if not rows:
             per_class.append(0.0)
@@ -831,11 +792,8 @@ CONTRACT_ZP = -128
 
 
 def _decode_raw(raw: np.ndarray, imgsz: int) -> np.ndarray:
-    """Apply YOLOX's grid decode to raw head rows, in numpy.
-
-    The graph no longer does this (it exports dynamic-shape ops ST Edge
-    AI cannot handle), so the host does it for scoring and yolox_pp.c
-    does it on the M55. Row order is stride 8, then 16, then 32."""
+    """YOLOX's grid decode of raw head rows, in numpy, as yolox_pp.c does on
+    the M55. Row order is stride 8, then 16, then 32."""
     out = np.array(raw, dtype=np.float32, copy=True)
     grids, strides = [], []
     for s_ in (8, 16, 32):
@@ -851,12 +809,9 @@ def _decode_raw(raw: np.ndarray, imgsz: int) -> np.ndarray:
 
 
 def _verify_input_contract(path: Path) -> dict:
-    """Pin and then CHECK the graph input's quantisation.
-
-    stedgeai is told to re-encode the input as uint8 channel-last; that
-    is only correct for an asymmetric [0,1] input (scale 1/255, zp
-    -128). A model that misses it either fails to build or, worse,
-    runs on scrambled values and detects noise. Refuse to emit one."""
+    """Pin the graph input's quantisation to the contract, then check the
+    saved file. stedgeai reads the input as uint8 channel-last, which is
+    correct only for scale 1/255, zero-point -128."""
     import onnx
     from onnx import helper, numpy_helper as nh
 
@@ -878,13 +833,7 @@ def _verify_input_contract(path: Path) -> dict:
 
         cal_s, cal_z = float(_val(q.input[1])), int(_val(q.input[2]))
         calibrated = {"scale": cal_s, "zeroPoint": cal_z}
-        # The input tensor is raw camera bytes, so the only correct
-        # parameters are the contract's, whatever calibration saw. What
-        # calibration is allowed to tell us is whether the preprocessing
-        # fed [0,1] at all: an implied range outside it (a symmetric
-        # [-1,1] model, a [0,255] model) means every downstream range was
-        # learned on the wrong input and pinning would be the post-hoc
-        # rewrite that measurably costs more than it saves - refuse.
+        # A calibrated range outside [0,1] means training fed another input range.
         lo, hi = cal_s * (-128 - cal_z), cal_s * (127 - cal_z)
         if lo < -0.02 or hi > 1.02:
             raise ValueError(
@@ -893,7 +842,7 @@ def _verify_input_contract(path: Path) -> dict:
                 f"scale={CONTRACT_SCALE:.8f} zp={CONTRACT_ZP} over [0, 1]. The model was "
                 "calibrated on the wrong input range - fix the preprocessing rather than "
                 "rewriting the finished network.")
-        # A sub-range of [0,1] (dim images, percentile clipping): pin.
+        # A sub-range of [0,1] is pinned to the contract.
         for idx, value in ((1, np.float32(CONTRACT_SCALE)), (2, np.int8(CONTRACT_ZP))):
             name = q.input[idx]
             if name in init:
@@ -901,8 +850,7 @@ def _verify_input_contract(path: Path) -> dict:
             else:
                 consts[name].attribute[0].t.CopyFrom(nh.from_array(value, name))
     else:
-        # Nothing quantised the input (e.g. the first op is a reshape):
-        # insert the contract pair and rewire the original consumers.
+        # No input quantiser: insert one with the contract's parameters.
         s_n, z_n = inp + "_pk_scale", inp + "_pk_zp"
         g.initializer.extend([nh.from_array(np.float32(CONTRACT_SCALE), s_n),
                               nh.from_array(np.int8(CONTRACT_ZP), z_n)])
@@ -917,7 +865,7 @@ def _verify_input_contract(path: Path) -> dict:
                                           name=inp + "_pk_Q"))
     onnx.save(m, str(path))
 
-    # Re-read and assert, so the check tests the file we actually ship.
+    # The check reads the saved file back.
     m = onnx.load(str(path))
     g = m.graph
     arr = {i.name: nh.to_array(i) for i in g.initializer}
@@ -949,7 +897,7 @@ def _decode_rows(out: torch.Tensor, conf: float, nms: float, n_classes: int) -> 
     return np.stack([d[:, 0], d[:, 1], d[:, 2], d[:, 3], d[:, 4] * d[:, 5], d[:, 6]], axis=1)
 
 
-# ── inference with an exported model (the "label with your own model" job)
+# Inference with an exported model
 
 def open_onnx(path: Path):
     import onnxruntime as ort
@@ -960,7 +908,7 @@ def open_onnx(path: Path):
 def infer_image(sess, img_rgb: np.ndarray, imgsz: int, n_classes: int, conf: float,
                 nms: float) -> np.ndarray:
     """Run an exported raw-head ONNX on one RGB image. Returns (n,6)
-    rows x0,y0,x1,y1,score,cls in the ORIGINAL image's pixels."""
+    rows x0,y0,x1,y1,score,cls in the original image's pixels."""
     h, w = img_rgb.shape[:2]
     lb, scale, dx, dy = letterbox(img_rgb, imgsz)
     x = lb.astype(np.float32).transpose(2, 0, 1)[None] / 255.0
@@ -978,17 +926,15 @@ def infer_image(sess, img_rgb: np.ndarray, imgsz: int, n_classes: int, conf: flo
     return rows[keep]
 
 
-# ── the run ─────────────────────────────────────────────────────────
+# Training run
 
 class Cancelled(Exception):
     pass
 
 
 def init_run_problem(run_dir: Path | None, size: str) -> str | None:
-    """Why a run of `size` cannot start from the run in `run_dir`, or
-    None when it can. A run of the other size shares almost no weight
-    shapes (65 of Tiny's 5 M values fit Nano's), so it would start from
-    nothing: not even the COCO checkpoint it replaces."""
+    """Why a run of `size` cannot start from the run in `run_dir`, or None.
+    Runs of the other size share almost no weight shapes."""
     if run_dir is None or not (run_dir / "best.pt").is_file():
         return "cannot start from that run: it has no saved weights"
     if run_dir.parent.name != MODEL_SPECS[size]["dir"]:
@@ -1019,11 +965,7 @@ def _build_model(n_classes: int, size: str = "nano", conv_stem: bool = True) -> 
     head = YOLOXHead(num_classes=n_classes, width=spec["width"], depthwise=spec["depthwise"])
     model = YOLOX(backbone, head)
     if conv_stem:
-        # YOLOX's Focus stem is a 4-way slice + concat. The Neural-ART
-        # compiler maps those Slices as pure-software epochs (measured:
-        # 6 of 129), so swap in the stride-2 conv YOLOv5 and ST's own
-        # st_yoloxn use instead. Same output shape, so the rest of the
-        # COCO warm start still loads; only the stem trains from scratch.
+        # Stride-2 conv stem: Neural-ART runs the Focus stem's Slices in software.
         base_ch = int(spec["width"] * 64)
         model.backbone.backbone.stem = BaseConv(3, base_ch, ksize=6, stride=2, act="silu")
 
@@ -1045,45 +987,108 @@ def _fq_keys(model: YOLOX) -> set[str]:
     return keys
 
 
-def _load_pretrained(model: YOLOX, cancel=None, size: str = "nano") -> bool:
-    """Warm-start from Megvii's COCO checkpoint (skips the
-    class-dependent head layers). Cached in <workspace>/weights/yolox/."""
+class _BadCheckpoint(Exception):
+    """A COCO checkpoint that is incomplete, unreadable or not the release file."""
+
+
+# Cached checkpoints whose hash matched in this process: (path, size, mtime).
+_HASHED: set[tuple[str, int, int]] = set()
+
+
+def _open_read(path: Path, tries: int = 40, wait: float = 0.05):
+    """open(path, "rb"), retried: on Windows it fails while another run
+    replaces the file."""
+    for i in range(tries):
+        try:
+            return open(path, "rb")
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(wait)
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with _open_read(path) as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _discard(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _fetch_pretrained(spec: dict, dest: Path, cancel=None) -> None:
+    """Download spec["url"] to dest. A body shorter than its Content-Length,
+    or whose SHA-256 is not spec["sha256"], raises _BadCheckpoint and is not
+    kept. The temp name is unique to the thread."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f"{dest.name}.{os.getpid()}.{threading.get_ident()}.{os.urandom(4).hex()}.tmp")
+    try:
+        digest, got = hashlib.sha256(), 0
+        # Timeout and cancel poll: this thread holds the GPU gate.
+        with urllib.request.urlopen(spec["url"], timeout=30) as r, open(tmp, "wb") as f:  # noqa: S310
+            length = str(r.headers.get("Content-Length") or "")
+            while True:
+                if cancel is not None and cancel.is_set():
+                    raise Cancelled()
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+                digest.update(chunk)
+                got += len(chunk)
+        # read() returns b"" when the server closes the connection early.
+        if length.isdigit() and got != int(length):
+            raise _BadCheckpoint(f"the COCO checkpoint download stopped at {got} of {length} bytes")
+        if spec.get("sha256") and digest.hexdigest() != spec["sha256"]:
+            raise _BadCheckpoint("the downloaded COCO checkpoint failed its checksum")
+        _replace_retry(tmp, dest)
+    finally:
+        _discard(tmp)
+
+
+def _check_cached(path: Path, sha256: str | None) -> None:
+    """Hash a cached checkpoint before its first load in this process; one
+    that does not match is deleted."""
+    if not sha256:
+        return
+    st = path.stat()
+    key = (str(path), st.st_size, st.st_mtime_ns)
+    if key in _HASHED:
+        return
+    if _sha256(path) != sha256:
+        _discard(path)
+        raise _BadCheckpoint("the cached COCO checkpoint failed its checksum and was deleted")
+    _HASHED.add(key)
+
+
+def _load_pretrained(model: YOLOX, cancel=None, size: str = "nano",
+                     notes: list[str] | None = None) -> bool:
+    """Warm-start from Megvii's COCO checkpoint, cached in
+    <workspace>/weights/yolox/. Class-dependent head layers are skipped. On
+    failure returns False and adds the reason to `notes`."""
     spec = MODEL_SPECS[size]
     dest = workspace.weights_dir() / "yolox" / spec["file"]
     try:
         if not dest.is_file():
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            # Streamed with a socket timeout and a cancel poll: a stalled
-            # connection used to hang the training thread forever while it
-            # held the GPU gate. Per-process temp name so two first runs
-            # cannot clobber each other's download.
-            tmp = dest.with_suffix(f".{os.getpid()}.tmp")
-            try:
-                with urllib.request.urlopen(spec["url"], timeout=30) as r, open(tmp, "wb") as f:  # noqa: S310
-                    while True:
-                        if cancel is not None and cancel.is_set():
-                            raise Cancelled()
-                        chunk = r.read(1 << 20)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                os.replace(tmp, dest)
-            finally:
-                if tmp.exists():
-                    try:
-                        tmp.unlink()
-                    except OSError:
-                        pass
-        ckpt = torch.load(dest, map_location="cpu", weights_only=False)
+            _fetch_pretrained(spec, dest, cancel)
+        _check_cached(dest, spec.get("sha256"))
+        try:
+            with _open_read(dest) as f:
+                ckpt = torch.load(f, map_location="cpu", weights_only=True)
+        except Exception as e:  # noqa: BLE001
+            # Deleted, so the next run downloads it again.
+            _discard(dest)
+            raise _BadCheckpoint("the cached COCO checkpoint could not be read and was deleted") from e
         state = dict(ckpt.get("model", ckpt))
         own = model.state_dict()
 
-        # The COCO checkpoint has YOLOX's Focus stem (4-way slice + 3x3
-        # conv on 12 channels). We build a 6x6 stride-2 conv instead, and
-        # the two are exactly equivalent: grid cell (i,j) of the Focus
-        # path reads original pixels 2i-2..2i+3, which is precisely the
-        # 6x6 stride-2 window. Remap rather than drop it, so small
-        # datasets keep a warm first layer.
+        # The Focus stem's 3x3 conv on 12 channels maps exactly onto the 6x6 stride-2 conv.
         f_w = state.pop("backbone.backbone.stem.conv.conv.weight", None)
         tgt = "backbone.backbone.stem.conv.weight"
         if f_w is not None and tgt in own and own[tgt].shape[-1] == 6:
@@ -1093,11 +1098,10 @@ def _load_pretrained(model: YOLOX, cancel=None, size: str = "nano") -> bool:
                     for dj in range(-1, 2):
                         k6[:, :, 2 * di + py + 2, 2 * dj + px + 2] = \
                             f_w[:, grp * 3:(grp + 1) * 3, di + 1, dj + 1]
-            # Trained on [0,255]; the graph now takes [0,1], and this is
-            # the first layer, so fold the 255 in here. Everything
-            # downstream then sees identical activations.
-            state[tgt] = k6 * 255.0
-        # Focus wrapped its BN one level deeper than a bare BaseConv does.
+            # The checkpoint was trained on OpenCV's BGR in [0,255]; the graph
+            # takes RGB in [0,1].
+            state[tgt] = k6.flip(1) * 255.0
+        # Focus holds its BN one level deeper than BaseConv.
         for suffix in ("weight", "bias", "running_mean", "running_var", "num_batches_tracked"):
             v = state.pop(f"backbone.backbone.stem.conv.bn.{suffix}", None)
             if v is not None:
@@ -1111,24 +1115,44 @@ def _load_pretrained(model: YOLOX, cancel=None, size: str = "nano") -> bool:
         return True
     except Cancelled:
         raise
-    except Exception:
-        return False  # offline / hash mismatch: train from scratch
+    except Exception as e:  # noqa: BLE001
+        if notes is not None:
+            why = str(e) if isinstance(e, _BadCheckpoint) else "COCO checkpoint unavailable (offline?)"
+            notes.append(f"{why}: trained from scratch")
+        return False
 
 
-def _load_run_weights(model: YOLOX, run_dir: Path) -> dict:
-    """Warm-start from a previous PixelKit run's best.pt. Shape-matched
-    tensors load (a different class count skips the class-prediction
-    layers); the fake-quant observers are never carried over."""
-    ck = torch.load(run_dir / "best.pt", map_location="cpu", weights_only=False)
+def _load_run_weights(model: YOLOX, run_dir: Path, classes: list[str] | None = None) -> dict:
+    """Warm-start from another run's best.pt: shape-matched tensors only, no
+    fake-quant observers. When the run's labels differ from `classes`, a label
+    both have keeps its class-prediction channel and the others start fresh."""
+    ck = torch.load(run_dir / "best.pt", map_location="cpu", weights_only=True)
     state = dict(ck.get("model", ck))
     own = model.state_dict()
     skip = _fq_keys(model)
+    run_classes = list(ck.get("classes") or [])
+    reused: list[str] = []
+    if classes is not None and run_classes and run_classes != classes:
+        pairs = [(j, run_classes.index(c)) for j, c in enumerate(classes) if c in run_classes]
+        reused = [classes[j] for j, _ in pairs]
+        # head.cls_preds.<level>.weight/bias: one output channel per class.
+        for k in [k for k in state if k.startswith("head.cls_preds.")]:
+            v = state.pop(k)
+            if pairs and k in own and v.shape[1:] == own[k].shape[1:]:
+                t = own[k].clone()
+                for j, i in pairs:
+                    t[j] = v[i]
+                state[k] = t
     loadable = {k: v for k, v in state.items()
                 if k in own and k not in skip and own[k].shape == v.shape}
     model.load_state_dict(loadable, strict=False)
     return {"run": run_dir.name, "loaded": len(loadable),
             "skipped": len([k for k in own if k not in loadable and k not in skip]),
-            "classes": list(ck.get("classes") or [])}
+            "classes": run_classes,
+            # Labels whose class channels came from the run when the labels differ.
+            "reusedClasses": reused,
+            # A run that does not record it may descend from the checkpoint.
+            "cocoWeights": bool(ck.get("cocoWeights", True))}
 
 
 def _check_cancel(cancel) -> None:
@@ -1137,8 +1161,7 @@ def _check_cancel(cancel) -> None:
 
 
 def _gpu_turn(st: dict) -> None:
-    """Between two units of GPU work: lend the card if the engine asks
-    (see train(gpu_turn=...))."""
+    """Lend the card between two units of GPU work, if the engine asks."""
     turn = st.get("gpu_turn")
     if turn is not None:
         turn()
@@ -1152,29 +1175,22 @@ def _is_oom(e: BaseException) -> bool:
     return isinstance(e, RuntimeError) and ("out of memory" in msg or "cudnn_status_alloc_failed" in msg)
 
 
-# An epoch should be at least this many optimiser steps: a batch that
-# swallows a small dataset in three steps trains three times per epoch,
-# and 50 such epochs are 150 steps (measured on VOC-300: AP 0 after 10
-# epochs at batch 64, against 0.38 at batch 16).
+# Minimum optimiser steps per epoch; caps the batch on small datasets.
 MIN_STEPS_PER_EPOCH = 15
-# How often a live run refreshes history.json (a thread in _train_impl);
-# the server treats a run whose file is younger than a few of these as
-# live even when it has no job for it (the CLI trained it).
+# history.json refresh period. The server treats a run whose file is
+# younger than a few periods as live.
 HEARTBEAT_SECONDS = 30
 
 
 def _auto_batch(device: torch.device, imgsz: int, size: str, n_train: int) -> int:
-    """Batch size from free VRAM and dataset size: 60% of the free
-    memory divided by a per-image peak measured for each size at
-    256x256 (scaled by input area), capped at 64 and at what keeps
-    MIN_STEPS_PER_EPOCH steps in an epoch. An estimate on purpose;
-    _epoch() halves the batch if the card still says no."""
+    """60% of free VRAM over the per-image peak (mb_per_image at 256x256),
+    capped at 64 and by MIN_STEPS_PER_EPOCH. _epoch() halves it on OOM."""
     by_steps = max(2, int(round(n_train / MIN_STEPS_PER_EPOCH)))
     if device.type != "cuda":
         return max(2, min(8, by_steps, n_train))
     try:
         free, _total = torch.cuda.mem_get_info(device)
-    except Exception:  # noqa: BLE001 - driver hiccup: use the documented default
+    except Exception:  # noqa: BLE001
         return max(2, min(16, by_steps, n_train))
     per_image = MODEL_SPECS[size]["mb_per_image"] * 1e6 * (imgsz / 256.0) ** 2
     b = int(free * 0.6 / per_image)
@@ -1187,20 +1203,16 @@ def _auto_batch(device: torch.device, imgsz: int, size: str, n_train: int) -> in
 
 def _epoch(samples, train_s: list[int], st: dict, imgsz: int, step_fn, cancel, notes: list[str]
            ) -> float:
-    """One pass over train_s at st["batch"], returning the mean loss
-    over the steps whose loss was finite. On a CUDA out-of-memory error
-    the batch is halved (st["batch"], st["steps"] updated), st["on_oom"]
-    is called (the float phase uses it to replace its GradScaler, whose
-    state is undefined after an OOM inside step()) and the epoch
-    restarts; below batch 2 the error propagates. An epoch whose every
-    step was non-finite is a diverged run and raises."""
+    """One pass over train_s; returns the mean finite loss. On CUDA OOM the
+    batch halves, st["on_oom"] is called and the epoch restarts. An epoch
+    with no finite step raises."""
     while True:
         batch = st["batch"]
         steps = max(1, len(train_s) // batch)
         st["steps"] = steps
         order = train_s[:]
         random.shuffle(order)
-        # Drop the ragged tail so every step is a full batch (BN stats).
+        # Full batches only, for BN statistics.
         order = order[: steps * batch]
         loss_sum, n, bad = 0.0, 0, 0
         it = _batch_iter(samples, order, batch, imgsz, train=True)
@@ -1239,8 +1251,8 @@ def _epoch(samples, train_s: list[int], st: dict, imgsz: int, step_fn, cancel, n
 
 
 def _json_safe(obj):
-    """Strict JSON: a non-finite float becomes null (orjson, which the
-    server parses with, rejects the NaN token and would hide the run)."""
+    """Strict JSON: non-finite floats become null, as the server's orjson
+    rejects NaN."""
     if isinstance(obj, float):
         return obj if math.isfinite(obj) else None
     if isinstance(obj, dict):
@@ -1255,9 +1267,8 @@ def _json_safe(obj):
 
 
 def _replace_retry(tmp: Path, path: Path, tries: int = 40, wait: float = 0.05) -> None:
-    """os.replace with a retry: on Windows the rename fails with
-    PermissionError while another process has the target open for
-    reading (the app polls history.json every few seconds)."""
+    """os.replace, retried: on Windows it fails while another process reads
+    the target."""
     for i in range(tries):
         try:
             os.replace(tmp, path)
@@ -1272,9 +1283,13 @@ def _replace_retry(tmp: Path, path: Path, tries: int = 40, wait: float = 0.05) -
             time.sleep(wait)
 
 
+def _json_text(data) -> str:
+    return json.dumps(_json_safe(data), indent=2, allow_nan=False)
+
+
 def _write_json_atomic(path: Path, data) -> None:
     tmp = path.with_suffix(path.suffix + f".{os.getpid()}.{threading.get_ident()}.tmp")
-    tmp.write_text(json.dumps(_json_safe(data), indent=2, allow_nan=False), "utf-8", newline="\n")
+    tmp.write_text(_json_text(data), "utf-8", newline="\n")
     _replace_retry(tmp, path)
 
 
@@ -1291,14 +1306,9 @@ def train(
     cancel=None,
     gpu_turn: Callable[[], None] | None = None,
 ) -> dict:
-    """Train + export. On a cuda:N device the CURRENT device is set for
-    this thread only for the duration (the vendored head allocates its
-    grids on the current device); it is restored on exit because the
-    thread pool is shared with labelling inference.
-
-    gpu_turn, when given, is called between two units of GPU work (a
-    training step, a val image, a calibration batch): the engine uses
-    it to lend the card to labelling that shares it."""
+    """Train and export. On cuda:N that device is current for the duration,
+    since the vendored head allocates its grids there. `gpu_turn` is called
+    between units of GPU work to lend the card to labelling."""
     device = torch.device(cfg.device)
     try:
         if device.type == "cuda" and device.index is not None:
@@ -1306,17 +1316,14 @@ def train(
                 return _train_impl(project_id, cfg, progress, cancel, gpu_turn)
         return _train_impl(project_id, cfg, progress, cancel, gpu_turn)
     finally:
-        # The run's model, optimiser and batches are garbage now: hand
-        # their cached memory back to the card (measured: 1.9 GB held
-        # after a Nano run), as the labelling paths do after theirs.
         gc.collect()
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
 
 def _restore_cfg(saved: dict, cfg: TrainConfig) -> TrainConfig:
-    """The run's own settings win over the resume request's, except
-    for what belongs to the machine (device) and the request itself."""
+    """The run's saved settings, with device, verify_neuron6 and resume_run
+    from the request."""
     names = {f.name for f in fields(TrainConfig)}
     merged = {k: v for k, v in saved.items() if k in names}
     out = TrainConfig(**merged)
@@ -1331,13 +1338,13 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel, gpu_turn=No
     if cfg.size not in MODEL_SPECS:
         raise ValueError(f"unknown model size {cfg.size!r} (nano or tiny)")
 
-    # ── resume: the checkpoint carries the run's settings ───────────
+    # A resumed run's checkpoint carries its settings.
     ck = None
     if cfg.resume_run:
         run_dir = find_run_dir(project_id, cfg.resume_run)
         if run_dir is None or not (run_dir / "ckpt_last.pt").is_file():
             raise ValueError("nothing to resume: that run has no checkpoint")
-        ck = torch.load(run_dir / "ckpt_last.pt", map_location="cpu", weights_only=False)
+        ck = torch.load(run_dir / "ckpt_last.pt", map_location="cpu", weights_only=True)
         cfg = _restore_cfg(ck.get("cfg") or {}, cfg)
         cfg.run_id = ck["run_id"]
 
@@ -1345,18 +1352,23 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel, gpu_turn=No
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
 
+    # A resume keeps the run's split; a checkpoint without one is split again.
+    saved_split = ck.get("split") if ck is not None else None
     samples, classes, info = load_samples(
         project_id, cfg.train_split, use_augmentations=cfg.use_augmentations,
-        stratify=cfg.stratify, seed=cfg.seed, eval_project=cfg.eval_project)
+        stratify=cfg.stratify, seed=cfg.seed, eval_project=cfg.eval_project,
+        saved_split=saved_split if isinstance(saved_split, dict) else None)
     checks = preflight_samples(samples, classes, info, cfg)
     if checks["blockers"]:
         raise ValueError("; ".join(checks["blockers"]))
     if ck is not None and list(ck.get("classes") or []) != classes:
         raise ValueError("the dataset's labels changed since that run started; start a new run")
+    split_names = {k: sorted(s.name for s in samples if s.source == "original" and s.split == k)
+                   for k in ("train", "val")}
     train_s = [i for i, s in enumerate(samples) if s.split == "train"]
     val_s = [i for i, s in enumerate(samples) if s.split == "val"]
     scored_on_train = not val_s
-    if scored_on_train:  # tiny dataset: fall back to scoring on train originals
+    if scored_on_train:  # no val split: score on train originals
         val_s = [i for i in train_s if samples[i].source == "original"] or list(train_s)
 
     device = torch.device(cfg.device)
@@ -1364,12 +1376,10 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel, gpu_turn=No
     spec = MODEL_SPECS[cfg.size]
     model = _build_model(len(classes), cfg.size).to(device)
 
-    # ── run directory from the start, so checkpoints have a home ───
     run_id = cfg.run_id or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     out_dir = store.dataset_dir(project_id) / "models" / spec["dir"] / run_id
     if ck is None and cfg.run_id is None:
-        # Two runs started in the same second (the CLI next to the app)
-        # must not share a folder.
+        # Two runs started in the same second must not share a folder.
         for _ in range(5):
             try:
                 out_dir.mkdir(parents=True, exist_ok=False)
@@ -1389,8 +1399,7 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel, gpu_turn=No
     history_lock = threading.Lock()
 
     def write_history(status: str, error: str | None = None) -> None:
-        """history.json is a progress report, never worth the run: an
-        I/O failure is noted once and otherwise ignored."""
+        """An I/O failure on history.json is noted once and otherwise ignored."""
         run_state["status"] = status
         run_state["error"] = error
         try:
@@ -1406,10 +1415,7 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel, gpu_turn=No
             if msg not in notes:
                 notes.append(msg)
 
-    # Heartbeat: another process (the app while the CLI trains, or the
-    # other way round) tells a live run from an interrupted one by the
-    # age of history.json, so keep it fresh through the long stretches
-    # without an epoch boundary (evaluation, export, the compile).
+    # Heartbeat: other processes judge a run live by the age of history.json.
     stop_beat = threading.Event()
 
     def _beat() -> None:
@@ -1420,7 +1426,7 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel, gpu_turn=No
 
     beat_thread = threading.Thread(target=_beat, name="pk-train-heartbeat", daemon=True)
 
-    # ── weights: resume, previous run, COCO, or scratch ─────────────
+    # Weights: resume, previous run, COCO or scratch.
     init_info: dict | None = None
     pretrained_used = False
     if ck is not None:
@@ -1432,16 +1438,20 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel, gpu_turn=No
         problem = init_run_problem(prev, cfg.size)
         if problem:
             raise ValueError(problem)
-        init_info = _load_run_weights(model, prev)
+        init_info = _load_run_weights(model, prev, classes)
         if init_info["classes"] and init_info["classes"] != classes:
+            kept = len(init_info["reusedClasses"])
             notes.append(f"started from run {prev.name}, whose labels differ: "
-                         "its class layers were not reused")
+                         + (f"its class layers were reused by label name for {kept} of "
+                            f"{len(classes)} label(s)" if kept else "its class layers were not reused"))
     elif cfg.pretrained:
-        pretrained_used = _load_pretrained(model, cancel, cfg.size)
-        if not pretrained_used:
-            notes.append("COCO checkpoint unavailable (offline?): trained from scratch")
+        pretrained_used = _load_pretrained(model, cancel, cfg.size, notes)
+    # The weights descend from Megvii's COCO checkpoint, directly or through earlier runs.
+    coco_weights = pretrained_used or (init_info is not None and bool(init_info.get("cocoWeights", True)))
+    if ck is not None and "cocoWeights" in ck:
+        coco_weights = bool(ck["cocoWeights"])
 
-    # ── batch and optimiser ─────────────────────────────────────────
+    # Batch and optimiser
     if ck is not None:
         batch = int(ck.get("batch") or 0) or _auto_batch(device, cfg.imgsz, cfg.size, len(train_s))
     else:
@@ -1469,19 +1479,18 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel, gpu_turn=No
             opt.load_state_dict(ck["opt"])
             if ck.get("scaler") and use_amp:
                 scaler_ref[0].load_state_dict(ck["scaler"])
-        except Exception:  # noqa: BLE001 - a stale optimiser state is not worth losing the run
+        except Exception:  # noqa: BLE001
             notes.append("optimiser state could not be restored; momentum restarted")
 
     def _on_oom() -> None:
-        # An OOM inside scaler.step() leaves the scaler mid-update
-        # (gradients unscaled, scale not adjusted): start it afresh.
+        # An OOM inside scaler.step() leaves the scaler mid-update.
         scaler_ref[0] = torch.amp.GradScaler("cuda", enabled=use_amp)
         opt.zero_grad(set_to_none=True)
 
     st["on_oom"] = _on_oom
 
     def lr_at(epoch: int, step: int) -> float:
-        lr = cfg.lr * st["batch"] / 64  # scaled by batch like upstream
+        lr = cfg.lr * st["batch"] / 64
         t = epoch + step / st["steps"]
         if t < cfg.warmup_epochs:
             return lr * (t / cfg.warmup_epochs) ** 2
@@ -1508,8 +1517,7 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel, gpu_turn=No
             return
         eta = None
         if epoch_secs:
-            # Fine-tuning epochs run in fp32 with fake quantisation and
-            # take about 1.8x a float epoch (measured on VOC-300).
+            # A QAT epoch takes about 1.8x a float epoch.
             per = float(np.mean(epoch_secs[-5:]))
             left_float = max(0, cfg.epochs - index)
             left_qat = max(0, total_epochs - max(index, cfg.epochs))
@@ -1523,6 +1531,11 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel, gpu_turn=No
     if ck is not None:
         start_epoch = cfg.epochs if ck.get("phase") == "qat" else int(ck.get("epoch") or 0)
         notes.append(f"resumed at epoch {start_epoch + 1}")
+        if info.get("splitAdded"):
+            notes.append(f"{info['splitAdded']} image(s) added since the run started went to train")
+        if info.get("splitGone"):
+            notes.append(f"{info['splitGone']} image(s) deleted or left without boxes since the "
+                         "run started were dropped")
     write_history("training")
     beat_thread.start()
 
@@ -1535,7 +1548,8 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel, gpu_turn=No
             "best_ap": best_ap, "best_state": best_state,
             "history": history, "notes": notes, "classes": classes,
             "cfg": asdict(cfg), "batch": st["batch"], "init": init_info,
-            "pretrained": pretrained_used,
+            "pretrained": pretrained_used, "cocoWeights": coco_weights,
+            "split": split_names,
         })
 
     def float_step(epoch: int):
@@ -1583,19 +1597,16 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel, gpu_turn=No
         _check_cancel(cancel)
         fp32_ap, fp32_per_class = evaluate(model)
 
-        # ── export ──────────────────────────────────────────────────
-        # Float reference first: the plain graph, before any fine-tuning.
-        # Raw head: the in-graph decode exports ScatterND/Expand/Where,
-        # which ST Edge AI cannot shape-infer. yolox_pp.c decodes on the M55.
+        # Float export with a raw head: ST Edge AI cannot shape-infer the
+        # in-graph decode's ScatterND/Expand/Where.
         model.head.decode_in_inference = False
         fp32_onnx = out_dir / f"{slug}_fp32.onnx"
         _export_onnx(model, fp32_onnx, cfg.imgsz, qat=False)
         model.to(device)
-        # The export turned in-graph decoding off; evaluation during the
-        # QAT phase needs it back on (raw rows scored as pixel boxes give AP 0).
+        # QAT evaluation needs the in-graph decode.
         model.head.decode_in_inference = True
 
-        # ── quantisation-aware fine-tuning ──────────────────────────
+        # Quantisation-aware fine-tuning
         qat_ap = None
         if cfg.qat_epochs > 0:
             _check_cancel(cancel)
@@ -1606,7 +1617,7 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel, gpu_turn=No
                                    lambda: write_history("training"))
 
         torch.save({"model": model.state_dict(), "classes": classes, "imgsz": cfg.imgsz,
-                    "size": cfg.size, "qat": cfg.qat_epochs > 0},
+                    "size": cfg.size, "qat": cfg.qat_epochs > 0, "cocoWeights": coco_weights},
                    out_dir / "best.pt")
 
         _check_cancel(cancel)
@@ -1621,7 +1632,7 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel, gpu_turn=No
             contract = _ptq_quantize(fp32_onnx, int8_onnx, samples, train_s, cfg, notes)
         int8_ap, int8_per_class, preds, gts = _score_onnx(int8_onnx, samples, val_s, cfg, classes)
 
-        # ── what to ship as the threshold, and how the model fails ──
+        # Threshold and failure analysis
         _check_cancel(cancel)
         import train_eval
 
@@ -1650,14 +1661,14 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel, gpu_turn=No
                            _val_predictions(samples, val_s, preds, gts, conf, cfg, project_id, classes))
 
         _check_cancel(cancel)
-        neuron6 = _verify_neuron6(int8_onnx, out_dir, slug) if cfg.verify_neuron6 else {
+        neuron6 = _verify_neuron6(int8_onnx, out_dir) if cfg.verify_neuron6 else {
             "verified": False, "available": None, "reason": "verification disabled"}
         if neuron6.get("error"):
-            # The compiler is installed and said no: not a deliverable. Leave
-            # the ONNX for debugging, write the reason, emit no bundle.
+            # Rejected by an installed compiler: no bundle; the ONNX and scores stay.
             _write_json_atomic(out_dir / "report.json", {
                 "run": run_id, "model": spec["dir"], "size": cfg.size, "exportRejected": True,
-                "neuron6": neuron6, "history": history})
+                "ap50_fp32": round(fp32_ap, 4), "ap50_int8": round(int8_ap, 4),
+                "threshold": threshold, "neuron6": neuron6, "history": history})
             run_state["final"] = True
             write_history("rejected", neuron6["error"])
             (out_dir / "ckpt_last.pt").unlink(missing_ok=True)
@@ -1679,6 +1690,7 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel, gpu_turn=No
             "batch": st["batch"],
             "pretrained": pretrained_used,
             "initRun": (init_info or {}).get("run"),
+            "cocoWeights": coco_weights,
             "resumed": ck is not None,
             "head": "raw",
             "input": {**contract, "layout": "NCHW float [0,1]",
@@ -1713,7 +1725,7 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel, gpu_turn=No
             run_state["final"] = True
             write_history("interrupted", "cancelled")
         raise
-    except Exception as e:  # noqa: BLE001 - record, then re-raise for the job
+    except Exception as e:  # noqa: BLE001
         if not run_state["final"]:
             run_state["final"] = True
             write_history("interrupted" if (out_dir / "ckpt_last.pt").is_file() else "failed",
@@ -1725,34 +1737,27 @@ def _train_impl(project_id: str, cfg: TrainConfig, progress, cancel, gpu_turn=No
             beat_thread.join(timeout=2.0)
 
 
-# ── Neuro N6 build verification (PK-1.3) ────────────────────────────
+# Neuro N6 build verification
 
-def _verify_neuron6(int8_onnx: Path, out_dir: Path, slug: str) -> dict:
-    """Compile the export with ST Edge AI as the core's pragma pipeline
-    would. The compiler log and generate report land in <run>/neuron6/."""
+def _verify_neuron6(int8_onnx: Path, out_dir: Path) -> dict:
+    """Compile the export with ST Edge AI as the core's pragma pipeline does;
+    the logs go to <run>/neuron6/."""
     import neuron6_verify
 
-    del slug  # the generated C symbol is discarded; a short name avoids MAX_PATH
     try:
         return neuron6_verify.verify(int8_onnx, out_dir / "neuron6")
-    except Exception as e:  # noqa: BLE001 - a compiler-wrapper OSError must not void the run
+    except Exception as e:  # noqa: BLE001
         return {"verified": False, "available": True, "error": f"{type(e).__name__}: {e}"}
 
 
-# ── export helpers ──────────────────────────────────────────────────
+# Export helpers
 
 def _export_onnx(model: YOLOX, path: Path, imgsz: int, qat: bool) -> None:
-    """Trace to ONNX on CPU. With qat=True the fake-quant points export
-    as QuantizeLinear/DequantizeLinear pairs (the QDQ pattern ST Edge AI
-    accepts) and BatchNorm is already folded by the QAT forward."""
+    """Trace to ONNX on CPU. With qat=True activation fake quants export as
+    Q/DQ pairs; conv weights come out float, for _fold_weight_quant."""
     set_qat(model, qat)
     model.eval().cpu()
     model.head.decode_in_inference = False
-    # QAT: activation fake quants export as Q/DQ pairs. The WEIGHT fake
-    # quants do not survive the exporter (constant propagation folds
-    # Q(const weight) -> DQ back into a float weight), so the conv
-    # weights come out float and _fold_weight_quant re-quantises them
-    # with the exact per-channel rule the fine-tuning simulated.
     torch.onnx.export(
         model, torch.zeros(1, 3, imgsz, imgsz), str(path), opset_version=17,
         input_names=["images"], output_names=["raw"], dynamo=False,
@@ -1760,17 +1765,10 @@ def _export_onnx(model: YOLOX, path: Path, imgsz: int, qat: bool) -> None:
 
 
 def _fold_weight_quant(path: Path) -> int:
-    """Make a QAT export carry int8 weights the way a PTQ export does.
-
-    1. Every Q/DQ scale and zero-point torch emitted as a Constant node
-       becomes an initializer (ST Edge AI resolves them there and dies
-       with "'NoneType' object has no attribute 'tolist'" otherwise).
-    2. Every Conv whose weight is still a float initializer (the
-       exporter folded the weight fake quant away) gets a per-channel
-       symmetric int8 initializer + DequantizeLinear in front of it,
-       with scale = max|w| / 127 per output channel: exactly what
-       qat.fq_weight simulated during fine-tuning.
-    Returns the number of convs re-quantised."""
+    """Give a QAT export int8 weights. Constant Q/DQ parameters become
+    initializers, which ST Edge AI requires, and each float conv weight gets
+    per-channel symmetric int8 with scale max|w| / 127, as qat.fq_weight
+    simulates. Returns the number of convs re-quantised."""
     import onnx
     from onnx import helper, numpy_helper as nh
 
@@ -1788,10 +1786,8 @@ def _fold_weight_quant(path: Path) -> int:
     init = {i.name: i for i in g.initializer}
     producer = {o: n for n in keep for o in n.output}
 
-    # The exporter de-duplicates identical parameters (three pred-conv
-    # biases straight after initialize_biases are identical) into one
-    # initializer plus Identity nodes. Resolve those to the source
-    # tensor so each conv gets its own quantised copy.
+    # The exporter shares identical parameters through Identity nodes; each
+    # conv gets its own copy.
     def _resolve(name):
         seen = 0
         while name not in init and name in producer and producer[name].op_type == "Identity" and seen < 8:
@@ -1836,8 +1832,7 @@ def _fold_weight_quant(path: Path) -> int:
                     [base + "_dq"], name=base + "_DQ", axis=0))
                 n.input[1] = base + "_dq"
                 count += 1
-                # Bias as int32 with scale = x_scale * w_scale, the way
-                # ORT's QDQ output (which the compiler handles) has it.
+                # Bias as int32 with scale x_scale * w_scale, as in ORT's QDQ output.
                 src = producer.get(n.input[0])
                 if (len(n.input) >= 3 and n.input[2] in init
                         and init[n.input[2]].data_type == onnx.TensorProto.FLOAT
@@ -1847,9 +1842,7 @@ def _fold_weight_quant(path: Path) -> int:
                     b_t = init[n.input[2]]
                     b = nh.to_array(b_t)
                     b_scale = (scale * x_scale).astype(np.float32)
-                    # float64: float32 cannot hold 2**31-1, so a saturated
-                    # bias cast to int32 wrapped to INT_MIN and killed the
-                    # channel on the board.
+                    # float64: float32 cannot hold 2**31-1, so a saturated bias wraps to INT_MIN.
                     b_q = np.clip(np.round(b.astype(np.float64) / b_scale.astype(np.float64)),
                                   -2**31, 2**31 - 1).astype(np.int32)
                     bbase = n.input[2]
@@ -1873,19 +1866,14 @@ def _fold_weight_quant(path: Path) -> int:
 def _qat_finetune(model: YOLOX, samples, train_s, st: dict, cfg: TrainConfig, device,
                   evaluate, report_progress, cancel, history: list[dict], notes: list[str],
                   epoch_secs: list[float], on_epoch: Callable[[], None]) -> float:
-    """Fine-tune with int8 simulated throughout the graph (see
-    vendor/yolox/qat.py). BatchNorm is folded with frozen statistics;
-    the activation observers seed from a pass over training batches,
-    then track a slow moving average. Runs in fp32 (no autocast): the
-    model is small and fake quant is cheap. Returns the simulated-int8
-    AP@0.5 on the val split."""
+    """Fine-tune in fp32 with int8 simulated throughout the graph. Returns the
+    simulated-int8 AP@0.5 on the val split."""
     from vendor.yolox.qat import reset_observers, set_calibrate, unseeded
 
     set_qat(model, True)
     reset_observers(model)  # a warm start must not carry another run's ranges
     batch = st["batch"]
-    # Seed every observer: the training branch (losses) and the
-    # inference branch (the head's output fake quant lives only there).
+    # Seed observers on both branches: the head's output fake quant is inference-only.
     set_calibrate(model, True)
     with torch.no_grad():
         seed = train_s[: min(len(train_s), max(batch * 8, cfg.calib_images))]
@@ -1903,7 +1891,6 @@ def _qat_finetune(model: YOLOX, samples, train_s, st: dict, cfg: TrainConfig, de
         raise RuntimeError(f"QAT observers never saw data: {missing[:5]}")
     _check_cancel(cancel)
     model.train()
-    # Fine-tune at a tenth of the float LR, cosine to 1% over the phase.
     lr = cfg.lr * st["batch"] / 64
     qat_lr = lr * 0.1
     opt = torch.optim.SGD(model.parameters(), lr=qat_lr, momentum=0.9,
@@ -1920,10 +1907,7 @@ def _qat_finetune(model: YOLOX, samples, train_s, st: dict, cfg: TrainConfig, de
             loss = model(imgs, targets)["total_loss"]
             opt.zero_grad(set_to_none=True)
             loss.backward()
-            # With BatchNorm folded the loss landscape is far sharper than
-            # the float run's (gradient norms of 100-200 vs single digits);
-            # unclipped, one step at this LR doubles the loss. Measured:
-            # clip 5 recovers the float loss within a few dozen steps.
+            # With BatchNorm folded, gradient norms reach 100-200.
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             opt.step()
             return float(loss.detach())
@@ -1949,14 +1933,12 @@ def _qat_finetune(model: YOLOX, samples, train_s, st: dict, cfg: TrainConfig, de
     return ap
 
 
-# ── int8 PTQ fallback (ONNX Runtime static QDQ) ─────────────────────
+# int8 PTQ fallback: ONNX Runtime static QDQ
 
 def _ptq_quantize(fp32_path: Path, int8_path: Path, samples, train_s, cfg: TrainConfig,
                   notes: list[str] | None = None) -> dict:
-    """Post-training quantisation for qat_epochs=0: percentile
-    calibration on natural training images (no synthetic extremes: they
-    poison every deep range for the sake of the input, which the
-    contract check pins anyway). Returns the input contract record."""
+    """Post-training quantisation for qat_epochs=0, percentile-calibrated on
+    training images. Returns the input contract record."""
     from onnxruntime.quantization import (CalibrationDataReader, CalibrationMethod,
                                           QuantFormat, QuantType, quantize_static)
 
@@ -1985,11 +1967,8 @@ def _ptq_quantize(fp32_path: Path, int8_path: Path, samples, train_s, cfg: Train
 
     try:
         _run(CalibrationMethod.Percentile, {"CalibPercentile": cfg.calib_percentile})
-    except Exception as e:  # noqa: BLE001 - ORT raises its own Exception subclasses
-        # The percentile calibrator builds histograms and dies on a
-        # tensor with no range at all (a dead channel, a constant
-        # output on a tiny dataset): "Too many bins for data range".
-        # MinMax has no such failure mode; note it and carry on.
+    except Exception as e:  # noqa: BLE001
+        # The percentile calibrator fails on a tensor with no range; MinMax does not.
         if notes is not None:
             notes.append(f"percentile calibration failed ({type(e).__name__}); used MinMax")
         _run(CalibrationMethod.MinMax, {})
@@ -1998,10 +1977,9 @@ def _ptq_quantize(fp32_path: Path, int8_path: Path, samples, train_s, cfg: Train
 
 def _score_onnx(path: Path, samples, val_s, cfg: TrainConfig, classes: list[str]
                 ) -> tuple[float, list[float], list[np.ndarray], list[np.ndarray]]:
-    """AP@0.5 of an exported (raw-head) ONNX on the val split, through
-    the same host decode + NMS the float model is scored with. Also
-    returns the predictions (down to score 0.01) and ground truth in
-    letterbox space so the threshold can be calibrated on them."""
+    """AP@0.5 of an exported raw-head ONNX on the val split, with the float
+    model's decode and NMS. Also returns the predictions down to score 0.01
+    and the ground truth, in letterbox space."""
     sess = open_onnx(path)
     preds, gts = [], []
     for si in val_s:
@@ -2017,11 +1995,9 @@ def _score_onnx(path: Path, samples, val_s, cfg: TrainConfig, classes: list[str]
 def _val_predictions(samples: list[Sample], val_s: list[int], preds: list[np.ndarray],
                      gts: list[np.ndarray], conf: float, cfg: TrainConfig, project_id: str,
                      classes: list[str]) -> dict:
-    """Each val image's truth beside what the shipped model reports on it
-    (the boxes at the calibrated threshold), in the image's own pixels,
-    for the side-by-side view. A prediction's `kind` says how it fared
-    (tp, wrong class, fp) and a truth box nothing found is `missed`, by
-    the same matching as the report's numbers."""
+    """Each val image's truth and its predictions at `conf`, in the image's
+    pixels. A prediction's `kind` is tp, wrong or fp; a truth box nothing
+    found is `missed`."""
     import train_eval
 
     images = []
@@ -2048,7 +2024,7 @@ def _val_predictions(samples: list[Sample], val_s: list[int], preds: list[np.nda
     return {"conf": conf, "classes": classes, "images": images}
 
 
-# ── the Neuro N6 bundle ─────────────────────────────────────────────
+# Neuro N6 bundle
 
 _C_KEYWORDS = frozenset("""auto break case char const continue default do double else enum extern
 float for goto if inline int long register restrict return short signed sizeof static struct
@@ -2056,12 +2032,8 @@ switch typedef union unsigned void volatile while bool true false""".split())
 
 
 def _c_slug(name: str) -> str:
-    """Dataset name -> a slug that is a valid C identifier, macro prefix
-    and Arduino sketch name: the export uses it in `#pragma neuron6
-    name=<slug>`, `NEURON6_DECLARE_MODEL(<slug>)`, `NN_Instance_<slug>`,
-    the `<SLUG>_*` macros and the `<slug>/<slug>.ino` sketch folder. A
-    leading digit ("3d objects") or a keyword ("int") made the shipped
-    bundle uncompilable, and sketch names stop at 63 characters."""
+    """Dataset name -> a slug valid as a C identifier, a macro prefix and an
+    Arduino sketch name, which stops at 63 characters."""
     slug = re.sub(r"[^a-z0-9]+", "_", (name or "").lower()).strip("_")[:40].rstrip("_") or "model"
     if slug[0].isdigit() or slug in _C_KEYWORDS or slug.upper() in _C_KEYWORDS:
         slug = "pk_" + slug
@@ -2069,8 +2041,18 @@ def _c_slug(name: str) -> str:
 
 
 def _c_str(s: str) -> str:
-    """Escape a class name for a C string literal."""
-    return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+    """Escape a class name for a C string literal in the UTF-8 labels header.
+    A control character becomes octal escapes of its UTF-8 bytes: an octal
+    escape ends after three digits, a hex one would take in a digit after it."""
+    out = []
+    for ch in s:
+        if ch in '\\"':
+            out.append("\\" + ch)
+        elif unicodedata.category(ch) == "Cc":
+            out.extend(f"\\{b:03o}" for b in ch.encode("utf-8"))
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def _c_comment(s: str) -> str:
@@ -2080,10 +2062,7 @@ def _c_comment(s: str) -> str:
 
 def _sketch(slug: str, dataset_name: str, classes: list[str], cfg: TrainConfig,
             report: dict, model_file: str) -> str:
-    """The export's sketch: the camera, the model fed at the size and
-    aspect it was trained on, and the core's PixelKit post-processor,
-    which publishes the boxes to Neuro Studio and draws them on the
-    display. Everything that varies comes from <slug>_labels.h."""
+    """The exported sketch. Everything that varies comes from <slug>_labels.h."""
     U = slug.upper()
     name = _c_comment(dataset_name).strip() or slug
     shown = [_c_comment(c) for c in classes[:6]]
@@ -2099,108 +2078,104 @@ def _sketch(slug: str, dataset_name: str, classes: list[str], cfg: TrainConfig,
         "/*",
         f"  {name} detector",
         "",
-        *para(f'Finds what the "{name}" dataset was labelled with ({", ".join(shown)}) '
-              "in the camera picture and draws a labelled box around each. The boxes "
-              "stream over USB to Neuro Studio, which shows them on the live video "
-              "beside a slider for the score a box needs."),
+        *para(f"Detects {', '.join(shown)} in the camera picture and streams labelled "
+              "boxes to Neuro Studio, over USB or WiFi."),
         "",
-        *para(f"Trained in PixelKit: {MODEL_SPECS[cfg.size]['label']}, {cfg.imgsz}x{cfg.imgsz} "
-              f"input, run {report.get('run')}."
-              + (f" On its validation images the int8 model that runs here scored "
-                 f"AP@0.5 {ap:.3f}." if isinstance(ap, (int, float)) else "")),
+        "  Hardware: Neuro N6 with an OV5640 camera; the MAYA-W476 radio for WiFi.",
         "",
-        "  The circuit:",
-        "  - Neuro N6 board with an OV5640 camera fitted.",
-        "  - USB cable to a computer running Neuro Studio.",
-        "",
-        *para(f"Keep this folder's files together: the sketch, {slug}_labels.h and "
-              f"{model_file} come from the same export."),
+        *para(f"Model: {MODEL_SPECS[cfg.size]['label']}, {cfg.imgsz}x{cfg.imgsz} input, "
+              f"PixelKit run {report.get('run')}."),
+        *(para(f"AP@0.5 {ap:.3f} on its validation images, as int8.")
+          if isinstance(ap, (int, float)) else []),
+        *para(f"The sketch, {slug}_labels.h and {model_file} belong together."),
         "*/",
         "",
-        "// The board package this sketch needs. An older one, or another board,",
-        "// stops here with that message instead of a missing name further down.",
+        f"// Stops the build on a core older than {core}, or on another board.",
         "#ifndef NEURON6_CORE_VERSION_AT_LEAST",
         f'#error "This sketch needs the Neuro N6 core {core} or later"',
         f"#elif !NEURON6_CORE_VERSION_AT_LEAST({', '.join(map(str, CORE_MIN))})",
         f'#error "This sketch needs the Neuro N6 core {core} or later"',
         "#endif",
         "",
-        "// The camera driver and the post-processing that turns the model's output",
-        "// into labelled boxes.",
+        "// 0: stream over USB. 1: stream over WiFi from the board's own network: with",
+        "// the board on USB, pick WiFi (the board's network) in Neuro Studio and join",
+        "// the network it shows. The Serial Monitor prints its name and password too.",
+        "#define STREAM_OVER_WIFI 0",
+        "",
         "#include <OV5640_Arduino.h>",
         "#include <PostProcess.h>",
+        "#if STREAM_OVER_WIFI",
+        "#include <MayaW476.h>",
+        "#endif",
         "",
-        "// The class names, input size and thresholds of this model.",
         f'#include "{slug}_labels.h"',
         "",
-        "// The model. This line makes the build compile the file with ST Edge AI and",
-        "// flash its weights alongside the sketch.",
+        "// Compiled with ST Edge AI during the build; the weights are flashed with the sketch.",
         f'#pragma neuron6 model="{model_file}" name={slug}',
         "",
-        "// Declaring the camera selects it. Use \"OV5640 camera(CARRIER_TFT);\" for the",
-        "// TFT carrier, the one with the display.",
+        "// OV5640 camera(CARRIER_TFT); for the TFT carrier.",
         "OV5640 camera;",
         "",
-        "// Make the model above available to the sketch.",
         f"NEURON6_DECLARE_MODEL({slug});",
         "",
-        "// The post-processor, kept so loop() can read the boxes.",
         "IPostProcessor *detector = nullptr;",
         "",
-        "// The score a box needs to be kept. Neuro Studio shows it as a slider while",
-        "// the sketch runs: drag it to trade missed objects against false ones on",
-        f"// your own scene, then put the value you settle on in {U}_CONF_THRESHOLD.",
+        "// Minimum box score. Neuro Studio shows it as a slider; a value chosen there",
+        f"// belongs in {U}_CONF_THRESHOLD.",
         f"static float confidence = {U}_CONF_THRESHOLD;",
         "",
         "void setup() {",
         "  VisionConfig cfg;",
-        "",
-        "  // Camera resolution and frame rate.",
         "  cfg.camera = CAMERA_VGA;",
         "  cfg.fps = FPS_45;",
-        "",
-        "  // The size of picture this model was trained on.",
         f"  cfg.nn.width  = {U}_INPUT_W;",
         f"  cfg.nn.height = {U}_INPUT_H;",
+        "  // The whole picture, padded to a square with grey bars, as in training.",
+        "  cfg.nn.aspect = ASPECT_LETTERBOX;",
         "",
-        "  // A centred square, undistorted: PixelKit trained the model on pictures",
-        "  // padded to a square rather than squashed, so squashing the camera frame",
-        "  // would cost accuracy. The boxes are still mapped onto the full picture.",
-        "  cfg.nn.aspect = ASPECT_CROP_CENTER;",
-        "",
-        "  // Send the video to Neuro Studio. TRANSPORT_LCD draws the boxes on the",
-        "  // on-board display instead, which needs the TFT carrier.",
+        "#if STREAM_OVER_WIFI",
+        "  // A network named after the board, with a password unique to it.",
+        "  Serial.begin(115200);",
+        "  MayaW476.beginAP(MayaW476.getHostname(), MayaW476.devicePassword());",
+        "  cfg.transport = TRANSPORT_WIFI_SOFTAP;",
+        "#else",
+        "  // TRANSPORT_LCD draws the boxes on the TFT carrier's display instead.",
         "  cfg.transport = TRANSPORT_USB;",
+        "#endif",
         "",
-        "  // Keep boxes scoring at least the confidence, which starts at the threshold",
-        "  // PixelKit calibrated on the validation images. Raise it for fewer but",
-        "  // surer boxes.",
         '  n6_tune_float("confidence", &confidence, 0.01f, 0.99f);',
         f"  detector = PostProcess_PixelKitYOLOX(confidence, {U}_NMS_THRESHOLD,",
         f"                                       {U}_CLASSES, {U}_NUM_CLASSES);",
-        "",
-        "  // Start the camera and the model together.",
         f"  Vision.begin(&NN_Instance_{slug}, detector, cfg);",
         "}",
         "",
         "void loop() {",
-        "  // A slider move reaches the post-processor here: calling its factory again",
-        "  // changes the settings of the one instance.",
+        "#if STREAM_OVER_WIFI",
+        "  // The network name and password every 10 s.",
+        "  static uint32_t nextNote = 0;",
+        "  if ((int32_t)(millis() - nextNote) >= 0) {",
+        "    nextNote = millis() + 10000;",
+        '    Serial.print("WiFi network ");',
+        "    Serial.print(MayaW476.getHostname());",
+        '    Serial.print(", password ");',
+        "    Serial.println(MayaW476.devicePassword());",
+        "  }",
+        "#endif",
+        "",
+        "  // Calling the factory again updates the settings of the one instance.",
         f"  static float applied = {U}_CONF_THRESHOLD;",
         "  if (confidence != applied) {",
         "    applied = confidence;",
         f"    PostProcess_PixelKitYOLOX(confidence, {U}_NMS_THRESHOLD, {U}_CLASSES, {U}_NUM_CLASSES);",
         "  }",
         "",
-        "  // Grab a frame, run the model on it, and publish what it found.",
         "  Vision.run();",
         "",
-        "  // The boxes are also here to act on: centre and size as fractions of the",
-        "  // model's picture, a score, and the class.",
+        "  // Each box: centre and size as fractions of the model's input, score and class.",
         "  const od_pp_outBuffer_t *boxes = nullptr;",
         "  const int n = PostProcess_ZooResults(detector, &boxes);",
         "  for (int i = 0; i < n; i++) {",
-        f"    // {U}_CLASSES[boxes[i].class_index] was found, sure to boxes[i].conf.",
+        f"    // {U}_CLASSES[boxes[i].class_index], score boxes[i].conf",
         "  }",
         "}",
         "",
@@ -2238,21 +2213,34 @@ def _write_bundle(out_dir: Path, slug: str, dataset_name: str, classes: list[str
     (out_dir / f"{slug}_labels.h").write_text(labels_h, "utf-8", newline="\n")
     sketch = _sketch(slug, dataset_name, classes, cfg, report, int8_onnx.name)
     (out_dir / f"{slug}.ino").write_text(sketch, "utf-8", newline="\n")
-    _write_json_atomic(out_dir / "report.json", report)
-    files = [out_dir / f"{slug}.ino", int8_onnx, out_dir / f"{slug}_labels.h", out_dir / "report.json"]
-    # Weights that descend from Megvii's checkpoint, directly or through the
-    # run this one started from, go out with Megvii's notice.
-    if report.get("pretrained") or report.get("initRun"):
-        (out_dir / "NOTICE.txt").write_text(
-            f"{int8_onnx.name} was trained in PixelKit from Megvii's COCO-pretrained\n"
-            "YOLOX checkpoint (https://github.com/Megvii-BaseDetection/YOLOX),\n"
-            "Copyright (c) Megvii Inc., licensed under the Apache License,\n"
-            "Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0). Keep this\n"
-            "notice with the model when you share it.\n", "utf-8", newline="\n")
-        files.append(out_dir / "NOTICE.txt")
+    files = [out_dir / f"{slug}.ino", int8_onnx, out_dir / f"{slug}_labels.h"]
+    # Every export is a modified YOLOX network; most also descend from Megvii's weights.
+    coco = report.get("cocoWeights", bool(report.get("pretrained") or report.get("initRun")))
+    weights = f" and fine-tuned from Megvii's COCO-pretrained {label} checkpoint" if coco else ""
+    (out_dir / "NOTICE.txt").write_text(
+        f"{int8_onnx.name} is a modified version of YOLOX. PixelKit built it from\n"
+        f"the YOLOX network as modified by Ohm Lab Ltd{weights},\n"
+        "trained it on your dataset and quantised it to int8.\n\n"
+        "YOLOX: https://github.com/Megvii-BaseDetection/YOLOX\n"
+        "Copyright (c) 2021-2022 Megvii Inc. All rights reserved.\n"
+        "Changes: Copyright 2026 Ohm Lab Ltd.\n"
+        "Licensed under the Apache License, Version 2.0; a copy is in LICENSE.txt.\n"
+        "Keep this notice and LICENSE.txt with the model when you share it.\n",
+        "utf-8", newline="\n")
+    (out_dir / "LICENSE.txt").write_bytes(
+        (Path(__file__).resolve().parent / "vendor" / "yolox" / "LICENSE").read_bytes())
+    files += [out_dir / "NOTICE.txt", out_dir / "LICENSE.txt"]
 
-    # A sketch folder: unzip it and open <slug>.ino in the Arduino IDE.
+    # One sketch folder, <slug>/, written under a temp name. report.json goes
+    # in from memory and onto disk last: a run with report.json lists as done.
     zpath = out_dir / "export.zip"
-    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in files:
-            zf.write(f, f"{slug}/{f.name}")
+    tmp = zpath.with_name(f"{zpath.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in files:
+                zf.write(f, f"{slug}/{f.name}")
+            zf.writestr(f"{slug}/report.json", _json_text(report))
+        _replace_retry(tmp, zpath)
+    finally:
+        _discard(tmp)
+    _write_json_atomic(out_dir / "report.json", report)

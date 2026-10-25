@@ -1,12 +1,5 @@
-"""Box/label resolution helpers shared by derived datasets and export.
-
-Extracted from the deleted training module - pure dict utilities, the
-canonical per-image view across V1 (results/editedBoxes) and V2 (imports)
-manifest shapes."""
+"""Box and label resolution for manifests, shared by derived datasets and export."""
 from __future__ import annotations
-
-def _safe_label(s) -> str:
-    return (s or "").strip().lower() if isinstance(s, str) else ""
 
 def _box_xyxy(b: dict) -> tuple[float, float, float, float] | None:
     if all(b.get(k) is not None for k in ("x0", "y0", "x1", "y1")):
@@ -14,7 +7,7 @@ def _box_xyxy(b: dict) -> tuple[float, float, float, float] | None:
             return float(b["x0"]), float(b["y0"]), float(b["x1"]), float(b["y1"])
         except (TypeError, ValueError):
             pass
-    # SAM 3 and model detections carry the box as `box` (xyxy) as well.
+    # Detections carry the box as box_xyxy or box, both xyxy.
     for key in ("box_xyxy", "box"):
         v = b.get(key)
         if isinstance(v, list) and len(v) == 4:
@@ -22,9 +15,7 @@ def _box_xyxy(b: dict) -> tuple[float, float, float, float] | None:
                 return float(v[0]), float(v[1]), float(v[2]), float(v[3])
             except (TypeError, ValueError):
                 pass
-    # Segmentation-only detection (e.g. a SAM "road" polygon with no stored
-    # bbox): derive the enclosing box from the mask polygons so a detector can
-    # still train on it. Without this, seg-class boxes are silently dropped.
+    # A mask-only detection gets the bounding box of its polygons.
     polys = (b.get("mask") or {}).get("polygons")
     if isinstance(polys, list) and polys:
         xs: list[float] = []
@@ -43,14 +34,12 @@ def _box_xyxy(b: dict) -> tuple[float, float, float, float] | None:
             return min(xs), min(ys), max(xs), max(ys)
     return None
 
-def _vlm_rejected(b: dict) -> bool:
+def _validation_rejected(b: dict) -> bool:
     v = b.get("validation")
     return isinstance(v, dict) and v.get("match") is False
 
 def _box_label(b: dict) -> str:
-    """Resolve a box's label across every naming convention in play - matches
-    the export's `_box_label` (and the FE viewer's predLabel||gdLabel). V2 auto
-    detections carry the label under predLabel/gd_label, NOT `label`."""
+    """The box's first non-empty label key; must match the export's `_box_label`."""
     for key in ("label", "predLabel", "pred_label", "gd_label", "gdLabel", "gd_variant"):
         v = b.get(key)
         if v is None:
@@ -61,11 +50,8 @@ def _box_label(b: dict) -> str:
     return ""
 
 def _image_index(manifest: dict) -> dict[str, dict]:
-    """Unified per-image view across V1 (results[] + top-level editedBoxes) and
-    V2 (imports[] with per-entry width/height/editedBoxes/detections). Returns
-    {filename: {"width", "height", "boxes"}}. This is the SAME resolution the
-    export uses, so training sees exactly the labels the user sees - for V2,
-    `editedBoxes` wins when set, else auto `detections` (minus rejected)."""
+    """{filename: {"width", "height", "boxes"}} from results[], editedBoxes and imports[].
+    Same resolution as the export: an import's editedBoxes when set, else its detections."""
     out: dict[str, dict] = {}
     for r in (manifest.get("results") or []):
         img = r.get("image")

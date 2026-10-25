@@ -1,12 +1,6 @@
 "use client";
 
-// Type-to-confirm modal for purging a label from the entire project.
-// Mirror of the "type the project name to confirm" pattern used in
-// settings → Delete project, scaled down for a single label.
-//
-// Submit fires the parent's onConfirm with the (canonical) label ,
-// the parent schedules a `purge_label` job via /api/jobs so the
-// strip happens in the background and survives a browser refresh.
+// Type-to-confirm modal for purging a label from a dataset.
 
 import { useEffect, useRef, useState } from "react";
 
@@ -15,9 +9,7 @@ export function DeleteLabelModal({
   onCancel,
   onConfirm,
 }: {
-  /** User-visible name shown in the prompt + required to type.
-      The canonical is held by the parent and threaded through
-      onConfirm, the modal itself only needs the display string. */
+  /** Shown in the prompt and typed to confirm; the parent holds the canonical label. */
   displayName: string;
   onCancel: () => void;
   onConfirm: () => Promise<void> | void;
@@ -57,7 +49,6 @@ export function DeleteLabelModal({
       aria-modal="true"
       aria-label={`Delete label ${displayName}`}
       onClick={(e) => {
-        // Click on the wash closes the modal, but not on the card.
         if (e.target === e.currentTarget && !busy) onCancel();
       }}
     >
@@ -70,9 +61,8 @@ export function DeleteLabelModal({
           <span className="font-mono font-medium text-[var(--foreground)]">
             {displayName}
           </span>
-          {" "}from the project AND every annotation referencing it across the
-          whole dataset. The strip runs as a background job, closing this
-          tab or refreshing the page won&rsquo;t cancel it.
+          {" "}from the dataset and every annotation that uses it. It runs as
+          a background job; leaving this page won&rsquo;t cancel it.
         </p>
         <p className="mt-4 text-[12px] text-foreground/55">
           Type{" "}

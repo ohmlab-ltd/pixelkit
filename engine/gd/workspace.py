@@ -1,27 +1,18 @@
-"""Workspace resolution for the portable build.
+"""Workspace folder and app config.
 
-Everything PixelKit stores - projects, datasets, images, annotations, model
-weights - lives inside one user-chosen workspace folder. This module resolves
-that folder and must be imported BEFORE torch/transformers so HF_HOME points
-model downloads into the workspace.
-
-Resolution order:
-  1. PIXELKIT_WORKSPACE env var (also how tests isolate themselves)
-  2. "workspace" key in the app config file (per-OS config dir)
-  3. default: ~/PixelKit
-
-The app config dir (small, machine-local, never inside the workspace - the
-workspace may be synced or shared, and config holds the HF token):
-  macOS:   ~/Library/Application Support/PixelKit
-  Windows: %APPDATA%/PixelKit
-  Linux:   $XDG_CONFIG_HOME/pixelkit or ~/.config/pixelkit
+The config holds the HF token, so it lives outside the workspace. dir() sets
+HF_HOME and must run before transformers is imported.
 """
 from __future__ import annotations
 
 import json
 import os
 import sys
+import threading
+import time
+import uuid
 from pathlib import Path
+from typing import Callable
 
 _SCHEMA_VERSION = 1
 
@@ -39,20 +30,42 @@ def config_dir() -> Path:
     return base
 
 
+_CONFIG_LOCK = threading.Lock()
+
+
 def load_config() -> dict:
+    """The config; {} when it is missing or unreadable. A read that meets a
+    concurrent replace on Windows is retried."""
     path = config_dir() / "config.json"
-    try:
-        return json.loads(path.read_text("utf-8"))
-    except Exception:
-        return {}
+    for i in range(20):
+        try:
+            cfg = json.loads(path.read_text("utf-8"))
+            return cfg if isinstance(cfg, dict) else {}
+        except PermissionError:
+            time.sleep(0.01 * (i + 1))
+        except (OSError, ValueError):
+            return {}
+    return {}
 
 
 def save_config(cfg: dict) -> None:
     d = config_dir()
     d.mkdir(parents=True, exist_ok=True)
-    tmp = d / "config.json.tmp"
-    tmp.write_text(json.dumps(cfg, indent=2), "utf-8")
+    tmp = d / f"config.json.{uuid.uuid4().hex}.tmp"
+    # Owner-only from the start: the config holds the HF token.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(json.dumps(cfg, indent=2))
     os.replace(tmp, d / "config.json")
+
+
+def update_config(change: Callable[[dict], None]) -> dict:
+    """Load, change and save the config as one step; returns the saved config."""
+    with _CONFIG_LOCK:
+        cfg = load_config()
+        change(cfg)
+        save_config(cfg)
+        return cfg
 
 
 def _resolve_workspace() -> Path:
@@ -69,7 +82,7 @@ _WORKSPACE: Path | None = None
 
 
 def dir() -> Path:
-    """The workspace root (created on first access)."""
+    """The workspace root, created on first access."""
     global _WORKSPACE
     if _WORKSPACE is None:
         ws = _resolve_workspace()
@@ -84,8 +97,6 @@ def dir() -> Path:
                 "utf-8",
             )
             os.replace(tmp, marker)
-        # Model downloads land in the workspace unless the user has an
-        # explicit HF_HOME of their own.
         os.environ.setdefault("HF_HOME", str(ws / "weights"))
         _WORKSPACE = ws
     return _WORKSPACE
@@ -100,9 +111,6 @@ def weights_dir() -> Path:
 
 
 def set_workspace(path: str) -> Path:
-    """Persist a new workspace location in the app config (takes effect on
-    next process start; live re-pointing is not supported)."""
-    cfg = load_config()
-    cfg["workspace"] = str(Path(path).expanduser())
-    save_config(cfg)
+    """Save a new workspace location; it takes effect at the next start."""
+    cfg = update_config(lambda c: c.__setitem__("workspace", str(Path(path).expanduser())))
     return Path(cfg["workspace"])

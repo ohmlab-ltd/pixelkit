@@ -1,14 +1,12 @@
-"""Threshold calibration, per-class report, confusion matrix and the
-failure gallery (gd/train_eval.py): pure numpy, no model."""
+"""Threshold calibration, class report, confusion matrix and failure gallery, without a model."""
 import numpy as np
 import pytest
 
 
 def _preds_gts():
-    # Image 0: one dog GT; a confident correct dog + a weak spurious cat.
-    # Image 1: one cat GT that the model calls a dog (right place, wrong
-    #          class) at 0.6, and a weak (0.3) dog box nowhere near anything.
-    # Image 2: a dog GT the model misses entirely.
+    # Image 0: one dog GT; a confident correct dog and a weak spurious cat.
+    # Image 1: one cat GT called a dog at 0.6, and a stray 0.3 dog box.
+    # Image 2: a dog GT the model misses.
     dog, cat = 0, 1
     preds = [
         np.array([[10, 10, 50, 50, 0.90, dog], [70, 70, 90, 90, 0.30, cat]], np.float32),
@@ -56,10 +54,7 @@ def test_calibrated_threshold_separates_good_from_weak_boxes():
     preds, gts = _preds_gts()
     cal = calibrate_threshold(preds, gts, n_classes=2)
     assert cal["calibrated"] is True
-    # Above 0.30 the spurious cat and the stray dog vanish; the wrong-class
-    # box at 0.60 costs an FP and an FN, so F1 peaks (0.5) on the whole
-    # plateau (0.6, 0.9) and the calibrator picks its middle, not an edge
-    # that one slightly weaker detection would fall off.
+    # F1 peaks at 0.5 on the plateau from 0.6 to 0.9; the calibrator picks its middle.
     assert cal["conf"] == pytest.approx(0.75, abs=0.011)
     assert cal["precision"] == 1.0
     assert cal["recall"] == pytest.approx(1 / 3, abs=1e-3)

@@ -3,11 +3,11 @@
     pixelkit            start the engine (serves the UI at 127.0.0.1:8001)
     pixelkit doctor     check device, weights, workspace, token, UI build
     pixelkit label <folder> --prompts "a,b"
-                        headless batch labelling: make a dataset from a
-                        folder of images, auto-label with SAM 3, and
-                        optionally export (--export yolo|coco|voc|cvat|
-                        labelstudio|masks). Everything lands in the
-                        normal workspace, so the app can open it after.
+                        make a workspace dataset from a folder of images,
+                        label it with SAM 3, and optionally export it with
+                        --export yolo|coco|voc|cvat|labelstudio|masks
+    pixelkit train <dataset>
+                        train a Neuro N6 model on a workspace dataset
 """
 from __future__ import annotations
 
@@ -24,11 +24,11 @@ sys.path.insert(0, str(ENGINE_DIR / "gd"))
 
 
 def _ok(label: str, value: str) -> None:
-    print(f"  ✓ {label:<14} {value}")
+    print(f"  ok {label:<14} {value}")
 
 
 def _warn(label: str, value: str) -> None:
-    print(f"  ! {label:<14} {value}")
+    print(f"  !! {label:<14} {value}")
 
 
 def doctor() -> int:
@@ -73,7 +73,7 @@ def doctor() -> int:
         if models.is_downloaded(name):
             _ok(name, "weights downloaded")
         else:
-            _warn(name, "weights not downloaded (setup screen or /api/models)")
+            _warn(name, "weights not downloaded; the engine fetches them when it starts")
 
     ui = ENGINE_DIR.parent / "ui" / "out"
     if (ui / "index.html").is_file():
@@ -95,9 +95,7 @@ _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".heic", ".avif"}
 
 
 def label(args) -> int:
-    """Headless batch labelling: boots the engine in-process (no HTTP
-    port) and drives the same endpoints the app uses, so results are a
-    perfectly normal dataset in the workspace."""
+    """Label a folder headlessly through the app's endpoints, in-process."""
     folder = Path(args.folder).expanduser()
     if not folder.is_dir():
         print(f"error: not a folder: {folder}")
@@ -114,20 +112,18 @@ def label(args) -> int:
         os.environ["PK_DEVICE"] = args.device
 
     name = args.name or folder.name
-    print(f"PixelKit headless labelling")
+    print("PixelKit headless labelling")
     print(f"  images:  {len(files)} from {folder}")
     print(f"  prompts: {', '.join(prompts)}")
 
     from fastapi.testclient import TestClient
     import server
 
-    with TestClient(server.app) as client:
+    with TestClient(server.app, base_url="http://127.0.0.1") as client:
         settings = client.get("/api/settings").json()
         dev = settings.get("device") or "cpu"
         env_dev = settings.get("deviceEnvOverride")
-        # Mirror the engine's precedence: PK_DEVICE beats the config, so
-        # a config cpu preference doesn't count as forced when the env
-        # overrode it to something else.
+        # PK_DEVICE overrides the configured device preference.
         forced_cpu = env_dev == "cpu" or (not env_dev and settings.get("devicePreference") == "cpu")
         if dev == "cpu" and not forced_cpu:
             print("error: no supported GPU detected. Re-run with --device cpu to")
@@ -135,8 +131,7 @@ def label(args) -> int:
             return 2
         print(f"  device:  {dev}")
 
-        # SAM 3 must be loaded before the job can run. Boot auto-loads
-        # cached weights; nudge a load if it's downloaded-but-unloaded.
+        # The job needs SAM 3 loaded; start a load if the weights are on disk.
         deadline = time.time() + args.model_timeout
         nudged = False
         while True:
@@ -157,7 +152,7 @@ def label(args) -> int:
             if time.time() > deadline:
                 print(f"error: SAM 3 didn't finish loading in {args.model_timeout}s")
                 return 2
-            print("\r  loading SAM 3…", end="", flush=True)
+            print("\r  loading SAM 3...", end="", flush=True)
             time.sleep(2)
         print("\r  SAM 3 loaded.   ")
 
@@ -205,8 +200,7 @@ def label(args) -> int:
             if idx is not None and total:
                 print(f"\r  labelling {idx}/{total}", end="", flush=True)
             time.sleep(2)
-        # A failed job vanishes from /active exactly like a finished one
-        # - ask for the final status before claiming victory.
+        # A failed job also leaves /active, so check the final status.
         final = client.get(f"/api/jobs/{jid}")
         body = final.json() if final.status_code == 200 else {}
         status = body.get("status", "unknown")
@@ -236,7 +230,7 @@ def label(args) -> int:
 
 
 def _resolve_dataset(ref: str) -> str | None:
-    """A dataset id, or a dataset name (case-insensitive, unique)."""
+    """Resolve a dataset id, or a unique dataset name in any case, to an id."""
     import store
 
     ref = (ref or "").strip()
@@ -257,8 +251,7 @@ def _resolve_dataset(ref: str) -> str | None:
 
 
 def _dataset_name(pid: str) -> str:
-    """The dataset's display name from dataset.json alone (store.load
-    would also read every per-image annotation file)."""
+    """The dataset's name from dataset.json alone; store.load reads every annotation file."""
     import store
 
     try:
@@ -272,16 +265,14 @@ def _dataset_name(pid: str) -> str:
 
 
 def train(args) -> int:
-    """Headless training: the same train_yolox job the Train card
-    schedules, driven in-process, with the pre-flight checks printed
-    first and the bundle copied out at the end."""
+    """Run the train_yolox job in-process, as the Train card does."""
     if args.device:
         os.environ["PK_DEVICE"] = args.device
 
     from fastapi.testclient import TestClient
     import server
 
-    with TestClient(server.app) as client:
+    with TestClient(server.app, base_url="http://127.0.0.1") as client:
         pid = _resolve_dataset(args.dataset)
         if pid is None:
             print(f"error: no dataset '{args.dataset}' in the workspace (id or exact name)")
@@ -369,9 +360,8 @@ def train(args) -> int:
                     last = line
                 time.sleep(3)
         except KeyboardInterrupt:
-            # Cancel the job (the run keeps its last checkpoint) rather
-            # than leaving the engine to finish hours of work unseen.
-            print("\n  cancelling after the current epoch…", flush=True)
+            # The cancelled run keeps its last checkpoint for --resume.
+            print("\n  cancelling after the current epoch...", flush=True)
             client.delete(f"/api/v2/projects/{pid}/jobs/{jid}")
             deadline = time.time() + 600
             while time.time() < deadline:
@@ -439,17 +429,16 @@ def train(args) -> int:
 
 
 def main() -> None:
-    # A redirected console on Windows is cp1252: never let a progress
-    # line with a non-ASCII character take the engine down.
+    # A redirected Windows console is cp1252; unencodable characters are replaced.
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(errors="replace")
         except (AttributeError, ValueError):
             pass
-    ap = argparse.ArgumentParser(prog="pixelkit", description=__doc__)
+    ap = argparse.ArgumentParser(prog="pixelkit", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="command")
-    # SUPPRESS: without it the subcommand's default would overwrite a
-    # port given before it (`pixelkit --port 8011 serve` ran on 8001).
+    # SUPPRESS keeps a --port given before `serve` from being overwritten.
     sub.add_parser("serve", help="start the engine (default)").add_argument(
         "--port", type=int, default=argparse.SUPPRESS
     )

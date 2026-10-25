@@ -1,17 +1,7 @@
 "use client";
 
-// Trim + sample-rate modal for video imports. Ported from V1's
-// ProjectView so V2's drop zone (which advertises video/*) actually
-// has a destination for dropped videos instead of silently filtering
-// them.
-//
-// Flow: parent queues videos → modal mounts → user picks trim + fps →
-// onConfirm fires → parent calls extractVideoFrames (lib/videoFrames)
-// and re-feeds the result into the image upload pipeline.
-//
-// A recording from the board (Neuro Studio's .mjpeg) is frames with no
-// timing and no browser plays it, so it is previewed a frame at a time,
-// trimmed in frames and sampled as one frame in N.
+// Trim and sample-rate modal for video imports. A board recording (.mjpeg)
+// has no timing, so it is trimmed in frames and sampled as one frame in N.
 
 import { useEffect, useRef, useState } from "react";
 import { extractCount, isMjpeg, mjpegFrames, type VideoExtractParams } from "../../lib/videoFrames";
@@ -25,18 +15,13 @@ export function VideoFrameModal({
   onConfirm,
 }: {
   file: File;
-  /** Set while the parent is mid-extraction so the modal swaps to
-      its progress view + disables every cancellation affordance. */
+  /** Set during extraction: shows progress and blocks cancelling. */
   extracting: { done: number; total: number } | null;
   onCancel: () => void;
   onConfirm: (params: VideoExtractParams) => void;
 }) {
   const recording = isMjpeg(file);
-  // Object URL lifecycle is managed inside the effect (not lazy-init
-  // useState) so React 18's StrictMode double-mount doesn't revoke
-  // the URL the live <video> element is still pointing at, that bug
-  // surfaced as "couldn't decode this video" the instant the modal
-  // opened, even on a clean 20 MB MP4.
+  // Created in an effect so a StrictMode double mount cannot revoke the live URL.
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => {
     if (recording) return;
@@ -103,9 +88,7 @@ export function VideoFrameModal({
     return () => window.removeEventListener("keydown", onKey);
   }, [onCancel, isExtracting]);
 
-  // Generate the thumbnail strip on a hidden video. Decoupled from
-  // the visible <video> so scrubbing/playing the preview doesn't
-  // fight the seeks needed for thumbs.
+  // Thumbnails come from a hidden video so their seeks do not move the preview.
   useEffect(() => {
     if (!loaded || duration <= 0 || !src) return;
     let cancelled = false;
@@ -158,7 +141,7 @@ export function VideoFrameModal({
           if (!cancelled) setThumbs([...out]);
         }
       } catch {
-        // Non-fatal, modal still works without the strip.
+        // The strip is optional.
       }
     })();
     return () => {
@@ -193,14 +176,14 @@ export function VideoFrameModal({
 
   return (
     <div
-      className="pk-backdrop fixed inset-0 z-[1300] flex items-center justify-center p-6"
+      className="pk-backdrop fixed inset-0 z-[1300] flex overflow-auto p-6"
       role="dialog"
       aria-modal="true"
       onClick={(e) => {
         if (e.target === e.currentTarget && !isExtracting) onCancel();
       }}
     >
-      <div className="pk-glass pk-pop max-w-2xl w-full rounded-md overflow-hidden">
+      <div className="pk-glass pk-pop m-auto max-w-2xl w-full rounded-md overflow-hidden">
         <header className="px-6 pt-5 pb-3 flex items-start justify-between gap-4">
           <div>
             <div className="pk-micro">{recording ? "Board recording" : "Video import"}</div>
@@ -239,14 +222,10 @@ export function VideoFrameModal({
               className="w-full max-h-[50vh] block bg-[var(--background)]"
               onLoadedMetadata={onLoadedMetadata}
               onError={(e) => {
-                // Only flag a real decode failure. The bare `onError`
-                // signature on HTMLVideoElement fires from harmless
-                // transient states too (seek-during-buffer, abort on
-                // re-render, etc.); only surface the permanent
-                // codec-not-supported case.
+                // onError also fires on transient states; only these codes are fatal.
                 const err = (e.currentTarget as HTMLVideoElement).error;
                 if (err && (err.code === err.MEDIA_ERR_SRC_NOT_SUPPORTED || err.code === err.MEDIA_ERR_DECODE)) {
-                  setLoadError("Couldn't decode this video, try a different format (mp4 / webm / mov).");
+                  setLoadError("Couldn't decode this video. MP4, WebM and MOV videos work.");
                 }
               }}
             />
@@ -270,8 +249,6 @@ export function VideoFrameModal({
         </div>
 
         <div className="px-6 py-5 grid gap-5">
-          {/* Trim slider, iOS-style two-handle range over a single
-              track with thumbnail strip background. */}
           <div>
             <div className="flex items-center justify-between text-xs text-foreground/55 mb-2">
               <span className="flex items-center gap-2">
@@ -304,7 +281,6 @@ export function VideoFrameModal({
             />
           </div>
 
-          {/* Frame rate; for a recording, one frame kept in `step`. */}
           {recording ? (
           <div>
             <div className="flex items-center justify-between text-xs mb-2">
@@ -376,7 +352,7 @@ export function VideoFrameModal({
               />
             </div>
             <p className="text-[11px] text-foreground/45">
-              Don&rsquo;t close this window, frames are being decoded locally.
+              Keep this window open while the frames are decoded on this machine.
             </p>
           </footer>
         ) : (

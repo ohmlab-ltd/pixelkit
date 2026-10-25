@@ -1,6 +1,7 @@
-"""CVAT / Label Studio / PNG-mask exporters — shape and content checks."""
+"""CVAT, Label Studio and PNG-mask exports: shape and content."""
 import io
 import json
+import time
 import zipfile
 
 from PIL import Image
@@ -51,8 +52,7 @@ def test_cvat_export(client):
     zf = _export_zip(client, pid, "cvat")
     names = zf.namelist()
     assert "annotations.xml" in names, names
-    # Uploads are stored under content-hash names; the xml must reference
-    # exactly the file shipped in images/.
+    # The xml names the content-hash file shipped in images/.
     imgs = [n for n in names if n.startswith("images/") and n.endswith(".jpg")]
     assert len(imgs) == 1, names
     xml = zf.read("annotations.xml").decode()
@@ -134,4 +134,66 @@ def test_masks_export_covers_unannotated_images(client):
     assert r.status_code == 200
     zf = _export_zip(client, pid, "masks")
     pngs = [n for n in zf.namelist() if n.endswith(".png")]
-    assert len(pngs) == 2, pngs  # annotated AND background-only image
+    assert len(pngs) == 2, pngs  # annotated and unannotated image
+
+
+def test_labelstudio_results_match_the_config_controls(client):
+    import xml.etree.ElementTree as ET
+
+    pid = _make_dataset(client, "Ls Controls")
+    for params, kinds in (({}, {"polygonlabels"}), ({"include_segmentations": False}, {"rectanglelabels"})):
+        zf = _export_zip(client, pid, "labelstudio", **params)
+        cfg = ET.fromstring(zf.read("labeling-config.xml"))
+        controls = {el.get("name"): el.tag.lower() for el in cfg if el.tag != "Image"}
+        results = [r for t in json.loads(zf.read("tasks.json")) for a in t["annotations"] for r in a["result"]]
+        assert {r["type"] for r in results} == kinds
+        for r in results:
+            assert controls.get(r["from_name"]) == r["type"], (r["from_name"], controls)
+
+
+def test_augmented_copies_without_boxes_are_in_every_export(client, app_module):
+    import xml.etree.ElementTree as ET
+    from pathlib import Path
+
+    pid = _make_dataset(client, "Aug Backgrounds")
+    r = client.post(
+        f"/api/v2/projects/{pid}/imports/raw",
+        files={"image": ("empty.jpg", _jpeg_bytes(), "image/jpeg")},
+    )
+    assert r.status_code == 200, r.text
+    bg = r.json()["import_id"]
+    # Uploads save their blurhash in the background; edit after those saves.
+    for _ in range(250):
+        m = app_module.load_manifest(pid)
+        if all(e.get("blurhash") for e in m["imports"]):
+            break
+        time.sleep(0.02)
+    entry = next(e for e in m["imports"] if e["id"] == bg)
+    entry["n_augmentations"] = 2
+    app_module.save_manifest(pid, m)
+    out = app_module._augmentations_dir(pid, bg)
+    out.mkdir(parents=True)
+    for name in ("00.jpg", "01.jpg"):
+        (out / name).write_bytes(_jpeg_bytes())
+    (out / "annotations.json").write_text(
+        json.dumps({"width": 64, "height": 48, "copies": {"00.jpg": [], "01.jpg": []}})
+    )
+    stem = Path(entry["filename"]).stem
+    want = {f"aug_{stem}_00", f"aug_{stem}_01"}
+
+    def stems(names):
+        return {Path(n).stem for n in names}
+
+    zf = _export_zip(client, pid, "coco")
+    coco = [json.loads(zf.read(n)) for n in zf.namelist() if n.startswith("annotations/")]
+    assert want <= stems(i["file_name"] for c in coco for i in c["images"])
+    zf = _export_zip(client, pid, "voc")
+    assert want <= stems(n for n in zf.namelist() if n.startswith("Annotations/"))
+    zf = _export_zip(client, pid, "cvat")
+    assert want <= stems(el.get("name") for el in ET.fromstring(zf.read("annotations.xml")).iter("image"))
+    zf = _export_zip(client, pid, "labelstudio")
+    assert want <= stems(t["data"]["image"] for t in json.loads(zf.read("tasks.json")))
+    zf = _export_zip(client, pid, "masks")
+    assert want <= stems(n for n in zf.namelist() if n.startswith("masks/"))
+    zf = _export_zip(client, pid, "yolo")
+    assert want <= stems(n for n in zf.namelist() if n.startswith("images/"))

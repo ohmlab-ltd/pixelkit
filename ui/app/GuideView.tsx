@@ -1,36 +1,33 @@
 "use client";
 
-// SPA tab view for the Guide. Mounted by /app/page.tsx when tab === "guide".
-// Owns its own section state (overview / projects / dataset / ...) and syncs
-// it to the URL as ?tab=guide&section=<key> via replaceState, same pattern
-// as the other tabs in the SPA.
+// Guide view. Mounted by /app/page.tsx for ?tab=guide.
 
 import { useEffect, useState, type ReactNode } from "react";
 
-export type GuideSectionKey =
+type GuideSectionKey =
   | "overview"
-  | "projects"
+  | "create"
   | "dataset"
   | "labelling"
   | "augmentations"
   | "stats"
   | "settings"
-  | "teams"
+  | "projects"
   | "derived"
   | "training"
   | "reference";
 
 const GUIDE_SECTIONS: { key: GuideSectionKey; title: string; blurb: string }[] = [
   { key: "overview", title: "Overview", blurb: "What PixelKit does and how the moving parts fit together." },
-  { key: "projects", title: "Create a dataset", blurb: "Creating a dataset, naming, labels, optional reference images." },
+  { key: "create", title: "Create a dataset", blurb: "Creating a dataset, naming, labels, optional reference images." },
   { key: "dataset", title: "Dataset", blurb: "Adding images, searching Openverse, video trims, filters, bulk delete." },
-  { key: "labelling", title: "Labelling", blurb: "Auto-labelling, the Annotations card, manual edits, fast Review mode." },
+  { key: "labelling", title: "Labelling", blurb: "Auto-labelling, detection settings, manual edits, fast Review mode." },
   { key: "augmentations", title: "Augmentations", blurb: "Every dial, the Randomise button, the per-tile viewer." },
   { key: "stats", title: "Dataset stats", blurb: "The health score, insights, the variation plot, near-duplicate review." },
-  { key: "settings", title: "Settings & themes", blurb: "Renaming, recolouring labels, annotation snapshots, export." },
-  { key: "teams", title: "Projects & teams", blurb: "Group datasets into a Project: shared labels, covers, activity." },
+  { key: "settings", title: "Settings & export", blurb: "Renaming, recolouring labels, annotation snapshots, export." },
+  { key: "projects", title: "Projects", blurb: "Group datasets into a Project: shared labels, covers, activity." },
   { key: "derived", title: "Derived datasets", blurb: "Crop each detection into a child dataset: ROI squares, inherited or fresh labels, live sync." },
-  { key: "training", title: "Train for Neuro N6", blurb: "Train a YOLOX on this dataset, check it before and after, verify it for the NPU, export the board bundle." },
+  { key: "training", title: "Train for Neuro N6", blurb: "Train a YOLOX on this dataset, check it before and after, verify it for the NPU, and export the board bundle." },
   { key: "reference", title: "Reference", blurb: "Keyboard shortcuts and reference tables." },
 ];
 
@@ -53,12 +50,7 @@ export function GuideView() {
     if (key === "overview") url.searchParams.delete("section");
     else url.searchParams.set("section", key);
     window.history.replaceState(null, "", url.toString());
-    // Inside the desktop shell the Guide scrolls within the content
-    // pane ([data-app-scroll]), not the page - scroll that back to the
-    // top. The standalone /guide route still scrolls the window.
-    const pane = document.querySelector<HTMLElement>("[data-app-scroll]");
-    if (pane) pane.scrollTo({ top: 0, behavior: "smooth" });
-    else window.scrollTo({ top: 0, behavior: "smooth" });
+    document.querySelector<HTMLElement>("[data-app-scroll]")?.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   return (
@@ -88,13 +80,13 @@ export function GuideView() {
 
       <div className="grid gap-10">
         {section === "overview" && <OverviewSection go={go} />}
-        {section === "projects" && <ProjectsSection go={go} />}
+        {section === "create" && <CreateSection go={go} />}
         {section === "dataset" && <DatasetSection go={go} />}
         {section === "labelling" && <LabellingSection go={go} />}
         {section === "augmentations" && <AugmentationsSection go={go} />}
         {section === "stats" && <StatsSection go={go} />}
         {section === "settings" && <SettingsSection go={go} />}
-        {section === "teams" && <TeamsSection go={go} />}
+        {section === "projects" && <ProjectsSection go={go} />}
         {section === "derived" && <DerivedSection go={go} />}
         {section === "training" && <TrainingSection go={go} />}
         {section === "reference" && <ReferenceSection />}
@@ -103,7 +95,7 @@ export function GuideView() {
   );
 }
 
-// ---------- Shared helpers ----------
+// Shared helpers
 
 function GuideHeader({
   eyebrow,
@@ -261,9 +253,9 @@ function NextUp({
   );
 }
 
-// ---------- New helpers: LLM prompt + figures ----------
+// LLM prompt and figures
 
-const LLM_PROMPT = `You are a helpful assistant for someone using PixelKit, a free desktop app for building labelled computer-vision datasets and training detectors for the OhmLab Neuro N6 board. Answer my questions in plain English. If something is unclear or undocumented in what follows, say so rather than guessing.
+const LLM_PROMPT = `You are a helpful assistant for someone using PixelKit, a free desktop app for building labelled computer-vision datasets and training detectors for the Ohm Lab Neuro N6 board. Answer my questions in plain English. If something is unclear or undocumented in what follows, say so rather than guessing.
 
 ==============================================================
 WHAT PIXELKIT IS
@@ -271,25 +263,27 @@ WHAT PIXELKIT IS
 PixelKit turns images into a labelled, augmented dataset that's ready for training.
 
 The five-step flow:
-  1. Create a project. Name it and define your labels.
+  1. Create a dataset. Name it and define your labels.
   2. Add images. Upload, import from video, or search Openverse.
-  3. Label. One click runs auto-labelling.
+  3. Label. One click runs auto-labelling on every unlabelled image.
   4. Augment. Choose realistic variations to expand the dataset.
   5. Export. Download with a train/val split.
 
 ==============================================================
-PROJECTS
+DATASETS
 ==============================================================
-When you create a project, pick the labels you want PixelKit to find.
+When you create a dataset, pick the labels you want PixelKit to find.
 Confirming the labels creates the dataset and opens it straight away.
 
 Reference images are optional on every dataset. If your labels are
 visually similar or specific to your domain (hare vs rabbit, your
 part A vs your part B), add a few example photos of each from the
-References tab on the dataset page - they help PixelKit tell the
+References tab on the dataset page. They help PixelKit tell the
 classes apart. You can add or remove references at any time.
 
-Project names are display-only; the URL uses a stable identifier.
+A new dataset's name can be up to 120 characters. You can rename a
+dataset at any time, from its settings or by clicking its name at the
+top of the dataset page.
 
 ==============================================================
 ADDING IMAGES
@@ -304,40 +298,57 @@ Three ways to add images:
 
 The dataset gallery shows a thumbnail for every image. Indicators
 on each thumbnail include a sparkle icon (augmentations exist),
-an Unsure pill (a detection is borderline), and the per-image
-verdict if you've used Review mode.
+an Unsure pill (a detection is borderline), and an Unlabelled or
+Background pill.
 
 A filter chip rail above the gallery lets you narrow to All /
-Unlabelled / Unrated / Good / Bad / Unsure.
+Unlabelled / Unrated / Good / Bad / Unsure. Unrated shows the images
+with boxes and no verdict yet. A pill with no images is hidden.
 
 ==============================================================
 LABELLING
 ==============================================================
-Start labelling runs auto-labelling across every unlabelled image.
+The labelling button at the top of the dataset page (Label images,
+Label new images and so on) runs auto-labelling across every
+unlabelled image.
 
-Click-to-detect: switch the viewer into click mode, then tap any
+Auto-labelling uses SAM 3. It needs a Hugging Face token with access
+to facebook/sam3, set in the first-run setup or in Settings, and a GPU
+unless Compute is set to CPU.
+
+Click-to-detect: switch the viewer into click mode, then click any
 object. PixelKit labels it.
 
-Manual mode: a toggle that lets you draw boxes by hand. Use it when
-you want full control or when auto-labelling missed something.
+Manual mode: a toggle in the viewer header that switches off
+click-to-detect and the automatic mask and label for drawn boxes, so a
+box stays where you draw it and you type its label.
 
 The image viewer can also delete the current image entirely (a Delete
-button in the header, the same as the gallery tile trash); it then
+button in the header, the same as the × on a gallery tile); it then
 moves to the next image. The detection count in the header is live, so
 it updates as you add or delete boxes. Large 4K images load a fast
 preview first, then sharpen to full resolution.
 
 Borderline detections are flagged "Unsure" so you can confirm them
 quickly. They appear as an amber pill on the dataset thumbnail, in
-the Dataset stats summary, and next to the detection in the
-viewer's box list. Resolve by confirming or deleting.
+the Dataset health counts, and next to the detection in the
+viewer's box list. Delete the box, or press its label's key to keep
+it. Once an image is edited, Dataset health stops counting its
+detections as unsure; the chip in the box list and the pill on the
+thumbnail stay.
 
-Review mode: a focused review interface. Use arrow keys to approve
-or reject images one at a time.
+Review mode: a focused review interface. The arrow keys give each
+image a verdict: good, bad or unsure; a swipe right or left marks it
+good or bad. The Review button
+above the gallery opens the unrated images, or the images of the
+active Good, Bad or Unsure pill; its menu picks another set. The
+Good, Unsure and Bad pills in the image viewer header also set a
+verdict.
 
-Deleting a label removes every detection carrying that label and
-takes down any augmentations that referenced it. Irreversible;
-export first if you might want the annotations back.
+Deleting a label removes every detection carrying that label,
+including the boxes on augmented copies. Irreversible; export first
+if you might want the annotations back. Ctrl + Z brings the label
+back without its boxes.
 
 ==============================================================
 AUGMENTATIONS
@@ -346,10 +357,10 @@ Augmentations create realistic variations of your images so the
 trained model handles real-world conditions better.
 
 Categories:
-  Camera & sensor - simulates real camera artefacts.
-  Distortion - perspective, scale, rotation, hue.
-  Occlusion - simulates things blocking the view.
-  Domain randomisation - varies the background and lighting.
+  Camera & sensor: simulates real camera artefacts.
+  Distortion: perspective, scale, rotation, hue.
+  Occlusion: simulates things blocking the view.
+  Domain randomisation: varies the background and lighting.
 
 For each enabled category you can pick the strength and how often
 it's applied.
@@ -357,47 +368,49 @@ it's applied.
 You can set how many augmented copies to make per image. Off
 creates none and clears the existing ones.
 
-Augmentations re-generate in the background after manual edits.
+Augmentations are generated when you click Update. They are not
+regenerated after labelling or manual edits, so click Update again
+after either. Until then, the copies of an image whose boxes changed
+are left out of training and exports.
 
 ==============================================================
 DATASET STATS
 ==============================================================
 PixelKit shows a Health score (0-100) summarising how trainable
-your dataset is, plus a short list of the biggest things to fix.
-
-The Insights area also shows an AI-written lead recommendation (what
-to improve next) above the rule-based suggestion cards. It only
-regenerates on a material change (crossing an image or label-count
-tier, or changing the label set), so it stays token-frugal, and it
-never tells you to add labels to a deliberately single-class dataset.
+your dataset is. Uniqueness (few near-duplicates) counts for 40% of
+it; label balance, coverage and confidence count for 20% each. The
+Overview tab also shows insight cards for duplicates, images with no
+detections and underrepresented labels.
 
 The variation map shows your dataset as dots. Pictures that look
 the same to a model sit close together. Pictures that look
-different spread out. Duplicates are highlighted.
+different spread out. Near-duplicates are highlighted. Clicking a
+dot shows that image in the Dataset gallery.
 
-You can flick through duplicates in the Review duplicates modal
-and keep one per group.
+You can review duplicates in the Dataset health window and keep one
+per group.
 
 ==============================================================
-SETTINGS, THEMES, EXPORT
+SETTINGS AND EXPORT
 ==============================================================
-The gear icon at the top of any project page opens Settings.
+The gear icon at the top of a dataset page opens its settings.
 
-You can rename the project, pick the cover image, and rename /
-recolour labels.
+You can rename the dataset, set the target input shape, recolour
+labels, pick the cover image, save annotation snapshots and delete
+the dataset. Labels are renamed in the Labels row on the dataset page.
 
 Export in YOLO, COCO, Pascal VOC, CVAT, Label Studio or PNG masks.
 Choose your train/val split.
-The split is reproducible - the same image always lands in the
-same set, even across re-exports.
+The split is reproducible. The same image always lands in the
+same set, even across re-exports. CVAT and Label Studio exports
+have no split: every image is in one folder and one annotation file.
 
-You can filter out detections that would be too small at your
-target input shape.
+You can leave out boxes that would be too small or borderline at
+your target input shape.
 
-Light and dark mode toggle in the top-right corner.
-
-Deleting a project is destructive and irreversible. Type the
-project name to confirm.
+Deleting a dataset is destructive and irreversible. From its
+settings or the Workspace you type the dataset name to confirm;
+Delete entirely on a Project page deletes it at once.
 
 ==============================================================
 PROJECTS
@@ -407,7 +420,8 @@ datasets, with a cover and an activity timeline. It is different
 from a single dataset (which is one labelled image collection).
 
 Create a Project from the New project tile on the Workspace. Add
-datasets with "Add existing" or "+ New dataset".
+datasets with "Add existing", which moves one or more datasets into
+the Project, or "+ New dataset".
 
 The Project page also has a Labels card: label usage across every
 dataset in the Project, with rename. Renaming onto an existing
@@ -415,24 +429,28 @@ label merges the two everywhere.
 
 Deleting a dataset from a Project asks whether to remove it from the
 Project (it survives as a standalone dataset) or delete it entirely.
+Delete entirely deletes it at once, with no typed confirmation.
 
 ==============================================================
 IMPORTING AN EXISTING DATASET
 ==============================================================
-The Import a labelled dataset step on the home page accepts Pascal
-VOC (Annotations/*.xml), COCO (a JSON with images and annotations)
-and YOLO (labels/*.txt with classes.txt or data.yaml), as a folder
-or a zip. Every box comes in editable; polygon masks are kept.
+The Import a labelled dataset step (Import it, on the labels step of
+a new dataset) accepts Pascal VOC (Annotations/*.xml), COCO (a JSON
+with images and annotations) and YOLO (labels/*.txt with classes.txt
+or data.yaml), as a folder or a zip. Every box comes in editable;
+polygon masks are kept.
 
 ==============================================================
 TRAINING FOR THE NEURO N6
 ==============================================================
 The Train for Neuro N6 card on a dataset's overview trains a
-YOLOX detector (Nano, or Tiny for more accuracy at five times the
-weights) on this machine (GPU required), fine-tunes it with int8
-simulated so the deployed model keeps its accuracy, and exports a
+YOLOX detector (Nano, or Tiny for more accuracy at about five times
+the compute) on this machine (on a GPU, or slowly on the CPU when Compute
+is set to CPU in Settings), fine-tunes it with int8
+simulated so the deployed model keeps most of its accuracy, and exports a
 sketch folder ready to build: the sketch, the int8 model, a labels
-header and report.json. When ST Edge AI Core is installed the export is
+header, report.json, and the YOLOX NOTICE.txt and LICENSE.txt. When
+ST Edge AI Core is installed the export is
 compiled for the board's NPU and the run shows how much runs in
 hardware and how much flash it uses. A model the compiler rejects is
 kept with the reason instead of exported.
@@ -440,7 +458,7 @@ kept with the reason instead of exported.
 Options: epochs, input size, model size, the train/val split (per
 class, so every class is measured; or pick another dataset as the
 held-out set), whether generated augmentations join the training
-set (they follow their source image's split, never the val side),
+set: only copies of training images do, never copies of val images,
 and Start from (continue from an earlier run's weights). A pre-flight
 line under the options says what the run will use and warns about
 classes with few boxes, classes the val split cannot measure, objects
@@ -448,7 +466,7 @@ too small for the input size, and duplicate images across the split.
 
 While it trains the run shows live loss and AP@0.5 curves and the
 time left. The batch size comes from free GPU memory and is halved
-automatically if the card runs out. Every epoch is checkpointed: a
+automatically if the card runs out. Every float epoch is checkpointed: a
 run interrupted by a crash or a closed app shows as Interrupted with
 a Resume button.
 
@@ -460,8 +478,8 @@ wrong (missed, spurious, wrong class), and every val image beside its
 ground truth. Label images runs the exported
 model over the dataset's unlabelled images so you can review and
 correct instead of drawing from scratch; hand-edited images are never
-touched. The same run can be started from a terminal with
-pixelkit train.
+touched. From a source install, the same run can be started from a
+terminal with pixelkit train.
 
 ==============================================================
 DERIVED DATASETS
@@ -474,14 +492,15 @@ Create one from the Derived datasets panel on a dataset's overview.
 Options: keep the parent labels on each crop or create new labels
 (crops arrive unlabelled for a fresh taxonomy); ROI mode forces every
 crop to an exact 1:1 square; an optional fixed crop size resizes every
-crop to one size (N x N) so all derived images match, handy for
-training; context padding and a minimum image size; and whether to
+crop to one size (N x N) so all derived images match; context
+padding and a minimum image size; and whether to
 group the crop dataset in a workspace Project.
 
 In "create new labels" mode no boxes, masks or reference images are
 copied; each crop is blank and the original parent label shows as a
 muted reference while you label. The child re-syncs from the parent
-one way (Sync now), and a crop you delete will not come back. A
+one way, a few seconds after each parent edit or when you click Sync
+now, and a crop you delete will not come back. A
 parent can have many derived datasets, but you cannot derive from a
 derived dataset.
 
@@ -491,46 +510,61 @@ WORKSPACE
 The Explorer shows everything in your workspace: Projects (folders
 of datasets) as expandable nodes in the tree, with standalone
 datasets at the root level. Everything is stored as plain files in
-the workspace folder on this machine.
+the workspace folder on this machine: a folder named PixelKit in the
+home folder unless it is changed under Settings, Workspace. A JPEG
+is stored as uploaded; other image formats are stored as JPEG, and
+Openverse images keep the format they were downloaded in.
 
 ==============================================================
 SHORTCUTS
 ==============================================================
+On a Mac, use Cmd where this list says Ctrl.
+
 Image viewer:
-  Left / right arrow - previous / next image
-  Esc - close viewer
-  1-9 - relabel the box under the cursor
-  Delete - delete the selected box
-  B - toggle box layer
-  L - toggle label-chip layer
-  M - toggle mask layer
-  + / - - zoom in / out
-  0 - reset zoom and pan to fit-on-screen
+  Left / right arrow: previous / next image
+  Esc: deselect the box or leave draw mode, then close the viewer
+  1-9, Q-P, A-L: relabel the box under the cursor (labels 1 to 28)
+  Delete or Backspace: delete the selected box
+  B: draw a box
+  X: click to detect
+  M: edit the mask of the box under the cursor
+  Ctrl + wheel: zoom (the wheel alone pans)
+  Ctrl + Z: undo the last box edit
 
 Review mode:
-  Left arrow - Bad
-  Right arrow - Good
-  Up or down arrow - Unsure
-  Esc - close Review mode
+  Left arrow: Bad
+  Right arrow: Good
+  Up or down arrow: Unsure
+  Esc: close Review mode
 
-Global:
-  / - focus search input
-  ? - open shortcuts cheatsheet
-  Esc - close any modal or panel
+Dataset page:
+  Ctrl + Z: undo the last label add, rename or removal, or the last
+    dataset rename; a removed label comes back without its boxes
+
+Desktop app:
+  Ctrl + 0: reset the window zoom
+  Ctrl + plus / minus: zoom the window in / out
 
 ==============================================================
 LIMITS
 ==============================================================
-None. PixelKit runs entirely on this machine - the only ceilings
-are your disk space and compute.
+PixelKit runs on this machine, so dataset size is bounded by your
+disk space and labelling speed by your hardware. An image or a video
+can be up to 100 MB, a board recording up to 2 GB.
 
 ==============================================================
 LICENSING
 ==============================================================
-Openverse imports carry their original CC licence and source URL;
-both are stamped into exports. Direct uploads carry no licence
-metadata - you're responsible for your right to use the images,
-especially for any redistributable model.
+PixelKit keeps the title, creator and licence of each Openverse
+import. An export that includes the image files adds ATTRIBUTIONS.txt,
+which credits every Openverse image, its crops and its augmented
+copies. Check each licence's terms before you reuse an image. Direct
+uploads carry no licence metadata: you are responsible for your right
+to use the images, especially for any redistributable model.
+
+A trained model's export includes NOTICE.txt and LICENSE.txt: the
+model is a modified YOLOX, licensed under the Apache License 2.0.
+Keep both files with the model when you share it.
 
 ==============================================================
 HOW TO RESPOND
@@ -539,7 +573,7 @@ HOW TO RESPOND
 - Do not use em-dashes in your responses. Prefer commas, periods, semicolons, or parentheses.
 - When I ask a how-to question, give a step-by-step answer that maps to the UI described.
 - If I ask about general computer-vision dataset best practice (class balance, augmentation strategy, annotation quality, train/val splits, etc.) you can answer from your own knowledge.
-- If I ask about an implementation detail not covered here (specific thresholds, server architecture, internal models), say you do not know rather than guessing.
+- If I ask about an implementation detail not covered here, such as specific thresholds, how the engine works inside or internal models, say you do not know rather than guessing.
 
 I'll send my actual question in the next message.`;
 
@@ -552,8 +586,7 @@ function LLMPromptBox() {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1800);
     } catch {
-      // Clipboard blocked. Fall back to selecting the textarea so
-      // the user can hit Cmd/Ctrl+C themselves.
+      // Clipboard blocked: select the text for a manual copy.
       const ta = document.getElementById("llm-prompt-ta") as HTMLTextAreaElement | null;
       if (ta) {
         ta.focus();
@@ -573,7 +606,7 @@ function LLMPromptBox() {
             Copy this prompt into the LLM of your choice.
           </h3>
           <p className="mt-1 text-[13px] text-[var(--muted)] leading-relaxed">
-            It primes the model with what PixelKit is and what it can do, then hands the floor to your question.
+            It tells the model what PixelKit is and what it can do, then waits for your question.
           </p>
         </div>
         <button
@@ -637,8 +670,6 @@ function Figure({
   );
 }
 
-// Five-step flow at the top of the overview. Inline SVG so it themes
-// with currentColor and needs no external asset.
 function FlowDiagram() {
   const steps = [
     { label: "Create", icon: <FolderIcon /> },
@@ -688,7 +719,7 @@ function PipelineDiagram() {
     <div className="flex items-center gap-2">
       <Box title="References" sub="anchor images" />
       <Arrow />
-      <Box title="Auto-label" sub="boxes + masks" />
+      <Box title="Auto-label" sub="boxes and masks" />
       <Arrow />
       <Box title="PixelKit" sub="picks the label" />
       <Arrow />
@@ -716,7 +747,7 @@ function VariationPlotMock() {
   return (
     <svg viewBox="0 0 100 100" className="w-full max-w-md mx-auto block" aria-hidden>
       <rect x="0" y="0" width="100" height="100" rx="4" fill="rgb(var(--foreground-rgb) / 0.03)" />
-      {/* faint axes */}
+      {/* axes */}
       <line x1="6" y1="94" x2="94" y2="94" stroke="rgb(var(--foreground-rgb) / 0.15)" strokeWidth="0.4" />
       <line x1="6" y1="94" x2="6" y2="6" stroke="rgb(var(--foreground-rgb) / 0.15)" strokeWidth="0.4" />
       {dots.map((d, i) => (
@@ -766,30 +797,31 @@ function AugmentationGridMock() {
 
 function HealthBadgeMock() {
   const factors = [
-    { name: "Uniqueness", v: 0.78, weight: 40 },
-    { name: "Balance", v: 0.86, weight: 20 },
-    { name: "Coverage", v: 0.92, weight: 20 },
-    { name: "Confidence", v: 0.81, weight: 20 },
+    { name: "Balance", v: 0.86 },
+    { name: "Coverage", v: 0.92 },
+    { name: "Confidence", v: 0.81 },
+    { name: "Uniqueness", v: 0.78 },
   ];
   return (
     <div className="grid sm:grid-cols-[160px_1fr] gap-5 items-center">
       <div className="grid place-items-center">
         <div className="rounded-full border border-[var(--line)] bg-[var(--panel)] text-[var(--ok)] px-5 py-3 inline-flex items-center gap-3">
-          <span className="text-[10px] uppercase tracking-[0.18em] font-mono opacity-80">Health</span>
-          <span className="text-2xl font-mono tabular-nums">82</span>
+          <span className="text-2xl font-mono tabular-nums">
+            83<span className="ml-1 text-sm text-[var(--muted)]">/100</span>
+          </span>
+          <span className="text-[10px] uppercase tracking-[0.18em] font-mono opacity-80">Healthy</span>
         </div>
       </div>
       <div className="grid gap-2">
         {factors.map((f) => (
           <div key={f.name} className="grid grid-cols-[110px_1fr_44px] items-center gap-3">
             <div className="text-[12px] text-[var(--muted)]">
-              {f.name}{" "}
-              <span className="text-foreground/35">({f.weight}%)</span>
+              {f.name}
             </div>
             <div className="h-1.5 rounded-full bg-foreground/[0.08] overflow-hidden">
               <div className="h-full rounded-full bg-foreground/55" style={{ width: `${Math.round(f.v * 100)}%` }} />
             </div>
-            <div className="text-[12px] font-mono tabular-nums text-right text-[var(--foreground)]/80">{Math.round(f.v * 100)}</div>
+            <div className="text-[12px] font-mono tabular-nums text-right text-[var(--foreground)]/80">{Math.round(f.v * 100)}%</div>
           </div>
         ))}
       </div>
@@ -809,8 +841,8 @@ function ViewerOverlayMock() {
       {/* bounding box */}
       <rect x="42" y="38" width="100" height="80" fill="none" stroke="#5b8def" strokeWidth="1" strokeDasharray="3 2" />
       {/* label chip */}
-      <rect x="42" y="28" width="48" height="10" rx="5" fill="#5b8def" />
-      <text x="46" y="35.5" fontSize="6" fontFamily="ui-sans-serif" fill="#fff" fontWeight="600">cat · 0.94</text>
+      <rect x="42" y="28" width="20" height="10" rx="5" fill="#5b8def" />
+      <text x="46" y="35.5" fontSize="6" fontFamily="ui-sans-serif" fill="#fff" fontWeight="600">cat</text>
     </svg>
   );
 }
@@ -819,27 +851,27 @@ function ReviewModeMock() {
   return (
     <div className="grid sm:grid-cols-3 gap-3">
       <div className="rounded-md border border-[var(--line-soft)] bg-[var(--panel)] p-3">
-        <div className="text-[11px] uppercase tracking-wider font-mono text-[var(--ok)] mb-2">
-          ← Good
-        </div>
-        <div className="aspect-[4/3] rounded-md bg-foreground/[0.06] grid place-items-center text-[11px] text-[var(--muted)]">
-          confirmed
-        </div>
-      </div>
-      <div className="rounded-md border border-[var(--line-strong)] bg-[var(--panel)] p-3">
-        <div className="text-[11px] uppercase tracking-wider font-mono text-[var(--muted)] mb-2">
-          Reviewing
-        </div>
-        <div className="aspect-[4/3] rounded-md bg-foreground/[0.08] grid place-items-center text-[11px] text-[var(--foreground)]/70">
-          current image
-        </div>
-      </div>
-      <div className="rounded-md border border-[var(--line-soft)] bg-[var(--panel)] p-3">
         <div className="text-[11px] uppercase tracking-wider font-mono text-[var(--bad)] mb-2">
-          Bad →
+          ← Bad
         </div>
         <div className="aspect-[4/3] rounded-md bg-foreground/[0.06] grid place-items-center text-[11px] text-[var(--muted)]">
           rejected
+        </div>
+      </div>
+      <div className="rounded-md border border-[var(--line-soft)] bg-[var(--panel)] p-3">
+        <div className="text-[11px] uppercase tracking-wider font-mono text-[var(--warn)] mb-2">
+          ↓ Unsure
+        </div>
+        <div className="aspect-[4/3] rounded-md bg-foreground/[0.06] grid place-items-center text-[11px] text-[var(--muted)]">
+          parked
+        </div>
+      </div>
+      <div className="rounded-md border border-[var(--line-soft)] bg-[var(--panel)] p-3">
+        <div className="text-[11px] uppercase tracking-wider font-mono text-[var(--ok)] mb-2">
+          Good →
+        </div>
+        <div className="aspect-[4/3] rounded-md bg-foreground/[0.06] grid place-items-center text-[11px] text-[var(--muted)]">
+          confirmed
         </div>
       </div>
     </div>
@@ -853,7 +885,7 @@ function FilterChipsMock() {
     { label: "Unrated", count: 96 },
     { label: "Good", count: 18 },
     { label: "Bad", count: 7 },
-    { label: "Unsure", count: 3, tone: "amber" as const },
+    { label: "Unsure", count: 3 },
   ];
   return (
     <div className="flex flex-wrap gap-2">
@@ -864,9 +896,7 @@ function FilterChipsMock() {
             "inline-flex items-center gap-1.5 rounded-md border px-3 py-1 text-[12px]",
             c.active
               ? "border-[var(--accent)] bg-[var(--accent-dim)] text-[var(--foreground)] font-medium"
-              : c.tone === "amber"
-                ? "border-[var(--line)] bg-[var(--panel)] text-[var(--warn)]"
-                : "border-[var(--line)] bg-[var(--panel)] text-[var(--foreground)]/80",
+              : "border-[var(--line)] bg-[var(--panel)] text-[var(--foreground)]/80",
           ].join(" ")}
         >
           {c.label}
@@ -877,7 +907,7 @@ function FilterChipsMock() {
   );
 }
 
-// ---------- Tiny icon set used in the flow diagram ----------
+// Flow diagram icons
 
 function FolderIcon() {
   return (
@@ -931,7 +961,7 @@ function DownloadIcon() {
   );
 }
 
-// ---------- Sections ----------
+// Sections
 
 function OverviewSection({ go }: { go: (k: GuideSectionKey) => void }) {
   return (
@@ -953,28 +983,25 @@ function OverviewSection({ go }: { go: (k: GuideSectionKey) => void }) {
 
       <GuideSection n={1} title="The flow at a glance">
         <p>
-          Most projects follow the same five-step rhythm. You don&rsquo;t need to
-          know anything about computer vision to use it. Every step has sensible
-          defaults.
+          Most datasets follow the same five steps.
         </p>
-        <Figure caption="Create the project, add media, label, augment, export.">
+        <Figure caption="Create the dataset, add media, label, augment, export.">
           <FlowDiagram />
         </Figure>
         <Bullets
           items={[
-            "<strong>Create a project</strong>. Name it, define the labels you want to detect.",
-            "<strong>Add images</strong>. Drop your own, paste video files, or search Openverse from inside the app.",
-            "<strong>Label</strong>. One click runs auto-labelling across the whole dataset.",
+            "<strong>Create a dataset</strong>. Name it and define the labels you want to detect.",
+            "<strong>Add images</strong>. Drop your own images or videos, or search Openverse from inside the app.",
+            "<strong>Label</strong>. One click runs auto-labelling on every unlabelled image.",
             "<strong>Augment</strong>. Configurable rotations, lighting, occlusions, background swaps, and more.",
-            "<strong>Export</strong>. Download with train / val split, segmentations, and size-class filters baked in.",
+            "<strong>Export</strong>. Download with a train / val split, segmentations, and an optional filter for boxes too small to detect.",
           ]}
         />
       </GuideSection>
 
       <GuideSection n={2} title="Section guide">
         <p>
-          Pick a section to dive in. The sub-nav above the title stays on every
-          page so you can jump around without losing your place.
+          Pick a section. The sub-nav above the title stays on every page.
         </p>
         <ul className="grid gap-3 sm:grid-cols-2">
           {GUIDE_SECTIONS.slice(1).map((s, i) => (
@@ -998,7 +1025,7 @@ function OverviewSection({ go }: { go: (k: GuideSectionKey) => void }) {
   );
 }
 
-function ProjectsSection({ go }: { go: (k: GuideSectionKey) => void }) {
+function CreateSection({ go }: { go: (k: GuideSectionKey) => void }) {
   return (
     <>
       <GuideHeader
@@ -1010,8 +1037,8 @@ function ProjectsSection({ go }: { go: (k: GuideSectionKey) => void }) {
             attached to it: labels, reference images, augmentations, settings.
             This section walks through creating one and adding optional
             reference images. (A <Strong>Project</Strong>
-            {" "}is a separate thing, a team container that groups several
-            datasets, covered in the Projects &amp; teams section.)
+            {" "}is a separate thing: a folder that groups several
+            datasets, covered in the Projects section.)
           </>
         }
       />
@@ -1019,11 +1046,11 @@ function ProjectsSection({ go }: { go: (k: GuideSectionKey) => void }) {
       <GuideSection n={1} title="Creating a dataset">
         <p>
           Datasets live on this machine and are only visible to you. From the
-          Workspace tab:
+          Workspace page, which the Explorer icon in the activity bar opens:
         </p>
         <Steps
           items={[
-            ["Click + Add Dataset", "A small card slides in with a name field."],
+            ["Click + Add Dataset", "A New dataset dialog opens with a name field."],
             ["Type a name", "Anything you like. You can rename it later from Settings."],
             ["Click Continue", "PixelKit takes you to the labels stage."],
             ["Type the labels you want to detect", "Press Enter, comma, or full stop between each one. Each chip gets a random colour you&rsquo;ll see across the whole dataset."],
@@ -1034,7 +1061,7 @@ function ProjectsSection({ go }: { go: (k: GuideSectionKey) => void }) {
 
       <GuideSection n={2} title="Reference images (optional)">
         <p>
-          Reference images are optional - add examples to improve label
+          Reference images are optional. Add examples to improve label
           matching. Each one is a clear photo of the labelled object:
           close-up, well-lit, little background clutter. They matter most
           when your labels are visually similar (hare vs rabbit) or specific
@@ -1047,24 +1074,24 @@ function ProjectsSection({ go }: { go: (k: GuideSectionKey) => void }) {
         <Steps
           items={[
             ["Open the References tab", "On the dataset page, in the left section nav."],
-            ["Drop or click to upload", "Each label has its own section, the section is the label, so PixelKit knows exactly what each reference shows."],
+            ["Drop or click to upload", "Each label has its own section. The section is the label, so PixelKit knows exactly what each reference shows."],
             ["Keep them editable", "Add, remove, or re-label references at any time. Changes are picked up the next time you run auto-labelling."],
           ]}
         />
       </GuideSection>
 
-      <GuideSection n={3} title="Cancelling out of onboarding">
+      <GuideSection n={3} title="Cancelling a new dataset">
         <p>
-          If you bail before finishing the onboarding flow (Cancel or Esc), the
-          half-created project is removed from the workspace automatically.
+          If you cancel before finishing (Cancel or Esc), the half-created
+          dataset is removed from the workspace automatically.
         </p>
       </GuideSection>
 
-      <GuideSection n={4} title="The naming card">
+      <GuideSection n={4} title="Dataset names">
         <Bullets
           items={[
-            "Project names can be any text. They&rsquo;re display-only. The URL uses a stable UUID under the hood.",
-                        "Names are editable any time from project Settings.",
+            "A new dataset&rsquo;s name can be up to 120 characters.",
+                        "Rename a dataset any time from its settings, or by clicking its name at the top of the dataset page.",
           ]}
         />
       </GuideSection>
@@ -1084,24 +1111,25 @@ function DatasetSection({ go }: { go: (k: GuideSectionKey) => void }) {
           <>
             Adding images and videos, searching Openverse from inside the app,
             video trim and frames-per-second selection, the verdict filter,
-            bulk delete, and the per-tile chrome on every thumbnail.
+            bulk delete, and the indicators on every thumbnail.
           </>
         }
       />
 
       <GuideSection n={1} title="Adding images">
         <p>
-          On the project page, the <em>Drop media here</em> card is where your
-          dataset lives. Drag and drop images (JPG, PNG, WebP, HEIC, AVIF, BMP,
-          TIFF, GIF) or videos (MP4, MOV, WebM, M4V, AVI, MKV), or click the
-          card to open a file picker.
+          On the Dataset tab, the <em>Drop images or click to browse</em> card
+          is where you add media. Drag and drop images (JPG, PNG, WebP, HEIC,
+          AVIF, BMP, TIFF, GIF) or videos (MP4, MOV, WebM, M4V, MKV) in a
+          codec the app can play, or click the card to open a file picker.
+          The Add images button at the top of the page opens the same picker.
         </p>
         <Bullets
           items={[
                         "Image orientation from EXIF metadata is honoured so iPhone photos don&rsquo;t end up sideways.",
-            "Upload progress streams into the dataset gallery one tile at a time, with blurred placeholders for in-flight files.",
-            "Up to 100 MB per video, split into per-frame images on this machine before upload.",
-            "Already have annotations? The <em>Import a labelled dataset</em> step on the home page takes Pascal VOC, COCO or YOLO (folder or zip): every box comes in editable and polygon masks are kept.",
+            "Each image gets a tile in the gallery as soon as you drop it, marked processing&hellip; until it has uploaded, and a Processing images card counts them.",
+            "Up to 100 MB per video (2 GB per recording from the board), split into per-frame images on this machine before upload.",
+            "Already have annotations? Click <em>Import it</em> on the labels step of a new dataset. It takes Pascal VOC, COCO or YOLO (folder or zip); every box comes in editable and polygon masks are kept.",
           ]}
         />
       </GuideSection>
@@ -1126,24 +1154,26 @@ function DatasetSection({ go }: { go: (k: GuideSectionKey) => void }) {
 
       <GuideSection n={3} title="Searching Openverse">
         <p>
-          Click <em>Don&rsquo;t have images?</em> on the project page and
-          PixelKit opens an inline Openverse search. Openverse aggregates
-          openly-licensed photos. You can grab matching images directly into
-          your dataset without leaving the app.
+          Click <em>Import from web</em> on the Dataset tab and PixelKit
+          opens an Openverse search. Openverse aggregates openly-licensed
+          photos; PixelKit asks only for licences that allow commercial use.
+          You can grab matching images directly into your dataset without
+          leaving the app.
         </p>
         <Steps
           items={[
-            ["Type what you’re looking for", "e.g. &ldquo;potholes&rdquo;, &ldquo;factory pipes&rdquo;, &ldquo;forklifts&rdquo;."],
-            ["Tap Search", "You get a preview grid of candidate images."],
-            ["Tap Yes, this is what I’m looking for", "Confirms the search direction."],
-            ["Choose how many", "Slider from 1 up to your remaining import quota."],
-            ["Pull images", "PixelKit downloads them and adds them to your dataset. <strong>Check the CC licence on each image before reusing it.</strong> Licences vary per image. Some require attribution, some restrict commercial use, some prohibit derivatives. The footer&rsquo;s Openverse policy page covers attribution and takedown."],
+            ["Type what you\u2019re looking for", "e.g. &ldquo;potholes&rdquo;, &ldquo;factory pipes&rdquo;, &ldquo;forklifts&rdquo;."],
+            ["Click Search", "You get a preview grid of candidate images."],
+            ["Click Yes, this is what I\u2019m looking for", "Confirms the search direction."],
+            ["Choose how many", "A slider from 10 to 250 images."],
+            ["Pull images", "PixelKit fetches them. Click an image to leave it out, then click Add to dataset. <strong>Check the CC licence on each image before reusing it.</strong> Licences vary per image. Some require attribution, some prohibit derivatives."],
           ]}
         />
         <Callout tone="info">
-          <Strong>Licensing:</Strong> every Openverse image carries its
-          original CC licence on import. The Openverse policy page in the
-          footer covers attribution and takedown for redistribution.
+          <Strong>Licensing:</Strong> PixelKit keeps each Openverse
+          image&rsquo;s title, creator and licence, and an export that
+          includes the images adds ATTRIBUTIONS.txt crediting them. Check a
+          licence&rsquo;s terms before you redistribute the image.
         </Callout>
       </GuideSection>
 
@@ -1156,9 +1186,9 @@ function DatasetSection({ go }: { go: (k: GuideSectionKey) => void }) {
             "<strong>Sparkle icon (top-left)</strong>. Image has augmentations generated. Click it to open the Augmentations viewer.",
             "<strong>Unsure pill (top-left, amber)</strong>. At least one detection on the image was flagged borderline.",
             "<strong>×&nbsp;icon (top-right)</strong>. Delete this image. Single-tile delete.",
-            "<strong>Detection count + label chips (bottom)</strong>. How many objects were found, in what colour each label is.",
+            "<strong>Box count and label chips (bottom)</strong>. How many objects were found, and the colour of each label.",
             "<strong>Labelling overlay</strong>. Appears briefly while the active label job is processing this image.",
-            "<strong>Verdict chip</strong>. If you&rsquo;ve marked the image good, bad, or unsure in Review mode, the corresponding pill paints in the top-left.",
+            "<strong>Unlabelled or Background pill (top-left)</strong>. The image has no boxes yet, or is marked as background.",
           ]}
         />
       </GuideSection>
@@ -1169,31 +1199,32 @@ function DatasetSection({ go }: { go: (k: GuideSectionKey) => void }) {
           tiles by the verdict you&rsquo;ve given them. Counts in each pill
           update live as you tag images in Review mode or as new uploads land.
         </p>
-        <Figure caption="Filter pills above the dataset gallery: All, Unlabelled, Unrated, Good, Bad, Unsure.">
+        <Figure caption="Filter pills above the dataset gallery: All, Unlabelled, Unrated, Good, Bad, Unsure. A pill with no images is hidden.">
           <FilterChipsMock />
         </Figure>
         <Bullets
           items={[
             "<strong>All</strong>. Default. Every tile.",
             "<strong>Unlabelled</strong>. Images with nothing detected, other than those marked background.",
-            "<strong>Unrated</strong>. Images you haven&rsquo;t reviewed yet.",
-            "<strong>Good / Bad / Unsure</strong>. Whatever verdict you assigned in Review mode.",
+            "<strong>Unrated</strong>. Images with boxes that have no verdict yet. Images without boxes, background images included, are not counted.",
+            "<strong>Good / Bad / Unsure</strong>. The verdict you gave in Review mode or with the Good, Unsure and Bad pills in the image viewer header.",
           ]}
         />
       </GuideSection>
 
       <GuideSection n={6} title="Bulk select &amp; delete">
         <p>
-          A floating Select-mode toggle sits at the top of the gallery. Clicking
-          it puts every tile into checkbox mode. Click any tile to add it to
-          the selection. A bottom action bar shows the current count alongside
-          Select all, Delete N, and Cancel buttons.
+          The Select button at the top of the gallery puts every tile into
+          selection mode. Click any tile to add it to the selection. A bottom
+          action bar shows the current count alongside Select all, Mark N
+          background, Delete N, and Cancel buttons.
         </p>
         <Callout tone="warn">
           <Strong>Bulk delete is permanent.</Strong> Select all takes the
-          images the current filter shows. The selected images, their
-          labelled-preview thumbnails, and their augmentations are all removed
-          in one go.
+          images the current filter shows. The selected images and their
+          labelled-preview thumbnails are deleted in one go, and their
+          augmented copies leave the dataset; the copies&rsquo; files are
+          deleted at the next Update.
         </Callout>
       </GuideSection>
 
@@ -1204,17 +1235,17 @@ function DatasetSection({ go }: { go: (k: GuideSectionKey) => void }) {
           Manual editing controls live in the toolbar at the top, covered in
           the next section.
         </p>
-        <Figure caption="The viewer overlays each detection on the image with a label chip carrying the class and confidence.">
+        <Figure caption="The viewer draws each detection&rsquo;s box and mask on the image, with a chip naming its label.">
           <ViewerOverlayMock />
         </Figure>
         <Bullets
           items={[
             "Arrow keys cycle through neighbouring images.",
             "Esc closes the viewer and returns to the gallery.",
-            "Toolbar pills toggle the box, label, and mask display layers, plus the Click-to-detect and Manual labelling modes covered in the Labelling section.",
-            "<strong>Clear all annotations</strong>. Wipes every box and mask on the current image in one modal-confirmed click. Useful for restarting from scratch on a difficult shot. Cleared images are treated as unlabelled, so the next Start labelling run will re-label them.",
+            "Toolbar pills toggle the box, label, and mask display layers. Click to detect and the Manual mode in the header are covered in the Labelling section.",
+            "<strong>Clear all</strong>. Removes every box and mask on the current image in one click, with no confirmation. Useful for restarting from scratch on a difficult shot. Cleared images are treated as unlabelled, so the next labelling run labels them again.",
             "<strong>Background</strong>. Shown instead of Clear all on an image with no boxes: marks it as checked, with nothing in it to label. It then counts as labelled, labelling runs leave it alone, and training learns from it as a negative example, which is what stops a detector firing on an empty scene. Drawing a box on it unmarks it. Select mode marks many at once (<em>Mark N background</em>), and an imported dataset&rsquo;s images whose annotation lists no objects arrive marked.",
-            "<strong>Delete image</strong>. Removes the current image from the dataset entirely (the same as the gallery tile&rsquo;s trash) and moves on to the next one, or closes the viewer if it was the last.",
+            "<strong>Delete image</strong>. Removes the current image from the dataset entirely (the same as the × on its gallery tile) and moves on to the next one, or to the previous one if it was the last. Deleting the only image closes the viewer.",
             "<strong>Live detection count</strong>. The header count next to the resolution reflects the boxes on the canvas, so it updates the moment you add or delete a detection.",
             "Large originals (e.g. 4K) load a fast display version first, then sharpen to full resolution in the background, so the viewer opens quickly and zoom stays crisp.",
           ]}
@@ -1234,19 +1265,19 @@ function LabellingSection({ go }: { go: (k: GuideSectionKey) => void }) {
         title="Labelling"
         intro={
           <>
-            One-click auto-labelling, the Annotations card
-            controls, manual edits in the box editor, fast verdict review
-            with Review mode, and how to purge a label entirely.
+            One-click auto-labelling, the detection settings, manual edits
+            in the box editor, fast verdict review with Review mode, and how
+            to remove a label entirely.
           </>
         }
       />
 
       <GuideSection n={1} title="Auto-labelling">
         <p>
-          When you click <Strong>Start labelling</Strong> on the Annotations
-          card, PixelKit&rsquo;s auto-labelling runs across every unlabelled
-          image in your dataset. For each label you defined, you get back
-          labelled detections for matching objects.
+          When you click <Strong>Label images</Strong> at the top of the
+          dataset page, PixelKit&rsquo;s auto-labelling runs across every
+          unlabelled image in your dataset. For each label you defined, you
+          get back labelled detections for matching objects.
         </p>
         <p>
           If you&rsquo;ve added reference images, they help PixelKit choose
@@ -1255,66 +1286,77 @@ function LabellingSection({ go }: { go: (k: GuideSectionKey) => void }) {
           cases are flagged as <em>Unsure</em>.
         </p>
         <Callout tone="info">
-          <Strong>Adaptive start button.</Strong> The Start labelling button
-          reshapes its copy based on what would happen if you clicked it now.
-          On a fresh project it reads &ldquo;Start labelling&rdquo;. After
-          you&rsquo;ve added a new label to a partially-labelled project it
-          flips to &ldquo;Label new images and new labels&rdquo; so it&rsquo;s
-          obvious what the run will cover.
+          <Strong>Before the first run.</Strong> Auto-labelling,
+          click-to-detect and the masks for drawn boxes use SAM 3 on this
+          machine. Its weights download once, after you give PixelKit a
+          Hugging Face read token for an account that has accepted
+          Meta&rsquo;s licence for facebook/sam3, in the first-run setup or
+          under Settings, Hugging Face access. Labelling needs a GPU; without
+          one it stays off unless Compute is set to CPU in Settings, where it
+          takes minutes per image.
+        </Callout>
+        <Callout tone="info">
+          <Strong>Adaptive button.</Strong> The labelling button says what a
+          click will do. On a new dataset it reads &ldquo;Label images&rdquo;
+          (or &ldquo;Label&rdquo; and the label&rsquo;s name when there is
+          only one). Once some images are labelled it reads &ldquo;Label new
+          images&rdquo;. After you add labels it names the new label, or reads
+          &ldquo;Label new labels&rdquo; for several. After you change the
+          detection settings it offers &ldquo;Relabel all&rdquo;, and with
+          nothing left to do it reads &ldquo;All images labelled&rdquo;.
         </Callout>
       </GuideSection>
 
       <GuideSection n={2} title="Watching the job">
         <p>
-          The progress card at the top of the project page tracks the labelling
-          job:
+          A progress card on the Dataset tab tracks the labelling job:
         </p>
         <Bullets
           items={[
             "An ETA based on how long earlier images took.",
             "A live counter of processed images.",
-            "The filename of the image currently in flight.",
+            "A progress bar.",
             "A small Labelling overlay on the matching dataset thumbnail.",
-            "Whimsical phrase rotator that paints something different every few seconds. Mostly there so the wait doesn&rsquo;t feel like nothing&rsquo;s happening.",
+            "A status line that changes every few seconds.",
           ]}
         />
         <p>
-          You can keep working on other tabs while it runs. The job completes
-          whether you&rsquo;re looking or not. The card auto-dismisses a few
-          seconds after &ldquo;Labelling complete&rdquo; lands.
+          You can keep working on other tabs while it runs; the status bar
+          shows the job too. The job completes whether you&rsquo;re looking or
+          not. The × on the card cancels it. The card closes a few seconds
+          after &ldquo;Labelling complete&rdquo; appears.
         </p>
       </GuideSection>
 
-      <GuideSection n={3} title="Auto-augment on finish">
+      <GuideSection n={3} title="Augmentations after labelling">
         <p>
-          When the labelling job lands, if the project already has an
-          augmentation config saved (i.e. you&rsquo;ve clicked Update on the
-          Augmentations tab at least once), PixelKit kicks off a fresh
-          augmentation pass automatically. Every newly-labelled image picks
-          up the same augmentations you have set without a second manual
-          click.
+          Labelling does not generate augmentations. After a labelling run,
+          click Update on the Augmentations tab so the newly labelled images
+          get their augmented copies.
         </p>
       </GuideSection>
 
-      <GuideSection n={4} title="The Annotations card">
+      <GuideSection n={4} title="Detection settings">
         <p>
-          The Annotations card on the project page is the labelling control
-          panel. It opens collapsed. The header shows the current label
-          count, the detection-sensitivity mode, and synonym handling.
+          The Detection settings panel on the Dataset tab holds the
+          labelling controls. It opens collapsed. The header shows whether
+          the settings are default or custom.
         </p>
         <Bullets
           items={[
-            "<strong>Add / remove labels</strong>. Every change cascades through every image&rsquo;s chip rail.",
-            "<strong>Detection mode</strong>. Switch between Normal and Stricter. Stricter favours fewer false positives at the cost of missing some objects.",
-            "<strong>Synonyms</strong>. When on, common alternates of your label words also match (e.g. &ldquo;car&rdquo; matches &ldquo;automobile&rdquo;).",
-            "<strong>Confidence slider</strong>. Lifts or lowers the cut-off below which detections are dropped. The slider previews live as you drag.",
-            "<strong>Start labelling</strong>. Runs the pipeline. You can re-run any time to incorporate new images, edited labels, or a flipped detection mode.",
+            "<strong>Detection confidence</strong>. How sure the model has to be before keeping a box, from 10% to 95%. Lower picks up more candidates; higher trims false positives.",
+            "<strong>Mask precision</strong>. How tight each mask outline is. Higher trims softer pixels for cleaner edges.",
+            "<strong>Minimum object size</strong>. Drops same-label fragments smaller than this fraction of the largest match. 0 keeps every hit.",
+            "<strong>Resolution</strong>. <em>Downscale</em> runs one pass per image. <em>Tile · native</em> slices large images into native-resolution tiles, which catches small objects but is slower.",
+            "<strong>Clear all annotations</strong> removes every detection and edited box in the dataset after you type a confirmation. <strong>Default</strong> restores the default settings.",
           ]}
         />
         <Callout tone="info">
-          <Strong>Credit.</Strong> The small credit row
-          under the Annotations heading links to Meta&rsquo;s SAM page.
-          Required attribution, one of the conditions of using the model.
+          <Strong>Labels.</Strong> Add, rename and remove labels in the Labels
+          row under the stats strip: click + to add one, click a label to
+          rename it, and hover it for the × that removes it. New detection
+          settings apply to the next labelling run; once every image is
+          labelled, the labelling button offers Relabel all.
         </Callout>
       </GuideSection>
 
@@ -1325,26 +1367,27 @@ function LabellingSection({ go }: { go: (k: GuideSectionKey) => void }) {
         </p>
         <Bullets
           items={[
-            "<strong>Move or resize</strong> a box by dragging its edges.",
-            "<strong>Relabel</strong> by hovering a box and pressing a number key. The legend in the header shows which digit maps to which label.",
+            "<strong>Move or resize</strong> a box by dragging it or its handles.",
+            "<strong>Relabel</strong> by hovering a box and pressing its label&rsquo;s key: 1 to 9, then Q to P and A to L for labels 10 to 28. In a window at least 1280 px wide, the legend in the header shows which key maps to which label.",
             "<strong>Delete</strong> by clicking a box and pressing Delete, or by clicking the × on its row in the right-hand sidebar.",
-            "<strong>Draw</strong> a new box with the + Add box tool. PixelKit segments and labels it for you the moment you release the drag.",
-            "<strong>Paint a mask</strong> onto an existing box with the brush / eraser pair.",
+            "<strong>Draw</strong> a new box with the + Add box tool (or press B). PixelKit segments and labels it for you the moment you release the drag.",
+            "<strong>Edit a mask</strong>. Select a box and click Edit mask (or press M over a box), then paint with the brush or eraser.",
             "<strong>Toggle layers</strong>. Boxes, Labels and Masks each have their own pill toggle in the toolbar, useful for decluttering while you work.",
           ]}
         />
         <p>
-          Every edit saves automatically. Augmentations re-generate in the
-          background after each save so the augmentation set always reflects
-          the latest annotations. No manual re-run needed.
+          Every edit saves automatically, and Ctrl + Z undoes the last box
+          edit. Augmentations are not regenerated after an edit: an edited
+          image&rsquo;s copies are left out of training and exports until you
+          click Update on the Augmentations tab.
         </p>
       </GuideSection>
 
       <GuideSection n={6} title="Click-to-detect">
         <p>
-          The viewer toolbar has a click-to-detect mode. Activate it, then
-          click anywhere on the image. PixelKit labels what you clicked, in
-          one gesture. Designed to feel instant.
+          The viewer toolbar has a click-to-detect mode (Click to detect, or
+          press X). Turn it on, then click an object on the image. PixelKit
+          labels what you clicked, in one gesture.
         </p>
         <Bullets
           items={[
@@ -1386,22 +1429,27 @@ function LabellingSection({ go }: { go: (k: GuideSectionKey) => void }) {
         <Bullets
           items={[
             "An amber Unsure pill on the dataset thumb.",
-            "An &ldquo;n unsure&rdquo; row on the Dataset stats card.",
+            "The Unsure detections count in Dataset health.",
             "An Unsure chip next to the affected detection in the image viewer&rsquo;s box list.",
           ]}
         />
         <p>
-          Click into the viewer and either confirm (relabel via 1-9) or delete
-          the box. The Unsure count drops live as you go.
+          Open the image in the viewer and delete the box, or press its
+          label&rsquo;s key to keep it. Once an image is edited, Dataset
+          health stops counting its detections as unsure; the Unsure chip in
+          the box list and the pill on the tile stay.
         </p>
       </GuideSection>
 
       <GuideSection n={9} title="Review mode">
         <p>
-          Review mode is a fast keyboard-or-swipe interface for tagging every
-          image with a verdict (good, bad, or unsure) without opening the full
-          viewer. It paints the current image with all its detections so you
-          can decide at a glance whether the labelling is worth keeping.
+          Review mode is a fast keyboard-or-swipe interface for giving images
+          a verdict: good, bad or unsure, without opening the full viewer.
+          The Review button above the gallery opens the unrated images, or the
+          images of the active Good, Bad or Unsure pill; its menu picks
+          another set. It paints
+          the current image with all its detections so you can decide at a
+          glance whether the labelling is worth keeping.
         </p>
         <Figure caption="Swipe right or arrow-right to mark the current image good, swipe left or arrow-left to mark it bad, up/down arrow to mark it unsure. Verdicts feed the gallery filter chips.">
           <ReviewModeMock />
@@ -1411,8 +1459,8 @@ function LabellingSection({ go }: { go: (k: GuideSectionKey) => void }) {
             "<strong>→ Good</strong>. Confirms the labelling on this image.",
             "<strong>← Bad</strong>. Flags the image for follow-up. Doesn&rsquo;t delete anything.",
             "<strong>↑ / ↓ Unsure</strong>. Park for later review.",
-            "<strong>Tap a label chip</strong> to filter visible boxes by that label as you scrub through.",
-            "<strong>Hover-highlight</strong>. Hovering a detection box dims everything else so the focus pops.",
+            "<strong>Annotations panel</strong>. Lists every detection on the current image with its label and score.",
+            "<strong>Hover-highlight</strong>. Hovering a box highlights it and its row in the annotations panel.",
             "<strong>Verdict persists</strong>. Stored on the image, surfaces in the gallery filter chips, and survives reloads.",
           ]}
         />
@@ -1420,23 +1468,23 @@ function LabellingSection({ go }: { go: (k: GuideSectionKey) => void }) {
 
       <GuideSection n={10} title="Deleting a label entirely">
         <p>
-          Removing a label chip in the Annotations card triggers a confirm
-          modal because the action is destructive. Confirming it purges every
-          detection on that label across the whole dataset, removes the
-          label&rsquo;s reference data (if it has any), and tears down
-          any augmentations that referenced it.
+          Removing a label from the Labels row (hover it and click ×) asks
+          for confirmation because the action is destructive. Confirming it
+          deletes every detection on that label across the whole dataset,
+          removes the label&rsquo;s reference data (if it has any), and
+          drops the label&rsquo;s boxes from the augmented copies.
         </p>
         <Bullets
           items={[
-            "A progress card shows the purge in flight, the same shape as the labelling progress card.",
+            "A progress card shows the removal while it runs, like the labelling progress card.",
             "Other detections on affected images are kept. Only the boxes carrying the removed label are touched.",
             "The label disappears from every chip rail and from the colour palette.",
           ]}
         />
         <Callout tone="warn">
-          <Strong>Irreversible.</Strong> Once confirmed, the label and every
-          detection on it are gone. Take an export if you might want the
-          annotations back.
+          <Strong>Irreversible.</Strong> Once confirmed, every detection on the
+          label is gone. Ctrl + Z brings the label back without its boxes.
+          Take an export if you might want the annotations back.
         </Callout>
       </GuideSection>
 
@@ -1484,7 +1532,7 @@ function AugmentationsSection({ go }: { go: (k: GuideSectionKey) => void }) {
           The Augmentations viewer (covered below) shows you exactly what
           PixelKit produced.
         </p>
-        <Figure caption="A handful of augmentations applied to the same source image. Real previews look photographic, not block-shape.">
+        <Figure caption="A handful of augmentations applied to the same source image. Real output is photographic; this is a sketch.">
           <AugmentationGridMock />
         </Figure>
       </GuideSection>
@@ -1496,9 +1544,9 @@ function AugmentationsSection({ go }: { go: (k: GuideSectionKey) => void }) {
         </p>
         <Bullets
           items={[
-            "<strong>Enable checkbox</strong>. Opens the controls. Ticked categories are included in every Update.",
+            "<strong>Enable checkbox</strong>. Opens the controls. Ticked augmentations are included in every Update. Camera &amp; sensor has one checkbox for its nine dials, and a dial at 0 is off.",
             "<strong>Frequency toggle</strong>. <em>All</em> applies the augmentation to every copy. <em>Random</em> applies to roughly half so the augmented set has more variety.",
-            "<strong>Strength dial(s)</strong>. Each augmentation has one or more sliders. Drag to see a live preview on a sample dataset image.",
+            "<strong>Strength dial(s)</strong>. Each augmentation has one or more sliders. Release a slider to update the preview on a sample dataset image.",
             "<strong>Random image button</strong>. Under each preview, swaps to a different source image so you can see the augmentation on a few different shots before committing.",
           ]}
         />
@@ -1506,26 +1554,27 @@ function AugmentationsSection({ go }: { go: (k: GuideSectionKey) => void }) {
 
       <GuideSection n={4} title="Per-image count">
         <p>
-          At the top of the Augmentations tab, the <em>Per image</em> slider
-          sets how many augmented copies to generate per dataset image:
+          At the top of the Augmentations tab, the <em>Augmentations per
+          image</em> control sets how many augmented copies to generate per
+          dataset image:
         </p>
         <Bullets
           items={[
-            "<strong>Off</strong>. No augmentations. Hitting Update in this mode deletes every existing augmentation (button label flips to Clear all).",
+            "<strong>Off</strong>. No augmentations. Clicking Update in this mode deletes every existing augmentation (the button reads Clear all).",
             "<strong>1 / 2 / 3</strong>. Fixed copy count per image.",
-            "<strong>Random</strong>. PixelKit picks 1, 2 or 3 per image; re-runs are reproducible.",
+            "<strong>Random</strong>. PixelKit picks 1, 2 or 3 at random for each image.",
           ]}
         />
       </GuideSection>
 
-      <GuideSection n={5} title="Randomise + Update">
+      <GuideSection n={5} title="Randomise and Update">
         <p>
           Two buttons in the top-right of the page drive the pipeline.
         </p>
         <Bullets
           items={[
-            "<strong>Randomise</strong>. Rolls fresh values for every pure-dial augmentation in one click. Skips augmentations that need uploaded assets (background swap, object overlay). Auto-opens every category card so the new values land visibly.",
-            "<strong>Update</strong>. Generates augmentations for every dataset image based on the current settings. The job runs in the background. The same progress card you see during labelling tracks it, mounted directly on the Augmentations tab too so you can stay on this page.",
+            "<strong>Randomise</strong>. Rolls fresh values for most dials, and a new per-image count, in one click. Lens distortion, lens glare, low resolution, pixelation and background swap keep their settings. Opens every category card so you can see the new values.",
+            "<strong>Update</strong>. Generates augmentations for every dataset image based on the current settings. The job runs in the background, with a progress card on the Augmentations tab and on the Dataset tab.",
           ]}
         />
       </GuideSection>
@@ -1538,8 +1587,8 @@ function AugmentationsSection({ go }: { go: (k: GuideSectionKey) => void }) {
         </p>
         <Bullets
           items={[
-            "Upload up to three backgrounds. They are compressed in the browser before upload so the page does not stall on slow connections.",
-                        "Mix any number of backgrounds. PixelKit picks one at random per generated copy.",
+            "Upload up to six backgrounds. PixelKit keeps each as a JPEG at most 1280 px on the long side.",
+            "PixelKit picks one of them at random for each generated copy.",
           ]}
         />
       </GuideSection>
@@ -1552,32 +1601,31 @@ function AugmentationsSection({ go }: { go: (k: GuideSectionKey) => void }) {
         </p>
         <Bullets
           items={[
-            "<strong>Hover a tile</strong> to see the annotations overlay: polygons and bounding boxes coloured by size validity against the project&rsquo;s target input shape (green / orange / red).",
+            "<strong>Hover a tile</strong> to see the annotations overlay: polygons and bounding boxes coloured by size validity against the dataset&rsquo;s target input shape (green, orange or red).",
             "<strong>Click the × on a tile</strong> to delete that single augmentation. The remaining count updates live and the dataset-thumbnail sparkle hides when the last copy is gone.",
-            "<strong>Bounding boxes turn red</strong> when they will be too small to detect at your chosen input shape. A fast visual indicator that the annotation will be hard for the model to learn.",
+            "<strong>Bounding boxes turn red</strong> when they will be too small to detect at your chosen input shape.",
           ]}
         />
       </GuideSection>
 
-      <GuideSection n={8} title="Auto-regen after edits">
+      <GuideSection n={8} title="Keeping augmentations current">
         <p>
-          The augmentation set always reflects the latest annotations. Two
-          triggers re-run augmentations automatically:
+          Augmentations are generated when you click Update. They are not
+          regenerated automatically, so click Update again:
         </p>
         <Bullets
           items={[
-            "When the labelling job finishes (any newly-labelled images get covered).",
-            "When you commit a manual edit in the image viewer (a debounced regen kicks in after the save lands).",
+            "After a labelling run, so newly labelled images get their copies.",
+            "After manual edits in the image viewer, so the copies carry the corrected annotations. Until then, an edited image&rsquo;s copies are left out of training and exports, and the Train card&rsquo;s pre-flight says how many images need Update.",
           ]}
         />
         <p>
-          You never need to click Update again after a label or annotation
-          change. It just happens.
+          Update regenerates every copy with the current settings.
         </p>
         <Callout tone="info">
-          The auto-regen skips while another generate job is already running
-          for the project. Edits during an in-flight run pile up and the next
-          regen picks them all up at once.
+          Update is disabled while a generation job is running for the
+          dataset, and refused while a training run on the dataset is
+          reading the copies.
         </Callout>
       </GuideSection>
 
@@ -1594,27 +1642,28 @@ function StatsSection({ go }: { go: (k: GuideSectionKey) => void }) {
         title="Dataset stats"
         intro={
           <>
-            The Dataset stats card sits at the top of the Dataset tab. It
-            surfaces counts, label distribution, a 0-100 health score,
-            a 2-D variation plot, and a Review duplicates modal for finding
-            and removing near-identical images.
+            Stats appear in three places: the stats strip under the dataset
+            name, the Overview tab, and the Dataset health window. Together
+            they show counts, label distribution, a 0-100 health score, a
+            2-D variation plot, and a review for finding and removing
+            near-identical images.
           </>
         }
       />
 
       <GuideSection n={1} title="The summary row">
         <p>
-          The card opens collapsed showing a one-line summary so it
-          doesn&rsquo;t dominate the page. Expand it for the full breakdown.
+          The stats strip under the dataset name shows the main numbers on
+          every tab. The Overview tab adds insight cards and the full charts.
         </p>
         <Bullets
           items={[
-            "<strong>Image count</strong>. How many images you&rsquo;ve added to the dataset.",
-            "<strong>Detection count</strong>. Total objects detected across the dataset.",
-            "<strong>Label count</strong>. How many distinct labels have at least one detection.",
-            "<strong>Augmentation count</strong>. Total generated copies across all images.",
-            "<strong>Near-dup count</strong>. Flagged when one or more images cluster too tightly with another (amber-tinted, click to open the review modal).",
-            "<strong>Health badge</strong>. The 0-100 score, covered below.",
+            "<strong>Images</strong>. How many images you&rsquo;ve added to the dataset.",
+            "<strong>Detections</strong>. Total boxes across the dataset.",
+            "<strong>Labels</strong>. How many labels the dataset has.",
+            "<strong>Augmentations</strong>. Total generated copies across all images.",
+            "<strong>Health</strong>. The 0-100 score and its rating (Healthy, Fair or Needs work). Click it to open Dataset health.",
+            "<strong>Insights</strong> on the Overview tab flag near-duplicates, images with no detections, and an underrepresented label.",
           ]}
         />
       </GuideSection>
@@ -1622,47 +1671,49 @@ function StatsSection({ go }: { go: (k: GuideSectionKey) => void }) {
       <GuideSection n={2} title="Health score">
         <p>
           The health score is a single 0-to-100 number summarising how
-          trainable your dataset is. Hover the badge for a short breakdown
-          of the biggest things to fix.
+          trainable your dataset is. The Overview tab shows it with its four
+          factors; Dataset health also explains each factor.
         </p>
-        <Figure caption="A green badge is healthy, amber is workable, red flags a meaningful issue. Hover the badge in-product to see the breakdown.">
+        <Figure caption="Healthy is 75 and above, Fair 45 to 74, Needs work below 45. Uniqueness counts for 40% of the score, the other factors for 20% each.">
           <HealthBadgeMock />
         </Figure>
         <p>
-          The score blends several signals about your dataset and surfaces
-          the lowest-scoring one as the recommended next thing to fix.
-          Following the suggestion is usually the cheapest win.
+          Uniqueness is the share of images that are not near-duplicates,
+          balance is how evenly detections spread across labels, coverage is
+          the share of images with a detection or marked background, and
+          confidence is the share of detections not flagged unsure. Start
+          with the lowest factor.
         </p>
       </GuideSection>
 
       <GuideSection n={3} title="Label distribution">
         <p>
-          The middle column of the expanded card shows a bar per label
-          sorted by count, with the label&rsquo;s project colour as the
-          fill and a count + percentage on the right. Useful for spotting
-          imbalances at a glance. If one class accounts for 80% of all
-          detections, your model will learn it disproportionately.
+          The Overview tab shows a donut of detections per label, with counts
+          for the largest six. Dataset health lists every label as a bar with
+          its count and percentage. Useful for spotting imbalances at a
+          glance. If one class accounts for 80% of all detections, your model
+          will learn it disproportionately.
         </p>
       </GuideSection>
 
       <GuideSection n={4} title="Image variation plot">
         <p>
-          The right column shows a 2-D plot of the dataset. Each dot is one
-          image. The position reflects how visually similar it is to every
-          other image. Tight clusters mean lots of pictures of basically the
-          same thing. Wide spread means good variation.
+          The Overview tab and Dataset health both show a 2-D plot of the
+          dataset. Each dot is one image. The position reflects how visually
+          similar it is to every other image. Tight clusters mean many
+          pictures of nearly the same thing. Wide spread means good variation.
         </p>
-        <Figure caption="Each dot is an image, coloured by primary label. An amber halo flags near-duplicates. Click a dot to jump to that tile in the dataset gallery.">
+        <Figure caption="Each dot is an image, coloured by primary label. An amber halo flags near-duplicates. Hover a dot to see which image it is. Click it to show the image in the Dataset gallery.">
           <VariationPlotMock />
         </Figure>
         <Bullets
           items={[
             "<strong>Dot colour</strong> matches the primary label of the image.",
-            "<strong>Dot radius</strong> scales softly with the number of objects in the image.",
+            "<strong>Dot radius</strong> grows with the number of detections in the image.",
             "<strong>Amber halo</strong> around a dot flags it as a near-duplicate of at least one other image. Consider removing one or the other.",
-            "<strong>Smaller dots clustered around each main one</strong> are the augmentations generated from that image.",
-            "<strong>Click a dot</strong> to scroll the dataset gallery to that image, dim everything else, and highlight the matched tile. Clicking an augmentation dot jumps to its parent image with an &ldquo;Augmentation&rdquo; badge briefly flashing over the cover.",
-            "<strong>Soft spinner</strong>. The plot shows a spinner while it is still computing, then fills in as the data lands.",
+            "<strong>Smaller, fainter dots</strong> are the augmentations generated from your images.",
+            "<strong>Hover a dot</strong> to see the file name, its label, its detection count and whether it is a near-duplicate. Click it to show the image in the Dataset gallery.",
+            "<strong>Progress ring</strong>. While image embeddings are still computing, the plot shows how far along they are, then fills in.",
           ]}
         />
       </GuideSection>
@@ -1671,30 +1722,30 @@ function StatsSection({ go }: { go: (k: GuideSectionKey) => void }) {
         <p>
           PixelKit identifies pairs of images that look very similar to a
           model. Both members of each flagged pair get an amber halo on the
-          variation plot, and the summary row shows a single &ldquo;n
-          near-dup&rdquo; count.
+          variation plot, and the Insights row on the Overview tab shows how
+          many images are near-duplicates.
         </p>
         <p>
-          Clicking that count opens the <Strong>Review duplicates</Strong>
-          modal. From there you can scan every flagged group, pick which
-          image to keep, and act in bulk.
+          Clicking that card opens Dataset health, where the <Strong>Review duplicates</Strong>
+          {" "}panel lists every flagged group. From there you can pick which
+          image to keep and act in bulk.
         </p>
         <Bullets
           items={[
-            "<strong>Near / Exact toggle</strong>. Switch between visually-similar pairs and pixel-identical duplicates.",
-            "<strong>Per-group keeper</strong>. Each group shows one image as the keeper (emerald outline) and the rest as candidates for deletion.",
+            "<strong>Near duplicates / 100% duplicates</strong>. Switch between visually similar images and exact copies.",
+            "<strong>Per-group keeper</strong>. Each group shows one image as the keeper (green outline, marked Keep) and the rest as candidates for deletion.",
             "<strong>Per-group actions</strong>. Delete the n duplicates in one click, or mark the group as &ldquo;Not duplicates&rdquo; to ignore it next time.",
-            "<strong>Select &amp; bulk-delete</strong>. Tick individual non-keeper images across multiple groups and delete them all in one go.",
-            "<strong>Select all duplicates</strong>. One click to mark every non-keeper across every group.",
+            "<strong>Select and delete</strong>. Click non-keeper images across several groups, then delete them all in one go.",
+            "<strong>No duplicates to review</strong> shows once every group is resolved.",
           ]}
         />
       </GuideSection>
 
       <GuideSection n={6} title="Live updates">
         <p>
-          The card refreshes itself on every meaningful change to your
-          dataset: new uploads, deletions, manual annotation edits, and
-          augmentation generate / delete events. No reload required.
+          The stats refresh after every meaningful change to your dataset:
+          new uploads, deletions, annotation edits, labelling runs, and
+          augmentation changes. No reload required.
         </p>
       </GuideSection>
 
@@ -1708,104 +1759,101 @@ function SettingsSection({ go }: { go: (k: GuideSectionKey) => void }) {
     <>
       <GuideHeader
         eyebrow="Section 06"
-        title="Settings & themes"
+        title="Settings & export"
         intro={
           <>
-            Project settings, label management, the light / dark toggle,
-            and exporting the finished dataset.
+            Dataset settings, label colours, annotation snapshots, and
+            exporting the finished dataset.
           </>
         }
       />
 
       <GuideSection n={1} title="Opening Settings">
         <p>
-          Click the gear icon at the top of any project page to open the
-          Settings panel. From there you can rename the project, set the
-          cover image, manage label colours, and delete the project
-          entirely.
+          Click the gear icon at the top of a dataset page to open its
+          settings. From there you can rename the dataset, set the target
+          input shape, recolour labels, set the cover image, save annotation
+          snapshots, and delete the dataset entirely.
         </p>
       </GuideSection>
 
-      <GuideSection n={2} title="Renaming the project">
+      <GuideSection n={2} title="Renaming the dataset">
         <p>
-          Type the new name and click <em>Rename</em>. It runs
-          on the new value before the request is sent. Blocked terms surface
-          as an inline red error.
+          Type the new name and click <em>Rename</em>, or click the dataset
+          name at the top of the page, type the new name and press Enter.
         </p>
         <p>
-          The renamed project propagates everywhere it&rsquo;s shown in the
-          same tick (workspace card, public feed, page title) without
-          waiting for a refresh.
+          The new name shows everywhere without a refresh.
         </p>
       </GuideSection>
 
       <GuideSection n={3} title="Your data stays local">
         <Bullets
           items={[
-            "Everything - images, labels, annotations and exports - lives on this machine. Nothing is uploaded to a cloud service.",
-            "Deleting a project removes its files from disk permanently; there is no remote copy to restore from.",
+            "Everything (images, labels, annotations and exports) lives on this machine. Nothing is uploaded to a cloud service.",
+            "Deleting a dataset removes its files from disk permanently; there is no remote copy to restore from.",
           ]}
         />
         <p>
-          Back up the PixelKit data folder if you want an extra copy of your
+          Back up the workspace folder if you want an extra copy of your
           datasets.
         </p>
       </GuideSection>
 
       <GuideSection n={4} title="Cover image">
         <p>
-          Pick which thumbnail represents the project across the workspace
-          and public feed. The Cover image section in Settings shows every
-          uploaded image as a small grid. Click any of them to set it as the
-          cover. Click the small reset icon (visible when a custom cover is
-          set) to revert to PixelKit&rsquo;s default pick.
+          Pick which image represents the dataset on the workspace. The
+          Cover image section in Settings shows the dataset&rsquo;s images
+          and references as a grid. Click any of them to set it as the
+          cover, or click Upload image to use a separate picture. Reset
+          (visible when a cover is set) reverts to PixelKit&rsquo;s default
+          pick.
         </p>
       </GuideSection>
 
       <GuideSection n={5} title="Renaming and recolouring labels">
         <p>
           The Label colours section in Settings lists every label in the
-          project, each row showing the current swatch and the count of
-          detections carrying that label.
+          dataset with its current colour.
         </p>
         <Bullets
           items={[
-            "<strong>Rename</strong> a label by clicking the pencil icon. The change cascades to every chip in the workspace card, dataset gallery, and image viewer instantly.",
-            "<strong>Recolour</strong> by clicking the swatch. Pick from the eight-tone palette or paste a hex value. Colours persist into the per-project meta cache so they survive reloads with no re-fetch.",
-            "<strong>Reset</strong> the colour to the default palette pick by clicking the reset icon when a custom colour is set.",
+            "<strong>Rename</strong> a label by clicking its name in the Labels row on the dataset page. The change shows in the dataset gallery and image viewer at once.",
+            "<strong>Recolour</strong> by hovering the colour dot in Settings. Pick one of the eight palette colours, or any colour from the colour picker. Colours are saved with the dataset.",
+            "<strong>Reset</strong> the colour to the default palette pick by clicking Reset, shown when a custom colour is set.",
           ]}
         />
       </GuideSection>
 
       <GuideSection n={6} title="Export modal">
         <p>
-          Click the <Strong>Export</Strong> button at the top of the project
+          Click the <Strong>Export</Strong> button at the top of the dataset
           page to open the export modal. PixelKit packages your dataset into
           a single download with annotations in your chosen format.
         </p>
         <Bullets
           items={[
-            "<strong>Train / val split</strong>. A slider sets the percentage of images to go into the training split. The remainder lands in val. Splits are reproducible across re-exports.",
+            "<strong>Train / val split</strong>. A slider sets the percentage of images to go into the training split; the remainder lands in val. Splits are reproducible across re-exports. CVAT and Label Studio exports have no split: every image is in one folder and one annotation file.",
             "<strong>Boxes / Segmentations</strong>. Toggle which annotation kinds to include. At least one has to be on.",
-            "<strong>Size-class filters</strong>. Include or exclude detections that fall into Tiny / Small / Medium / Large buckets at your chosen input shape.",
-            "<strong>Include augmentations</strong>. Optional. When on, every generated copy ships alongside its source.",
-            "<strong>Animated modal</strong>. Slides in with a backdrop blur. Esc closes it without committing.",
+            "<strong>Filter by detection size</strong>. Leave out red boxes (too small for the model to detect at your target input shape) or orange boxes (borderline).",
+            "<strong>Include image files</strong>. Off exports annotations only. On bundles every image and its augmentations in the same archive.",
+            "<strong>Formats</strong>. YOLO, COCO, Pascal VOC, CVAT, Label Studio or PNG masks. Pascal VOC has boxes only; PNG masks need segmentations.",
           ]}
         />
       </GuideSection>
 
-      <GuideSection n={7} title="Deleting a project">
+      <GuideSection n={7} title="Deleting a dataset">
         <p>
-          At the bottom of Settings, the destructive section wipes the
-          project permanently. Type the project name to confirm before the
-          delete button enables. Once gone:
+          At the bottom of Settings, Delete this dataset removes the dataset
+          permanently. Type the dataset name to confirm before the delete
+          button enables. Once gone:
         </p>
         <Bullets
           items={[
             "Every reference image is removed.",
             "Every imported image is removed.",
             "Every annotation, augmentation, and labelled-preview thumbnail is removed.",
-            "The project itself is taken off the server.",
+            "The dataset folder is removed from the workspace.",
           ]}
         />
         <Callout tone="warn">
@@ -1816,35 +1864,39 @@ function SettingsSection({ go }: { go: (k: GuideSectionKey) => void }) {
 
       <GuideSection n={8} title="Your workspace on disk">
         <p>
-          Everything lives in the workspace folder you picked at first run:
-          one folder per Project, one per dataset, original images untouched
-          in <code>images/</code>, one annotation file per image in
-          <code>annotations/</code>. The Explorer tree mirrors that layout.
-          Back up or sync the folder like any other files; the format is
-          documented in the repository&rsquo;s workspace spec.
+          Everything lives in the workspace folder, a folder named PixelKit in
+          your home folder unless you change it under Settings, Workspace; the
+          status bar shows its name. It holds one folder per Project and one
+          per dataset, the images in <code>images/</code> and one annotation
+          file per image in <code>annotations/</code>. A JPEG is stored as
+          uploaded; other image formats are stored as JPEG, and Openverse
+          images keep the format they were downloaded in. The Explorer tree
+          mirrors that layout. Back up or sync the folder like any other
+          files; the format is documented in the repository&rsquo;s
+          docs/WORKSPACE.md.
         </p>
       </GuideSection>
 
       <GuideSection n={9} title="Annotation snapshots">
         <p>
           The dataset settings panel can save a snapshot of the current
-          annotation state (labels + boxes/masks, never the images) and
+          annotation state (labels, boxes and masks, never the images) and
           restore any earlier one. Restoring first snapshots the current
           state automatically, so it&rsquo;s always undoable.
         </p>
       </GuideSection>
 
-      <NextUp next="teams" go={go} />
+      <NextUp next="projects" go={go} />
     </>
   );
 }
 
-function TeamsSection({ go }: { go: (k: GuideSectionKey) => void }) {
+function ProjectsSection({ go }: { go: (k: GuideSectionKey) => void }) {
   return (
     <>
       <GuideHeader
         eyebrow="Section 07"
-        title="Projects & teams"
+        title="Projects"
         intro={
           <>
             A <Strong>Project</Strong> is a folder that groups several
@@ -1856,7 +1908,7 @@ function TeamsSection({ go }: { go: (k: GuideSectionKey) => void }) {
       />
 
       <GuideSection n={1} title="Projects vs datasets">
-        <p>Two things share similar names, so it is worth being precise:</p>
+        <p>Two things share similar names:</p>
         <Bullets
           items={[
             "A <strong>dataset</strong> is one collection of labelled images (the thing you build in the Create a dataset, Labelling, and Augmentations sections).",
@@ -1864,7 +1916,7 @@ function TeamsSection({ go }: { go: (k: GuideSectionKey) => void }) {
           ]}
         />
         <p>
-          On the Workspace tab your Projects sit in a row across the top, above
+          On the Workspace page your Projects sit in a row across the top, above
           the grid of your individual datasets.
         </p>
       </GuideSection>
@@ -1874,7 +1926,7 @@ function TeamsSection({ go }: { go: (k: GuideSectionKey) => void }) {
           items={[
             ["Click the New project tile", "It sits at the start of the Projects row on the Workspace."],
             ["Name it and pick a cover", "The cover photo is optional. It shows on the Project hero and card."],
-            ["Create", "You land on the Project page, ready to add datasets."],
+            ["Click Create project", "You land on the Project page, ready to add datasets."],
           ]}
         />
       </GuideSection>
@@ -1883,7 +1935,7 @@ function TeamsSection({ go }: { go: (k: GuideSectionKey) => void }) {
         <p>On the Project page, the Datasets section has two buttons:</p>
         <Bullets
           items={[
-            "<strong>Add existing</strong> pulls one of your standalone datasets into the Project.",
+            "<strong>Add existing</strong> moves datasets into the Project: tick one or more.",
             "<strong>+ New dataset</strong> creates a fresh dataset directly inside the Project, using the same naming and labels flow as the Workspace.",
           ]}
         />
@@ -1903,13 +1955,14 @@ function TeamsSection({ go }: { go: (k: GuideSectionKey) => void }) {
         </p>
         <Callout tone="info">
           <Strong>Merging.</Strong> Renaming onto a label that already
-          exists merges the two - the fix for &ldquo;bolt&rdquo; vs
-          &ldquo;bolts&rdquo; drift between datasets.
+          exists merges the two. Use it when datasets spell the same label
+          differently, such as &ldquo;bolt&rdquo; and &ldquo;bolts&rdquo;.
         </Callout>
         <Callout tone="info">
           <Strong>Deleting a dataset</Strong> from a Project asks what should
           happen: <em>remove from project</em> detaches it (it survives as a
-          standalone dataset), or <em>delete entirely</em> destroys it.
+          standalone dataset), or <em>delete entirely</em> deletes it at
+          once, with no typed confirmation and no undo.
         </Callout>
       </GuideSection>
 
@@ -1937,8 +1990,8 @@ function DerivedSection({ go }: { go: (k: GuideSectionKey) => void }) {
         intro={
           <>
             A derived dataset is a cropped child of a parent dataset: one image
-            per detection, each cropped to its box. It is handy for training a
-            focused classifier on individual objects. The child stays linked to
+            per detection, each cropped to its box. Use it to train on
+            individual objects. The child stays linked to
             the parent and re-syncs from it one way.
           </>
         }
@@ -1966,7 +2019,7 @@ function DerivedSection({ go }: { go: (k: GuideSectionKey) => void }) {
             "<strong>Label source</strong>. <em>Keep parent labels</em> carries each detection&rsquo;s label onto its crop. <em>Create new labels</em> brings the crops in unlabelled so you can build a fresh taxonomy.",
             "<strong>Labels to include</strong>. Pick which of the parent&rsquo;s labels to crop.",
             "<strong>ROI mode (square crops)</strong>. Forces every crop to an exact 1:1 square centred on the object, so long thin objects are not cropped to slivers.",
-            "<strong>Fixed crop size</strong>. Optional. Turn it on and a slider sets one size: every crop is resized to exactly that N x N, so all derived images match (handy for training). It forces square crops and overrides the minimum size.",
+            "<strong>Fixed crop size</strong>. Optional. Turn it on and a slider sets one size: every crop is resized to exactly that N x N, so all derived images match. It forces square crops and overrides the minimum size.",
             "<strong>Context padding</strong> and <strong>minimum image size</strong> sliders, to keep surrounding context and to scale tiny crops up.",
             "<strong>Group in a workspace Project</strong>. On keeps the crop dataset alongside its parent in a Project; off creates a standalone dataset.",
           ]}
@@ -1985,8 +2038,9 @@ function DerivedSection({ go }: { go: (k: GuideSectionKey) => void }) {
 
       <GuideSection n={4} title="Live sync">
         <p>
-          The child re-derives from the parent&rsquo;s current state, on creation
-          and whenever you hit <Strong>Sync now</Strong> on the child&rsquo;s
+          The child re-derives from the parent&rsquo;s current state on
+          creation, a few seconds after each change to the parent, and
+          whenever you click <Strong>Sync now</Strong> on the child&rsquo;s
           banner.
         </p>
         <Bullets
@@ -2020,10 +2074,11 @@ function TrainingSection({ go }: { go: (k: GuideSectionKey) => void }) {
         title="Train for Neuro N6"
         intro={
           <>
-            Turn a labelled dataset into a detector that runs on the OhmLab
-            Neuro N6 board. Training happens on this machine, the export is
-            compiled for the board&rsquo;s NPU, and everything you need lands
-            in one zip.
+            Turn a labelled dataset into a detector that runs on the Ohm Lab
+            Neuro N6 board. Training happens on this machine, and the sketch,
+            the int8 model and its labels header land in one zip. With ST Edge
+            AI Core installed, the run also compiles the model for the
+            board&rsquo;s NPU to check that it fits.
           </>
         }
       />
@@ -2040,13 +2095,13 @@ function TrainingSection({ go }: { go: (k: GuideSectionKey) => void }) {
           items={[
             "<strong>Epochs</strong>. 50 is the default; small datasets are usually fine with fewer.",
             "<strong>Input</strong>. The square resolution the model sees (256 by default). Bigger inputs see smaller objects at the cost of speed on the board.",
-            "<strong>Model</strong>. Nano (0.9 M parameters, under 1 MB of weights) or Tiny (5 M parameters, about 5 MB, more accurate, about six times the compute).",
+            "<strong>Model</strong>. Nano (0.9 M parameters, under 1 MB of weights) or Tiny (5 M parameters, about 5 MB, more accurate, about five times the compute).",
             "<strong>Split</strong>. The share of images that train; the rest is held out per class, so every class with two or more images gets a val image and is measured.",
             "<strong>Augmentations</strong>. Generated copies of training images join the training set (with their transformed boxes). Copies of val images are never used, so the val score stays honest.",
             "<strong>Start from</strong>. Continue from an earlier run&rsquo;s weights instead of the COCO checkpoint, for a second pass on a grown dataset.",
-            "<strong>Evaluate on</strong>. Score on a separate dataset instead of a held-out split: everything here trains, everything labelled there is scored. The honest number for a camera the model has never seen.",
+            "<strong>Evaluate on</strong>. Score on a separate dataset instead of a held-out split: everything here trains, everything labelled there is scored.",
             "<strong>Pre-flight</strong>. Before you start, the card says how many images and augmentations the run will use and warns about classes with few boxes, classes the val split cannot measure, objects under 8 px at the input size, and identical images on both sides of the split. Too few labelled images blocks the run.",
-            "<strong>GPU</strong>. Training wants a CUDA card or Apple Silicon; it runs on the CPU only when Compute is set to CPU in Settings, and slowly. On one GPU, training pauses between steps for click-to-detect, drawn boxes and auto-labelling, so both carry on, the run a little slower while you label. With a second GPU installed, training uses the card labelling is not on.",
+            "<strong>GPU</strong>. Training needs a CUDA card or Apple Silicon; it runs on the CPU only when Compute is set to CPU in Settings, and then slowly. On a single GPU, training pauses between steps for click-to-detect, drawn boxes and auto-labelling, so you can keep labelling while it trains; the run is a little slower meanwhile. With a second GPU installed, training uses the card labelling is not on.",
           ]}
         />
       </GuideSection>
@@ -2055,8 +2110,8 @@ function TrainingSection({ go }: { go: (k: GuideSectionKey) => void }) {
         <Bullets
           items={[
             "<strong>Float training</strong>. A YOLOX detector, warm-started from COCO or a previous run, trained on the dataset&rsquo;s labelled images and their augmentations. The batch size comes from free GPU memory and is halved automatically if the card runs out.",
-            "<strong>Live curves</strong>. The run shows loss and AP@0.5 per epoch as it trains, with the time left. Every float epoch is checkpointed: a run interrupted by a crash, Cancel training or a closed app shows as Interrupted and resumes from its last epoch with the Resume button (an interruption during the int8 fine-tuning restarts that short phase).",
-            "<strong>Quantisation-aware fine-tuning</strong>. A few extra epochs with int8 simulated throughout the network, so the exported model scores like the float one instead of losing ten to twenty points.",
+            "<strong>Live curves</strong>. The run shows the loss every epoch and AP@0.5 every few epochs as it trains, with the time left. Every float epoch is checkpointed: a run interrupted by a crash, Cancel training or a closed app shows as Interrupted and resumes from its last epoch with the Resume button (an interruption during the int8 fine-tuning restarts that short phase).",
+            "<strong>Quantisation-aware fine-tuning</strong>. Eight extra epochs with int8 simulated throughout the network, so the exported int8 model keeps most of the float model&rsquo;s accuracy. The run reports both scores.",
             "<strong>Threshold calibration</strong>. On the int8 model&rsquo;s val predictions the confidence threshold with the best F1 is chosen and written into the labels header, with the precision and recall it gives.",
             "<strong>Export and verify</strong>. The int8 model is written with the board&rsquo;s input contract built in and, when ST Edge AI Core is installed, compiled for the NPU so the run can report how much of it runs in hardware and how much flash it needs.",
           ]}
@@ -2069,11 +2124,11 @@ function TrainingSection({ go }: { go: (k: GuideSectionKey) => void }) {
           items={[
             "<strong>AP50 float and int8</strong>. Accuracy on the held-out split for the float model and for the exact int8 file you deploy, with the per-class numbers in Details.",
             "<strong>The threshold line</strong>. The calibrated confidence threshold and its F1; Details shows per-class precision and recall at that threshold and the confusion matrix (truth by prediction, with a background row and column for spurious boxes and misses).",
-            "<strong>Worst images</strong>. The val images with the most errors, drawn: green is the truth, thin blue a correct detection, yellow a miss, red a spurious box, orange the right place with the wrong class. Click one to enlarge it. That gallery is where the next labelling hour should go.",
+            "<strong>Worst images</strong>. The val images with the most errors, drawn: green is the truth, thin blue a correct detection, yellow a miss, red a spurious box, orange the right place with the wrong class. Click one to enlarge it.",
             "<strong>Compare every val image with its ground truth</strong>. Every val image twice, side by side: the truth it was scored against, and what the exported int8 model reports at the shipped threshold, in the same colours, worst first. Arrow keys step through them.",
             "<strong>The NPU line</strong>. <em>Fully on NPU</em> means zero software epochs; otherwise it says how many of the compiler&rsquo;s epochs run on the CPU instead. Weights are shown against the board&rsquo;s flash pool.",
             "<strong>Rejected</strong>. If the compiler refuses the model the run is kept with the reason instead of shipping something that cannot build.",
-            "<strong>Label images</strong>. Runs the exported model over the dataset&rsquo;s unlabelled images at its calibrated threshold, so you review and correct instead of drawing from scratch. Hand-edited images are never touched. Review, correct, retrain.",
+            "<strong>Label images</strong>. Runs the exported model over the dataset&rsquo;s unlabelled images at its calibrated threshold, so you review and correct instead of drawing from scratch. Hand-edited images are never touched.",
           ]}
         />
       </GuideSection>
@@ -2086,19 +2141,29 @@ function TrainingSection({ go }: { go: (k: GuideSectionKey) => void }) {
           <span className="font-mono break-all">https://raw.githubusercontent.com/ohmlab-ltd/Neuro-N6-Arduino-Core/main/package_ohmlab_index.json</span>{" "}
           to the Boards Manager URLs and install <strong>Neuro N6</strong>),
           and ST Edge AI Core, which the core runs to compile the model and
-          flash it with the sketch; on an older core the sketch stops with a
-          message saying so. The sketch
+          flash it with the sketch; on an older core the build stops with an
+          error naming the version it needs. The sketch
           declares the camera, feeds the model at the size it was trained on
           and hands its output to the core&rsquo;s PixelKit post-processor,
-          so the boxes appear on Neuro Studio&rsquo;s live video (or on the
-          TFT carrier&rsquo;s display) with the class names and the
-          calibrated threshold from the labels header. While the sketch runs,
+          so the boxes appear on Neuro Studio&rsquo;s live video with the
+          class names and the calibrated threshold from the labels header.
+          Comments in the sketch say what to change to draw the boxes on the
+          TFT carrier&rsquo;s display instead. While the sketch runs,
           Neuro Studio shows that threshold as a <strong>confidence</strong>{" "}
           slider: drag it on your own scene, then write the value you settle
-          on into the labels header. The same run can
-          be started from a terminal with{" "}
-          <span className="font-mono">pixelkit train &lt;dataset&gt;</span>;
-          the local endpoints behind the card are documented in the
+          on into the labels header. To stream over WiFi instead, on a board
+          with the MAYA-W476 radio, change{" "}
+          <span className="font-mono">STREAM_OVER_WIFI</span> to 1 at the top
+          of the sketch and upload again: the board hosts its own network.
+          With the board on USB, pick{" "}
+          <strong>WiFi (the board&rsquo;s network)</strong> in Neuro Studio&rsquo;s
+          connection menu and join the network it shows; the Serial Monitor
+          prints its name and password too. From a source install,
+          where <span className="font-mono">pip install -e engine</span> adds
+          the <span className="font-mono">pixelkit</span> command, the same run
+          starts from a terminal with{" "}
+          <span className="font-mono">pixelkit train &lt;dataset&gt;</span>.
+          The local endpoints behind the card are documented in the
           repository&rsquo;s docs/API.md.
         </p>
       </GuideSection>
@@ -2117,8 +2182,8 @@ function ReferenceSection() {
         title="Reference"
         intro={
           <>
-            Keyboard shortcuts and the other reference tables - the bits
-            you reach for sporadically, kept in one place.
+            Keyboard shortcuts and the other reference tables, kept in one
+            place. On a Mac, use Cmd where a table says Ctrl.
           </>
         }
       />
@@ -2132,14 +2197,14 @@ function ReferenceSection() {
         <ShortcutTable
           rows={[
             ["←  /  →", "Cycle to the previous / next image in the gallery."],
-            ["Esc", "Close the viewer and return to the dataset gallery."],
-            ["1 - 9", "Relabel the box under the cursor to label N. The legend in the header shows which digit maps to which label."],
-            ["Delete", "Delete the currently-selected box."],
-            ["B", "Toggle the box-display layer."],
-            ["L", "Toggle the label-chip layer."],
-            ["M", "Toggle the mask layer."],
-            ["+ / -", "Zoom the canvas in / out."],
-            ["0", "Reset the zoom + pan to fit-on-screen."],
+            ["Esc", "Deselect the box or leave draw mode first, then close the viewer and return to the dataset gallery."],
+            ["1-9, Q-P, A-L", "Relabel the box under the cursor: 1 to 9 for the first nine labels, then the Q to P and A to L rows for labels 10 to 28. In a window at least 1280 px wide, the legend in the header shows which key maps to which label."],
+            ["Delete", "Delete the currently-selected box (Backspace works too)."],
+            ["B", "Draw a box (the Add box tool)."],
+            ["X", "Click to detect."],
+            ["M", "Edit the mask of the box under the cursor, or of the selected box."],
+            ["Ctrl + wheel", "Zoom the canvas. The wheel alone, Alt-drag or a middle-button drag pans it."],
+            ["Ctrl + Z", "Undo the last box edit."],
           ]}
         />
       </GuideSection>
@@ -2155,53 +2220,50 @@ function ReferenceSection() {
         />
       </GuideSection>
 
-      <GuideSection n={3} title="Project + workspace shortcuts">
+      <GuideSection n={3} title="App shortcuts">
         <ShortcutTable
           rows={[
-            ["/", "Focus the search input (when one is visible on the current page)."],
-            ["?", "Open the global shortcuts cheatsheet from anywhere in the app."],
-            ["Esc", "Close any open modal or panel."],
+            ["Ctrl + Z", "On a dataset page, undo the last label add, rename or removal, or the last dataset rename. A removed label comes back without its boxes."],
+            ["Ctrl + 0", "Reset the window zoom (View menu). Ctrl + plus and Ctrl + minus zoom in and out."],
+            ["Esc", "Close the image viewer, Review mode or most dialogs."],
           ]}
         />
       </GuideSection>
 
       <GuideSection n={4} title="Limits">
         <p>
-          There are no plans, quotas or caps - PixelKit runs entirely on
-          this machine. Dataset size is bounded only by your disk space,
-          and labelling speed by your hardware.
+          PixelKit runs on this machine, so dataset size is bounded by your
+          disk space and labelling speed by your hardware. An image or a
+          video can be up to 100 MB, a board recording up to 2 GB.
         </p>
       </GuideSection>
 
       <GuideSection n={5} title="Licensing">
         <p>
-          Openverse imports carry their original CC licence and source URL,
-          and both are stamped into exports. Direct uploads carry no licence
-          metadata - you are responsible for your right to use the images,
-          especially in a redistributable dataset or model.
-        </p>
-      </GuideSection>
-
-
-      <GuideSection n={7} title="Licensing of imported imagery">
-        <p>
           Openverse aggregates openly-licensed images from across the web,
-          but the licence varies per image. PixelKit records the licence
-          and the source URL for every Openverse import and stamps both
-          into your exports so the trail stays intact.
+          and the licence varies per image. PixelKit keeps the title,
+          creator and licence of each Openverse import, and an export that
+          includes the image files adds ATTRIBUTIONS.txt, which credits every
+          Openverse image, its crops and its augmented copies. Check each
+          licence&rsquo;s terms before you reuse an image.
         </p>
         <p>
-          Direct uploads carry no licence metadata. You&rsquo;re responsible
-          for ensuring you have the right to use the images you upload,
-          especially for any model you intend to redistribute.
+          Direct uploads carry no licence metadata. You are responsible for
+          your right to use the images, especially in a redistributable
+          dataset or model.
+        </p>
+        <p>
+          A trained model&rsquo;s export includes NOTICE.txt and LICENSE.txt:
+          the model is a modified YOLOX, licensed under the Apache License
+          2.0. Keep both files with the model when you share it.
         </p>
       </GuideSection>
 
-      <GuideSection n={8} title="Getting in touch">
+      <GuideSection n={6} title="Getting in touch">
         <p>
-          The feedback link in the footer goes to a small form that
-          forwards to the team. Bugs, feature requests, exception
-          requests, and general feedback all welcome.
+          Report bugs and request features on GitHub. In the desktop app,
+          Help &gt; Report an Issue&hellip; opens
+          github.com/ohmlab-ltd/pixelkit/issues.
         </p>
       </GuideSection>
     </>

@@ -1,10 +1,7 @@
 "use client";
 
-// A run's val images, each shown twice: the ground truth it was scored
-// against, and what the exported int8 model reports on it at the shipped
-// threshold. Worst first, in the report gallery's colours: green truth,
-// yellow a truth box nothing found, blue a correct box, orange the right
-// place with the wrong class, red a box where there is nothing.
+// A run's val images, each as ground truth and as the exported int8 model's
+// output at the shipped threshold, worst first.
 
 import { useEffect, useMemo, useState } from "react";
 
@@ -162,7 +159,7 @@ export function PredictionsCompare({
   );
 }
 
-// One picture with its boxes drawn over it, in the picture's own pixels.
+// Boxes are in the image's own pixel coordinates.
 function Panel({ title, src, w, h, boxes }: { title: string; src: string; w: number; h: number; boxes: Drawn[] }) {
   const side = Math.max(w, h);
   const stroke = Math.max(1.5, side / 320);

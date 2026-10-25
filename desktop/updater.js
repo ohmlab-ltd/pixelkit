@@ -1,10 +1,4 @@
-// Lightweight update check (v1: notify, don't self-update).
-//
-// One GitHub API call after launch; if a newer release exists, a native
-// dialog offers the download page. No downloads, no background service -
-// unsigned builds can't safely self-update anyway. "Skip this version"
-// is remembered in userData/update-check.json. Silent on any failure.
-// Opt-out: PIXELKIT_NO_UPDATE_CHECK=1.
+// Update check: a dialog offers the download page when GitHub has a newer release.
 
 'use strict';
 
@@ -35,8 +29,7 @@ function saveState(state) {
   }
 }
 
-// "v1.2.3" / "1.2.3" -> [1,2,3]; null for anything else (prereleases with
-// suffixes are skipped rather than mis-compared).
+// "v1.2.3" or "1.2.3" -> [1, 2, 3]; null for anything else, prereleases included.
 function parseVersion(tag) {
   const m = /^v?(\d+)\.(\d+)\.(\d+)$/.exec((tag || '').trim());
   return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
@@ -81,7 +74,7 @@ async function checkForUpdates(parentWindow) {
   try {
     release = await fetchLatestRelease();
   } catch {
-    return; // offline / rate-limited / repo missing - never bother the user
+    return;
   }
 
   const latest = parseVersion(release.tag_name);
@@ -94,7 +87,7 @@ async function checkForUpdates(parentWindow) {
     type: 'info',
     title: 'PixelKit update',
     message: `PixelKit ${release.tag_name.replace(/^v/, '')} is available`,
-    detail: `You have ${app.getVersion()}. Updates are downloaded from GitHub and installed like the original installer.`,
+    detail: `You have ${app.getVersion()}. Download opens the release page on GitHub; run the new installer from there to update.`,
     buttons: ['Download', 'Skip this version', 'Later'],
     defaultId: 0,
     cancelId: 2,

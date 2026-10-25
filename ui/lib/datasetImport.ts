@@ -1,23 +1,10 @@
-// Client-side parsing for the "import an already-labelled dataset as a
-// fully-editable project" flow. Everything here runs in the user's tab:
-// we collect the dataset's files (from a folder picker OR a .zip), parse
-// the annotations into the canonical editable-box shape the editor +
-// exporters consume, and prepare each image (optional downscale) with its
-// boxes rescaled to match. The result is fed to the batched ingest endpoint
-// (/api/v2/projects/{id}/imports/raw_batch) which writes them as
-// editedBoxes (editedBoxesSet=True, labelled=True).
-//
-// Format support is VOC-first but structured so COCO / YOLO parsers slot
-// in as additional `parse*` functions behind `detectFormat`/`parseDataset`.
+// Browser-side parsing of VOC, COCO and YOLO datasets for imports/raw_batch.
 
 import { unzip } from "fflate";
 
-// ── Public types ──────────────────────────────────────────────────────────
-
-// One editable box in absolute top-left pixel coords on the image it
-// belongs to. Maps 1:1 to a Pascal VOC <bndbox> (xmin/ymin/xmax/ymax) and
-// to the backend's editedBox shape. score is null for ground-truth imports.
-export type ImportBox = {
+// Box in absolute pixel coordinates, top-left origin. score is null for
+// ground truth.
+type ImportBox = {
   id: string;
   label: string;
   x0: number;
@@ -26,16 +13,13 @@ export type ImportBox = {
   y1: number;
   score: number | null;
   mask?: { polygons: number[][][] } | null;
-  /** Set for imported polygons: ground truth, which a box move must not
-   *  replace by re-running segmentation (as for a hand-painted mask). */
+  /** Set for imported polygons, so a box move keeps the mask. */
   maskEdited?: boolean;
 };
 
-// One image + its annotation, before upload-time preparation. `width`/
-// `height` are the annotation's declared dims (VOC <size>); 0 when absent
-// (resolved by decoding at prepare time). `boxes` are in that declared
-// pixel space.
-export type ImportItem = {
+// width and height are the annotation's declared size, or 0 when absent.
+// boxes are in that pixel space.
+type ImportItem = {
   file: File;
   originalName: string;
   boxes: ImportBox[];
@@ -43,7 +27,7 @@ export type ImportItem = {
   height: number;
 };
 
-export type DatasetFormat = "voc" | "coco" | "yolo" | "unknown";
+type DatasetFormat = "voc" | "coco" | "yolo" | "unknown";
 
 export type ParsedDataset = {
   format: DatasetFormat;
@@ -52,7 +36,7 @@ export type ParsedDataset = {
   stats: {
     images: number;
     annotated: number; // images that had an annotation file
-    background: number; // images with zero boxes (explicitly empty or unpaired)
+    background: number; // images with zero boxes, empty or unpaired
     boxes: number;
     droppedBoxes: number; // degenerate / unparseable objects skipped
     unpairedAnnotations: number; // annotation files with no matching image
@@ -62,22 +46,16 @@ export type ParsedDataset = {
 
 export type CollectedFile = { path: string; file: File };
 
-// Soft ceiling above which a single in-browser .zip expand risks OOMing the
-// tab (fflate decompresses into memory). The folder picker streams Files
-// lazily and has no such limit, so we steer large datasets there.
+// Above this, expanding a .zip in the tab risks running out of memory.
 export const ZIP_SOFT_LIMIT_BYTES = 1_500 * 1024 * 1024;
 
 const IMAGE_EXT_RE = /\.(jpe?g|png|webp|gif|bmp|tiff?|heic|heif|avif)$/i;
 const JPEG_EXT_RE = /\.jpe?g$/i;
 const JPEG_QUALITY = 0.92;
 
-// ── File collection (folder picker OR zip) ─────────────────────────────────
+// File collection
 
-// Normalise whatever the picker hands us into a flat {path, File}[] list.
-// A single .zip is expanded client-side; everything else (a webkitdirectory
-// FileList, a multi-select, or a folder drop already flattened to Files) is
-// passed through, preferring webkitRelativePath so we keep the
-// Annotations/ vs JPEGImages/ structure for pairing.
+// Flattens picker input to {path, File}[], expanding a single .zip.
 export async function collectInput(files: File[]): Promise<CollectedFile[]> {
   if (files.length === 1 && /\.zip$/i.test(files[0].name)) {
     return collectFromZip(files[0]);
@@ -100,9 +78,7 @@ function relPath(f: File): string {
 async function collectFromZip(zip: File): Promise<CollectedFile[]> {
   const buf = new Uint8Array(await zip.arrayBuffer());
   const entries = await new Promise<Record<string, Uint8Array>>((resolve, reject) => {
-    // Only inflate the files we care about - images + annotation text -
-    // so a zip that also bundles model weights / videos doesn't balloon
-    // memory decompressing bytes we'll throw away.
+    // Inflates only images and annotation text.
     unzip(
       buf,
       {
@@ -116,16 +92,13 @@ async function collectFromZip(zip: File): Promise<CollectedFile[]> {
   for (const [path, data] of Object.entries(entries)) {
     if (path.endsWith("/")) continue; // directory entry
     const name = baseName(path);
-    // Finder zips carry __MACOSX/._x.jpg resource forks that decode as
-    // nothing; skip them. A zero-byte .txt is a legitimate empty YOLO
-    // label ("no objects"), so only images need bytes.
+    // A zero-byte .txt is an empty YOLO label, so only images need bytes.
     if (isMacDebris(path)) continue;
     if (data.byteLength === 0 && !/\.txt$/i.test(name)) continue;
     const type = mimeForName(name);
     out.push({
       path,
-      // `data` is a Uint8Array (a valid BlobPart at runtime); the cast
-      // only satisfies the newer Uint8Array<ArrayBufferLike> generic.
+      // The cast satisfies the Uint8Array<ArrayBufferLike> generic.
       file: new File([data as BlobPart], name, type ? { type } : undefined),
     });
   }
@@ -143,15 +116,12 @@ function mimeForName(name: string): string | undefined {
   return undefined;
 }
 
-// ── Format detection + dispatch ────────────────────────────────────────────
+// Format detection
 
 // YOLO sidecar files that name classes rather than label an image.
 const YOLO_META_RE = /^(classes\.txt|obj\.names|data\.ya?ml|dataset\.ya?ml)$/i;
 
-// Cheap extension-based guess for UI hints. parseDataset() makes the real
-// call: COCO is confirmed by sniffing JSON content (a stray metadata.json
-// must not hijack a YOLO folder), and YOLO by whether any .txt actually
-// parses as label rows.
+// Extension-based guess for UI hints. parseDataset() checks file contents.
 export function detectFormat(files: CollectedFile[]): DatasetFormat {
   let hasXml = false;
   let hasJson = false;
@@ -168,24 +138,20 @@ export function detectFormat(files: CollectedFile[]): DatasetFormat {
   return "unknown";
 }
 
-// Parse a collected dataset: Pascal VOC, COCO, or YOLO. The rest of the
-// pipeline is format-agnostic - every parser yields the same ImportItem
-// shape (absolute-pixel boxes, or unit-space boxes flagged by width =
-// height = 1 for YOLO, which prepareItemForUpload scales by the decoded
-// dims).
+// YOLO items carry unit-space boxes, flagged by width = height = 1, which
+// prepareItemForUpload scales to the decoded size.
 export async function parseDataset(
   files: CollectedFile[],
   onProgress?: (done: number, total: number) => void,
 ): Promise<ParsedDataset> {
-  // An unrelated .xml (a settings or metadata file) must not turn a COCO
-  // or YOLO dataset into an empty VOC import.
+  // A stray .xml must not make a COCO or YOLO dataset parse as VOC.
   if (detectFormat(files) === "voc" && (await hasVocXml(files))) return parseVoc(files, onProgress);
   const cocoJsons = await findCocoJsons(files);
   if (cocoJsons.length > 0) return parseCoco(files, cocoJsons, onProgress);
   if (files.some((cf) => /\.txt$/i.test(baseName(cf.path)))) return parseYolo(files, onProgress);
   throw new Error(
     "Couldn't recognise this dataset. Supported layouts: Pascal VOC (Annotations/*.xml next to images), " +
-      "COCO (a JSON with images + annotations), or YOLO (labels/*.txt with classes.txt or data.yaml).",
+      "COCO (a JSON with images and annotations), or YOLO (labels/*.txt with classes.txt or data.yaml).",
   );
 }
 
@@ -196,27 +162,21 @@ async function hasVocXml(files: CollectedFile[]): Promise<boolean> {
   return false;
 }
 
-// Text in the encoding the byte-order mark names (some Windows tools save
-// VOC XML as UTF-16), UTF-8 otherwise.
+// Decodes in the encoding the byte-order mark names, else UTF-8.
 async function readText(file: Blob): Promise<string> {
   const b = new Uint8Array(await file.arrayBuffer());
   const enc = b[0] === 0xff && b[1] === 0xfe ? "utf-16le" : b[0] === 0xfe && b[1] === 0xff ? "utf-16be" : "utf-8";
   return new TextDecoder(enc).decode(b);
 }
 
-// ── Shared image index (COCO / YOLO pairing) ───────────────────────────────
+// Image index for COCO and YOLO pairing
 
 type ImageIndex = {
   all: CollectedFile[]; // every image, in input order
   byPath: Map<string, CollectedFile>; // lowercased relative path, "/"-normalised
-  collisions: Set<string>; // stems shared by >1 image (train/a.jpg + val/a.jpg)
+  collisions: Set<string>; // stems shared by >1 image
   byStem: (stem: string) => CollectedFile | undefined; // unambiguous stems only
-  // Resolve an annotation's file reference ("train/a.jpg", "a.jpg") to
-  // the ONE image whose path ends with it. The folder picker prefixes
-  // every path with the chosen folder's name ("ds/train/a.jpg"), so an
-  // exact match never hits; a basename match with train/ and val/ twins
-  // is ambiguous and must not pair (it attached one split's boxes to the
-  // other split's file). Ambiguous -> undefined.
+  // The one image whose path ends with ref, or undefined when ambiguous.
   bySuffix: (ref: string) => CollectedFile | undefined;
 };
 
@@ -259,7 +219,7 @@ function normPath(p: string): string {
   return p.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
 }
 
-// The folder of a path, normalised ("" at the top).
+// Normalised folder of a path, "" at the top.
 function dirOf(p: string): string {
   const n = normPath(p);
   const i = n.lastIndexOf("/");
@@ -270,7 +230,7 @@ function joinPath(dir: string, name: string): string {
   return dir ? `${dir}/${name}` : name;
 }
 
-// ── COCO ───────────────────────────────────────────────────────────────────
+// COCO
 
 type CocoAnn = {
   id?: number | string;
@@ -290,15 +250,13 @@ function isCocoJson(d: unknown): d is CocoJson {
   if (!d || typeof d !== "object") return false;
   const c = d as CocoJson & { categories?: unknown };
   if (!Array.isArray(c.images) || !Array.isArray(c.annotations) || !Array.isArray(c.categories)) return false;
-  // Captions files list the same images with no categories and no boxes;
-  // taken as COCO, the one that sorted first left every image with none.
+  // Rejects captions files, whose annotations have no bbox or segmentation.
   return c.annotations.length === 0 || c.annotations.some(
     (a) => !!a && (Array.isArray((a as { bbox?: unknown }).bbox) || !!(a as { segmentation?: unknown }).segmentation),
   );
 }
 
-// Every .json whose content is COCO-shaped (train + val splits commonly
-// arrive together; all are merged).
+// Every COCO-shaped .json. Splits such as train and val are merged.
 async function findCocoJsons(files: CollectedFile[]): Promise<{ cf: CollectedFile; data: CocoJson }[]> {
   const out: { cf: CollectedFile; data: CocoJson }[] = [];
   for (const cf of files) {
@@ -314,9 +272,8 @@ async function findCocoJsons(files: CollectedFile[]): Promise<{ cf: CollectedFil
   return out;
 }
 
-// COCO segmentation -> polygon rings as [x, y] pairs. Polygon form is a list
-// of flat [x0, y0, x1, y1, ...] rings; RLE (an object) is skipped, since the
-// editor's mask type is polygon-only. Returns "rle" so the caller can count.
+// COCO segmentation -> polygon rings of [x, y] pairs. RLE, which the
+// polygon-only editor cannot hold, returns "rle" for the caller to count.
 function cocoPolygons(seg: unknown): number[][][] | "rle" | null {
   if (!seg) return null;
   if (!Array.isArray(seg)) return typeof seg === "object" ? "rle" : null;
@@ -363,8 +320,7 @@ async function parseCoco(
   const total = jsons.reduce((n, j) => n + j.data.images.length, 0);
   let done = 0;
   for (const { data } of jsons) {
-    // Declared categories seed the class list in declared order, so a
-    // label set survives even when a split has no instance of a class.
+    // Declared categories set the class order and include unused classes.
     const catName = new Map<string, string>();
     for (const c of data.categories ?? []) {
       if (!c || c.id == null) continue;
@@ -406,8 +362,7 @@ async function parseCoco(
 
       const boxes: ImportBox[] = [];
       (annsByImage.get(String(im.id)) ?? []).forEach((a, i) => {
-        // iscrowd=1 marks a crowd region (one outline around many people),
-        // not an object; converters such as Ultralytics' skip them.
+        // iscrowd=1 marks a crowd region, not an object.
         if (a.iscrowd === 1) {
           crowd++;
           return;
@@ -442,8 +397,7 @@ async function parseCoco(
           return;
         }
         boxes.push({
-          // Index keeps ids unique even when some annotations carry an
-          // id and others do not (a.id 1 vs index 1 collided).
+          // The index keeps ids unique when only some annotations carry an id.
           id: a.id != null ? `coco_${a.id}_${i}` : `coco_${i}`,
           label,
           x0,
@@ -492,7 +446,7 @@ async function parseCoco(
     warnings.push(`${crowd} crowd region(s) (iscrowd) were skipped: they outline a group, not one object.`);
   if (idx.collisions.size > 0)
     warnings.push(`${idx.collisions.size} image name(s) were ambiguous (same name, different extension); their annotations may not have paired.`);
-  if (items.length === 0) warnings.push("No image/annotation pairs were found - check the folder layout.");
+  if (items.length === 0) warnings.push("No image/annotation pairs were found. Check the folder layout.");
 
   return {
     format: "coco",
@@ -503,7 +457,7 @@ async function parseCoco(
   };
 }
 
-// ── YOLO ───────────────────────────────────────────────────────────────────
+// YOLO
 
 type YoloRow = {
   cls: number;
@@ -515,13 +469,9 @@ type YoloRow = {
   score: number | null;
 };
 
-// Parse one label file's text. Rows are `cls cx cy w h` (box), the same
-// with a trailing confidence (`yolo predict save_txt save_conf`), or
-// `cls x1 y1 x2 y2 ...` (YOLO-seg / OBB polygon, >= 3 points), all in
-// [0,1] unit space. Returns null when the text is not label rows at all
-// (a README.txt, a licence) so the caller can ignore it; an EMPTY file is
-// a valid "no objects" label, and a file of malformed rows is a label
-// file with dropped rows, not prose.
+// Rows in [0,1] unit space: `cls cx cy w h [conf]`, or a polygon
+// `cls x1 y1 x2 y2 ...` of >= 3 points. Returns null for text that is not
+// label rows. An empty file is a label with no objects.
 export function parseYoloLabelText(text: string): { rows: YoloRow[]; bad: number } | null {
   const rows: YoloRow[] = [];
   let bad = 0;
@@ -574,11 +524,8 @@ export function parseYoloLabelText(text: string): { rows: YoloRow[]; bad: number
   return { rows, bad };
 }
 
-// Class names from data.yaml / dataset.yaml. Handles every shape seen in
-// the wild: inline `names: [a, b]` (possibly spanning lines, possibly
-// with a trailing comment), a flow mapping `names: {0: a, 1: b}`, a
-// block list (indented, or at column 0 as PyYAML dumps it), and a block
-// index mapping with plain or quoted keys.
+// Class names from data.yaml as a flow or block list, or a flow or block
+// index mapping.
 export function parseYamlNames(text: string): string[] {
   const stripComment = (l: string) => l.replace(/(^|\s)#.*$/, "");
   const lines = text.split(/\r?\n/).map(stripComment);
@@ -644,16 +591,13 @@ async function parseYolo(
   const idx = indexImages(files);
   const warnings: string[] = [];
 
-  // Class names: classes.txt / obj.names (one per line, index = class id),
-  // else data.yaml. Without either, ids become `class_N` so the import
-  // still works and the user renames in the ontology panel.
+  // Class names from classes.txt or obj.names, else data.yaml, else class_N.
   let names: string[] = [];
   let namesSource = "";
   for (const cf of files) {
     const n = baseName(cf.path).toLowerCase();
     if (n === "classes.txt" || n === "obj.names") {
-      // A line's position is its class id: a blank line in the middle is
-      // an unnamed class, not a gap to close (that shifted every later id).
+      // A line's position is its class id, so a blank line is an unnamed class.
       const lines = (await cf.file.text()).split(/\r?\n/).map((s) => s.trim().toLowerCase());
       while (lines.length && !lines[lines.length - 1]) lines.pop();
       names = lines.map((s, i) => s || `class_${i}`);
@@ -676,7 +620,7 @@ async function parseYolo(
     }
   }
   if (!names.length)
-    warnings.push("No classes.txt or data.yaml found; classes were named class_0, class_1, ... - rename them after import.");
+    warnings.push("No classes.txt or data.yaml found, so classes were named class_0, class_1 and so on. Rename them after import.");
   const nameFor = (id: number) => names[id] || `class_${id}`;
 
   const labelFiles = files.filter(
@@ -693,8 +637,7 @@ async function parseYolo(
   let background = 0;
   let notLabels = 0;
 
-  // Pair a label to its image: the mirrored path first (labels/x/a.txt ->
-  // images/x/a.<ext>, which keeps train/ and val/ twins apart), then an
+  // The mirrored path first, labels/x/a.txt -> images/x/a.<ext>, then an
   // unambiguous stem.
   const imageFor = (labelPath: string): CollectedFile | undefined => {
     const p = normPath(labelPath);
@@ -755,8 +698,7 @@ async function parseYolo(
     boxesTotal += boxes.length;
     annotated++;
     if (boxes.length === 0) background++;
-    // width = height = 1 marks UNIT space: prepareItemForUpload scales by
-    // trueW / 1 = trueW, landing the boxes in decoded pixels.
+    // width = height = 1 marks unit space.
     items.push({ file: img.file, originalName: baseName(img.path), boxes, width: 1, height: 1 });
   }
 
@@ -766,7 +708,7 @@ async function parseYolo(
     );
   }
 
-  // Images without a label file: YOLO's own convention for "no objects".
+  // An image without a label file has no objects.
   let unlabelledImages = 0;
   for (const cf of idx.all) {
     if (usedImages.has(normPath(cf.path))) continue;
@@ -775,7 +717,7 @@ async function parseYolo(
     items.push({ file: cf.file, originalName: baseName(cf.path), boxes: [], width: 0, height: 0 });
   }
 
-  // Keep declared class order for the label set when we have names.
+  // Declared class order first.
   const orderedClasses = names.length
     ? Array.from(new Set([...names.filter(Boolean), ...classes]))
     : classes;
@@ -799,7 +741,7 @@ async function parseYolo(
   };
 }
 
-// ── Pascal VOC ─────────────────────────────────────────────────────────────
+// Pascal VOC
 
 async function parseVoc(
   files: CollectedFile[],
@@ -826,11 +768,8 @@ async function parseVoc(
   const byName = group((cf) => baseName(cf.path).toLowerCase());
   const byStem = group((cf) => stemOf(baseName(cf.path)).toLowerCase());
   const only = (list?: CollectedFile[]) => (list && list.length === 1 ? list[0] : undefined);
-  // An annotation's picture: beside it, or in the image folder next to its
-  // Annotations folder (the VOC layout), by <filename> and then by the
-  // XML's own name; anywhere else only when a single image has that name.
-  // Twins in train/ and val/ pair within their own split, and a name
-  // shared by several images (a.jpg + a.png, split twins) is never guessed.
+  // By <filename>, then the XML's own name, beside the XML or in the image
+  // folder next to its Annotations folder. Elsewhere only a unique name pairs.
   const resolveImage = (xmlPath: string, filename: string): CollectedFile | undefined => {
     const dir = dirOf(xmlPath);
     const parent = dirOf(dir);
@@ -868,8 +807,7 @@ async function parseVoc(
     try {
       parsed = parseVocXml(await readText(xf.file));
     } catch {
-      // Unreadable: its picture is left out rather than imported as an
-      // empty (negative) frame it is not.
+      // The image of an unreadable file is left out, not imported as empty.
       const img = resolveImage(xf.path, "");
       if (img) used.add(normPath(img.path));
       unreadable++;
@@ -922,9 +860,7 @@ async function parseVoc(
     onProgress?.(++done, total);
   }
 
-  // Images with no annotation file become background (negative) frames -
-  // valid, intentionally-empty training data. Surfaced in stats so the
-  // user can spot a pairing problem (e.g. a renamed folder).
+  // Images with no annotation file become background frames.
   let unpairedImages = 0;
   for (const cf of images) {
     if (used.has(normPath(cf.path))) continue;
@@ -948,7 +884,7 @@ async function parseVoc(
   if (dropped > 0)
     warnings.push(`${dropped} box(es) were unlabelled or degenerate (zero-area) and were dropped.`);
   if (items.length === 0)
-    warnings.push("No image/annotation pairs were found - check the folder layout.");
+    warnings.push("No image/annotation pairs were found. Check the folder layout.");
 
   return {
     format: "voc",
@@ -997,28 +933,19 @@ function parseVocXml(text: string): VocXml {
   };
 }
 
-// ── Upload preparation (decode, optional downscale, box rescale) ───────────
+// Upload preparation
 
-// Prepare one item for upload. Decodes the image (createImageBitmap bakes
-// EXIF orientation, giving upright pixel dims), maps the annotation's boxes
-// from its declared <size> space into true decoded space (a no-op for
-// well-formed datasets), then either downscales to `maxSide` (re-encoding a
-// high-quality JPEG and scaling boxes by the same factor) or preserves the
-// original resolution. Boxes always come out in the EXACT pixel space of the
-// returned File, which is what the backend re-decodes - so coordinates stay
-// pixel-accurate end to end.
+// Decodes upright and returns boxes in the pixel space of the returned File.
 export async function prepareItemForUpload(
   item: ImportItem,
-  maxSide: number | null,
 ): Promise<{ file: File; boxes: ImportBox[]; width: number; height: number }> {
   const { bitmap, trueW, trueH, viaBitmap } = await decodeImage(item.file);
   try {
     let boxes = item.boxes;
     let declaredW = item.width || trueW;
     let declaredH = item.height || trueH;
-    // Annotated on the stored frame of a photo shown rotated (labelImg and
-    // PIL report that size): the declared size is the decoded one turned a
-    // quarter, and the boxes must turn with the picture, not stretch to it.
+    // A declared size that is the decoded size turned a quarter means boxes
+    // drawn on the stored frame. They turn with the picture.
     if (declaredW !== declaredH && declaredW === trueH && declaredH === trueW) {
       const o = await jpegOrientation(item.file);
       if (o >= 5 && o <= 8) {
@@ -1030,25 +957,8 @@ export async function prepareItemForUpload(
     const sy = trueH / (declaredH || trueH);
     if (sx !== 1 || sy !== 1) boxes = boxes.map((b) => scaleBox(b, sx, sy));
 
-    const longest = Math.max(trueW, trueH);
-    if (maxSide && longest > maxSide) {
-      const s = maxSide / longest;
-      const outW = Math.max(1, Math.round(trueW * s));
-      const outH = Math.max(1, Math.round(trueH * s));
-      const file = await encodeCanvas(bitmap, outW, outH, item.originalName);
-      const fx = outW / trueW;
-      const fy = outH / trueH;
-      return { file, boxes: boxes.map((b) => scaleBox(b, fx, fy)), width: outW, height: outH };
-    }
-
-    // Preserve full resolution. A JPEG decoded via createImageBitmap passes
-    // through its original bytes (lossless + fast): the FE box space and the
-    // backend's recorded dims both derive from the SAME bytes + EXIF tag, so an
-    // orientation tag is applied identically on both sides and they always
-    // agree. The <img> fallback can report unreliable oriented dims, so when it
-    // was used we re-encode through the canvas to bake an upright, tag-less JPEG
-    // whose pixel space provably matches the boxes. Non-JPEG sources are always
-    // re-encoded so the stored bytes are uniformly decodable downstream.
+    // A JPEG decoded by createImageBitmap passes through unchanged. The <img>
+    // fallback's sizes are unreliable, so it and non-JPEGs are re-encoded.
     if (viaBitmap && JPEG_EXT_RE.test(item.originalName) && /jpeg/i.test(item.file.type || "")) {
       return { file: await materialise(item.file), boxes, width: trueW, height: trueH };
     }
@@ -1072,9 +982,7 @@ async function decodeImage(
       /* fall through to <img> */
     }
   }
-  // Fallback path. <img>.naturalWidth/Height can report physical (un-oriented)
-  // dims inconsistently across browsers, so callers must not trust these for a
-  // lossless byte passthrough (see prepareItemForUpload).
+  // naturalWidth and naturalHeight may ignore EXIF orientation in some browsers.
   const url = URL.createObjectURL(file);
   try {
     const img = await new Promise<HTMLImageElement>((resolve, reject) => {
@@ -1109,8 +1017,7 @@ async function encodeCanvas(
   return materialise(blob, name);
 }
 
-// EXIF orientation (1-8) of a JPEG, 1 when it has none. Reads the header
-// segments only.
+// EXIF orientation 1-8 of a JPEG, 1 when it has none.
 export async function jpegOrientation(file: Blob): Promise<number> {
   const v = new DataView(await file.slice(0, 131072).arrayBuffer());
   if (v.byteLength < 4 || v.getUint16(0) !== 0xffd8) return 1;
@@ -1139,8 +1046,8 @@ export async function jpegOrientation(file: Blob): Promise<number> {
   return 1;
 }
 
-// A box (and its mask) from the stored w x h frame into the upright frame
-// of EXIF orientation o (5-8, the quarter turns).
+// Maps a box and its mask from the stored w x h frame to the upright frame
+// of EXIF orientation o, 5-8.
 function orientBox(b: ImportBox, o: number, w: number, h: number): ImportBox {
   const turn = ([x, y]: number[]): number[] =>
     o === 5 ? [y, x] : o === 6 ? [h - y, x] : o === 7 ? [h - y, w - x] : [y, w - x];
@@ -1169,8 +1076,7 @@ function scaleBox(b: ImportBox, sx: number, sy: number): ImportBox {
   };
 }
 
-// Copy bytes into a fresh ArrayBuffer-backed File so the upload survives any
-// later GC of the source blob (Safari blob-detach defence; mirrors resize.ts).
+// Copies the bytes into a new File, as Safari can detach the source blob.
 async function materialise(blob: Blob, name?: string): Promise<File> {
   const buf = await blob.arrayBuffer();
   const type = blob.type && blob.type.startsWith("image/") ? blob.type : "image/jpeg";
@@ -1178,35 +1084,28 @@ async function materialise(blob: Blob, name?: string): Promise<File> {
   return new File([new Blob([buf], { type })], fname, { type });
 }
 
-// ── Batched upload ─────────────────────────────────────────────────────────
+// Batched upload
 
-export type UploadProgress = { done: number; total: number; failed: number; droppedBoxes: number };
+type UploadProgress = { done: number; total: number; failed: number; droppedBoxes: number };
 
-// Upload a parsed dataset to a project via the batched ingest endpoint.
-// Items are prepared (decoded + optionally downscaled, boxes rescaled) at
-// bounded concurrency, accumulated into batches of `batchSize` (well under
-// the backend's 100-file/request cap), and POSTed one batch at a time -
-// each request is a single manifest write server-side, so a multi-thousand
-// image import stays off the O(n^2) manifest-rewrite cliff. `poster` injects
-// the authed fetch (apiFetch) so this stays decoupled from auth/session.
+// Images per request; the backend takes at most 100.
+const UPLOAD_BATCH = 20;
+// Images prepared at once, which caps peak memory.
+const PREP_CONCURRENCY = 4;
+
 export async function uploadDataset(
   items: ImportItem[],
-  opts: { maxSide: number | null; batchSize?: number; prepConcurrency?: number },
   poster: (form: FormData) => Promise<Response>,
   onProgress?: (p: UploadProgress) => void,
 ): Promise<UploadProgress & { errors: string[] }> {
-  const batchSize = Math.max(1, Math.min(opts.batchSize ?? 20, 100));
-  const prepConcurrency = Math.max(1, opts.prepConcurrency ?? 4);
   const total = items.length;
   let done = 0;
   let failed = 0;
   let droppedBoxes = 0;
   const errors: string[] = [];
 
-  for (let start = 0; start < items.length; start += batchSize) {
-    const batch = items.slice(start, start + batchSize);
-    // Prepare the batch at bounded concurrency to cap peak memory (a 4K
-    // decode is ~33 MB; we keep only a few in flight at once).
+  for (let start = 0; start < items.length; start += UPLOAD_BATCH) {
+    const batch = items.slice(start, start + UPLOAD_BATCH);
     const prepared: ({ file: File; boxes: ImportBox[]; key: string } | null)[] = new Array(
       batch.length,
     ).fill(null);
@@ -1216,7 +1115,7 @@ export async function uploadDataset(
         const i = cursor++;
         if (i >= batch.length) return;
         try {
-          const p = await prepareItemForUpload(batch[i], opts.maxSide);
+          const p = await prepareItemForUpload(batch[i]);
           prepared[i] = { file: p.file, boxes: p.boxes, key: randomKey() };
         } catch (e) {
           failed++;
@@ -1225,7 +1124,7 @@ export async function uploadDataset(
       }
     };
     await Promise.all(
-      Array.from({ length: Math.min(prepConcurrency, batch.length) }, prepWorker),
+      Array.from({ length: Math.min(PREP_CONCURRENCY, batch.length) }, prepWorker),
     );
 
     const form = new FormData();
@@ -1269,8 +1168,6 @@ function randomKey(): string {
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
-
-// ── small utils ────────────────────────────────────────────────────────────
 
 function baseName(path: string): string {
   const parts = path.split(/[\\/]/);

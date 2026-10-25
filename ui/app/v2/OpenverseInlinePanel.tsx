@@ -10,18 +10,7 @@ import {
 import { apiFetch } from "../../lib/apiFetch";
 import { GlassDialog } from "./GlassDialog";
 
-const API =
-  process.env.NEXT_PUBLIC_API_URL ??
-  (typeof window !== "undefined" && window.location.port === "3000"
-    ? "http://localhost:8001"
-    : "");
-
-// Ported 1:1 from V1's ProjectView Openverse panel, same UX,
-// adapted to V2's manifest shape (imports + /from_urls endpoint).
-// Renders as a flat "Import from web" button inside the upload
-// panel's action cluster; the dialog holds a search input + 5-image
-// preview, prompts for "Yes, this is what I'm looking for", then a
-// settings stage with a count slider, then a Pull/review stage.
+// "Import from web" button and dialog: Openverse search, preview, count, review.
 
 type ImportImage = {
   url?: string | null;
@@ -45,13 +34,9 @@ export function OpenverseInlinePanel({
   onAdded,
 }: {
   projectId: string;
-  /** URLs already imported into this project (read from
-      manifest.imports[i].source.url). Filtered out of every
-      Openverse response so the user doesn't accidentally re-add
-      something already in the dataset. */
+  /** Source URLs already in the dataset; excluded from every search. */
   alreadyImportedUrls: string[];
-  /** Called with the count of newly-added images so the parent
-      can refresh its gallery state. */
+  /** Called with the number of images added. */
   onAdded?: (added: number) => Promise<void> | void;
 }) {
   const [importOpen, setImportOpen] = useState(false);
@@ -86,7 +71,7 @@ export function OpenverseInlinePanel({
         REJECTED_KEY(projectId), JSON.stringify(Array.from(rejectedUrls)),
       );
     } catch {
-      /* quota / private mode, keep working in-memory */
+      /* quota or private mode: kept in memory only */
     }
   }, [projectId, rejectedUrls]);
 
@@ -109,10 +94,7 @@ export function OpenverseInlinePanel({
     setImportSearched(false);
   }, []);
 
-  // Search → fetch + probe thumbnails. Same two-stage probe V1 ships
-  // (dimension check + tiny pixel-variance read via canvas) so broken
-  // / placeholder / blank thumbnails get filtered before the user
-  // ever sees them.
+  // Thumbnails that fail to load, are tiny or are flat are dropped.
   const searchImportImages = useCallback(async () => {
     const q = importDesc.trim();
     if (!q) return;
@@ -127,7 +109,7 @@ export function OpenverseInlinePanel({
       const params = new URLSearchParams({
         q, count: String(PREVIEW_FETCH_COUNT), commercial: "true",
       });
-      const r = await fetch(`${API}/api/openverse/search?${params.toString()}`);
+      const r = await apiFetch(`/api/openverse/search?${params.toString()}`);
       if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
       const d = await r.json();
       const all: ImportImage[] = Array.isArray(d.results) ? d.results : [];
@@ -242,7 +224,7 @@ export function OpenverseInlinePanel({
       const params = new URLSearchParams({
         q, count: String(overCount), commercial: "true",
       });
-      const r = await fetch(`${API}/api/openverse/search?${params.toString()}`);
+      const r = await apiFetch(`/api/openverse/search?${params.toString()}`);
       if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
       const d = await r.json();
       const all: ImportImage[] = Array.isArray(d.results) ? d.results : [];
@@ -285,26 +267,30 @@ export function OpenverseInlinePanel({
     if (goodUrls.length === 0) return;
     setImportAdding(true);
     setImportError(null);
+    let addedCount = 0;
     try {
-      const r = await apiFetch(`/api/v2/projects/${projectId}/imports/from_urls`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ urls: goodUrls, query: importDesc }),
-      });
-      if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
-      const data = (await r.json()) as { added?: string[] };
-      const addedCount = data.added?.length ?? 0;
+      // The engine takes at most 100 URLs a request.
+      for (let i = 0; i < goodUrls.length; i += 100) {
+        const r = await apiFetch(`/api/v2/projects/${projectId}/imports/from_urls`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ urls: goodUrls.slice(i, i + 100), query: importDesc }),
+        });
+        if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+        const data = (await r.json()) as { added?: string[] };
+        addedCount += data.added?.length ?? 0;
+      }
       await onAdded?.(addedCount);
       closeImport();
     } catch (e) {
+      // The batches before the failure are in the dataset.
+      if (addedCount > 0) await onAdded?.(addedCount);
       setImportError(e instanceof Error ? e.message : String(e));
     } finally {
       setImportAdding(false);
     }
   }, [importPulled, importBadUrls, projectId, importDesc, closeImport, onAdded]);
 
-  // Filtered preview window, broken thumbnails dropped, then sliced
-  // into pages of 5 with prev/next.
   const valid = importResults.filter((r) => {
     const k = r.url || r.thumbnail || "";
     return !!(r.thumbnail || r.url) && !importBroken.has(k);
@@ -324,7 +310,7 @@ export function OpenverseInlinePanel({
         type="button"
         onClick={() => setImportOpen(true)}
         className="pk-btn"
-        title="Search and pull free Creative-Commons images from the web"
+        title="Search Openverse for Creative Commons images"
       >
         <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
           <path d="M4 14.9A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.24" />
@@ -369,14 +355,14 @@ export function OpenverseInlinePanel({
                   <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="text-[var(--ok)]">
                     <path d="M5 13l4 4L19 7" />
                   </svg>
-                  Sourced from Openverse - Creative Commons licensed, free for commercial use.
+                  Sourced from Openverse: Creative Commons images licensed for commercial use. Terms vary per image.
                 </span>
                 {rejectedUrls.size > 0 && (
                   <button
                     type="button"
                     onClick={() => setRejectedUrls(new Set())}
                     className="ml-auto text-[11px] uppercase tracking-wider text-foreground/35 hover:text-foreground transition-colors"
-                    title={`${rejectedUrls.size} URL${rejectedUrls.size === 1 ? "" : "s"} remembered as rejected, click to reset for this project`}
+                    title={`${rejectedUrls.size} rejected URL${rejectedUrls.size === 1 ? "" : "s"} remembered for this dataset. Click to reset.`}
                   >
                     Clear remembered ({rejectedUrls.size})
                   </button>
@@ -384,7 +370,6 @@ export function OpenverseInlinePanel({
               </p>
             </div>
 
-            {/* Error chip, animated reveal so the layout doesn't jump. */}
             <div
               className="grid transition-[grid-template-rows] duration-300 ease-out"
               style={{ gridTemplateRows: importError ? "1fr" : "0fr" }}
@@ -396,15 +381,12 @@ export function OpenverseInlinePanel({
               </div>
             </div>
 
-            {/* Results section, search preview (5 thumbnails) +
-                stage-specific action row underneath. */}
             <div
               className="grid transition-[grid-template-rows] duration-300 ease-out"
               style={{ gridTemplateRows: valid.length > 0 || importLoading || importSearched || importStage === "review" ? "1fr" : "0fr" }}
             >
               <div className="min-h-0 overflow-hidden">
                 <div className="mt-4 grid gap-3">
-                  {/* Stage: search preview (5 thumbs + arrows) */}
                   {importStage !== "review" && (
                     !importLoading && importSearched && valid.length === 0 ? (
                       <div className="flex flex-col items-center justify-center gap-2 py-8 text-center">
@@ -475,7 +457,6 @@ export function OpenverseInlinePanel({
                     )
                   )}
 
-                  {/* Stage: search → Yes / Try again */}
                   <div
                     className="grid transition-[grid-template-rows] duration-300 ease-out"
                     style={{ gridTemplateRows: !importLoading && valid.length > 0 && importStage === "search" ? "1fr" : "0fr" }}
@@ -498,7 +479,6 @@ export function OpenverseInlinePanel({
                     </div>
                   </div>
 
-                  {/* Stage: settings → Pull N images */}
                   <div
                     className="grid transition-[grid-template-rows] duration-300 ease-out"
                     style={{ gridTemplateRows: !importLoading && valid.length > 0 && importStage === "settings" ? "1fr" : "0fr" }}
@@ -523,7 +503,6 @@ export function OpenverseInlinePanel({
                     </div>
                   </div>
 
-                  {/* Stage: review pulled set */}
                   {importStage === "review" && (
                     <div className="grid gap-3 pt-3 mt-1 border-t border-foreground/[0.06]">
                       <div className="flex items-center justify-between gap-3">

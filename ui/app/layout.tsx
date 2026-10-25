@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
 import "./globals.css";
-import { ThemeProvider } from "./ThemeProvider";
 
 const geistSans = localFont({
   src: "./fonts/GeistVF.woff",
@@ -14,135 +13,24 @@ const geistMono = localFont({
   weight: "100 900",
 });
 
-const SITE_URL = (
-  process.env.NEXT_PUBLIC_APP_URL
-  ?? "https://pixelkit.ai"
-).replace(/\/+$/, "");
-
-const SITE_DESCRIPTION =
-  "Pixel Kit auto-labels images, generates augmentations, and exports training-ready datasets for computer vision AI - entirely on your own machine.";
-
 export const metadata: Metadata = {
-  metadataBase: new URL(SITE_URL),
   title: {
-    default: "Pixel Kit · Vision AI Labelling & Training Platform",
-    template: "%s · Pixel Kit",
+    default: "PixelKit",
+    template: "%s \u00b7 PixelKit",
   },
-  description: SITE_DESCRIPTION,
-  applicationName: "Pixel Kit",
-  authors: [{ name: "Ohm Lab Ltd" }],
-  creator: "Ohm Lab Ltd",
-  publisher: "Ohm Lab Ltd",
-  keywords: [
-    "computer vision",
-    "auto-labelling",
-    "image annotation",
-    "object detection",
-    "segmentation",
-    "dataset augmentation",
-    "training dataset",
-    "machine learning",
-  ],
-  alternates: { canonical: SITE_URL },
-  openGraph: {
-    type: "website",
-    url: SITE_URL,
-    title: "Pixel Kit · Vision AI Labelling & Training Platform",
-    description: SITE_DESCRIPTION,
-    siteName: "Pixel Kit",
-    images: [
-      {
-        url: "/opengraph-image",
-        width: 1200,
-        height: 630,
-        alt: "Pixel Kit · Vision AI Labelling & Training Platform",
-      },
-    ],
-    locale: "en_GB",
-  },
-  twitter: {
-    card: "summary_large_image",
-    title: "Pixel Kit · Vision AI Labelling & Training Platform",
-    description: SITE_DESCRIPTION,
-    images: ["/opengraph-image"],
-  },
+  description: "Label image datasets and train object detectors for the Ohm Lab Neuro N6.",
+  applicationName: "PixelKit",
   icons: {
     icon: "/pixelkit-favicon.svg",
     apple: "/pixelkit-favicon.svg",
   },
-  robots: {
-    index: true,
-    follow: true,
-    googleBot: {
-      index: true,
-      follow: true,
-      "max-image-preview": "large",
-      "max-snippet": -1,
-      "max-video-preview": -1,
-    },
-  },
 };
-
-// JSON-LD structured data. Inlined in the document <head> below so
-// Google can parse Organization + SoftwareApplication signals on
-// every route without needing a per-page repeat.
-const ORGANIZATION_LD = {
-  "@context": "https://schema.org",
-  "@type": "Organization",
-  name: "Pixel Kit",
-  url: SITE_URL,
-  logo: `${SITE_URL}/pixelkit-favicon.svg`,
-  sameAs: [] as string[],
-};
-
-const SOFTWARE_LD = {
-  "@context": "https://schema.org",
-  "@type": "SoftwareApplication",
-  name: "Pixel Kit",
-  applicationCategory: "BusinessApplication",
-  operatingSystem: "Web",
-  description: SITE_DESCRIPTION,
-  url: SITE_URL,
-  offers: {
-    "@type": "Offer",
-    price: "0",
-    priceCurrency: "GBP",
-    availability: "https://schema.org/InStock",
-  },
-};
-
-// Inline pre-hydration script: the app is permanently dark, so apply
-// the `.dark` class unconditionally before React mounts - any stored
-// 'pixelkit-theme' preference from older builds is ignored. The
-// class-based mechanism itself stays (globals.css keys everything off
-// `.dark`), only the choice is pinned.
-const themeInitScript = `
-(function() {
-  var root = document.documentElement;
-  root.classList.add('dark');
-  root.style.colorScheme = 'dark';
-})();
-`;
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className="dark" style={{ colorScheme: "dark" }} suppressHydrationWarning>
-      <head>
-        {/* eslint-disable-next-line @next/next/no-sync-scripts */}
-        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
-        {/* JSON-LD: Organization + SoftwareApplication. Google reads
-            these to power knowledge-panel + rich-result eligibility. */}
-        <script
-          type="application/ld+json"
-          dangerouslySetInnerHTML={{ __html: JSON.stringify(ORGANIZATION_LD) }}
-        />
-        <script
-          type="application/ld+json"
-          dangerouslySetInnerHTML={{ __html: JSON.stringify(SOFTWARE_LD) }}
-        />
-      </head>
+    <html lang="en">
       <body className={`${geistSans.variable} ${geistMono.variable} antialiased font-sans`}>
-        <ThemeProvider>{children}</ThemeProvider>
+        {children}
       </body>
     </html>
   );

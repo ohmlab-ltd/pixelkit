@@ -1,4 +1,4 @@
-"""Dataset snapshots: create, list, restore (with safety snapshot)."""
+"""Dataset snapshots: create, list, and restore with a safety snapshot."""
 import io
 import json
 
@@ -68,3 +68,34 @@ def test_snapshot_restore_guards(client):
         f"/api/v2/projects/{pid}/snapshots/20990101T000000Z-deadbeef/restore"
     )
     assert r.status_code == 404
+
+
+def test_restore_replaces_a_cover_whose_image_was_deleted(client, app_module):
+    pid, first = _dataset_with_box(client, "Snap Cover")
+    r = client.post(
+        f"/api/v2/projects/{pid}/imports/raw",
+        files={"image": ("b.jpg", _jpeg_bytes(), "image/jpeg")},
+    )
+    assert r.status_code == 200, r.text
+    second = r.json()["filename"]
+    assert app_module.load_manifest(pid)["cover"] != second
+    snap = client.post(f"/api/v2/projects/{pid}/snapshots").json()
+    assert client.delete(f"/api/v2/projects/{pid}/imports/{first}").status_code == 200
+    assert app_module.load_manifest(pid)["cover"] == second
+
+    r = client.post(f"/api/v2/projects/{pid}/snapshots/{snap['id']}/restore")
+    assert r.status_code == 200, r.text
+    assert r.json()["dropped"] == 1
+    assert app_module.load_manifest(pid)["cover"] == second
+
+
+def test_a_cover_whose_picture_is_gone_is_repaired_when_served(client, app_module):
+    pid, iid = _dataset_with_box(client, "Lost cover")
+    m = app_module.load_manifest(pid)
+    m["cover"] = "deleted-long-ago.jpg"
+    app_module.save_manifest(pid, m)
+    r = client.get(f"/api/projects/{pid}/cover_thumb")
+    assert r.status_code == 200, r.text
+    cover = app_module.load_manifest(pid)["cover"]
+    assert cover != "deleted-long-ago.jpg"
+    assert (app_module.project_dir(pid) / "images" / cover).is_file()

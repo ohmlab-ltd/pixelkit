@@ -3,104 +3,130 @@
 [![ci](https://github.com/ohmlab-ltd/pixelkit/actions/workflows/ci.yml/badge.svg)](https://github.com/ohmlab-ltd/pixelkit/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/ohmlab-ltd/pixelkit)](https://github.com/ohmlab-ltd/pixelkit/releases/latest)
 
-Open-source, local-first dataset auto-labelling for computer vision, and
-detector training for the OhmLab Neuro N6. Text-prompted detection and
-segmentation with **SAM 3**, an interactive annotation editor (boxes, polygon
-masks, click-to-segment), GPU-accelerated augmentations, YOLO / COCO / Pascal
-VOC export, and YOLOX training with an int8 export ready to build for the
-Neuro N6 - all running on your own machine, with every image and annotation
-stored in a workspace folder you choose. No accounts, no cloud, no telemetry.
+PixelKit is a desktop application for labelling image datasets and training
+object detectors for the Ohm Lab Neuro N6. It runs locally, with no account
+and no telemetry, and stores images and annotations as plain files in a
+workspace folder.
 
-> **Status: pre-release, under active development.**
+- Text-prompted detection and segmentation with SAM 3.
+- Annotation editor for boxes and polygon masks, with click-to-segment.
+- GPU augmentations.
+- Import from YOLO, COCO and Pascal VOC; export to those formats and to CVAT,
+  Label Studio and mask images.
+- Videos and Neuro Studio recordings import as frames.
+- YOLOX training with an int8 export for the Neuro N6.
 
 ## Download
 
-Grab the latest installer from
-[**Releases**](https://github.com/ohmlab-ltd/pixelkit/releases):
+Installers are on the [Releases](https://github.com/ohmlab-ltd/pixelkit/releases/latest)
+page.
 
-- **Windows x64** - `PixelKit-Setup.exe` (~80 MB) from the latest
-  release. On first launch
-  the app downloads its AI runtime once: Python plus PyTorch (~3.5 GB CUDA
-  build on NVIDIA machines, ~300 MB CPU build otherwise) into
-  `%LOCALAPPDATA%\PixelKit\runtime`. The installer is currently **unsigned**,
-  so SmartScreen will warn: *More info → Run anyway*.
-- **macOS (Apple Silicon)** - `PixelKit-<version>.dmg` with the runtime
-  bundled. Also unsigned for now: right-click the app → Open, or allow it
-  under System Settings → Privacy & Security.
-- **Linux** - no packaged build yet; run from source (below).
+| Platform | File | Python runtime |
+|---|---|---|
+| Windows 10 or later, x64 | `PixelKit-Setup.exe`, 115 MB | Downloaded on first launch into `%LOCALAPPDATA%\PixelKit\runtime`: about 3.5 GB with CUDA on NVIDIA machines, which needs 9 GB free, and 3 GB free otherwise |
+| macOS 14 or later, Apple Silicon | `PixelKit-arm64.dmg`, 410 MB | Included |
+| Linux | none | Run from source |
 
-Model weights download separately on first run into your workspace
-(`weights/`): SAM 3 (~3.4 GB, needs a free Hugging Face token - see
-[`docs/HF-TOKEN.md`](docs/HF-TOKEN.md)) and DINOv2 (~1.2 GB, automatic).
-The first training run downloads Megvii's COCO-pretrained YOLOX checkpoint
-it starts from (~8 MB for Nano).
+The installers are unsigned. On Windows, SmartScreen asks for confirmation
+(More info, Run anyway). On macOS, after the first attempt to open it, choose
+Open Anyway under System Settings, Privacy & Security.
+
+The packaged app checks GitHub for a newer release at launch and offers the
+release page; `PIXELKIT_NO_UPDATE_CHECK=1` turns the check off.
+
+Model weights download on first run into the workspace's `weights/` folder:
+SAM 3, about 3.6 GB, which needs a Hugging Face token
+([docs/HF-TOKEN.md](docs/HF-TOKEN.md)), and DINOv2, about 1.3 GB; each
+download needs 2 GB free beyond its size. The first training run downloads
+Megvii's COCO-pretrained YOLOX checkpoint, 8 MB for Nano and 41 MB for Tiny.
 
 ## Requirements
 
 | Machine | Labelling | Training |
 |---|---|---|
-| Windows/Linux + NVIDIA GPU (12 GB VRAM recommended) | Full speed (CUDA) | Full speed: a Nano run takes minutes |
-| Apple Silicon Mac (16 GB+ unified memory) | Full speed (Metal) | Metal |
-| No supported GPU (incl. AMD/Intel) | App fully works - editor, datasets, import/export, augmentations. AI labelling is off by default; Settings → Compute → CPU enables it in very-slow mode. | The same switch, slowly |
+| NVIDIA GPU, 12 GB VRAM recommended | CUDA | CUDA, minutes for a Nano run |
+| Apple Silicon, 16 GB memory or more | Metal | Metal |
+| No supported GPU | Off by default. Settings > Compute > CPU enables it, at minutes per image. | CPU, with the same setting |
 
-## Train for the Neuro N6
+Without a supported GPU, the editor, datasets, import, export and
+augmentations work as usual.
 
-On a labelled dataset, **Train for Neuro N6** trains a YOLOX-Nano or
-YOLOX-Tiny detector and exports it as an Arduino sketch folder: the int8
-model (trained quantisation-aware, so it scores like the float model), a
-labels header with a confidence threshold calibrated on the validation
-images, and a report (AP@0.5, per-class precision and recall, the images the
-model got most wrong, every validation image beside its ground truth). With
-ST Edge AI Core installed, every export is also compiled for the board's NPU
-and its fit reported. Build the sketch with the Neuro N6 board package
-(0.1.3 or later) and ST Edge AI Core, as
-[`docs/TRAINING.md`](docs/TRAINING.md#building-it-for-the-board) describes;
-Neuro Studio shows the boxes on the live video, with the threshold as a
-slider. Details in [`docs/TRAINING.md`](docs/TRAINING.md);
-the same runs work headless (`pixelkit train`) and through the local API
-([`docs/API.md`](docs/API.md)).
+## Training for the Neuro N6
 
-## Where your data lives
+The Train for Neuro N6 card on a dataset's overview trains a YOLOX-Nano or
+YOLOX-Tiny detector and exports an Arduino sketch folder with:
 
-Everything is plain files in one folder you pick on first run (default
-`~/PixelKit`): one folder per project, one per dataset, original images
-untouched in `images/`, one annotation JSON per image in `annotations/`.
-The format is documented in [`docs/WORKSPACE.md`](docs/WORKSPACE.md) -
-it's yours to sync, back up, or parse.
+- the int8 model, trained quantisation-aware;
+- a labels header with a confidence threshold calibrated on the validation
+  images;
+- `report.json`: AP@0.5, per-class precision and recall, the confusion
+  matrix and the threshold sweep;
+- `NOTICE.txt` and `LICENSE.txt`, which stay with the model.
 
-Coming from the SaaS? **File → Import Legacy Backup…** converts an old
-backup zip into the workspace format (CLI: `python import_legacy.py`).
+The run's Details on the card show the validation images with the most
+errors and every validation image beside its ground truth.
 
-## Run from source
+With ST Edge AI Core installed, each export is also compiled for the NPU and
+its fit is reported. The sketch builds with the Neuro N6 board package 0.1.3
+or later and ST Edge AI Core
+([docs/TRAINING.md](docs/TRAINING.md#building-for-the-board)). Neuro Studio
+shows the boxes on the live video, with the threshold as a slider. Training
+also runs from the command line (`pixelkit train`) and through the local API
+([docs/API.md](docs/API.md)).
+
+## Workspace
+
+All data is plain files in one workspace folder, `~/PixelKit` unless changed
+under Settings, Workspace or by `PIXELKIT_WORKSPACE`: a folder per project
+and per dataset, the imported images in `images/`, one annotation JSON per
+image in `annotations/`. JPEG files are kept byte for byte; other image
+formats are stored as JPEG. The format is specified in
+[docs/WORKSPACE.md](docs/WORKSPACE.md).
+
+File > Import Legacy Backup imports a backup zip of an earlier PixelKit
+server into the workspace; `python engine/import_legacy.py <folder or zip>`
+does the same from the command line.
+
+## Running from source
+
+`installers/install.ps1` on Windows or `installers/install.sh` on macOS and
+Linux creates `engine/.venv`, installs PyTorch, with CUDA when an NVIDIA GPU
+is found, and the engine, then builds the UI. It needs Python 3.11 or later
+and Node.js 22.12 or later.
 
 ```bash
-# engine - Python 3.12, FastAPI; binds 127.0.0.1:8001
-cd engine && pip install -r requirements.txt && python gd/server.py
+# Engine on 127.0.0.1:8001, serving the UI from ui/out
+engine/.venv/bin/pixelkit       # Windows: engine\.venv\Scripts\pixelkit.exe
 
-# ui - served by the engine after a build (or `npm run dev` on :3000)
-cd ui && npm install && npm run build
-
-# desktop shell (optional in dev; packaged builds bundle everything)
+# Desktop shell: uses a running engine, or starts one from engine/.venv
 cd desktop && npm ci && npm start
 ```
 
-`pip install -e engine` gives you the `pixelkit` launcher and
-`pixelkit doctor` environment checks. Device auto-detects cuda → mps → cpu
-(`PK_DEVICE` overrides; `PK_DISABLE_MODELS=1` runs the engine with no ML).
+The engine looks for `ui/out` when it starts, so the UI is built first.
+`npm run dev` in `ui/` serves the UI on port 3000 against the engine.
+`pixelkit doctor` checks the environment. The engine uses CUDA, then MPS,
+then the CPU; `PK_DEVICE` overrides the device, and `PK_DISABLE_MODELS=1`
+runs the engine without models.
 
 ## Status
 
-Working today: labelling with SAM 3, the annotation editor,
-augmentations, dataset import and export, training and the Neuro N6
-export, headless labelling and training (`pixelkit label`, `pixelkit
-train`) and the local API, and the desktop app with Windows and macOS
-installers, a first-run runtime download and an update check. The
-desktop-shell UI is documented in [`docs/DESKTOP-UI.md`](docs/DESKTOP-UI.md).
-Not yet: signed installers, a Linux package, and training for
-classification, segmentation or pose.
+Pre-release. The installers are unsigned, there is no Linux package, and
+training covers object detection only.
+
+## Documentation
+
+- [Training and Neuro N6 export](docs/TRAINING.md)
+- [Local API](docs/API.md)
+- [Workspace format](docs/WORKSPACE.md)
+- [Hugging Face token](docs/HF-TOKEN.md)
+- [Desktop UI](docs/DESKTOP-UI.md)
+- [Contributing](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
 
 ## License
 
 Code: [Apache-2.0](LICENSE). Model weights download separately and carry
-their own licenses - see [NOTICE](NOTICE). `facebook/sam3` is gated: you
-accept Meta's license on Hugging Face and use your own token.
+their own licences, listed in [NOTICE](NOTICE). `facebook/sam3` is gated:
+each user accepts Meta's licence on Hugging Face and uses their own token.
+Third-party components and their licences are listed in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

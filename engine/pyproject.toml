@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pixelkit"
-version = "0.3.0"
-description = "Local-first dataset auto-labelling with SAM 3"
+version = "0.4.0"
+description = "PixelKit engine: dataset labelling with SAM 3 and YOLOX training for the Ohm Lab Neuro N6"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.11"

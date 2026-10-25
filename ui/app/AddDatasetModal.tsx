@@ -1,7 +1,6 @@
 "use client";
 
-// Pick datasets you own and move them into a Project (container). Owner-only
-// (the backend requires container-manage + dataset ownership).
+// Moves existing datasets into a Project.
 import { useEffect, useRef, useState } from "react";
 
 import { GlassDialog } from "./v2/GlassDialog";
@@ -12,14 +11,12 @@ type Ds = { id: string; name: string };
 
 export function AddDatasetModal({
   containerId,
-  username,
   existingIds,
   open,
   onClose,
   onAdded,
 }: {
   containerId: string;
-  username: string;
   existingIds: string[];
   open: boolean;
   onClose: () => void;
@@ -28,18 +25,15 @@ export function AddDatasetModal({
   const [datasets, setDatasets] = useState<Ds[] | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
-  // Ref so the fetch effect depends only on [open, username] and doesn't re-run
-  // every render (existingIds is a fresh array each time).
+  // A ref, since existingIds is a new array on every render.
   const existingRef = useRef(existingIds);
   existingRef.current = existingIds;
 
   useEffect(() => {
-    if (!open || !username) return;
+    if (!open) return;
     setSelected(new Set());
     setDatasets(null);
-    apiFetch(
-      `/api/projects?owner=${encodeURIComponent(username)}&viewer=${encodeURIComponent(username)}&offset=0&limit=300`,
-    )
+    apiFetch("/api/projects?offset=0&limit=300")
       .then((r) => (r.ok ? r.json() : null))
       .then((payload: unknown) => {
         const arr: Array<{ id?: string; name?: string }> = Array.isArray(payload)
@@ -53,7 +47,7 @@ export function AddDatasetModal({
         );
       })
       .catch(() => setDatasets([]));
-  }, [open, username]);
+  }, [open]);
 
   function toggle(id: string) {
     setSelected((s) => {

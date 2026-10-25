@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// jsdom for DOMParser (VOC) + File; the COCO/YOLO parsers are pure.
+// jsdom provides DOMParser and File.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
@@ -135,7 +135,7 @@ describe("YOLO", () => {
   });
 });
 
-describe("sweep regressions", () => {
+describe("path pairing and label parsing edge cases", () => {
   it("COCO: folder-prefixed paths pair by suffix and twins never cross splits", async () => {
     // The folder picker prefixes every path with the chosen folder name.
     const train = JSON.stringify({
@@ -187,7 +187,7 @@ describe("sweep regressions", () => {
 });
 
 describe("VOC", () => {
-  it("still parses (regression guard for the dispatch rewrite)", async () => {
+  it("parses the Annotations/ and JPEGImages/ layout", async () => {
     const xml = `<annotation><filename>a.jpg</filename><size><width>10</width><height>20</height></size>
       <object><name>Cat</name><bndbox><xmin>1</xmin><ymin>2</ymin><xmax>5</xmax><ymax>6</ymax></bndbox></object></annotation>`;
     const ds = await parseDataset([jpg("JPEGImages/a.jpg"), f("Annotations/a.xml", xml)]);
@@ -196,7 +196,7 @@ describe("VOC", () => {
   });
 });
 
-describe("pairing and orientation regressions", () => {
+describe("image pairing and EXIF orientation", () => {
   const voc = (fn: string | null, label: string) =>
     `<annotation>${fn ? `<filename>${fn}</filename>` : ""}<size><width>100</width><height>100</height></size>` +
     `<object><name>${label}</name><bndbox><xmin>10</xmin><ymin>20</ymin><xmax>50</xmax><ymax>60</ymax></bndbox></object></annotation>`;
@@ -253,7 +253,7 @@ describe("pairing and orientation regressions", () => {
   });
 
   describe("a photo annotated on its stored, unrotated frame", () => {
-    // A JPEG header whose EXIF says: shown turned a quarter clockwise (6).
+    // A JPEG header with an EXIF orientation; 6 is a quarter turn clockwise.
     const exifJpeg = (orientation: number) => {
       const tiff = [0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00,
         0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, orientation, 0x00, 0x00, 0x00,
@@ -286,13 +286,13 @@ describe("pairing and orientation regressions", () => {
         boxes: [{ id: "b", label: "cat", x0: 100, y0: 200, x1: 500, y1: 600, score: null }],
         width: 4000, // the stored frame, as labelImg reports it
         height: 3000,
-      }, null);
+      });
       expect(out.boxes[0]).toMatchObject({ x0: 2400, y0: 100, x1: 2800, y1: 500 });
     });
   });
 });
 
-describe("importer regressions, part two", () => {
+describe("format detection and unusual inputs", () => {
   it("a stray non-VOC .xml does not hijack a YOLO dataset", async () => {
     const files = [jpg("ds/images/a.jpg"), f("ds/labels/a.txt", "0 0.5 0.5 0.2 0.2\n"),
                    f("ds/classes.txt", "bolt\n"), f("ds/settings.xml", "<config><x>1</x></config>")];

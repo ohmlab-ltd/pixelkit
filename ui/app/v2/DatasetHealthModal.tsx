@@ -3,21 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { apiFetch } from "../../lib/apiFetch";
-import { colourForLabelStable } from "./OnboardLabelsV2";
+import { API_BASE, apiFetch } from "../../lib/apiFetch";
+import { colourForLabelStable } from "./labelColours";
 import { VariationPlot, type StatsPoint, type AugmentPoint } from "./DatasetStatsCard";
 import { FactorRadar, FACTOR_INFO, FACTOR_ORDER } from "./HealthRadar";
 
-const API =
-  process.env.NEXT_PUBLIC_API_URL ??
-  (typeof window !== "undefined" && window.location.port === "3000"
-    ? "http://localhost:8001"
-    : "");
-
-// One modal, two equal-height columns: dataset HEALTH on the left, the
-// near-duplicate REVIEW (already expanded) on the right. No pop-up within a
-// pop-up: the duplicates review is inline, not a second modal. Opaque panel
-// over a soft white-blur backdrop.
+// Dataset health modal: health on the left, duplicate review on the right.
 
 type HealthStats = {
   counts: {
@@ -46,13 +37,20 @@ function Spinner({ label }: { label?: string }) {
 }
 
 function scoreTone(score: number): string {
-  if (score >= 75) return "var(--success)";
-  if (score >= 45) return "var(--warning)";
-  return "var(--destructive)";
+  if (score >= 75) return "var(--ok)";
+  if (score >= 45) return "var(--warn)";
+  return "var(--bad)";
 }
 
-// ─── Left column: health summary ───
-function HealthSummary({ stats, labelColours }: { stats: HealthStats; labelColours?: Record<string, string> | null }) {
+function HealthSummary({
+  stats,
+  labelColours,
+  onJumpToImport,
+}: {
+  stats: HealthStats;
+  labelColours?: Record<string, string> | null;
+  onJumpToImport?: (importId: string, kind: "image" | "augmentation") => void;
+}) {
   const counters: { label: string; value: number; warn?: boolean }[] = [
     { label: "Images", value: stats.counts.imports },
     { label: "With detections", value: stats.counts.with_detections },
@@ -67,39 +65,44 @@ function HealthSummary({ stats, labelColours }: { stats: HealthStats; labelColou
   const colourFor = (lab: string | null) => (lab ? (labelColours?.[lab] ?? colourForLabelStable(lab)) : "#9ca3af");
   const factorVals = FACTOR_ORDER.map((k) => ({ key: k as string, value: Math.max(0, Math.min(1, stats.health.factors?.[k] ?? 0)) }));
   const variation = stats.variation;
+  // No images: no score or factors to report.
+  const empty = stats.counts.imports === 0;
 
   return (
     <div className="space-y-6">
-      {/* Headline score */}
-      <div>
-        <div className="flex items-end gap-3">
-          <span className="text-[32px] font-semibold leading-none tracking-tight text-foreground tabular-nums">
-            {Math.round(stats.health.score)}
-          </span>
-          <span className="mb-1.5 text-[13px] font-medium text-foreground/55">/ 100 health</span>
-        </div>
-        <div className="mt-3 h-2 overflow-hidden rounded-full bg-foreground/[0.08]">
-          <div className="h-full rounded-full" style={{ width: `${Math.max(2, Math.min(100, stats.health.score))}%`, background: tone, transition: "width 320ms ease-out" }} />
-        </div>
-      </div>
+      {empty ? (
+        <p className="text-[13px] text-foreground/55">Add images to see the dataset&rsquo;s health.</p>
+      ) : (
+        <>
+          <div>
+            <div className="flex items-end gap-3">
+              <span className="text-[32px] font-semibold leading-none tracking-tight text-foreground tabular-nums">
+                {Math.round(stats.health.score)}
+              </span>
+              <span className="mb-1.5 text-[13px] font-medium text-foreground/55">/ 100 health</span>
+            </div>
+            <div className="mt-3 h-2 overflow-hidden rounded-full bg-foreground/[0.08]">
+              <div className="h-full rounded-full" style={{ width: `${Math.max(2, Math.min(100, stats.health.score))}%`, background: tone, transition: "width 320ms ease-out" }} />
+            </div>
+          </div>
 
-      {/* Factor spider + per-factor explanations */}
-      <div className="flex flex-col items-center gap-4 sm:flex-row">
-        <FactorRadar values={factorVals} />
-        <ul className="min-w-0 flex-1 space-y-2.5">
-          {factorVals.map((f) => (
-            <li key={f.key}>
-              <div className="flex items-baseline justify-between gap-2 text-[12.5px]">
-                <span className="font-medium text-foreground/85">{FACTOR_INFO[f.key].label}</span>
-                <span className="shrink-0 tabular-nums font-semibold text-foreground/60">{Math.round(f.value * 100)}%</span>
-              </div>
-              <p className="mt-0.5 text-[11.5px] leading-snug text-foreground/55">{FACTOR_INFO[f.key].desc}</p>
-            </li>
-          ))}
-        </ul>
-      </div>
+          <div className="flex flex-col items-center gap-4 sm:flex-row">
+            <FactorRadar values={factorVals} />
+            <ul className="min-w-0 flex-1 space-y-2.5">
+              {factorVals.map((f) => (
+                <li key={f.key}>
+                  <div className="flex items-baseline justify-between gap-2 text-[12.5px]">
+                    <span className="font-medium text-foreground/85">{FACTOR_INFO[f.key].label}</span>
+                    <span className="shrink-0 tabular-nums font-semibold text-foreground/60">{Math.round(f.value * 100)}%</span>
+                  </div>
+                  <p className="mt-0.5 text-[11.5px] leading-snug text-foreground/55">{FACTOR_INFO[f.key].desc}</p>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </>
+      )}
 
-      {/* Image variation (embeddings projection) */}
       <div>
         <div className="mb-2.5 flex items-center justify-between gap-2">
           <h4 className="pk-micro">Image variation</h4>
@@ -107,28 +110,31 @@ function HealthSummary({ stats, labelColours }: { stats: HealthStats; labelColou
             <span className="text-[11px] text-foreground/45 tabular-nums">{stats.counts.embeddings_ready}/{stats.counts.imports} embedded</span>
           )}
         </div>
-        <VariationPlot
-          points={variation?.points ?? []}
-          augmentations={variation?.augmentations ?? []}
-          colourFor={colourFor}
-          nearDuplicateIds={new Set(variation?.near_duplicate_ids ?? [])}
-          computing={stats.counts.imports > 0 && stats.counts.embeddings_ready < stats.counts.imports}
-          totalImports={stats.counts.imports}
-          embeddingsReady={stats.counts.embeddings_ready}
-        />
+        {empty ? (
+          <p className="text-[13px] text-foreground/55">No images yet.</p>
+        ) : (
+          <VariationPlot
+            points={variation?.points ?? []}
+            augmentations={variation?.augmentations ?? []}
+            colourFor={colourFor}
+            nearDuplicateIds={new Set(variation?.near_duplicate_ids ?? [])}
+            onJumpToImport={onJumpToImport}
+            computing={stats.counts.imports > 0 && stats.counts.embeddings_ready < stats.counts.imports}
+            totalImports={stats.counts.imports}
+            embeddingsReady={stats.counts.embeddings_ready}
+          />
+        )}
       </div>
 
-      {/* Counters */}
       <div className="grid grid-cols-2 gap-2">
         {counters.map((c) => (
           <div key={c.label} className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-2.5">
-            <div className={`text-[18px] font-semibold leading-none tabular-nums ${c.warn ? "text-[var(--warning)]" : "text-foreground"}`}>{c.value}</div>
+            <div className={`text-[18px] font-semibold leading-none tabular-nums ${c.warn ? "text-[var(--warn)]" : "text-foreground"}`}>{c.value}</div>
             <div className="mt-1 text-[11.5px] text-foreground/60">{c.label}</div>
           </div>
         ))}
       </div>
 
-      {/* Label distribution */}
       <div>
         <h4 className="mb-2.5 pk-micro">Label distribution</h4>
         {stats.labels.length === 0 ? (
@@ -163,7 +169,6 @@ function HealthSummary({ stats, labelColours }: { stats: HealthStats; labelColou
   );
 }
 
-// ─── Right column: inline duplicates review ───
 function DuplicatesReviewPanel({ projectId, onChanged }: { projectId: string; onChanged?: () => void }) {
   const [mode, setMode] = useState<"near" | "exact">("near");
   const [loading, setLoading] = useState(true);
@@ -311,7 +316,7 @@ function DuplicatesReviewPanel({ projectId, onChanged }: { projectId: string; on
                         className={`relative aspect-square overflow-hidden rounded-md border text-left transition-shadow ${m.keeper ? "cursor-default border-[var(--ok)]" : sel ? "cursor-pointer border-[var(--bad)] ring-1 ring-[var(--bad)]" : "cursor-pointer border-[var(--line)] hover:border-[var(--line-strong)]"}`}>
                         {m.filename && (
                           // eslint-disable-next-line @next/next/no-img-element
-                          <img src={`${API}/api/v2/projects/${projectId}/imports/${encodeURIComponent(m.filename)}`} alt="" loading="lazy" decoding="async"
+                          <img src={`${API_BASE}/api/v2/projects/${projectId}/imports/${encodeURIComponent(m.filename)}`} alt="" loading="lazy" decoding="async"
                             className={`absolute inset-0 h-full w-full object-cover ${sel ? "opacity-55" : "opacity-100"}`} />
                         )}
                         {m.keeper && <span className="absolute bottom-1 left-1 rounded bg-[var(--ok)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--background)]">Keep</span>}
@@ -334,16 +339,22 @@ export function DatasetHealthModal({
   projectId,
   labelColours,
   refreshSignal = 0,
+  onJumpToImport,
 }: {
   open: boolean;
   onClose: () => void;
   projectId: string | null | undefined;
   labelColours?: Record<string, string> | null;
   refreshSignal?: number;
+  /** A variation plot dot was clicked: show that image in the Dataset gallery. */
+  onJumpToImport?: (importId: string, kind: "image" | "augmentation") => void;
 }) {
   const [stats, setStats] = useState<HealthStats | null>(null);
   const [loading, setLoading] = useState(false);
   const restoreFocus = useRef<HTMLElement | null>(null);
+  // Held in a ref: callers pass a new function on every render.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   const load = useCallback(async () => {
     if (!projectId) return;
@@ -351,7 +362,7 @@ export function DatasetHealthModal({
     try {
       const r = await apiFetch(`/api/v2/projects/${projectId}/dataset-stats?v=${refreshSignal}`, { cache: "no-store" });
       if (r.ok) setStats((await r.json()) as HealthStats);
-    } catch { /* keep seed */ }
+    } catch { /* the last stats stay */ }
     finally { setLoading(false); }
   }, [projectId, refreshSignal]);
 
@@ -359,7 +370,7 @@ export function DatasetHealthModal({
     if (!open) return;
     restoreFocus.current = (document.activeElement as HTMLElement) ?? null;
     void load();
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.stopPropagation(); onClose(); } };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.stopPropagation(); onCloseRef.current(); } };
     document.addEventListener("keydown", onKey, true);
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
@@ -368,7 +379,7 @@ export function DatasetHealthModal({
       document.body.style.overflow = prev;
       restoreFocus.current?.focus?.();
     };
-  }, [open, load, onClose]);
+  }, [open, load]);
 
   if (!open || typeof document === "undefined") return null;
 
@@ -396,15 +407,17 @@ export function DatasetHealthModal({
         </header>
 
         <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-2">
-          {/* LEFT: health */}
           <div className="min-h-0 overflow-y-auto px-5 py-5 lg:border-r lg:border-foreground/[0.08]">
-            {stats ? <HealthSummary stats={stats} labelColours={labelColours} /> : <Spinner label={loading ? "Loading dataset health…" : undefined} />}
+            {stats ? <HealthSummary stats={stats} labelColours={labelColours} onJumpToImport={onJumpToImport} /> : <Spinner label={loading ? "Loading dataset health…" : undefined} />}
           </div>
-          {/* RIGHT: duplicates review, inline + expanded */}
           <div className="flex min-h-0 flex-col px-5 py-5">
             <h3 className="mb-1 pk-micro">Review duplicates</h3>
             <p className="mb-3 text-[12px] text-foreground/55">Each group is a cluster of duplicates. Keep one, delete the rest, or mark them as not duplicates.</p>
-            {projectId && <DuplicatesReviewPanel projectId={projectId} onChanged={load} />}
+            {stats?.counts.imports === 0 ? (
+              <p className="text-[13px] text-foreground/55">No images yet.</p>
+            ) : (
+              projectId && <DuplicatesReviewPanel projectId={projectId} onChanged={load} />
+            )}
           </div>
         </div>
       </div>

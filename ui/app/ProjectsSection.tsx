@@ -1,49 +1,36 @@
 "use client";
 
-// Workspace "Projects" row: a New-Project tile + cards for each Project.
-// A Project (container) holds many Datasets; this sits above the Datasets
-// grid on the workspace. Cover/last-updated/#datasets per card (no owner
-// identity in this build). Clicking a card opens the Project page
-// (onOpenProject).
+// Workspace Projects row: a New project tile and a card per Project.
 import { useCallback, useEffect, useState } from "react";
 
 import { CreateProjectModal } from "./CreateProjectModal";
 import { containerCoverUrl, listContainers, type ContainerCard } from "@/lib/containers";
+import { timeAgo } from "@/lib/timeAgo";
 
-function timeAgo(iso?: string): string {
-  if (!iso) return "";
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return "";
-  const s = Math.max(0, (Date.now() - t) / 1000);
-  if (s < 60) return "just now";
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
-}
-
-// Always try to load the Project cover and fall back to the monogram only on a
-// real load error. We don't gate on `card.cover` because that field has been
-// arriving null even when a cover.jpg exists in R2; attempting the image
-// directly is robust to that (and projects are few per user, so the occasional
-// 404 for a cover-less project is cheap).
-function ContainerCover({ id, name }: { id: string; name: string }) {
+// The monogram shows for a Project without a cover, or once the retries fail.
+function ContainerCover({
+  id,
+  name,
+  cover,
+  coverUpdated,
+}: {
+  id: string;
+  name: string;
+  cover: string | null;
+  coverUpdated?: string;
+}) {
   const [retry, setRetry] = useState(0);
   const [failed, setFailed] = useState(false);
-  if (failed) {
+  if (!cover || failed) {
     return (
       <div className="flex h-full w-full items-center justify-center text-3xl font-bold text-white/80 drop-shadow-sm transition-transform duration-300 group-hover:scale-110">
         {(name || "?").slice(0, 1).toUpperCase()}
       </div>
     );
   }
-  // Load eagerly (projects are few) + a short backed-off retry. The cover GET
-  // can transiently 404/5xx right after upload while R2/CDN propagates; without
-  // a retry the card stuck on the monogram until it remounted - the "cover only
-  // appears after I click into the project and back out" bug. The cache-buster
-  // (?r=N) forces the retry to actually re-request rather than reuse the failed
-  // response. No loading="lazy": deferral was part of why it didn't paint until
-  // a remount put it in view.
-  const base = containerCoverUrl(id);
+  // Retried with backoff, as the cover can 404 right after upload; ?r=N forces
+  // a fresh request. Loaded eagerly.
+  const base = containerCoverUrl(id, coverUpdated);
   const src = retry > 0 ? `${base}${base.includes("?") ? "&" : "?"}r=${retry}` : base;
   return (
     // eslint-disable-next-line @next/next/no-img-element
@@ -69,7 +56,13 @@ function ProjectCard({ card, onClick }: { card: ContainerCard; onClick: () => vo
       className="pk-card pk-card-hover group flex flex-col overflow-hidden rounded-2xl text-left"
     >
       <div className="pk-cover relative aspect-[16/9] w-full overflow-hidden">
-        <ContainerCover id={card.id} name={card.name} />
+        <ContainerCover
+          key={card.cover_updated ?? "cover"}
+          id={card.id}
+          name={card.name}
+          cover={card.cover}
+          coverUpdated={card.cover_updated}
+        />
       </div>
       <div className="flex flex-1 flex-col gap-2 p-3.5">
         <span className="flex items-center gap-2 truncate font-semibold text-foreground/90">
@@ -112,10 +105,7 @@ function NewProjectTile({ onClick }: { onClick: () => void }) {
   );
 }
 
-// Module-level cache of the Projects row so navigating into a Project and back
-// paints the cards instantly from memory (then refreshes), instead of flashing
-// empty for the ~0.5s the listContainers fetch takes. Mirrors how the dataset
-// list is cached.
+// Module-level cache so the row paints at once on return, then refreshes.
 let _containersCache: ContainerCard[] | null = null;
 
 export function ProjectsSection({ onOpenProject }: { onOpenProject?: (id: string) => void }) {
@@ -124,11 +114,7 @@ export function ProjectsSection({ onOpenProject }: { onOpenProject?: (id: string
 
   const reload = useCallback(() => {
     listContainers().then((c) => {
-      // null = the fetch failed (expired bearer / network blip). Keep the
-      // last-known row rather than wiping it to an empty "no projects" state;
-      // apiFetch already retried once with a fresh token, so a null here means
-      // it's genuinely unreachable for now. A real empty list is [] and DOES
-      // update (so a deleted-last-project reflects correctly).
+      // null: the fetch failed, so the last row stays. [] is a real empty list.
       if (c === null) return;
       _containersCache = c;
       setCards(c);

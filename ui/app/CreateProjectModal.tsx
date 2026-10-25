@@ -1,8 +1,6 @@
 "use client";
 
-// Create-a-Project (container) modal: name + cover photo. Calls the
-// container backend via lib/containers. A Project holds many Datasets;
-// this is distinct from creating a Dataset (the CreateFlowV2 path).
+// New Project modal: a name and an optional cover photo.
 import { useEffect, useRef, useState } from "react";
 
 import { GlassDialog } from "./v2/GlassDialog";
@@ -25,10 +23,7 @@ export function CreateProjectModal({
   const fileRef = useRef<HTMLInputElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
 
-  // Focus the name field when the modal opens. GlassDialog focuses its first
-  // control (the cover button) on open; this parent effect runs after that
-  // child effect, and the deferred tick makes it win, so the user can type
-  // straight away.
+  // Deferred so it runs after GlassDialog focuses its first control.
   useEffect(() => {
     if (!open) return;
     const t = setTimeout(() => nameRef.current?.focus(), 0);
@@ -87,7 +82,6 @@ export function CreateProjectModal({
           A project groups related datasets. You can add datasets once it&apos;s created.
         </p>
 
-        {/* Cover photo */}
         <button
           type="button"
           onClick={() => fileRef.current?.click()}
@@ -108,8 +102,6 @@ export function CreateProjectModal({
             </div>
           )}
           {coverPreview && (
-            // Legibility scrim over the photo only - never over the flat
-            // panel placeholder.
             <span className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/40 to-transparent px-3 py-2 text-xs font-medium text-white opacity-0 transition group-hover:opacity-100">
               Change cover
             </span>
@@ -123,7 +115,6 @@ export function CreateProjectModal({
           onChange={(e) => pickCover(e.target.files?.[0] ?? null)}
         />
 
-        {/* Name */}
         <label className="flex flex-col gap-1.5">
           <span className="pk-micro">Project name</span>
           <input

@@ -1,11 +1,11 @@
-## What & why
+## Summary
 
-<!-- One or two sentences. Link the issue if there is one. -->
+<!-- What changes and why, in one or two sentences. Link the issue if there is one. -->
 
-## How it was verified
+## Testing
 
-<!-- Tests added/run, and any hands-on check (which OS / GPU). -->
+<!-- Tests added or run, and any manual check, with OS and GPU. -->
 
 - [ ] `engine/tests` pass
-- [ ] `tsc --noEmit` + eslint clean (if UI touched)
-- [ ] Workspace on-disk format unchanged, or `docs/WORKSPACE.md` updated in this PR
+- [ ] `npm test`, `npx tsc --noEmit` and `npm run lint` pass in `ui/`, if the UI changed
+- [ ] The workspace format is unchanged, or `docs/WORKSPACE.md` is updated

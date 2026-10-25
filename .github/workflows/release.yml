@@ -1,8 +1,6 @@
 name: release
-# Tag vX.Y.Z -> build the Windows installer + macOS dmg (both unsigned for
-# now) and attach them to a GitHub Release. The slim Windows installer
-# carries no Python/torch, so this stays fast and small; macOS bundles its
-# runtime via prepare-runtime.sh.
+# A vX.Y.Z tag builds the Windows installer and the macOS dmg and attaches
+# them to the tag's release.
 on:
   push:
     tags: ["v*"]
@@ -12,8 +10,7 @@ permissions:
 
 jobs:
   versions:
-    # The tag is the single source of truth — refuse to ship if the three
-    # in-repo version stamps disagree with it.
+    # Fails unless the version stamps match the tag.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,14 +30,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: npm, cache-dependency-path: ui/package-lock.json }
+        with: { node-version: 22, cache: npm, cache-dependency-path: ui/package-lock.json }
       - name: Build UI
         run: cd ui && npm ci && npm run build
       - name: Build installer (unsigned)
         run: cd desktop && npm ci && npx electron-builder --win
       - name: Release notes from CHANGELOG.md
-        # The tag's "## X.Y.Z" section, CRLF-safe (Windows checkouts); empty
-        # when there is none, which leaves the generated notes alone.
+        # The tag's "## X.Y.Z" section, with CR stripped; empty when there is none.
         shell: bash
         run: |
           awk -v v="${GITHUB_REF_NAME#v}" '{ sub(/\r$/, "") }
@@ -48,8 +44,7 @@ jobs:
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
-          # Version-less asset name -> releases/latest/download/PixelKit-Setup.exe
-          # is a permanent URL (the release's tag carries the version).
+          # A version-less name keeps releases/latest/download/PixelKit-Setup.exe stable.
           files: desktop/dist/PixelKit-Setup*.exe
           body_path: notes.md
           generate_release_notes: true
@@ -60,7 +55,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: npm, cache-dependency-path: ui/package-lock.json }
+        with: { node-version: 22, cache: npm, cache-dependency-path: ui/package-lock.json }
       - name: Build UI
         run: cd ui && npm ci && npm run build
       - name: Bundle Python runtime

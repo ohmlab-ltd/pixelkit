@@ -1,20 +1,8 @@
-// Client-side video → JPEG-frame extraction. A hidden <video> seeks
-// to each target time, draws to a canvas, encodes JPEG, and returns
-// File objects with the project's "{name}_frame####.jpg" naming so
-// they slot into the existing image-upload flow without any backend
-// changes.
-//
-// Lifted verbatim from V1's ProjectView so both the V1 and V2 drop
-// flows can share the same kernel.
-//
-// Neuro Studio's Record button saves the board's camera stream as
-// .mjpeg: its JPEG frames end to end, with no container and no timing,
-// which no browser plays. Those are split here instead, trimmed in
-// frames rather than seconds, and imported as they are, since every
-// frame already is a JPEG.
+// JPEG frames from a video or an .mjpeg recording. A recording is JPEG
+// frames end to end, with no container or timing.
 
-// A video is trimmed in seconds and sampled at fps; an .mjpeg recording
-// is trimmed in frame indices and keeps every step-th frame.
+// For a video, start and end are seconds, sampled at fps. For a recording,
+// they are frame indices, keeping every step-th frame.
 export type VideoExtractParams =
   | { start: number; end: number; fps: number }
   | { start: number; end: number; step: number };
@@ -28,44 +16,33 @@ export function isVideoFile(file: File): boolean {
   return file.type.startsWith("video/") || isMjpeg(file);
 }
 
-// How many frames an extraction yields.
+// Video types the file picker offers. Frames are read through Chromium's
+// <video>, which cannot decode AVI, so AVI is left out.
+export const VIDEO_ACCEPT = ".mp4,.m4v,.mov,.webm,.mkv,.mjpeg,.mjpg";
+
 export function extractCount(p: VideoExtractParams): number {
   if ("step" in p) return Math.floor((Math.round(p.end) - Math.round(p.start)) / Math.max(1, Math.round(p.step))) + 1;
   return Math.max(1, Math.floor((p.end - p.start) * p.fps) + 1);
 }
 
-// [start, end) byte ranges of the JPEGs in a buffer that holds them end
-// to end. Follows each frame's marker segments rather than searching for
-// an end marker, so a thumbnail inside a frame's EXIF, or entropy-coded
-// bytes that happen to spell one, never cut it short. Damaged data is
-// skipped up to the next start of image.
-export function jpegFrameRanges(b: Uint8Array): Array<[number, number]> {
-  const out: Array<[number, number]> = [];
-  const nextStart = (from: number) => {
-    for (let i = from; i + 2 < b.length; i++) {
-      if (b[i] === 0xff && b[i + 1] === 0xd8 && b[i + 2] === 0xff) return i;
-    }
-    return b.length;
-  };
-  let i = nextStart(0);
-  while (i < b.length) {
-    const end = jpegEnd(b, i);
-    if (end < 0) {
-      i = nextStart(i + 2);
-      continue;
-    }
-    out.push([i, end]);
-    i = nextStart(end);
+// The next start of image at or after `from`, or b.length.
+function nextStart(b: Uint8Array, from: number): number {
+  for (let i = from; i + 2 < b.length; i++) {
+    if (b[i] === 0xff && b[i + 1] === 0xd8 && b[i + 2] === 0xff) return i;
   }
-  return out;
+  return b.length;
 }
 
-// The end (exclusive) of the JPEG starting at `start`, or -1 when it is
-// cut short or malformed.
+// jpegEnd without an end: CUT when the buffer ends inside the frame, BAD
+// when the bytes are not JPEG marker structure.
+const CUT = -2;
+const BAD = -1;
+
+// Exclusive end of the JPEG at start, or CUT or BAD.
 function jpegEnd(b: Uint8Array, start: number): number {
   let p = start + 2;
   while (p + 1 < b.length) {
-    if (b[p] !== 0xff) return -1;
+    if (b[p] !== 0xff) return BAD;
     const m = b[p + 1];
     if (m === 0xff) {
       p += 1; // fill byte before a marker
@@ -76,24 +53,70 @@ function jpegEnd(b: Uint8Array, start: number): number {
       p += 2; // markers without a length
       continue;
     }
-    if (p + 3 >= b.length) return -1;
+    if (p + 3 >= b.length) return CUT;
     p += 2 + ((b[p + 2] << 8) | b[p + 3]);
     if (m !== 0xda) continue;
     // Start of scan: entropy-coded data runs to the next marker, which
     // is an 0xFF not followed by a stuffed 0x00 or a restart marker.
     while (p + 1 < b.length && !(b[p] === 0xff && b[p + 1] !== 0 && (b[p + 1] < 0xd0 || b[p + 1] > 0xd7))) p++;
   }
-  return -1;
+  return CUT;
 }
 
-// The frames of an .mjpeg recording as JPEG blobs (slices of the file,
-// not copies). Cached per file, so the modal and the import share one scan.
+// Read size, and the size past which a cut frame counts as damage.
+const SCAN_CHUNK_BYTES = 8 * 1024 * 1024;
+const MAX_FRAME_BYTES = 8 * 1024 * 1024;
+
+// [start, end) ranges of JPEGs stored end to end, read in chunks. Walks marker
+// segments, as an EXIF thumbnail has its own end marker. Damage is skipped. A
+// frame cut by the end of a read is finished with the next.
+export async function mjpegFrameRanges(
+  file: Blob,
+  chunkBytes = SCAN_CHUNK_BYTES,
+): Promise<Array<[number, number]>> {
+  const out: Array<[number, number]> = [];
+  let buf = new Uint8Array(0);
+  let base = 0; // file offset of buf[0]
+  let read = 0;
+  while (read < file.size) {
+    const chunk = new Uint8Array(await file.slice(read, read + chunkBytes).arrayBuffer());
+    if (chunk.length === 0) break;
+    read += chunk.length;
+    const joined = new Uint8Array(buf.length + chunk.length);
+    joined.set(buf);
+    joined.set(chunk, buf.length);
+    buf = joined;
+    const final = read >= file.size;
+
+    // A start of image may straddle this read and the next.
+    let keepFrom = Math.max(0, buf.length - 2);
+    let i = nextStart(buf, 0);
+    while (i < buf.length) {
+      const end = jpegEnd(buf, i);
+      if (end >= 0) {
+        out.push([base + i, base + end]);
+        i = nextStart(buf, end);
+        continue;
+      }
+      if (end === CUT && !final && buf.length - i <= MAX_FRAME_BYTES) {
+        keepFrom = i;
+        break;
+      }
+      i = nextStart(buf, i + 2);
+    }
+    buf = buf.slice(keepFrom);
+    base += keepFrom;
+  }
+  return out;
+}
+
+// JPEG slices of an .mjpeg recording, cached per file.
 const recordings = new WeakMap<File, Promise<Blob[]>>();
 export function mjpegFrames(file: File): Promise<Blob[]> {
   let frames = recordings.get(file);
   if (!frames) {
-    frames = file.arrayBuffer().then((buf) =>
-      jpegFrameRanges(new Uint8Array(buf)).map(([s, e]) => file.slice(s, e, "image/jpeg")),
+    frames = mjpegFrameRanges(file).then((ranges) =>
+      ranges.map(([s, e]) => file.slice(s, e, "image/jpeg")),
     );
     recordings.set(file, frames);
   }
@@ -105,12 +128,7 @@ function frameName(file: File, n: number): string {
   return `${baseName}_frame${String(n).padStart(4, "0")}.jpg`;
 }
 
-// Per-frame size + quality ladder, matches lib/resize.ts's defaults so
-// extracted frames never balloon past what the upload pipeline allows
-// downstream. Encoding under the cap inline (rather than at full
-// quality then re-compressing in handleImportFiles) keeps a long
-// extraction's peak memory bounded - a 1000-frame, 4K video at q=0.92
-// is ~2 GB of intermediate Blobs.
+// Per-frame limits.
 const FRAME_MAX_BYTES = 50 * 1024;
 const FRAME_MAX_EDGE = 1500;
 const FRAME_QUALITY_LADDER = [0.85, 0.72, 0.6, 0.48, 0.36, 0.25];
@@ -128,9 +146,7 @@ async function encodeFrameUnderCap(
       return new File([blob], fname, { type: "image/jpeg" });
     }
   }
-  // Quality floor still over budget → halve dimensions and fall back
-  // to a mid-quality encode. Captures the dense-detail outlier
-  // without making every frame pay the second pass.
+  // Still over the cap at the lowest quality: half size at quality 0.5.
   const half = document.createElement("canvas");
   half.width = Math.max(1, Math.round(canvas.width / 2));
   half.height = Math.max(1, Math.round(canvas.height / 2));
@@ -182,11 +198,7 @@ export async function extractVideoFrames(
       video.addEventListener("error", onErr);
     });
 
-    // Downscale to FRAME_MAX_EDGE on the long side BEFORE encoding -
-    // a 4K source frame at full res would never hit the 50 KB cap
-    // without falling through to the quality-floor pass, so cap once
-    // up front and the quality ladder has a fighting chance on
-    // pass 1.
+    // Long side capped at FRAME_MAX_EDGE before encoding.
     const srcW = video.videoWidth || 1920;
     const srcH = video.videoHeight || 1080;
     const longest = Math.max(srcW, srcH);
@@ -213,11 +225,9 @@ export async function extractVideoFrames(
           resolve();
         };
         video.addEventListener("seeked", onSeeked);
-        // Some browsers ignore tiny seeks if the time matches the
-        // current frame exactly, so always nudge by a hair.
+        // A seek to the current time may not fire seeked, so it is nudged.
         video.currentTime = t === video.currentTime ? t + 0.001 : t;
-        // Belt-and-braces timeout, if the browser fails to fire
-        // `seeked` (rare, but happens on some codecs), don't hang.
+        // Some codecs never fire seeked.
         setTimeout(() => {
           if (!done) {
             done = true;
@@ -238,7 +248,13 @@ export async function extractVideoFrames(
   }
 }
 
-// Hard cap on individual video files. Browser-side decode + seek of
-// anything bigger gets sluggish or OOMs on smaller machines. 100 MB
-// has tested OK on a mid-range laptop; bump cautiously past that.
+// Per-file limit for videos, which the browser decodes.
 export const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
+
+// A recording is scanned in chunks, never decoded, so it may be larger.
+export const MAX_RECORDING_BYTES = 2 * 1024 * 1024 * 1024;
+
+// The largest file the import takes for `file`.
+export function maxImportBytes(file: File): number {
+  return isMjpeg(file) ? MAX_RECORDING_BYTES : MAX_VIDEO_BYTES;
+}

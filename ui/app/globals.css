@@ -2,105 +2,10 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ------------------------------------------------------------------ */
-/* PixelKit - studio design language.                                  */
-/*                                                                     */
-/* Dark is the primary/brand look: a near-black neutral surface, flat  */
-/* panels (rgba white 0.02), hairline borders from a three-step line   */
-/* ramp, a five-step foreground ramp, ONE orange accent used sparingly */
-/* and semantic ok/warn/bad status colours. Micro-labels are uppercase */
-/* mono; figures are tabular. Motion is a single ease-out vocabulary.  */
-/* Light mode mirrors the same system in adapted neutrals via the      */
-/* existing `.dark` class mechanism (html.dark = dark).                */
-/*                                                                     */
-/* Two var flavours per legacy token:                                  */
-/*   - `--x` is the ready-to-use colour value used across the          */
-/*     existing codebase (`color: var(--foreground)`, Tailwind         */
-/*     arbitrary-value `text-[var(--foreground)]`, etc.).              */
-/*   - `--x-rgb` is the same colour as a bare `R G B` triplet, used    */
-/*     by the Tailwind config (`rgb(var(--x-rgb) / <alpha-value>)`)    */
-/*     so opacity modifiers like `bg-foreground/[0.04]` resolve.       */
-/* New code should prefer the ramp vars (--fg-*, --line*, --panel,     */
-/* --accent-dim, --ok/--warn/--bad).                                   */
-/* ------------------------------------------------------------------ */
+/* The `--x-rgb` tokens are bare `R G B` triplets, for `rgb(var(--x-rgb) / alpha)`. */
 
 :root {
-  /* Light theme: same system, adapted neutral (not tinted). */
-  --background: rgb(246 246 248);
-  --foreground: rgb(23 25 30);
-  --muted: rgb(92 97 108);
-  --border: rgba(23, 25, 30, 0.12);
-  --accent: rgb(192 74 0);
-  --surface: rgb(255 255 255);
-  --surface-2: rgb(238 238 241);
-  --background-rgb: 246 246 248;
-  --foreground-rgb: 23 25 30;
-  --muted-rgb: 92 97 108;
-  /* Composited hairline over --background, for Tailwind's border-border. */
-  --border-rgb: 219 219 222;
-  --accent-rgb: 192 74 0;
-  --surface-rgb: 255 255 255;
-  --surface-2-rgb: 238 238 241;
-
-  /* Foreground ramp. */
-  --fg: rgb(23 25 30);
-  --fg-soft: rgb(63 67 76);
-  --fg-muted: rgb(92 97 108);
-  --fg-dim: rgb(109 114 125);
-  --fg-faint: rgb(155 160 171);
-
-  /* Line ramp: hairlines everywhere; -strong only for emphasis. */
-  --line: rgba(23, 25, 30, 0.1);
-  --line-soft: rgba(23, 25, 30, 0.06);
-  --line-strong: rgba(23, 25, 30, 0.18);
-
-  /* Flat panel surfaces: a quiet tonal step, not an elevation. */
-  --panel: rgba(23, 25, 30, 0.025);
-  --panel-solid: rgb(255 255 255);
-  --surface-hover: rgba(23, 25, 30, 0.05);
-
-  /* ONE accent: PixelKit orange (deepened for AA on light ground). */
-  --accent-dim: rgba(192, 74, 0, 0.12);
-  /* Text/icon colour that sits ON an accent-filled control. */
-  --accent-contrast: rgb(255 255 255);
-  --accent-orange: var(--accent);
-  --accent-orange-rgb: 192 74 0;
-  --focus-ring: var(--accent);
-
-  /* Status colours. */
-  --ok: rgb(12 127 82);
-  --warn: rgb(156 101 0);
-  --bad: rgb(217 38 38);
-  /* Legacy aliases still consumed across the app. */
-  --success: var(--ok);
-  --warning: var(--warn);
-  --destructive: var(--bad);
-
-  /* Legacy brand triplets: flattened onto the single accent so any
-     remaining gradient consumer renders as flat orange. */
-  --brand-1: 192 74 0;
-  --brand-2: 192 74 0;
-  --brand-3: 192 74 0;
-  --brand-gradient: linear-gradient(135deg, rgb(var(--brand-2)), rgb(var(--brand-2)));
-  --brand-cover: linear-gradient(135deg, rgb(var(--brand-2) / 0.1), rgb(var(--brand-2) / 0.1));
-  --brand-glow: none;
-
-  /* Flat language: definition comes from hairlines, not elevation.
-     Shadows survive only where something truly floats (modals). */
-  --shadow-strong: 0 16px 48px -16px rgb(15 18 24 / 0.24);
-  --shadow-soft: 0 1px 2px rgb(15 18 24 / 0.04);
-  --shadow-rgb: 15 18 24;
-
-  --modal-surface: rgb(255 255 255);
-  --modal-border: rgba(23, 25, 30, 0.12);
-  --backdrop: rgba(246, 246, 248, 0.6);
-
-  /* One motion vocabulary. */
-  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.dark {
-  /* Dark theme: the primary/brand look. Near-black neutral ground. */
+  color-scheme: dark;
   --background: rgb(10 10 12);
   --foreground: rgb(242 244 248);
   --muted: rgb(153 161 172);
@@ -110,39 +15,36 @@
   --surface-2: rgb(21 21 24);
   --background-rgb: 10 10 12;
   --foreground-rgb: 242 244 248;
-  --muted-rgb: 153 161 172;
-  --border-rgb: 30 30 33;
   --accent-rgb: 255 121 0;
   --surface-rgb: 15 15 17;
-  --surface-2-rgb: 21 21 24;
 
-  --fg: rgb(242 244 248);
+  /* Foreground ramp. */
   --fg-soft: rgb(201 206 214);
   --fg-muted: rgb(153 161 172);
   --fg-dim: rgb(109 117 129);
   --fg-faint: rgb(69 76 87);
 
+  /* Line ramp. */
   --line: rgba(255, 255, 255, 0.08);
   --line-soft: rgba(255, 255, 255, 0.05);
   --line-strong: rgba(255, 255, 255, 0.16);
 
+  /* Panel surfaces. */
   --panel: rgba(255, 255, 255, 0.02);
   --panel-solid: rgb(15 15 17);
   --surface-hover: rgba(255, 255, 255, 0.045);
 
   --accent-dim: rgba(255, 121, 0, 0.14);
+  /* Text and icons on an accent fill. */
   --accent-contrast: rgb(26 18 5);
   --accent-orange: var(--accent);
   --accent-orange-rgb: 255 121 0;
   --focus-ring: var(--accent);
 
+  /* Status colours. */
   --ok: rgb(61 220 151);
   --warn: rgb(245 184 61);
   --bad: rgb(255 93 93);
-
-  --brand-1: 255 121 0;
-  --brand-2: 255 121 0;
-  --brand-3: 255 121 0;
 
   --shadow-strong: 0 24px 64px -16px rgb(0 0 0 / 0.6);
   --shadow-soft: 0 1px 2px rgb(0 0 0 / 0.3);
@@ -151,6 +53,8 @@
   --modal-surface: rgb(19 19 22);
   --modal-border: rgba(255, 255, 255, 0.08);
   --backdrop: rgba(0, 0, 0, 0.6);
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 html,
@@ -176,16 +80,8 @@ body {
   outline-offset: 2px;
 }
 
-/* Text controls opt OUT of the outline ring above: their focus voice
-   is the hairline border (var(--line)) stepping up to the accent -
-   ring + accent border together read as two concentric orange lines.
-   Buttons, links and every other focusable keep the ring.
-   Tick/slider/file inputs are excluded (their border isn't a visible
-   focus cue, so they keep the ring for accessibility). The :is()
-   wrapper adopts the specificity of its most specific argument
-   (the :not() chain), so `border-color` here also beats Tailwind
-   border utilities - including hover:/focus: variants - without
-   needing !important. */
+/* Text controls show focus as an accent border instead of the ring. The :is()
+   takes the :not() chain's specificity, so it beats Tailwind border utilities. */
 :is(
   input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
   textarea,
@@ -195,42 +91,8 @@ body {
   border-color: var(--accent);
 }
 
-/* Theme-swap synchronisation.
-   The ThemeProvider stamps `.theme-changing` on <html> for ~260 ms
-   around every toggle. We use it to drive a single coordinated fade
-   for the page chrome, and DON'T cascade it onto every descendant
-   the way it used to. The previous selector (`html.theme-changing *`)
-   applied the transition to every element on the page, which on a
-   964-image gallery was tens of thousands of nodes simultaneously
-   firing a 220 ms eased transition. Frame rate during a theme
-   toggle (and the cascading animations the toggle interleaves with)
-   tanked to single digits.
-   We now scope it to the document root and `[data-theme-fade]`
-   opt-ins so the chrome still cross-fades together without
-   conscripting the entire DOM into the transition. */
-html.theme-changing,
-html.theme-changing body,
-html.theme-changing [data-theme-fade],
-html.theme-changing [data-theme-fade] *,
-html.theme-changing [data-theme-fade] *::before,
-html.theme-changing [data-theme-fade] *::after {
-  transition-property: background-color, border-color, color, fill, stroke, box-shadow !important;
-  transition-duration: 220ms !important;
-  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1) !important;
-}
+/* Typography */
 
-[data-theme-no-transition],
-[data-theme-no-transition] *,
-.no-theme-transition,
-.no-theme-transition * {
-  transition: none !important;
-}
-
-/* ── Typography helpers ────────────────────────────────────────────── */
-
-/* Uppercase mono micro-label: pane headers, status segments, table
-   heads, stat keys. Colour defaults to the dim step; callers may
-   override. */
 .pk-micro {
   font-family: var(--font-geist-mono), ui-monospace, monospace;
   font-size: 11px;
@@ -240,13 +102,10 @@ html.theme-changing [data-theme-fade] *::after {
   color: var(--fg-dim);
 }
 
-/* Tabular figures for counts and readouts. */
 .pk-num {
   font-variant-numeric: tabular-nums;
 }
 
-/* Small uppercase eyebrow above a section or title - now the same
-   mono micro-label voice as the rest of the chrome. */
 .pk-eyebrow {
   font-family: var(--font-geist-mono), ui-monospace, monospace;
   font-size: 11px;
@@ -256,22 +115,20 @@ html.theme-changing [data-theme-fade] *::after {
   color: var(--fg-dim);
 }
 
-/* Section heading: quiet weight, tight tracking. Pair with a Tailwind
-   size class (e.g. `pk-section-title text-lg`). */
+/* No font-size: pair with a Tailwind size class. */
 .pk-section-title {
   font-weight: 600;
   letter-spacing: -0.015em;
   color: var(--foreground);
 }
 
-/* Page/hero title. No `color` so the caller's text-* class controls it. */
+/* No color: the caller's text-* class sets it. */
 .pk-page-title {
   font-weight: 600;
   letter-spacing: -0.03em;
   line-height: 1.08;
 }
 
-/* Leading accent bar for a section heading. */
 .pk-accent-bar {
   display: inline-block;
   width: 3px;
@@ -281,11 +138,8 @@ html.theme-changing [data-theme-fade] *::after {
   flex: none;
 }
 
-/* ── Flat surfaces ─────────────────────────────────────────────────── */
+/* Surfaces */
 
-/* Flat panel card: hairline border + the faint tonal step. No
-   elevation. Hover (via .pk-card-hover) firms the hairline and deepens
-   the step - accent stays reserved for active/selected states. */
 .pk-card {
   border: 1px solid var(--line);
   background: var(--panel);
@@ -297,8 +151,6 @@ html.theme-changing [data-theme-fade] *::after {
   background-color: var(--surface-hover);
 }
 
-/* Cover/placeholder wash for letter tiles + dataset covers: a quiet
-   hatched blank rather than a brand gradient. */
 .pk-cover {
   background-color: var(--panel);
   background-image: repeating-linear-gradient(
@@ -308,7 +160,6 @@ html.theme-changing [data-theme-fade] *::after {
   );
 }
 
-/* Compact flat button: 6px radius, hairline border, hover surface. */
 .pk-btn {
   display: inline-flex;
   align-items: center;
@@ -334,7 +185,6 @@ html.theme-changing [data-theme-fade] *::after {
   cursor: default;
 }
 
-/* Primary action: flat accent fill, contrast-safe label colour. */
 .pk-btn-primary {
   border-color: transparent;
   background: var(--accent);
@@ -347,9 +197,8 @@ html.theme-changing [data-theme-fade] *::after {
   filter: brightness(1.08);
 }
 
-/* ── Modal / popover surfaces ──────────────────────────────────────── */
+/* Modal and popover surfaces */
 
-/* Elevated surface + blur + hairline border, theme-aware via tokens. */
 .pk-glass {
   background: var(--modal-surface);
   border: 1px solid var(--modal-border);
@@ -363,34 +212,22 @@ html.theme-changing [data-theme-fade] *::after {
   backdrop-filter: blur(8px);
 }
 
-/* ── Motion vocabulary ─────────────────────────────────────────────── */
+/* Motion */
 
-/* Generic fade-in keyframe used across the app via Tailwind's
-   arbitrary `animate-[fadeIn_Xms_ease-out]` syntax. */
+/* Used through Tailwind's `animate-[fadeIn_Xms_ease-out]`. */
 @keyframes fadeIn {
   from { opacity: 0; }
   to { opacity: 1; }
 }
 
-/* Pop-in used by modal cards (e.g. ExportModal). Scale + lift +
-   fade lands in the same beat as the backdrop's fadeIn. */
-@keyframes popIn {
-  from {
-    opacity: 0;
-    transform: scale(0.97) translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1) translateY(0);
-  }
-}
-
-/* Tab/panel entrance - things rise in once. */
+/* Tab and panel entrance. */
 @keyframes pkUp {
   from { opacity: 0; transform: translateY(10px); }
   to   { opacity: 1; transform: none; }
 }
-.pk-up { animation: pkUp 0.55s var(--ease-out) both; }
+/* backwards, not both: a transform left in place would make this element the
+   containing block of fixed overlays inside it. */
+.pk-up { animation: pkUp 0.55s var(--ease-out) backwards; }
 @media (prefers-reduced-motion: reduce) {
   .pk-up { animation: none; }
 }
@@ -399,14 +236,12 @@ html.theme-changing [data-theme-fade] *::after {
   from { opacity: 0; transform: translateY(8px) scale(0.98); }
   to   { opacity: 1; transform: none; }
 }
-.pk-pop { animation: pkPop 0.22s var(--ease-out) both; }
+.pk-pop { animation: pkPop 0.22s var(--ease-out) backwards; }
 @media (prefers-reduced-motion: reduce) {
   .pk-pop { animation: none; }
 }
 
-/* Used by hydration placeholder tiles while reference image bytes
-   are streaming in, sweeps a faint highlight across the tile so
-   it reads as "loading" rather than "broken". */
+/* Placeholder tiles while reference images load. */
 @keyframes shimmer {
   0%   { background-position: 200% 0; }
   100% { background-position: -200% 0; }
@@ -418,35 +253,4 @@ html.theme-changing [data-theme-fade] *::after {
 }
 .indeterminate-bar {
   animation: indeterminate-slide 1.1s ease-in-out infinite;
-}
-
-/* Gentle pulsing ring around the BoxEditor's "click to detect"
-   affordance, in the accent at low opacity. Static soft ring when the
-   user prefers reduced motion. */
-@keyframes demo-detect-glow-pulse {
-  0%, 100% { box-shadow: 0 0 8px 1px var(--accent-dim); }
-  50%      { box-shadow: 0 0 16px 4px var(--accent-dim); }
-}
-.demo-detect-glow {
-  animation: demo-detect-glow-pulse 2.2s ease-in-out infinite;
-}
-@media (prefers-reduced-motion: reduce) {
-  .demo-detect-glow {
-    animation: none;
-    box-shadow: 0 0 12px 2px var(--accent-dim);
-  }
-}
-
-/* Sweep used by the auto-label progress bar, a soft highlight that
-   slides across the bar, signalling activity even when the percentage
-   isn't moving for a moment. Confined to a small element with
-   `will-change` so the GPU can promote it to its own layer without
-   invalidating the parent. */
-@keyframes progress-sweep {
-  0%   { transform: translateX(-100%); }
-  100% { transform: translateX(150%); }
-}
-.progress-sweep {
-  animation: progress-sweep 2.4s linear infinite;
-  will-change: transform;
 }

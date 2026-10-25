@@ -1,0 +1,25 @@
+# Top-level packages of the desktop app's Python runtime. The locks the
+# installers use are generated from this file and requirements-torch.in
+# with uv; each starts with the command that made it.
+#   requirements-win.txt             Windows, everything but PyTorch
+#   requirements-win-torch-cuda.txt  Windows PyTorch, CUDA 12.6
+#   requirements-win-torch-cpu.txt   Windows PyTorch, CPU
+#   requirements-mac.txt             macOS on Apple Silicon, generated with
+#                                    MACOSX_DEPLOYMENT_TARGET=14.0
+-r requirements-torch.in
+transformers==5.15.0
+accelerate==1.14.0
+huggingface_hub==1.27.0
+fastapi==0.141.1
+uvicorn==0.52.2
+python-multipart==0.0.32
+python-dotenv==1.2.2
+numpy==2.4.4
+Pillow==12.2.0
+pi-heif==1.4.0
+opencv-python-headless==5.0.0.93
+blurhash==1.1.5
+orjson==3.11.9
+psutil==7.2.2
+onnx==1.22.0
+onnxruntime==1.29.0

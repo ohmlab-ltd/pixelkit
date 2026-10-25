@@ -12,23 +12,17 @@ type Props = {
   imageHeight: number;
   /** Polygons to seed the canvas with, usually the box's existing mask. */
   initialPolygons: number[][][];
-  /** Where the brush is constrained, only pixels inside this clip-box can
-      be painted, so a stroke can't escape the bounding box that owns the
-      mask. Coordinates are image-space. */
+  /** Image-space box that confines the brush. */
   clip?: { x0: number; y0: number; x1: number; y1: number } | null;
   brushSize: number;
-  /** Mouse wheel over the canvas adjusts brush size, needs to flow back
-      out so the toolbar slider stays in sync. */
+  /** Receives wheel resizes, so the toolbar slider stays in sync. */
   setBrushSize?: (n: number) => void;
   mode: PaintMode;
   onSave: (polygons: number[][][]) => void;
   onCancel: () => void;
 };
 
-/** Drop-in painter that sits on top of the BoxEditor canvas. Owns its own
-    <canvas> and keeps the raster in-state until the user commits, the
-    extracted polygons are only synthesised on save, so we don't pay marching-
-    squares cost on every brush stroke. */
+/** Mask painter over the BoxEditor canvas. Polygons are extracted on commit. */
 export const MaskPainter = forwardRef<MaskPainterHandle, Props>(function MaskPainter({
   imageUrl,
   imageWidth,
@@ -47,14 +41,9 @@ export const MaskPainter = forwardRef<MaskPainterHandle, Props>(function MaskPai
   const lastPosRef = useRef<{ x: number; y: number } | null>(null);
   const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
 
-  // Bright cyan for the in-progress mask, chosen because it survives on
-  // grass, sky, road, skin, etc. The CSS `filter` below stamps a crisp
-  // white outline around it so the painted edge is unambiguous.
   const PAINT_COLOR = "rgba(34, 211, 238, 1)"; // tailwind cyan-400
 
-  // Seed the canvas with the existing polygons exactly once. We deliberately
-  // don't react to `initialPolygons` changes, the parent passes a snapshot
-  // taken when paint mode opened; subsequent edits live in the canvas.
+  // Seeds once: initialPolygons is a snapshot from when painting began.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -155,9 +144,8 @@ export const MaskPainter = forwardRef<MaskPainterHandle, Props>(function MaskPai
 
   useImperativeHandle(ref, () => ({ commit }));
 
-  // Wheel resizes the brush. React's onWheel attaches as passive so
-  // preventDefault is a no-op there, bind manually with passive: false.
-  // brushSize is read via a ref so the listener stays stable.
+  // Wheel resizes the brush. Bound with passive: false, as React's onWheel
+  // is passive and cannot preventDefault.
   const sizeRef = useRef(brushSize);
   sizeRef.current = brushSize;
   useEffect(() => {
@@ -165,7 +153,7 @@ export const MaskPainter = forwardRef<MaskPainterHandle, Props>(function MaskPai
     if (!wrap || !setBrushSize) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      // ~5% of the current size per notch, clamped to the slider range.
+      // 10% of the current size per notch, within 4-200.
       const step = Math.max(1, Math.round(sizeRef.current * 0.1));
       const delta = e.deltaY < 0 ? step : -step;
       const next = Math.max(4, Math.min(200, sizeRef.current + delta));
@@ -175,11 +163,8 @@ export const MaskPainter = forwardRef<MaskPainterHandle, Props>(function MaskPai
     return () => wrap.removeEventListener("wheel", onWheel);
   }, [setBrushSize]);
 
-  // Save with Enter, cancel with Escape, matches the rename picker's chord.
-  // Bound once, so it calls the latest commit/cancel through refs: the
-  // first render's copies saved the boxes as they were when painting began.
-  // Capture phase and consumed, with the arrows too: the viewer behind
-  // must not close or change image, which discarded the paint.
+  // Enter saves, Escape cancels. Captured, with the arrows, so the viewer
+  // behind does not close or change image.
   const commitRef = useRef(commit);
   commitRef.current = commit;
   const onCancelRef = useRef(onCancel);
@@ -202,9 +187,8 @@ export const MaskPainter = forwardRef<MaskPainterHandle, Props>(function MaskPai
     return () => window.removeEventListener("keydown", onKey, true);
   }, []);
 
-  // The wrapper sits in the same coordinate space as the BoxEditor SVG
-  // (absolute inset-0 inside the image-aspect div). The canvas paints at
-  // image-pixel resolution; CSS scales it to the displayed size.
+  // Shares the BoxEditor SVG's coordinate space. The canvas is at image
+  // resolution and CSS scales it.
   return (
     <div
       ref={wrapRef}
@@ -227,9 +211,7 @@ export const MaskPainter = forwardRef<MaskPainterHandle, Props>(function MaskPai
         className="absolute inset-0 w-full h-full pointer-events-none"
         style={{
           opacity: 0.7,
-          // 4-direction drop-shadow trick: stamps the canvas alpha 1px in
-          // each axis to draw a crisp 1px white outline around the painted
-          // region, regardless of background colour.
+          // Four 1px drop-shadows draw a white outline around the paint.
           filter:
             "drop-shadow(1px 0 0 white) drop-shadow(-1px 0 0 white) drop-shadow(0 1px 0 white) drop-shadow(0 -1px 0 white)",
         }}
@@ -246,9 +228,6 @@ export const MaskPainter = forwardRef<MaskPainterHandle, Props>(function MaskPai
             r={brushSize / 2}
             fill="none"
             stroke={mode === "eraser" ? "rgba(248,113,113,0.95)" : "rgb(var(--foreground-rgb) / 0.95)"}
-            // non-scaling-stroke keeps the brush outline a constant ~1.5px on
-            // screen instead of thickening with zoom (the ring radius still
-            // scales, only the outline weight stays fixed).
             strokeWidth={1.5}
             vectorEffect="non-scaling-stroke"
           />
@@ -258,10 +237,7 @@ export const MaskPainter = forwardRef<MaskPainterHandle, Props>(function MaskPai
   );
 });
 
-/** Marching-squares contour extraction. Reads the canvas alpha channel,
-    emits a flat list of polygons that approximate every connected blob.
-    Saddle cases are resolved consistently (always pick the connection that
-    keeps each loop closed). */
+/** Marching-squares outlines of the canvas pixels with alpha above threshold. */
 export function canvasToPolygons(canvas: HTMLCanvasElement, threshold = 64): number[][][] {
   const W = canvas.width;
   const H = canvas.height;
@@ -271,13 +247,7 @@ export function canvasToPolygons(canvas: HTMLCanvasElement, threshold = 64): num
   const inside = new Uint8Array(W * H);
   for (let i = 0; i < W * H; i++) inside[i] = data[i * 4 + 3] > threshold ? 1 : 0;
 
-  // Fill enclosed holes: flood from every canvas-edge pixel that's
-  // currently "outside", marking them as background. Anything still
-  // unflagged after the flood is enclosed by mask pixels, that's a
-  // hole. Flip those to "inside" so the marching-squares walk doesn't
-  // emit an inner contour and SVG even-odd fill doesn't render the
-  // segmentation as a donut. Stack-based DFS (push/pop) for O(N) on
-  // up to ~1M pixels without the array-shift cost of BFS.
+  // Fills enclosed holes, so no inner outline is emitted.
   const reached = new Uint8Array(W * H);
   const stack: number[] = [];
   const seedEdge = (x: number, y: number) => {
@@ -331,11 +301,8 @@ export function canvasToPolygons(canvas: HTMLCanvasElement, threshold = 64): num
     if (!inside[i] && !reached[i]) inside[i] = 1;
   }
 
-  // Edge midpoints in image coordinates, indexed clockwise from the top
-  // edge (0 top, 1 right, 2 bottom, 3 left). Sample (cx, cy) is the centre
-  // of pixel (cx, cy), at (cx + 0.5, cy + 0.5) in the image: without that
-  // half pixel every outline sat up-left of the paint, and each
-  // open-and-save grew the mask.
+  // Edge midpoints: 0 top, 1 right, 2 bottom, 3 left. Sample (cx, cy) is
+  // the centre of pixel (cx, cy), at (cx + 0.5, cy + 0.5) in the image.
   const edge = (cx: number, cy: number, e: number): [number, number] => {
     if (e === 0) return [cx + 1, cy + 0.5];
     if (e === 1) return [cx + 1.5, cy + 1];
@@ -343,29 +310,27 @@ export function canvasToPolygons(canvas: HTMLCanvasElement, threshold = 64): num
     return [cx + 0.5, cy + 1]; // e === 3
   };
 
-  // For each of the 16 marching-squares codes, list the edge pairs that
-  // form line segments (each pair = one segment).
+  // Edge pairs per marching-squares code, one segment per pair.
   const SEGS: number[][][] = [
     [], // 0
     [[3, 0]], // 1: TL only
     [[0, 1]], // 2: TR only
     [[3, 1]], // 3: TL+TR
     [[1, 2]], // 4: BR only
-    [[3, 0], [1, 2]], // 5: saddle (TL+BR)
+    [[3, 0], [1, 2]], // 5: saddle, TL+BR
     [[0, 2]], // 6: TR+BR
-    [[3, 2]], // 7: !BL
+    [[3, 2]], // 7: all but BL
     [[2, 3]], // 8: BL only
     [[0, 2]], // 9: TL+BL
-    [[0, 1], [2, 3]], // 10: saddle (TR+BL)
-    [[1, 2]], // 11: !BR
+    [[0, 1], [2, 3]], // 10: saddle, TR+BL
+    [[1, 2]], // 11: all but BR
     [[1, 3]], // 12: BL+BR
-    [[0, 1]], // 13: !TR
-    [[3, 0]], // 14: !TL
+    [[0, 1]], // 13: all but TR
+    [[3, 0]], // 14: all but TL
     [], // 15: all in
   ];
 
-  // Map each segment endpoint to a list of segments touching it. Use string
-  // keys so floating-point endpoints (always halves) hash deterministically.
+  // Endpoint -> neighbours. Endpoints are halves, so string keys are exact.
   const key = (p: [number, number]) => `${p[0]},${p[1]}`;
   const adj = new Map<string, [number, number][]>();
   const addSeg = (a: [number, number], b: [number, number]) => {
@@ -377,10 +342,7 @@ export function canvasToPolygons(canvas: HTMLCanvasElement, threshold = 64): num
     adj.get(kb)!.push(a);
   };
 
-  // Walk one extra cell past each edge with virtual "outside" corners so
-  // mask pixels touching the canvas boundary still emit edge segments.
-  // Without this, anything in the rightmost column or bottom row gets
-  // silently clipped off when we extract polygons.
+  // Runs one cell past each edge, so paint at the border is outlined too.
   const cell = (px: number, py: number): number =>
     px < 0 || py < 0 || px >= W || py >= H ? 0 : inside[py * W + px];
   const clamp01 = (n: number, max: number) => Math.max(0, Math.min(max, n));
@@ -402,8 +364,7 @@ export function canvasToPolygons(canvas: HTMLCanvasElement, threshold = 64): num
     }
   }
 
-  // Walk the adjacency map to assemble closed polygons. Pop endpoints as we
-  // visit them so each segment is consumed once.
+  // Joins segments into closed polygons, using each segment once.
   const polygons: number[][][] = [];
   while (adj.size > 0) {
     const startKey = adj.keys().next().value!;
@@ -424,7 +385,7 @@ export function canvasToPolygons(canvas: HTMLCanvasElement, threshold = 64): num
         break;
       }
       const next = neighbours.pop()!;
-      // Mirror-pop on the neighbour side so the segment is fully consumed.
+      // Removes the segment from the neighbour's list too.
       const nextKey = key(next);
       const nextNeighbours = adj.get(nextKey);
       if (nextNeighbours) {
@@ -446,9 +407,32 @@ export function canvasToPolygons(canvas: HTMLCanvasElement, threshold = 64): num
   return polygons;
 }
 
-/** Douglas-Peucker simplification. Pixel-aligned marching-squares output is
-    visually noisy, this brings the vertex count down ~10x without losing
-    obvious detail. */
+// simplify() and sqSegDist() are adapted from simplify-js,
+// https://github.com/mourner/simplify-js, under its licence:
+//
+// Copyright (c) 2017, Vladimir Agafonkin
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without modification, are
+// permitted provided that the following conditions are met:
+//
+//    1. Redistributions of source code must retain the above copyright notice, this list of
+//       conditions and the following disclaimer.
+//
+//    2. Redistributions in binary form must reproduce the above copyright notice, this list
+//       of conditions and the following disclaimer in the documentation and/or other materials
+//       provided with the distribution.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY
+// EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+// COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+// EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR
+// TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+// SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/** Douglas-Peucker simplification. */
 function simplify(points: number[][], tolerance: number): number[][] {
   if (points.length < 3) return points;
   const sqTol = tolerance * tolerance;

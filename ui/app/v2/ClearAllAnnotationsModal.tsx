@@ -1,8 +1,6 @@
 "use client";
 
-// Type-to-confirm modal for wiping every detection + edited box off
-// every image in the project. Project-level labels (tags / colours)
-// are preserved, only the per-image annotation data is reset.
+// Type-to-confirm modal that clears every image's annotations; the labels stay.
 
 import { useEffect, useRef, useState } from "react";
 
@@ -60,8 +58,8 @@ export function ClearAllAnnotationsModal({
         <p className="mt-3 text-sm text-foreground/65 leading-relaxed">
           This permanently removes every detection and edited box from{" "}
           <span className="font-medium text-[var(--foreground)]">every image</span>{" "}
-          in this project. Labels themselves stay, you can re-label without
-          reconfiguring. This cannot be undone.
+          in this dataset. The labels stay, so you can label again without
+          setting them up. This cannot be undone.
         </p>
         <p className="mt-4 text-[12px] text-foreground/55">
           Type{" "}

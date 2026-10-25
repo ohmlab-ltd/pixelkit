@@ -1,52 +1,24 @@
-"""FastAPI server: named-project pipeline backed by manifest.json.
+"""The PixelKit engine: a FastAPI app over the workspace's datasets.
 
 Run:
-    conda activate groundingdino
     python gd/server.py
-
-Project layout:
-    projects/<name>/
-        images/         input images
-        outputs/        annotated jpgs (server-rendered for first pass)
-        manifest.json   {tags, thresholds, results, verdicts, editedBoxes, ...}
-
-Endpoints:
-    GET    /api/health
-    GET    /api/projects                       list summaries
-    POST   /api/projects        body: {name}   create empty project
-    GET    /api/projects/{project_id}                full manifest
-    PUT    /api/projects/{project_id}                merge fields into manifest
-    DELETE /api/projects/{project_id}                rm -rf project
-    POST   /api/projects/{project_id}/run            multipart run (clears prior results)
-    GET    /api/projects/{project_id}/events         SSE progress
-    GET    /api/projects/{project_id}/originals/{file}
-    GET    /api/projects/{project_id}/files/{file}
 """
 import asyncio
 import hashlib
-import hmac
 import io
 import json
 import os
 import sys
 import uuid as _uuid
 
-# Windows consoles and pipes default to the legacy codepage (cp1252),
-# where printing any character outside it (≥, ², →) raises
-# UnicodeEncodeError inside whatever was logging - which killed whole
-# labelling jobs. Force UTF-8 with replacement so a log line can never
-# take down the work it was narrating. Done first, before any print.
+# UTF-8 with replacement, so a non-cp1252 character in a log line cannot
+# raise UnicodeEncodeError on a Windows console. Runs before any print.
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
-        pass  # non-reconfigurable stream (embedded/frozen) - fine
+        pass
 
-# orjson is 3-5× faster than the stdlib json on both parse and dump
-# for the large nested manifests this server reads and the large
-# annotations payloads it returns. Falls back to stdlib if the
-# package isn't installed so the server still boots in environments
-# that haven't picked up the new dependency yet.
 try:
     import orjson as _orjson
 except Exception:
@@ -58,42 +30,26 @@ def _json_loads(s: str | bytes) -> object:
         return _orjson.loads(s.encode() if isinstance(s, str) else s)
     return json.loads(s if isinstance(s, str) else s.decode())
 
-# Load backend/.env (one dir up from gd/) so R2_*, FRONTEND_ORIGINS, etc. work
-# without exporting in every terminal. Done before any os.getenv reads below.
+# Loads the .env one level above gd/, before any os.getenv read.
 from dotenv import load_dotenv  # noqa: E402
 from pathlib import Path as _Path  # noqa: E402
 load_dotenv(_Path(__file__).resolve().parent.parent / ".env", override=True)
 
-# CUDA allocator: switch to expandable segments BEFORE `import torch`.
-# This is the single biggest fix for the long-run-slowdown we kept
-# hitting - Qwen-VL allocates differently shaped tensors per image
-# crop, and the default caching allocator fragments around those into
-# pinned chunks it can't reuse. With expandable segments, those chunks
-# grow instead of getting orphaned, so VRAM stays usable across many
-# images without periodic empty_cache thrashing.
-# https://docs.pytorch.org/docs/stable/notes/cuda.html#environment-variables
+# Set before torch is imported. Expandable segments keep the CUDA allocator
+# from fragmenting VRAM; MPS ops without a kernel fall back to the CPU.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-# Apple Metal: a handful of ops in the SAM3/DINOv2 graphs may lack MPS
-# kernels depending on the torch release; per-op CPU fallback keeps them
-# working (slower for that op only) instead of hard-erroring. Must be set
-# before torch initialises, same as the CUDA allocator config above.
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import re
 import secrets
 
 
-# Single source of truth for the shipped engine version. Keep in sync with
-# engine/pyproject.toml and desktop/package.json (the release workflow
-# checks all three match the tag).
-PK_VERSION = "0.3.0"
+# Must match engine/pyproject.toml, desktop/package.json and the release tag.
+PK_VERSION = "0.4.0"
 
 
 def _configured_device() -> str:
-    """The user's explicit device choice, or "" for auto-detect.
-
-    PK_DEVICE env (power users, tests) beats the app-config "device" key
-    (written by the Settings UI picker via POST /api/settings/device)."""
+    """Configured device, or "" for auto-detect. PK_DEVICE overrides the config key."""
     env = (os.environ.get("PK_DEVICE") or "").strip().lower()
     if env:
         return env
@@ -108,18 +64,11 @@ def _configured_device() -> str:
 
 
 def _resolve_device() -> str:
-    """cuda > mps > cpu, with _configured_device() as an explicit override.
-
-    An unavailable override falls back down the chain with a warning
-    rather than failing boot - a saved config from another machine
-    shouldn't brick the app."""
+    """_configured_device() when available, else cuda > mps > cpu."""
     want = _configured_device()
     has_mps = getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
     if want:
         if re.fullmatch(r"cuda(:\d+)?", want) and torch.cuda.is_available():
-            # Validate the ordinal: a config saved on a 2-GPU machine
-            # ("cuda:1") moved to a 1-GPU one must fall back, not boot
-            # into invalid-device-ordinal errors on every tensor op.
             idx = int(want.split(":")[1]) if ":" in want else 0
             if idx < torch.cuda.device_count():
                 return want
@@ -127,159 +76,100 @@ def _resolve_device() -> str:
             return "mps"
         elif want == "cpu":
             return "cpu"
-        print(f"[server] device {want!r} not available on this machine - auto-detecting.")
+        print(f"[server] device {want!r} not available on this machine; auto-detecting.")
     if torch.cuda.is_available():
         return "cuda"
     if has_mps:
         return "mps"
     return "cpu"
 import shutil
-import tempfile
 import time
 import zipfile
+from collections import OrderedDict
+from collections.abc import Callable
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 import uvicorn
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, ORJSONResponse, RedirectResponse, Response
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import FileResponse, Response
 from PIL import Image as PILImage, ImageOps
 from xml.sax.saxutils import escape as _xml_escape
-# Hard ceiling on the pixel count Pillow will accept for any image
-# this process decodes. Without it a 1 KB compressed PNG declaring
-# 50 000 × 50 000 dimensions (a "decompression bomb") would expand to
-# ~7.5 GB of pixel buffer and OOM the worker. Pillow defaults to a
-# warning at ~89 MP; bumping that to a hard cap of 100 MP rejects
-# anything larger with PIL.Image.DecompressionBombError so the
-# request fails cleanly instead of taking the process with it.
+# Larger images raise DecompressionBombError.
 PILImage.MAX_IMAGE_PIXELS = 100_000_000
 
-# Register HEIF/AVIF decoders if the optional plugin is installed, so
-# Pillow can decode .heic/.heif/.avif uploads (iPhone photos, modern
-# web image formats). Pillow 11+ has native AVIF support; pillow-heif
-# covers older Pillow + HEIC. Best-effort: a missing package is a
-# no-op - the import path then rejects undecodable formats with a clean
-# 400 rather than storing a file nothing downstream can read.
+# HEIC/HEIF decoding when the optional pi-heif package is installed. Pillow
+# decodes AVIF itself.
 try:
-    import pillow_heif as _pillow_heif  # type: ignore
-    _pillow_heif.register_heif_opener()
-    try:
-        _pillow_heif.register_avif_opener()
-    except Exception:
-        pass
-    print("[server] pillow-heif registered (HEIC/AVIF decode enabled)")
+    import pi_heif as _pi_heif  # type: ignore
+    _pi_heif.register_heif_opener()
+    print("[server] pi-heif registered (HEIC decode enabled)")
 except Exception:
     pass
 
-# Per-file size cap. Single biggest legitimate image we've seen is
-# ~30 MB (raw 4K JPEG); 100 MB leaves a 3x headroom while keeping a
-# single attacker from posting a 5 GB body and filling pending_dir
-# (or the request memory) before NSFW screening even runs.
 MAX_UPLOAD_BYTES_PER_FILE = 100 * 1024 * 1024
-# Cap on items per batch-upload request. A free-tier user could
-# otherwise spray 10 000 tiny images in one POST and exhaust the
-# label queue + NSFW GPU long before the per-month quota engages.
 MAX_FILES_PER_UPLOAD_BATCH = 100
 
 
-def _enforce_upload_caps(blobs: list[tuple[str, bytes, str | None]]) -> None:
-    """Raise 413 if any single file or the batch as a whole exceeds
-    the configured caps. Called after the request body has been
-    read in fully (FastAPI streams UploadFile, so we know the actual
-    size only after `.read()`)."""
-    if len(blobs) > MAX_FILES_PER_UPLOAD_BATCH:
-        raise HTTPException(
-            413,
-            f"too many files in one upload ({len(blobs)} > {MAX_FILES_PER_UPLOAD_BATCH})",
-        )
-    for fn, data, _ in blobs:
-        if len(data) > MAX_UPLOAD_BYTES_PER_FILE:
-            raise HTTPException(
-                413,
-                f"file too large: {fn} is {len(data)} bytes "
-                f"(max {MAX_UPLOAD_BYTES_PER_FILE})",
-            )
+class FastJSONResponse(Response):
+    """JSON through orjson, for the large payloads; numpy values and
+    non-string keys as FastAPI's deprecated ORJSONResponse wrote them."""
+
+    media_type = "application/json"
+
+    def render(self, content) -> bytes:
+        if _orjson is None:
+            return json.dumps(content, default=str).encode()
+        return _orjson.dumps(content, option=_orjson.OPT_NON_STR_KEYS | _orjson.OPT_SERIALIZE_NUMPY)
+
+
+async def _read_upload(upload: UploadFile, what: str = "image") -> bytes:
+    """An upload's bytes; 413 above MAX_UPLOAD_BYTES_PER_FILE, refused before
+    a larger file is read into memory."""
+    size = getattr(upload, "size", None)
+    if size is not None and size > MAX_UPLOAD_BYTES_PER_FILE:
+        raise HTTPException(413, f"{what} too large ({size} bytes, max {MAX_UPLOAD_BYTES_PER_FILE})")
+    raw = await upload.read(MAX_UPLOAD_BYTES_PER_FILE + 1)
+    if len(raw) > MAX_UPLOAD_BYTES_PER_FILE:
+        raise HTTPException(413, f"{what} too large (max {MAX_UPLOAD_BYTES_PER_FILE} bytes)")
+    return raw
+
+
+# Formats a browser shows, stored as uploaded under their own extension.
+_SHOWN_FORMATS = {"JPEG": ".jpg", "MPO": ".jpg", "PNG": ".png", "WEBP": ".webp",
+                  "GIF": ".gif", "BMP": ".bmp", "AVIF": ".avif"}
+
+
+def _stored_image(raw: bytes) -> tuple[bytes, str]:
+    """The bytes and extension to store for an uploaded image: a format a
+    browser shows as uploaded, any other as an upright RGB JPEG. 400 when the
+    bytes are not an image."""
+    try:
+        with PILImage.open(io.BytesIO(raw)) as im:
+            fmt = (im.format or "").upper()
+            if fmt in _SHOWN_FORMATS:
+                im.verify()
+                return raw, _SHOWN_FORMATS[fmt]
+            buf = io.BytesIO()
+            _to_rgb(ImageOps.exif_transpose(im)).save(buf, "JPEG", quality=90)
+            return buf.getvalue(), ".jpg"
+    except Exception as e:
+        raise HTTPException(400, f"cannot decode image: {e}")
 from pydantic import BaseModel
-from sse_starlette.sse import EventSourceResponse
 
 from jobs import JobManager
-from storage import LocalStorage, from_env as _storage_from_env
-from storage import R2Storage  # alias of LocalStorage; legacy name at ~20 call sites
 import audit
+import aug_source
 import store
 import models as models_mgr
-from auth import (
-    current_user,
-    resolve_terminal_token,
-    require_user_match,
-    require_project_owner as _require_project_owner_factory,
-    require_project_read_access as _require_project_read_access_factory,
-    require_project_manage as _require_project_manage_factory,
-    require_dataset_creator as _require_dataset_creator_factory,
-    can_read_project_request,
-    request_username,
-)
+import workspace
 import containers
-
-NSFW_THRESHOLD = 0.3  # referenced by dead guarded branches; gate itself removed
-EXPOSED_CLASSES: tuple = ()  # dead-branch stub (NSFW gate removed)
-
-
-def nsfw_score(*_a, **_k):  # dead-branch stub - state["nsfw"] is always None
-    return 0.0, ""
-
-
-def segment_point(*_a, **_k):  # dead-branch stub - SAM2 removed, guards keep these unreached
-    return None
-
-
-def segment_boxes(*_a, **_k):  # dead-branch stub - SAM2 removed
-    return []
-
-
-
-def _enforce_nsfw_or_451(
-    raw: bytes,
-    *,
-    label: str = "upload",
-    project: str = "",
-    file: str = "",
-    user: str = "",
-) -> None:
-    """NSFW gate removed in the portable build - a local user labelling
-    their own images doesn't get content-policed."""
-    return
-
-
-# Local filesystem storage rooted in the workspace. The `R2` name survives
-# because ~25 call sites read it; it now always resolves.
-R2: LocalStorage = _storage_from_env()
-
-
-def r2_required() -> LocalStorage:
-    return R2
-
-
-def _redirect_to_r2(key: str) -> FileResponse:
-    """SaaS build 302'd to a presigned R2 URL. Locally we serve the file
-    directly. Name kept - many call sites."""
-    try:
-        path = R2.resolve(key)
-    except FileNotFoundError:
-        raise HTTPException(404, "not found")
-    if not path.is_file():
-        raise HTTPException(404, "not found")
-    return FileResponse(path, headers={"Cache-Control": "public, max-age=900"})
-
-
-def _invalidate_url_cache(key: str) -> None:
-    """Presigned-URL cache is gone; kept as a no-op for its call sites."""
-    return
 
 
 # Job/activity events persist to a local SQLite in the workspace.
@@ -287,21 +177,15 @@ def add_event(kind: str, **data) -> None:
     try:
         audit.add_event(kind, **data)
     except Exception as e:
-        # Audit logging never breaks the request path; just print.
         print(f"[audit] add_event({kind}) failed: {e}")
 
 
 import threading as _threading  # noqa: E402
 
 
-def _pil_from_r2(project: str, filename: str) -> PILImage.Image:
-    """Load an image from workspace storage, apply EXIF orientation, return RGB."""
-    return _open_upright(r2_required().get_bytes(LocalStorage.image_key(project, filename)))
-
-
 def _to_rgb(im: PILImage.Image) -> PILImage.Image:
     """RGB for any mode. 16- and 32-bit greyscale is scaled to 8 bits
-    first: convert() clamps it, so a mid-grey 16-bit PNG came out white."""
+    first, since convert() clamps it."""
     if im.mode in ("I;16", "I;16B", "I;16L", "I;16N", "I"):
         a = np.asarray(im, dtype=np.float64)
         top = 65535.0 if (im.mode != "I" or a.max() > 255) else 255.0
@@ -310,60 +194,38 @@ def _to_rgb(im: PILImage.Image) -> PILImage.Image:
 
 
 def _check_jpeg_whole(raw: bytes) -> None:
-    """Raise when a JPEG stops early. Upload keeps JPEG bytes as they are
-    and read only the header, so a truncated file was stored and failed
-    every later decode. Decoding at 1/8 scale (JPEG's DCT scaling) still
-    reads every scan, for a fraction of a full decode."""
+    """Raise when a JPEG stops early. The 1/8-scale draft decode still reads every scan."""
     with PILImage.open(io.BytesIO(raw)) as im:
         im.draft("RGB", (max(1, im.width // 8), max(1, im.height // 8)))
         im.load()
 
 
 def _open_upright(src: "Path | str | bytes") -> PILImage.Image:
-    """Decode a picture as it is shown: EXIF orientation applied, RGB.
-    Uploads keep their original bytes, while the manifest's sizes, the
-    editor's boxes, the trainer and the exports all use the upright
-    picture, so every decode whose pixels meet a box goes through here."""
+    """Decode with EXIF orientation applied, as RGB. Boxes and stored sizes
+    refer to this upright picture."""
     with PILImage.open(io.BytesIO(src) if isinstance(src, (bytes, bytearray)) else src) as im:
         return _to_rgb(ImageOps.exif_transpose(im))
 
 
 def _upright_size(im: PILImage.Image) -> tuple[int, int]:
-    """(width, height) as shown, without decoding: EXIF orientations 5-8
-    turn the picture a quarter and swap them."""
+    """(width, height) after EXIF orientation, without decoding."""
     try:
         orientation = im.getexif().get(0x0112, 1)
     except Exception:
         orientation = 1
     return (im.height, im.width) if orientation in (5, 6, 7, 8) else (im.width, im.height)
 
-import workspace  # noqa: E402
 
-ROOT = workspace.dir()
-PROJECTS_DIR = workspace.projects_dir()
-
-NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
-RESERVED = {"_jobs"}
+state: dict[str, Any] = {"device": "cpu", "jobs": JobManager()}
 
 
-state: dict[str, Any] = {"model": None, "segmenter": None, "device": "cpu", "jobs": JobManager()}
-
-
-# Idle gate for fire-and-forget background work (per-upload whole-image
-# embeddings). These embeddings feed ONLY the stats card (2-D variation
-# plot, near-duplicate flag, one health factor); labelling never reads
-# them. A bulk import queues thousands of them on the GPU, and if the
-# user then starts labelling, that backlog fights the label job's SAM3
-# calls for the GPU and makes labelling crawl. We pause the backlog
-# while any GPU job (label/augment) runs so the job gets the full GPU;
-# the embeddings drain afterwards when the GPU is idle. The event is
-# created at startup (binds to the loop); helpers no-op until then.
+# Running GPU jobs. Background embeddings wait on state["gpu_idle"], which
+# is clear while this is nonzero and is created at startup.
 _GPU_JOB_DEPTH = 0
 
 
 def _pause_bg_embeddings() -> None:
-    """Called when a GPU job starts. Clears the idle event so queued
-    background embeddings wait instead of starving the job."""
+    """Called when a GPU job starts."""
     global _GPU_JOB_DEPTH
     _GPU_JOB_DEPTH += 1
     ev = state.get("gpu_idle")
@@ -372,8 +234,7 @@ def _pause_bg_embeddings() -> None:
 
 
 def _resume_bg_embeddings() -> None:
-    """Called when a GPU job ends. Re-arms the idle event once the last
-    concurrent job has finished so deferred embeddings can drain."""
+    """Called when a GPU job ends."""
     global _GPU_JOB_DEPTH
     _GPU_JOB_DEPTH = max(0, _GPU_JOB_DEPTH - 1)
     if _GPU_JOB_DEPTH == 0:
@@ -383,9 +244,7 @@ def _resume_bg_embeddings() -> None:
 
 
 def _gpu_job_guarded(runner):
-    """Wrap a JobManager runner so background embeddings pause for its
-    whole lifetime (even on early return / exception). Used for GPU job
-    kinds that don't already pause inline."""
+    """Wrap a JobManager runner so background embeddings pause while it runs."""
     async def _wrapped(job, emit, cancel_event):
         _pause_bg_embeddings()
         try:
@@ -396,9 +255,8 @@ def _gpu_job_guarded(runner):
 
 
 def _embed_stored_image(project_id: str, import_id: str, path: "Path") -> bool:
-    """Read the stored picture only when its turn comes: queued with its
-    bytes, a bulk import waiting behind a long labelling run pinned every
-    upload in memory."""
+    """Read the stored picture only when its turn comes, so queued uploads
+    are not held in memory."""
     try:
         data = path.read_bytes()
     except OSError:
@@ -407,16 +265,8 @@ def _embed_stored_image(project_id: str, import_id: str, path: "Path") -> bool:
 
 
 async def _run_bg_embedding(project_id: str, import_id: str, path: "Path") -> None:
-    """Compute + store the whole-image DINOv2 embedding for the stats
-    card (variation plot / near-dup / health), OFF the upload hot path.
-
-    The embed_sem caps how many embeddings get past the idle gate at
-    once; the idle gate (cleared while a label/augment job runs) then
-    pauses them. Together: a bulk import's thousands of embed tasks can
-    NEVER pile onto the GPU lock and starve labelling: at most `embed_sem`
-    are ever in flight, and those pause the moment a job starts. They
-    drain during idle time. Labelling never reads these, so deferring them
-    has no effect on label quality; the stats card just populates lazily."""
+    """Compute and store the whole-image DINOv2 embedding for the dataset stats.
+    At most embed_sem run at once, and they wait while a GPU job runs."""
     try:
         loop = asyncio.get_running_loop()
         sem = state.get("embed_sem")
@@ -440,21 +290,15 @@ async def _run_bg_embedding(project_id: str, import_id: str, path: "Path") -> No
 
 
 def _job_to_audit(job) -> None:
-    """Persist a finished job to audit.db so the Terminal can show it after a
-    backend restart. Only terminal states are passed in (done/failed/cancelled).
-
-    NOTE: we use `job_kind` rather than `kind` for the audit blob field -
-    the row-level `kind` column is already "job" and a kwarg of `kind`
-    would clash with the first positional arg of `add_event`."""
+    """Record a finished job in the event log. The field is `job_kind` because
+    `kind` is add_event's first argument."""
     add_event(
         "job",
         id=job.id,
         job_kind=job.kind,
         project=job.project,
-        user=job.user,
         status=job.status,
         elapsed_s=round(job.elapsed_s, 2),
-        cost_pence=round(job.cost_pence, 5),
         n_images=job.n_images,
         error=job.error,
     )
@@ -463,91 +307,15 @@ def _job_to_audit(job) -> None:
 state["jobs"].on_finish = _job_to_audit
 
 
-def _load_vlm_into_state() -> None:
-    """Load Qwen 2.5-VL 3B (fp16) into VRAM, OR skip entirely when
-    a remote VLM worker is configured.
-
-    When `VLM_WORKER_URL` is set in the environment, `vlm_classify` in
-    `vlm_validate.py` routes calls over HTTP to that worker, so we
-    have no reason to keep the model resident here - that's ~3 GB of
-    VRAM freed on the main backend, which is the whole point of the
-    worker split (matters on 12 GB cards where the rest of the stack
-    barely fits).
-
-    We deliberately don't ping the worker here at startup: a transient
-    DNS / worker-restart blip during boot shouldn't keep the main
-    backend from coming up. The first real `/classify_box` call will
-    surface any worker problems via its own retry/log path.
-    """
-    worker_url = (os.environ.get("VLM_WORKER_URL") or "").strip()
-    if worker_url:
-        print(f"[server] VLM offloaded to worker at {worker_url} - local load skipped.")
-        state["vlm_model"] = None
-        state["vlm_processor"] = None
-        return
-
-    from vlm_validate import VLM_MODEL, load_vlm, set_vlm
-    print(f"[server] loading VLM {VLM_MODEL} (fp16)...")
-    model, processor = load_vlm(state["device"])
-    set_vlm(model, processor)
-    state["vlm_model"] = model
-    state["vlm_processor"] = processor
-    print(f"[server] VLM ready on {state['device']}.")
-
-
-# Master kill-switch for the Label Cascade pipeline (DINOv2/SigLIP
-# embeddings, /embeddings/* endpoints, post-auto-label scan,
-# relabel-driven refresh). When False, the model never loads, the
-# refresh / scan helpers no-op, and the endpoints return empty
-# payloads - so the frontend's modal never opens and the
-# infrastructure is dormant. Flip back to True to re-enable; all
-# the wiring stays in place.
-_EMBEDDINGS_ENABLED = False
-
-
-def _load_dinov2_into_state() -> None:
-    """Load the per-segmentation embedding model used by Label
-    Cascade. Currently SigLIP 2 base (~370 MB on disk; ~190 MB on
-    CUDA in fp16); override via the EMBED_MODEL env var. Cached to
-    disk on first run, resident in VRAM after."""
-    if not _EMBEDDINGS_ENABLED:
-        print("[server] Label Cascade embeddings disabled - skipping model load.")
-        return
-    try:
-        import embeddings as _emb
-        _emb.load_dinov2(state["device"])
-        _emb.warmup()
-    except Exception as e:
-        print(f"[server] embedding model load failed: {e} - Label Cascade disabled.")
-
-
 import heapq as _heapq_module
 
 
 class PriorityGPUGate:
-    """Priority-aware async lock for GPU access - drop-in replacement
-    for asyncio.Lock that wakes the highest-priority waiter first when
-    the lock releases.
-
-    Two priority levels:
-      P_INTERACTIVE = 0   user-facing clicks (segment_box,
-                          classify_box, click-to-detect, add-box).
-                          Always preempts background work.
-      P_JOB         = 10  background runners (augment_generate,
-                          label_charlie, image processing). Share
-                          the queue FIFO among themselves.
-
-    `async with state["gpu_lock"]:` defaults to P_JOB so every
-    existing call site still compiles + behaves the same. Interactive
-    endpoints opt in with `async with state["gpu_lock"].interactive():`.
-    """
+    """Async GPU lock that wakes the most urgent waiter first, FIFO within a
+    priority: P_INTERACTIVE for clicks via .interactive(), P_JOB for job
+    runners by default, P_BACKGROUND for fire-and-forget work via .background()."""
     P_INTERACTIVE = 0
     P_JOB = 10
-    # Lowest priority - fire-and-forget work the user isn't waiting on
-    # (per-upload whole-image embeddings, stats backfill). Yields the
-    # GPU to interactive clicks AND labelling jobs so a burst of
-    # background embeddings can never stall a click-to-detect or a
-    # labelling pass.
     P_BACKGROUND = 20
 
     def __init__(self) -> None:
@@ -556,10 +324,6 @@ class PriorityGPUGate:
         self._counter = 0
 
     async def _acquire(self, priority: int) -> None:
-        # Fast path: gate free AND we wouldn't be jumping a higher-
-        # priority queue. Note: with a healthy release loop the
-        # waiters list is empty whenever _free is True, but the
-        # extra check is cheap defence in depth.
         if self._free and (not self._waiters or priority <= self._waiters[0][0]):
             self._free = False
             return
@@ -570,26 +334,13 @@ class PriorityGPUGate:
         try:
             await fut
         except asyncio.CancelledError:
-            # Caller's request was cancelled while we were queued.
-            # Two cases:
-            #   • Future not yet set: nothing else has ownership;
-            #     just drop our heap entry so the next release
-            #     doesn't try to pop a stale slot. heapq doesn't
-            #     have a cheap "remove arbitrary" op, so we leave
-            #     the slot in place and rely on _release's "skip
-            #     done futures" loop to step past us.
-            #   • Future already set (we got the gate, now caller
-            #     cancels): we must release or the gate is stuck.
+            # Cancelled after being handed the gate: release it. A slot left
+            # in the heap is skipped by _release.
             if fut.done() and not fut.cancelled():
                 self._release()
             raise
 
     def _release(self) -> None:
-        # Pop heap until we find a live (non-cancelled, not-yet-
-        # set) waiter and transfer ownership to it. If we run out,
-        # mark the gate free. This loop is what keeps the gate from
-        # getting stuck behind a cancelled coroutine's stale heap
-        # slot.
         while self._waiters:
             _, _, fut = _heapq_module.heappop(self._waiters)
             if not fut.done():
@@ -598,22 +349,17 @@ class PriorityGPUGate:
         self._free = True
 
     def contended(self, priority: int = P_JOB) -> bool:
-        """True while work at `priority` or a more urgent one waits for
-        the gate. Safe from any thread (the heap is copied under the
-        GIL); a stale answer only moves a hand-over by one step."""
+        """True while work at `priority` or more urgent waits. Safe from any thread."""
         return any(p <= priority and not f.done() for p, _, f in list(self._waiters))
 
     async def hand_over(self, priority: int = P_JOB) -> None:
-        """For a holder that runs for minutes (training on the labelling
-        device): let whoever waits at `priority` or a more urgent one
-        use the card now, then queue to take the gate back."""
+        """For a long-running holder: let waiters at `priority` or more
+        urgent go first, then queue to take the gate back."""
         if not self.contended(priority):
             return
         self._release()
         await self._acquire(priority)
 
-    # Plain `async with gate:` → P_JOB. Keeps every existing
-    # `async with state["gpu_lock"]:` site working without changes.
     async def __aenter__(self) -> "PriorityGPUGate":
         await self._acquire(self.P_JOB)
         return self
@@ -631,7 +377,6 @@ class PriorityGPUGate:
 
     @asynccontextmanager
     async def interactive(self):
-        """Highest priority - click-to-detect, add-box, segment_box."""
         await self._acquire(self.P_INTERACTIVE)
         try:
             yield
@@ -640,8 +385,6 @@ class PriorityGPUGate:
 
     @asynccontextmanager
     async def job(self):
-        """Explicit P_JOB CM - same as `async with gate:`, just
-        spelled out so call sites can be explicit about intent."""
         await self._acquire(self.P_JOB)
         try:
             yield
@@ -650,8 +393,6 @@ class PriorityGPUGate:
 
     @asynccontextmanager
     async def background(self):
-        """Lowest priority - fire-and-forget embeddings / backfill.
-        Yields to interactive clicks and labelling jobs."""
         await self._acquire(self.P_BACKGROUND)
         try:
             yield
@@ -659,11 +400,8 @@ class PriorityGPUGate:
             self._release()
 
 
-# ── Shared model-load tasks ──────────────────────────────────────────────────
-# Used by both lifespan auto-load and the /api/models/{name}/load endpoints.
-# Serialized through state["model_load_lock"]: (a) transformers' lazy module
-# init is not thread-safe - two concurrent executor imports race into
-# spurious "cannot import name" failures; (b) concurrent loads spike VRAM.
+# Model loads for lifespan and /api/models/{name}/load, serialised by
+# state["model_load_lock"]: transformers' lazy imports are not thread-safe.
 
 async def _bg_load_dino() -> None:
     try:
@@ -688,56 +426,33 @@ async def _bg_load_charlie() -> None:
                     None, lambda: pipeline_charlie.load_sam3(state["device"]),
                 )
         state["charlie"] = pipeline_charlie
-        print("[server] pipeline_charlie ready (SAM3).")
+        print("[server] SAM 3 ready.")
     except Exception as e:
-        print(f"[server] pipeline_charlie load failed: {e} - /api/charlie/* will return 503.")
+        print(f"[server] SAM 3 failed to load: {e}")
         state["charlie"] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import neuron6_verify
+    neuron6_verify.allow_compilers()
     device = _resolve_device()
-    # Threads (crop-dataset resyncs) reach the per-dataset write locks
-    # through this loop.
+    # Crop-dataset resync threads reach the per-dataset write locks through this loop.
     state["loop"] = asyncio.get_running_loop()
 
-    # GPU serialization lock for V2 pipelines. Multiple concurrent
-    # /api/v2/references/process or /api/v2/imports/process requests
-    # used to all enter `loop.run_in_executor(None, ...)` at once and
-    # blow the 12 GB GPU's VRAM budget - each pipeline transiently
-    # needs ~2 GB on top of the warm models, so 4 parallel calls
-    # CUDA-OOM each other. Holding this lock across the executor
-    # call serialises GPU work without queuing on the event loop
-    # itself, so non-GPU endpoints stay responsive. Created here
-    # so it binds to the running loop.
+    # Serialises GPU work so concurrent pipelines cannot exhaust VRAM.
     state["gpu_lock"] = PriorityGPUGate()
-    # Idle gate for background embeddings (see _pause_bg_embeddings).
-    # Starts SET (idle) so embeddings run normally when no job is active.
+    # Set while no GPU job runs.
     _gpu_idle = asyncio.Event()
     _gpu_idle.set()
     state["gpu_idle"] = _gpu_idle
-    # Concurrency bound for background embeddings. A bulk import spawns
-    # one embed task per image; without this they'd ALL clear the idle
-    # gate at creation (idle during a pure import) and pile onto the GPU
-    # lock, so a later job couldn't hold them back. The semaphore caps
-    # how many are past the idle gate at once, so when a job starts the
-    # few in-flight finish and the rest block on the (now-cleared) idle
-    # gate instead of competing with the job.
+    # Background embeddings past the idle gate at once.
     state["embed_sem"] = asyncio.Semaphore(2)
 
     state["device"] = device
-    state["model"] = None       # GroundingDINO removed in the portable build
-    state["segmenter"] = None   # SAM2 removed - SAM3 covers interactive segmentation
-    state["nsfw"] = None        # NSFW gate removed
 
-    # Model loading policy: SAM3 + DINOv2. No VLM loads here: the VLM
-    # tiebreak runs only through a remote worker (VLM_WORKER_URL, see
-    # vlm_validate.py). Models load on cuda and mps. Plain CPU is
-    # too slow to be useful, so it loads models only when the user
-    # explicitly chose CPU (PK_DEVICE=cpu or the Settings device picker);
-    # otherwise a CPU-only machine boots with the ML endpoints on 503 and
-    # every dataset/annotation API fully live. PK_DISABLE_MODELS=1 forces
-    # that mode anywhere.
+    # SAM3 and DINOv2 load on cuda and mps, and on cpu only when chosen
+    # explicitly. Otherwise, or with PK_DISABLE_MODELS=1, the ML endpoints return 503.
     cpu_forced = _configured_device() == "cpu"
     models_disabled = (
         os.environ.get("PK_DISABLE_MODELS", "").lower() in ("1", "true", "yes", "on")
@@ -747,26 +462,26 @@ async def lifespan(app: FastAPI):
         print(
             f"[server] models disabled (device={device}"
             + (", PK_DISABLE_MODELS set" if os.environ.get("PK_DISABLE_MODELS") else "")
-            + ") - labelling endpoints 503; dataset/annotation APIs fully live."
+            + "): labelling is off, everything else works."
         )
     elif device == "cpu":
-        print("[server] device forced to CPU - models will load on CPU. Labelling will be very slow.")
+        print("[server] device set to CPU: models load on the CPU and labelling is very slow.")
 
 
-    # Model loading policy (portable): the model manager (gd/models.py)
-    # owns downloads; boot only auto-loads models whose weights are already
-    # in the cache, so startup never blocks on (or fails over) a multi-GB
-    # download. The setup UI drives /api/models/* for the rest.
+    # Downloads run in background tasks, so startup never waits on one.
     state["model_load_lock"] = asyncio.Lock()
     models_mgr.apply_token_env()
+    sam3_off = models_disabled or os.environ.get("CHARLIE_DISABLED", "").lower() in ("1", "true", "yes", "on")
+    # A token saved later downloads and loads SAM 3 under the same rule.
+    state["sam3_off"] = sam3_off
 
     if not models_disabled:
         if models_mgr.is_downloaded("dinov2"):
             asyncio.create_task(_bg_load_dino())
         else:
-            # Ungated - no token needed. Models are built in: fetch silently.
+            # DINOv2 is ungated: no token needed.
             async def _auto_dino() -> None:
-                print("[server] DINOv2 weights missing - auto-downloading...")
+                print("[server] DINOv2 weights missing; downloading...")
                 await asyncio.to_thread(models_mgr.start_download, "dinov2")
                 while True:
                     await asyncio.sleep(5)
@@ -779,25 +494,24 @@ async def lifespan(app: FastAPI):
                         print(f"[server] DINOv2 auto-download failed: {rec.get('error')}")
                         return
             asyncio.create_task(_auto_dino())
-        if os.environ.get("CHARLIE_DISABLED", "").lower() in ("1", "true", "yes", "on"):
-            print("[server] CHARLIE_DISABLED set - pipeline_charlie endpoints will return 503.")
+        if sam3_off:
+            print("[server] CHARLIE_DISABLED is set: SAM 3 is not loaded.")
             state["charlie"] = None
         elif models_mgr.is_downloaded("sam3"):
             asyncio.create_task(_bg_load_charlie())
         elif models_mgr.hf_token():
-            # SAM3 is the product - with a token on file, get it without
-            # being asked: download in the background, load when it lands.
+            # With a token on file, SAM3 downloads in the background and loads when done.
             state["charlie"] = None
 
             async def _auto_sam3() -> None:
-                print("[server] SAM3 weights missing - auto-downloading (token on file)...")
+                print("[server] SAM 3 weights missing; downloading with the saved token...")
                 await asyncio.to_thread(models_mgr.start_download, "sam3")
                 while True:
                     await asyncio.sleep(5)
                     with models_mgr._DL_LOCK:
                         rec = dict(models_mgr._DOWNLOADS.get("sam3") or {})
                     if rec.get("status") == "error":
-                        print(f"[server] SAM3 auto-download failed: {rec.get('error')}")
+                        print(f"[server] SAM 3 download failed: {rec.get('error')}")
                         return
                     if rec.get("status") == "done":
                         break
@@ -806,8 +520,8 @@ async def lifespan(app: FastAPI):
         else:
             state["charlie"] = None
             print(
-                "[server] SAM3 needs a Hugging Face token (license-gated) - "
-                "add it in the setup screen and it downloads + loads automatically"
+                "[server] SAM 3 needs a Hugging Face token: add it in Settings, "
+                "then SAM 3 downloads and loads"
             )
     else:
         state["charlie"] = None
@@ -818,53 +532,44 @@ async def lifespan(app: FastAPI):
     state["jobs"].register_runner("purge_label", _run_purge_label_job)
     state["jobs"].register_runner("augment_generate", _gpu_job_guarded(_run_augment_generate_job))
 
-    # Restore Terminal job history across restarts. Past completed jobs
-    # are stored as kind="job" audit events; pull the most recent batch
-    # back into the JobManager so the Terminal lists them after a reboot.
+    # Finished jobs from the event log, so a poll after a restart finds them.
     try:
         past = audit.list_events("job", limit=500)
         loaded = state["jobs"].hydrate_from_audit(past)
         if loaded:
-            print(f"[jobs] hydrated {loaded} past jobs from audit.db")
+            print(f"[jobs] hydrated {loaded} past jobs from events.db")
     except Exception as e:
         print(f"[jobs] audit hydrate failed: {e}")
 
     state["jobs"].start_worker()
 
-    # Worker watchdog: if any of the JobManager's worker tasks exits
-    # (shouldn't happen - we hardened it - but be paranoid), revive the
-    # missing slots. `start_worker(n=...)` is idempotent: live workers
-    # stay, dead/missing slots get respawned.
+    # Respawns exited worker tasks; start_worker() keeps live ones.
     async def _worker_watchdog() -> None:
         while True:
             await asyncio.sleep(5)
             wts = state["jobs"].worker_tasks
             live = [t for t in wts if not t.done()]
             if len(live) < len(wts):
-                print(f"[jobs] {len(wts) - len(live)} of {len(wts)} workers exited - restarting")
+                print(f"[jobs] {len(wts) - len(live)} of {len(wts)} workers exited; restarting")
                 state["jobs"].start_worker()
     state["_worker_watchdog"] = asyncio.create_task(_worker_watchdog())
 
-    import workspace as _ws
-    print(f"[server] workspace: {_ws.dir()}")
+    print(f"[server] workspace: {workspace.dir()}")
     print("[server] ready, job worker started.")
-    _log_manifest_cache_capacity()
+    _size_image_cache()
     yield
+    # A compile runs in its own process group, which the desktop's stop
+    # signal for the engine does not reach.
+    neuron6_verify.stop_running_compilers()
 
 app = FastAPI(
     lifespan=lifespan,
-    # Disable the auto-generated OpenAPI schema + Swagger / ReDoc UIs.
-    # Public scanners hitting our Cloudflare tunnel were pulling the
-    # full API surface map from /openapi.json - turning these off
-    # makes /openapi.json, /docs, /redoc all 404. If you ever need
-    # the docs locally, re-enable conditionally on an env flag.
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
 )
 
-# Localhost-only: the UI is either served by this process or a local dev
-# server on :3000. No cloud origins in the portable build.
+# Localhost origins only: this process or a dev server on :3000.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -873,18 +578,48 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
+# Only the loopback names: a web page that rebinds its own domain to
+# 127.0.0.1 sends that domain as Host and is refused.
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
 
-# ---- helpers ----
+_LOCAL_ORIGIN = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$")
 
-def slug(raw: str) -> str:
-    s = raw.strip().lower().replace(" ", "-")
-    s = re.sub(r"[^a-z0-9_-]+", "", s)
-    return s or "project"
+
+class _LocalPagesOnly:
+    """Refuses a POST, PUT, PATCH or DELETE that a page on another site sent:
+    CORS stops such a page reading the answer, not a form post or a POST
+    without a body reaching the engine. Requests without an Origin, from
+    scripts and the CLI, pass. Every response carries nosniff."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        if scope["method"] not in ("GET", "HEAD", "OPTIONS"):
+            origin = dict(scope["headers"]).get(b"origin")
+            if origin is not None and not _LOCAL_ORIGIN.match(origin.decode("latin-1")):
+                refused = FastJSONResponse({"detail": "cross-site request refused"}, status_code=403)
+                await refused(scope, receive, send)
+                return
+
+        async def send_nosniff(message):
+            if message["type"] == "http.response.start":
+                message["headers"] = [*message.get("headers", []),
+                                      (b"x-content-type-options", b"nosniff")]
+            await send(message)
+
+        await self.app(scope, receive, send_nosniff)
+
+
+app.add_middleware(_LocalPagesOnly)
 
 
 def project_dir(project_id: str) -> Path:
-    """Resolve a dataset id to its workspace folder (store index)."""
-    if project_id in RESERVED or not project_id or "/" in project_id or ".." in project_id:
+    """Resolve a dataset id to its workspace folder."""
+    if not project_id or "/" in project_id or ".." in project_id:
         raise HTTPException(400, f"invalid project id: {project_id}")
     try:
         return store.dataset_dir(project_id)
@@ -893,64 +628,20 @@ def project_dir(project_id: str) -> Path:
 
 
 def manifest_path(project_id: str) -> Path:
-    """Kept for existence checks; the actual manifest is split across
-    dataset.json + annotations/ (see store.py)."""
+    """For existence checks: the manifest is split across dataset.json and annotations/."""
     return project_dir(project_id) / "dataset.json"
 
 
-# ─── Manifest RAM cache ──────────────────────────────────────────
-# Every API request hits load_manifest at least once (often more -
-# `/api/projects` walks every project, the per-request handlers
-# read-modify-write, etc.). Reading + parsing the JSON off disk on
-# each call adds up to a noticeable share of latency, especially on
-# the cloudflare-tunnel-fronted host where a manifest read is
-# competing with image uploads for IO.
-#
-# Cache the parsed dict in process memory and serve copies from it
-# on subsequent reads. `save_manifest` writes through (disk first,
-# then cache) so the cache never serves stale data to other handlers
-# in the same process. Returning deep-copies on read keeps mutations
-# in the caller's local copy until they explicitly save.
-#
-# Manifests are tiny (~10-100 KB each). Even a thousand projects
-# fits in single-digit MB, well below the safe-bet headroom we
-# logged at startup. Skipping eviction is fine until that scales by
-# orders of magnitude.
-# Built-payload cache. Stores the output of expensive endpoints
-# (/overview, /annotations, /dataset-stats - both lite and full)
-# keyed by (project_id, name) → (manifest_mtime, payload).
-# A handler checks _PAYLOAD_CACHE before doing any work; on a hit
-# (cached mtime >= current disk mtime) it returns the cached dict
-# immediately. save_manifest doesn't need to touch this - the next
-# read picks up the new mtime and misses the cache automatically.
+# Built payloads of /overview, /annotations and /dataset-stats:
+# (project_id, name) -> (manifest_mtime, payload). Fresh while its mtime
+# is at least the manifest's.
 _PAYLOAD_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 _PAYLOAD_CACHE_LOCK = __import__("threading").Lock()
 
 
-def _payload_cache_get(project_id: str, name: str, disk_mtime: float) -> dict | None:
-    if disk_mtime <= 0:
-        return None
-    with _PAYLOAD_CACHE_LOCK:
-        entry = _PAYLOAD_CACHE.get((project_id, name))
-    if entry is None:
-        return None
-    cached_mtime, payload = entry
-    return payload if cached_mtime >= disk_mtime else None
-
-
 def _payload_cache_get_swr(project_id: str, name: str, disk_mtime: float) -> tuple[dict | None, bool]:
-    """Stale-while-revalidate variant. Returns (payload, is_fresh):
-      - (None, False)  : no cached value at all
-      - (dict, True)   : cache hit, payload is up-to-date
-      - (dict, False)  : cache hit but stale (disk has advanced since
-                         it was built). Caller should return it
-                         immediately for latency AND kick a rebuild in
-                         the background so the next read is fresh.
-
-    Used by the read endpoints during an active labelling job, where
-    the manifest is being rewritten after every image. Without SWR
-    every poll would cache-miss and pay the full 3-5 s rebuild cost.
-    """
+    """Stale-while-revalidate read: (None, False) when absent, (payload, True)
+    when fresh, (payload, False) when stale and due a background rebuild."""
     if disk_mtime <= 0:
         return None, False
     with _PAYLOAD_CACHE_LOCK:
@@ -961,15 +652,12 @@ def _payload_cache_get_swr(project_id: str, name: str, disk_mtime: float) -> tup
     return payload, cached_mtime >= disk_mtime
 
 
-# Bumped when a project's cached payloads are dropped, so a rebuild that
-# started before the drop does not put its older copy back.
+# Per-project drop count. A rebuild started before a drop does not store its result.
 _PAYLOAD_DROPS: dict[str, int] = {}
 
 
 def _drop_annotation_payloads(project_id: str) -> None:
-    """Forget the cached annotations after an edit. Served stale (the
-    cache revalidates in the background) they gave the editor the boxes
-    from before its own save, which its next save wrote back."""
+    """Forget the cached annotations after an edit, so the editor never gets a stale copy."""
     with _PAYLOAD_CACHE_LOCK:
         _PAYLOAD_DROPS[project_id] = _PAYLOAD_DROPS.get(project_id, 0) + 1
         for name in ("annotations", "annotations:imports"):
@@ -983,17 +671,13 @@ def _payload_cache_put(project_id: str, name: str, disk_mtime: float, payload: d
         _PAYLOAD_CACHE[(project_id, name)] = (disk_mtime, payload)
 
 
-# Tracks per-project payload rebuilds that are currently in flight so
-# concurrent SWR requests don't all kick off duplicate rebuilds. The
-# set is keyed by (project_id, name); a key is added when a rebuild
-# starts and removed in the finally block.
+# (project_id, name) rebuilds in flight.
 _PAYLOAD_REVALIDATE_IN_FLIGHT: set[tuple[str, str]] = set()
 
 
 async def _payload_revalidate(project_id: str, name: str, builder) -> None:
-    """Background rebuild for stale-while-revalidate. `builder` is a
-    zero-arg callable that returns the fresh payload. Runs once per
-    (project, payload) pair regardless of how many SWR readers fire it."""
+    """Background rebuild for stale-while-revalidate, at most one per key.
+    `builder` takes no arguments and returns the payload."""
     key = (project_id, name)
     with _PAYLOAD_CACHE_LOCK:
         if key in _PAYLOAD_REVALIDATE_IN_FLIGHT:
@@ -1014,26 +698,13 @@ async def _payload_revalidate(project_id: str, name: str, builder) -> None:
             _PAYLOAD_REVALIDATE_IN_FLIGHT.discard(key)
 
 
-# ─── Read-path sidecars: instant-serve overview + stats ──────────────
-# After every manifest write the backend pre-builds:
-#   - overview_first100.json  (the first-batch /overview payload)
-#   - dataset_stats_lite.json (already exists)
-# Reads pull straight from these files - zero compute, zero manifest
-# parse on the request path. The labelling job's per-image saves
-# trigger an async rebuild that's deduped through
-# _SIDECAR_REFRESH_IN_FLIGHT so rapid writes don't pile up rebuilds.
+# Read-path sidecars, rebuilt after each manifest write and served as files.
 
-_FAST_OVERVIEW_LIMIT = 100  # must match FE's FIRST_BATCH
-_INITIAL_PAYLOAD_LIMIT = 20  # matches FE's /initial first-paint slice
+_FAST_OVERVIEW_LIMIT = 100  # must match the UI's FIRST_BATCH
+_INITIAL_PAYLOAD_LIMIT = 20  # the UI's /initial first-paint slice
 _SIDECAR_REFRESH_IN_FLIGHT: set[str] = set()
-# Projects with sidecar refresh suppressed. Used by long-running jobs
-# (label_charlie, augment_generate) that save the manifest many times
-# in quick succession - without suppression each flush kicks a fresh
-# overview + stats + initial + workspace-card rebuild, and on a big
-# manifest those rebuilds can each take seconds, piling up faster
-# than they drain. The job adds its project_id at start, removes it
-# at end, and fires ONE sidecar refresh on completion to capture the
-# final state.
+# Projects whose sidecar refresh is suppressed while a long job saves
+# repeatedly. The job refreshes once when it ends.
 _SIDECAR_REFRESH_SUPPRESSED: set[str] = set()
 
 
@@ -1042,17 +713,13 @@ def _overview_sidecar_path(project_id: str) -> Path:
 
 
 def _workspace_card_sidecar_path(project_id: str) -> Path:
-    """Per-project sidecar for /api/projects' card payload - id, name,
-    counters, tags, cover info. Built once on save_manifest so the
-    list endpoint just reads N small JSON files instead of opening
-    N multi-MB manifests on cold-start."""
+    """Sidecar holding the /api/projects card payload, built on save_manifest."""
     return project_dir(project_id) / "workspace_card_v1.json"
 
 
 def _import_has_labels(entry: dict) -> bool:
-    """An image carries labels: once the user has edited it, their boxes
-    decide (an image they emptied has none); before that, the labelling
-    pass's own flag, or for imports older than the flag, its detections."""
+    """Whether an image has labels: its edited boxes once edited, else the
+    labelled flag, else its detections."""
     if entry.get("editedBoxesSet"):
         edited = entry.get("editedBoxes")
         return isinstance(edited, list) and len(edited) > 0
@@ -1063,20 +730,20 @@ def _import_has_labels(entry: dict) -> bool:
 
 
 def _import_is_labelled(entry: dict) -> bool:
-    """Done: it carries labels, or it is marked background (checked, with
-    nothing in it to label), which labelling passes leave alone and
-    training learns from as a negative."""
+    """Has labels, or is marked background: checked, with nothing to label."""
     return isinstance(entry, dict) and (bool(entry.get("background")) or _import_has_labels(entry))
 
 
+# The card fields GET /api/projects returns; a sidecar written by another version can hold more.
+_CARD_KEYS = ("id", "name", "createdAt", "updatedAt", "n_images", "n_labelled", "n_unlabelled",
+              "n_references", "tags", "label_aliases", "labelColours", "thumbnail", "_cover_subdir",
+              "hasModel", "v2", "derived", "cover_blurhash")
+
+
 def _build_workspace_card_payload(project_id: str, manifest: dict) -> dict:
-    """Compute the per-project card payload from a manifest. Same fields
-    list_projects builds in its loop, minus the per-viewer transforms
-    (likes/favourites count + isMine flags) which are folded in at
-    request time."""
+    """Per-project card payload; favouritedByMe, running and container are added at request time."""
     proj_id = manifest.get("id") or project_id
     display_name = manifest.get("name") or project_id
-    proj_owner = manifest.get("owner") or manifest.get("createdBy") or ""
 
     results = manifest.get("results") or []
     n_labelled = sum(1 for r in results if not r.get("pending"))
@@ -1092,9 +759,7 @@ def _build_workspace_card_payload(project_id: str, manifest: dict) -> dict:
     v2_refs = manifest.get("references") or []
     v2_imps = manifest.get("imports") or []
     cover_subdir: str | None = None
-    # A user-uploaded cover wins over any picked/random one and is served via
-    # the cover_thumb endpoint, so we only need a truthy thumbnail marker here
-    # (no subdir - it lives at the project root, not in references/imports).
+    # An uploaded cover wins. It lives at the project root and is served by cover_thumb.
     if manifest.get("cover_uploaded"):
         cover = "cover_upload.jpg"
         cover_subdir = None
@@ -1130,7 +795,6 @@ def _build_workspace_card_payload(project_id: str, manifest: dict) -> dict:
     return {
         "id": proj_id,
         "name": display_name,
-        "owner": proj_owner,
         "createdAt": manifest.get("createdAt"),
         "updatedAt": manifest.get("updatedAt"),
         "n_images": n_images_resolved,
@@ -1143,35 +807,41 @@ def _build_workspace_card_payload(project_id: str, manifest: dict) -> dict:
         "thumbnail": cover,
         "_cover_subdir": cover_subdir,
         "hasModel": bool(manifest.get("hasModel", False)),
-        "createdBy": proj_owner,
-        "likedBy": list(manifest.get("likedBy") or []),
         "favouritedBy": list(manifest.get("favouritedBy") or []),
-        "certified": bool(manifest.get("certified", False)),
-        "private": bool(manifest.get("private", False)),
         "v2": bool(manifest.get("v2", False)),
-        # Derived ("child") link so the workspace card can show a derived badge.
         "derived": ({"parentProjectId": (manifest.get("derived") or {}).get("parentProjectId"),
                      "parentName": (manifest.get("derived") or {}).get("parentName")}
                     if manifest.get("derived") else None),
         "cover_blurhash": manifest.get("cover_blurhash"),
-        "dataset_health": _compute_dataset_health(manifest),
     }
+
+
+def _manifest_mtime_ns(project_id: str) -> int:
+    """dataset.json's file time in ns, or 0 when it is missing."""
+    try:
+        return manifest_path(project_id).stat().st_mtime_ns
+    except (HTTPException, OSError):
+        return 0
+
+
+def _write_sidecar(path: Path, payload: dict, stamp_ns: int) -> None:
+    """Write a sidecar atomically with the file time `stamp_ns`, the manifest's
+    when the payload was built: a save during the build leaves it stale."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = store.tmp_path(path)
+    tmp.write_bytes(_orjson.dumps(payload) if _orjson is not None else json.dumps(payload).encode())
+    os.utime(tmp, ns=(stamp_ns, stamp_ns))
+    store.replace(tmp, path)
 
 
 def _write_workspace_card_sidecar(project_id: str) -> None:
     try:
+        stamp = _manifest_mtime_ns(project_id)
         m = load_manifest(project_id, False)
         if not m:
             return
-        payload = _build_workspace_card_payload(project_id, m)
-        p = _workspace_card_sidecar_path(project_id)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = store.tmp_path(p)
-        if _orjson is not None:
-            tmp.write_bytes(_orjson.dumps(payload))
-        else:
-            tmp.write_text(json.dumps(payload))
-        store.replace(tmp, p)
+        _write_sidecar(_workspace_card_sidecar_path(project_id),
+                       _build_workspace_card_payload(project_id, m), stamp)
     except Exception as e:
         print(f"[workspace-card-sidecar] write failed for {project_id}: {e}")
 
@@ -1193,11 +863,8 @@ _WORKSPACE_CARD_REFRESH_IN_FLIGHT: set[str] = set()
 
 
 def _kick_workspace_card_refresh(project_id: str) -> None:
-    """Lazy-build a workspace_card sidecar for projects that haven't
-    been saved since the sidecar mechanism was introduced. Called
-    from list_projects' slow-path so the NEXT request hits the fast
-    path. Dedup'd so 33 simultaneous slow-path hits during a single
-    /api/projects request only enqueue one rebuild per project."""
+    """Rebuild a missing or stale card sidecar in the background, one at a
+    time per project. Called from list_projects."""
     if project_id in _WORKSPACE_CARD_REFRESH_IN_FLIGHT:
         return
     try:
@@ -1217,39 +884,27 @@ def _kick_workspace_card_refresh(project_id: str) -> None:
 
 
 def _initial_sidecar_path(project_id: str) -> Path:
-    """The single-round-trip first-paint payload. Combines project
-    meta + first-N imports + lite dataset stats into one document so
-    the FE can render the gallery + chips + stats card in one fetch."""
+    """First-paint payload: project meta, the first imports and lite dataset stats."""
     return project_dir(project_id) / "initial_first20.json"
 
 
 def _write_overview_sidecar(project_id: str) -> None:
-    """Compute the first-100 /overview payload and persist atomically.
-    Called off the request path via _kick_sidecar_refresh so the
-    response itself never waits on this."""
+    """Write the first-100 /overview payload. Called from _kick_sidecar_refresh."""
     try:
+        stamp = _manifest_mtime_ns(project_id)
         m = load_manifest(project_id, False)
         if not m:
             return
         payload = _build_overview_payload(
             project_id, m, imports_limit=_FAST_OVERVIEW_LIMIT, imports_offset=0,
         )
-        p = _overview_sidecar_path(project_id)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = store.tmp_path(p)
-        if _orjson is not None:
-            tmp.write_bytes(_orjson.dumps(payload))
-        else:
-            tmp.write_text(json.dumps(payload))
-        store.replace(tmp, p)
+        _write_sidecar(_overview_sidecar_path(project_id), payload, stamp)
     except Exception as e:
         print(f"[overview-sidecar] write failed for {project_id}: {e}")
 
 
 def _read_overview_sidecar(project_id: str) -> dict | None:
-    """Return the persisted first-100 overview, or None when missing /
-    unreadable. Allow-stale - the file is good enough until the next
-    write replaces it. /overview compute path is the fallback."""
+    """The stored first-100 overview, possibly stale, or None when missing or unreadable."""
     p = _overview_sidecar_path(project_id)
     if not p.exists():
         return None
@@ -1263,26 +918,17 @@ def _read_overview_sidecar(project_id: str) -> dict | None:
 
 
 def _write_initial_sidecar(project_id: str) -> None:
-    """Combine the just-written overview + dataset-stats sidecars into
-    one initial-paint document. Cheap because it's just two file reads
-    plus a slice - no manifest reload, no recompute. Called from
-    _kick_sidecar_refresh AFTER the two upstream sidecars have been
-    rewritten."""
+    """Combine the overview and dataset-stats sidecars into the first-paint
+    document, stamped with the older of their file times. Runs after both are written."""
     try:
-        # Pull the freshly-written overview sidecar (project meta +
-        # first 100 imports + refs metadata + dataset_health). Slice
-        # imports down to the initial-paint count so the FE doesn't
-        # download 5x what it needs for the first viewport.
+        stats_path = _stats_sidecar_path(project_id, True)
+        stamps = [p.stat().st_mtime_ns for p in (_overview_sidecar_path(project_id), stats_path)
+                  if p.exists()]
         overview = _read_overview_sidecar(project_id)
-        if overview is None:
+        if overview is None or not stamps:
             return
         imports = (overview.get("imports") or [])[:_INITIAL_PAYLOAD_LIMIT]
-        # Stats-lite sidecar is read fresh from disk - same path the
-        # /dataset-stats?lite=true endpoint uses. If it doesn't exist
-        # yet (first-ever build), stats fall through to None and the
-        # FE re-fetches.
         stats_payload: dict | None = None
-        stats_path = _stats_sidecar_path(project_id, True)
         if stats_path.exists():
             try:
                 data = _json_loads(stats_path.read_bytes())
@@ -1291,11 +937,9 @@ def _write_initial_sidecar(project_id: str) -> None:
             except Exception:
                 stats_payload = None
         payload = {
-            # Project meta - flat, mirrors what /overview returns at
-            # the top level so the FE's destructuring keeps working.
+            # Same top-level fields as /overview.
             "id": overview.get("id"),
             "name": overview.get("name"),
-            "prompt": overview.get("prompt"),
             "tags": overview.get("tags") or [],
             "labelsLastRun": overview.get("labelsLastRun"),
             "settingsLastRun": overview.get("settingsLastRun"),
@@ -1306,44 +950,21 @@ def _write_initial_sidecar(project_id: str) -> None:
             "v2": overview.get("v2"),
             "createdAt": overview.get("createdAt"),
             "updatedAt": overview.get("updatedAt"),
-            "thresholds": overview.get("thresholds"),
-            "vlm_action": overview.get("vlm_action"),
-            "synonyms_enabled": overview.get("synonyms_enabled"),
-            "private": overview.get("private"),
-            "max_input_size": overview.get("max_input_size"),
-            # Cached general/specific verdict so the hero badge paints with the
-            # first frame instead of after a separate /dataset-type fetch.
             "dataset_type": overview.get("dataset_type"),
             "hasModel": overview.get("hasModel"),
-            "owner": overview.get("owner"),
-            "createdBy": overview.get("createdBy"),
-            "dataset_health": overview.get("dataset_health"),
-            # First-paint payload - gallery covers + chip rails + box
-            # counts + reference metadata.
             "references": overview.get("references") or [],
             "imports": imports,
             "imports_total": overview.get("imports_total") or 0,
-            # Stats card data - counts + label distribution + 3-factor
-            # health score. The variation plot (full payload) is fetched
-            # later via /dataset-stats when the user expands the card.
+            # Lite stats; the full payload comes from /dataset-stats.
             "stats": stats_payload,
         }
-        p = _initial_sidecar_path(project_id)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = store.tmp_path(p)
-        if _orjson is not None:
-            tmp.write_bytes(_orjson.dumps(payload))
-        else:
-            tmp.write_text(json.dumps(payload))
-        store.replace(tmp, p)
+        _write_sidecar(_initial_sidecar_path(project_id), payload, min(stamps))
     except Exception as e:
         print(f"[initial-sidecar] write failed for {project_id}: {e}")
 
 
 def _read_initial_sidecar(project_id: str) -> dict | None:
-    """Return the persisted first-paint document, or None if missing.
-    Allow-stale - by the time the user sees this on the next nav, the
-    next manifest write will have rewritten it."""
+    """The stored first-paint document, possibly stale, or None if missing."""
     p = _initial_sidecar_path(project_id)
     if not p.exists():
         return None
@@ -1357,16 +978,8 @@ def _read_initial_sidecar(project_id: str) -> dict | None:
 
 
 def _kick_sidecar_refresh(project_id: str) -> None:
-    """Schedule async rebuild of every read-path sidecar for this
-    project. Deduped - if a refresh is already in flight, subsequent
-    calls are no-ops until it finishes (in which case the new save
-    is reflected in the next refresh anyway because save_manifest
-    bumps disk mtime which the rebuild reads)."""
-    # Suppressed during long-running jobs (label_charlie's per-flush
-    # save loop is the worst offender - on a big manifest each
-    # rebuild can take seconds, faster than the job is saving). The
-    # job will fire one final refresh on completion to capture the
-    # end state.
+    """Schedule a rebuild of the project's read-path sidecars. A no-op while
+    one is in flight or the project is suppressed."""
     if project_id in _SIDECAR_REFRESH_SUPPRESSED:
         return
     if project_id in _SIDECAR_REFRESH_IN_FLIGHT:
@@ -1374,37 +987,20 @@ def _kick_sidecar_refresh(project_id: str) -> None:
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        # save_manifest can run outside an event loop (CLI scripts,
-        # tests). Skip silently - sidecars will be (re)built lazily
-        # on the next read.
+        # No event loop: the sidecars rebuild on a later read.
         return
     _SIDECAR_REFRESH_IN_FLIGHT.add(project_id)
 
     async def _run():
         try:
-            # Tiny debounce so a burst of save_manifest calls (e.g. a
-            # labelling job iterating its way through a dataset)
-            # coalesces into one rebuild rather than firing on each.
+            # Debounce, so a burst of saves makes one rebuild.
             await asyncio.sleep(0.15)
-            # Run the rebuilds on the dedicated bg pool, NOT asyncio's
-            # default executor. These are multi-second manifest reads;
-            # on the default pool they starve request-path work (the
-            # FE's /annotations + /overview builds, image serving) -
-            # which is what left freshly-labelled tiles showing
-            # "Unlabelled" for 10-15s after a job completed while the
-            # default pool churned through the completion-time sidecar
-            # rebuild. Off the default pool, the FE's post-completion
-            # syncAnnotations build runs immediately.
+            # The background pool, so these multi-second rebuilds do not
+            # starve request-path work on the default executor.
             await loop.run_in_executor(_BG_IMAGE_EXECUTOR, _write_overview_sidecar, project_id)
             await loop.run_in_executor(_BG_IMAGE_EXECUTOR, _persist_dataset_stats, project_id, True)
-            # Combined first-paint sidecar - reads the two upstream
-            # files (already on disk by now) and merges. Must run
-            # AFTER both above so it captures their fresh contents.
+            # Must run after the two sidecars above.
             await loop.run_in_executor(_BG_IMAGE_EXECUTOR, _write_initial_sidecar, project_id)
-            # Workspace card sidecar - fields /api/projects' loop used
-            # to compute by loading the full multi-MB manifest per
-            # project. Bake them once here so the list endpoint can
-            # serve N projects from N small JSON reads instead.
             await loop.run_in_executor(_BG_IMAGE_EXECUTOR, _write_workspace_card_sidecar, project_id)
         except Exception as e:
             print(f"[sidecar-refresh] failed for {project_id}: {e}")
@@ -1415,39 +1011,23 @@ def _kick_sidecar_refresh(project_id: str) -> None:
 
 
 _MANIFEST_CACHE: dict[str, dict] = {}
-# Disk mtime when the cache entry was populated. Used to invalidate
-# the cache when the manifest file has been written by ANY process
-# (a different gunicorn worker, an external editor, etc.) - without
-# this check, the cache became a "labels / refs lost on reopen" bug
-# when the backend ran with multiple workers, since each worker had
-# a private cache that never noticed sibling-worker writes.
+# Disk mtime when the entry was cached. A newer file, written by any
+# process, invalidates the entry.
 _MANIFEST_CACHE_MTIME: dict[str, float] = {}
-# Secondary index: project_id → {import_id: entry_dict}. Built and
-# kept in sync (under _MANIFEST_CACHE_LOCK) whenever the manifest
-# cache is seeded or invalidated. Turns the per-image annotation
-# endpoint from an O(n) linear scan into an O(1) dict lookup.
+# project_id -> {import_id: entry}, kept in step with the cache under
+# _MANIFEST_CACHE_LOCK.
 _MANIFEST_IMPORT_INDEX: dict[str, dict[str, dict]] = {}
 _MANIFEST_CACHE_LOCK = __import__("threading").Lock()
-_manifest_cache_hits = 0
-_manifest_cache_misses = 0
-_manifest_cache_stale = 0
 
-# Tombstones for recently-deleted projects. delete_project records the
-# id here (under _MANIFEST_CACHE_LOCK) BEFORE removing the folder, and
-# save_manifest refuses to write for a tombstoned id. Without this, a
-# write that races the delete - a debounced label-metadata autosave, a
-# like/favourite, or an in-flight job/sidecar flush - would re-run
-# save_manifest's `mkdir(parents=True)` and recreate the project
-# directory + manifest, resurrecting the deleted project (which then
-# reappears in the workspace, sometimes alongside a stale card as a
-# duplicate). Bounded FIFO: ids are random UUIDs and never reused, so
-# evicting the oldest entry once the cap is hit is safe - any write
-# racing that delete is long finished by then.
-_DELETED_PROJECT_IDS: "OrderedDict[str, float]" = __import__("collections").OrderedDict()
+# Recently deleted ids. delete_project adds one before removing the folder
+# and save_manifest refuses to write it, so a racing write cannot recreate
+# the project. Ids are never reused, so FIFO eviction is safe.
+_DELETED_PROJECT_IDS: OrderedDict[str, float] = OrderedDict()
 _DELETED_PROJECT_IDS_MAX = 4096
 
 
 def _mark_project_deleted(project_id: str) -> None:
+    _projects_changed()
     with _MANIFEST_CACHE_LOCK:
         _DELETED_PROJECT_IDS[project_id] = time.time()
         _DELETED_PROJECT_IDS.move_to_end(project_id)
@@ -1456,8 +1036,7 @@ def _mark_project_deleted(project_id: str) -> None:
 
 
 def _unmark_project_deleted(project_id: str) -> None:
-    """Undo a tombstone - used when a delete fails partway so a project
-    that's still on disk doesn't get permanently frozen against writes."""
+    """Undo a tombstone when a delete fails partway."""
     with _MANIFEST_CACHE_LOCK:
         _DELETED_PROJECT_IDS.pop(project_id, None)
 
@@ -1468,33 +1047,14 @@ def _is_project_deleted(project_id: str) -> bool:
 
 
 def _manifest_disk_mtime(project_id: str) -> float:
-    """Change stamp in seconds, or 0 if missing. store.save() always
-    rewrites dataset.json, so its mtime moves on every persisted change -
-    the cache validity marker survives the manifest split unchanged."""
+    """Change stamp in seconds, or 0 if missing. store.save() rewrites
+    dataset.json on every change."""
     return store.manifest_stamp(project_id)
 
 
 def load_manifest(project_id: str, copy: bool = True) -> dict:
-    """Read the on-disk manifest, going through the in-memory cache when
-    fresh. The deep-copy on warm-cache hits is the biggest single cost
-    for big projects (~200-500 ms on a 30 MB nested dict) - callers that
-    only READ the manifest can pass copy=False and skip it entirely. The
-    cache lifetime is the response, not the process, so racing mutations
-    aren't a concern in the read-only paths.
-
-    Callers that mutate the manifest MUST keep the default copy=True so
-    their edits land in their local copy, not the shared cache. The
-    save_manifest path re-seeds the cache with a fresh copy of the
-    persisted dict after each write, so concurrent reads on the same
-    project still converge to the latest disk truth without the writer
-    leaking partial state into the cache.
-
-    A handful of read-only sites (e.g. _kick_blurhash_backfill) do
-    monotonically fill in missing fields on the shared dict; that's
-    deliberate (the writeback becomes a side-effect of the read) and is
-    safe because the writes are idempotent + concurrent-write-tolerant.
-    """
-    global _manifest_cache_hits, _manifest_cache_misses, _manifest_cache_stale
+    """Read the manifest through the in-memory cache. copy=False returns the
+    shared cached dict, so a caller that mutates must keep copy=True."""
     import copy as _copy
 
     disk_mtime = _manifest_disk_mtime(project_id)
@@ -1503,20 +1063,11 @@ def load_manifest(project_id: str, copy: bool = True) -> dict:
         cached = _MANIFEST_CACHE.get(project_id)
         cached_mtime = _MANIFEST_CACHE_MTIME.get(project_id, 0.0)
         if cached is not None and disk_mtime > 0 and disk_mtime <= cached_mtime:
-            _manifest_cache_hits += 1
             return _copy.deepcopy(cached) if copy else cached
-        if cached is not None and disk_mtime > cached_mtime:
-            # Cache is stale (disk was written by someone else -
-            # another worker, an external edit, etc.). Drop and
-            # re-read.
-            _manifest_cache_stale += 1
-        _manifest_cache_misses += 1
 
-    try:
-        data = store.load(project_id)
-    except Exception as e:
-        print(f"[manifest-cache] read failed for {project_id}: {e}")
-        return {}
+    # A read error propagates: an empty manifest returned in its place could be
+    # saved back over the dataset.
+    data = store.load(project_id)
     if data is None:
         return {}
     with _MANIFEST_CACHE_LOCK:
@@ -1527,43 +1078,26 @@ def load_manifest(project_id: str, copy: bool = True) -> dict:
             for e in (data.get("imports") or [])
             if isinstance(e, dict) and "id" in e
         }
-    # Caller that asked for a copy gets a fresh deepcopy of what we
-    # just parsed. The cache also stores a fresh copy in that case
-    # (above) so subsequent reads aren't aliased to the caller's
-    # dict. When copy=False we share the parsed dict directly - the
-    # cache and the caller see the same reference.
     return _copy.deepcopy(data) if copy else data
 
 
 def save_manifest(project_id: str, manifest: dict, *, cache_by_ref: bool = False) -> None:
     import copy as _copy
-    # Refuse to resurrect a deleted project. A write that races
-    # delete_project (debounced label-metadata autosave, like/favourite,
-    # or an in-flight job/sidecar flush) would otherwise recreate the
-    # folder + manifest below via mkdir, bringing the project back.
     if _is_project_deleted(project_id):
         return
-    # New datasets get their workspace folder on first save - creation
-    # flows (create, duplicate, derive) don't need a separate step.
+    # A manifest without its id (an empty one from a failed read, say) would
+    # overwrite the dataset and delete its annotation files.
+    if store.dataset_exists(project_id) and manifest.get("id") != project_id:
+        raise RuntimeError(f"refusing to save dataset {project_id}: the manifest has no matching id")
+    # A new dataset gets its folder on first save.
     if not store.dataset_exists(project_id):
         store.create_dataset_dir(
             project_id,
             str(manifest.get("name") or project_id),
             str(manifest.get("container_id") or "") or None,
         )
-    # One-time slim: older label_charlie runs persisted the raw DINOv2
-    # (1024-d) + SigLIP (768-d) embedding vectors on every TEST-IMAGE
-    # detection. Those vectors are never read back for imports - the
-    # resolver re-embeds fresh crops on each (re)label - so they were
-    # pure bloat that made big manifests ~10× larger (≈200 MB at 4000
-    # imgs). That bloat is what made every whole-manifest write O(n²)
-    # past ~400 labels AND made the cached + parsed giant dict drag
-    # the load of EVERY other project. New writes strip at the source
-    # (see _flush_label_updates); this heals any pre-existing manifest
-    # the first time it's saved, then sets a flag so the walk is
-    # skipped on every later save (keeping the hot per-edit path free).
-    # References (manifest["references"]) keep their embeddings - the
-    # resolve step genuinely reads those back.
+    # Import detections carry no embedding vectors, since nothing reads them
+    # back. References keep theirs.
     if not manifest.get("_imports_embeddings_stripped"):
         for _e in manifest.get("imports") or []:
             if not isinstance(_e, dict):
@@ -1574,21 +1108,13 @@ def save_manifest(project_id: str, manifest: dict, *, cache_by_ref: bool = False
                         if _k in _d:
                             del _d[_k]
         manifest["_imports_embeddings_stripped"] = True
-    # Persist through the split store: dataset.json + per-image
-    # annotations/, atomic writes, only-changed annotation files.
+    # dataset.json and the changed per-image annotation files, written atomically.
     store.save(project_id, manifest)
-    # Stat the freshly-replaced file so the cache mtime matches what
-    # any other worker will see when they read disk.
+    _projects_changed()
     disk_mtime = _manifest_disk_mtime(project_id)
     with _MANIFEST_CACHE_LOCK:
-        # Default seeds the cache with a deepcopy so future mutations
-        # of the caller's `manifest` variable don't bleed into the
-        # cache. `cache_by_ref=True` skips the deepcopy and is safe
-        # ONLY when the caller is the last writer of the dict - e.g.
-        # a label_charlie flush that's inside the per-project write
-        # lock and discards `mm` immediately after save. Skipping
-        # the deepcopy saves 200-500ms per call on a 30MB manifest,
-        # which adds up to ~30s over a 1000-image labelling job.
+        # cache_by_ref skips the deepcopy: only for a caller that discards
+        # the dict after saving.
         _MANIFEST_CACHE[project_id] = manifest if cache_by_ref else _copy.deepcopy(manifest)
         _MANIFEST_CACHE_MTIME[project_id] = disk_mtime
         _MANIFEST_IMPORT_INDEX[project_id] = {
@@ -1596,13 +1122,8 @@ def save_manifest(project_id: str, manifest: dict, *, cache_by_ref: bool = False
             for e in (manifest.get("imports") or [])
             if isinstance(e, dict) and "id" in e
         }
-    # Kick async sidecar refresh so the next /overview + /dataset-stats
-    # reads serve straight from disk with zero compute. Deduped so
-    # rapid manifest writes (e.g. a labelling job that saves after
-    # every image) don't pile up dozens of parallel rebuilds.
     _kick_sidecar_refresh(project_id)
-    # Live one-way sync: if this project is a PARENT of derived (child) projects,
-    # re-derive them after edits settle. O(1) + never raises into this hot path.
+    # Re-derives any child projects once edits settle.
     _kick_child_resync(project_id)
 
 
@@ -1614,13 +1135,10 @@ def invalidate_manifest_cache(project_id: str) -> None:
         _MANIFEST_IMPORT_INDEX.pop(project_id, None)
 
 
-# ── derived ("child") projects: one-way parent → child crop sync ──────────
-# A child project's dataset is per-detection crops of a parent (see gd/derived.py).
-# We keep an in-memory reverse index (parent_id -> child_ids) so the save hook is
-# O(1); it's built once in the background on first use. Live re-sync is debounced
-# so a burst of parent saves (e.g. a labelling job) coalesces into one pass.
-try:  # never let the derived feature break the server's boot
-    import derived as _derived_mod  # noqa: E402  (gd/derived.py - no server import, no cycle)
+# Derived projects: a child holds per-detection crops of a parent, synced one
+# way. _DERIVED_INDEX maps parent_id -> child_ids and is built on first use.
+try:
+    import derived as _derived_mod  # noqa: E402
 except Exception as _derive_imp_err:
     _derived_mod = None
     print(f"[derived] feature disabled (import failed): {_derive_imp_err}", flush=True)
@@ -1660,9 +1178,7 @@ def _children_of(parent_id: str) -> set[str]:
 
 
 def _register_child(parent_id: str, child_id: str) -> None:
-    # Add to the in-memory index. The child manifest is already saved, so a
-    # later full build (lazy) still finds it; we don't flip the BUILT flag here
-    # (only a full scan may, so other parents' links aren't lost).
+    # Only a full scan sets _DERIVED_INDEX_BUILT.
     with _DERIVED_LOCK:
         _DERIVED_INDEX.setdefault(parent_id, set()).add(child_id)
 
@@ -1672,15 +1188,8 @@ def _ensure_derived_index() -> None:
         _build_derived_index()
 
 
-def _unregister_child(child_id: str) -> None:
-    with _DERIVED_LOCK:
-        for s in _DERIVED_INDEX.values():
-            s.discard(child_id)
-
-
 def resync_child(child_id: str) -> bool:
-    """Re-derive ONE child from its parent's current state. Reads parent, writes
-    child only. Returns True on success."""
+    """Re-derive one child from its parent, writing the child only. True on success."""
     if _derived_mod is None:
         return False
     child = load_manifest(child_id)
@@ -1701,9 +1210,7 @@ def resync_child(child_id: str) -> bool:
 
 
 async def _resync_child_locked(child_id: str) -> bool:
-    """resync_child under the child's write lock, the crop work in a
-    thread. Unlocked, an edit saved in the child during the pass was
-    reverted and a crop deleted during it came back."""
+    """resync_child under the child's write lock, with the crop work in a thread."""
     lock = await _manifest_write_lock(child_id)
     async with lock:
         return await asyncio.to_thread(resync_child, child_id)
@@ -1726,8 +1233,7 @@ def resync_children(parent_id: str) -> None:
 
 
 def _kick_child_resync(parent_id: str) -> None:
-    """Debounced background re-sync of a parent's children (~3s after the last
-    edit). Fast + swallow-all so it never disturbs save_manifest."""
+    """Re-sync a parent's children 3 s after its last edit. Never raises."""
     global _DERIVED_BUILDING
     try:
         if not _DERIVED_INDEX_BUILT:
@@ -1735,7 +1241,7 @@ def _kick_child_resync(parent_id: str) -> None:
                 if not _DERIVED_INDEX_BUILT and not _DERIVED_BUILDING:
                     _DERIVED_BUILDING = True
                     _threading.Thread(target=_build_derived_index, daemon=True).start()
-            return  # index warming up; live sync engages once it's ready
+            return  # index still building
         if parent_id not in _DERIVED_INDEX or not _DERIVED_INDEX[parent_id]:
             return
         with _DERIVED_LOCK:
@@ -1750,24 +1256,13 @@ def _kick_child_resync(parent_id: str) -> None:
         pass
 
 
-# Per-project asyncio lock for the manifest read-modify-write cycle.
-# Without this, concurrent uploads to the same project did
-# load_manifest → mutate → save_manifest in parallel. Each request
-# saw the manifest at upload-start time, appended its own ref, and
-# the later save_manifest overwrote the earlier one (most visibly:
-# uploading 2 references back-to-back ended with manifest holding
-# only the second one). The GPU lock serialises inference but says
-# nothing about manifest writes. Use one lock per project rather
-# than a global one so projects don't queue behind each other.
+# Per-project lock around the manifest read-modify-write cycle.
 _MANIFEST_WRITE_LOCKS: dict[str, asyncio.Lock] = {}
 _MANIFEST_WRITE_LOCKS_GUARD = asyncio.Lock()
 
 
 async def _manifest_write_lock(project_id: str) -> asyncio.Lock:
-    """Lazily-allocate per-project Lock. The guard lock makes the
-    "is this the first call for this project" check atomic so two
-    simultaneous first-callers don't each instantiate their own
-    Lock and end up racing each other."""
+    """The project's write lock, created on first use."""
     async with _MANIFEST_WRITE_LOCKS_GUARD:
         lk = _MANIFEST_WRITE_LOCKS.get(project_id)
         if lk is None:
@@ -1777,12 +1272,7 @@ async def _manifest_write_lock(project_id: str) -> asyncio.Lock:
 
 
 def _find_import_by_idempotency_key(project_id: str, key: str) -> dict | None:
-    """Scan the project manifest's imports for a previously-persisted
-    entry that carries the given idempotency_key. Returns the
-    /imports/raw response shape so the early-probe path in
-    v2_upload_import_raw can short-circuit on a retry without
-    redoing NSFW + PIL + disk write. Returns None when no match.
-    """
+    """The import carrying `key`, in the /imports/raw response shape, or None."""
     if not key:
         return None
     manifest = load_manifest(project_id, copy=False) or {}
@@ -1799,158 +1289,64 @@ def _find_import_by_idempotency_key(project_id: str, key: str) -> dict | None:
     return None
 
 
-def _log_manifest_cache_capacity() -> None:
-    """One-shot at startup. Prints system RAM headroom + an estimate
-    of how many manifests the cache can hold under that headroom.
-    Also sizes the served-image RAM cache (LRU bytes-bounded)."""
+def _size_image_cache() -> None:
+    """Size the served-image cache at startup: 25% of the available RAM,
+    between 0.5 and 8 GB, or 1 GB without psutil."""
     try:
         import psutil  # type: ignore
-        vm = psutil.virtual_memory()
-        total_gb = vm.total / 1e9
-        avail_gb = vm.available / 1e9
-        cap = int(min(1.0, max(0.1, avail_gb * 0.05)) * 1e9 / 50_000)
-        # Image cache budget: 25% of available RAM, capped at 8 GB.
-        # On a 16 GB box that's ~4 GB, on a 64 GB box ~8 GB.
-        # Sufficient for ~thousands of typical 200 KB JPEGs in RAM
-        # so reopens / workspace polls hit the cache nearly always.
-        img_budget_bytes = int(min(8.0, max(0.5, avail_gb * 0.25)) * 1e9)
-        _set_image_cache_budget(img_budget_bytes)
-        print(
-            f"[manifest-cache] system RAM: {total_gb:.1f} GB total, "
-            f"{avail_gb:.1f} GB available - cap-free cache (target ≤ {cap} manifests)"
-        )
-        print(
-            f"[image-cache] budget: {img_budget_bytes / 1e9:.1f} GB "
-            f"(LRU eviction over budget)"
-        )
+        avail_gb = psutil.virtual_memory().available / 1e9
+        budget = int(min(8.0, max(0.5, avail_gb * 0.25)) * 1e9)
     except Exception:
-        # psutil missing or any other error - just don't log the
-        # capacity hint. Caches still work; image cache stays at
-        # its default 0-byte budget (effectively disabled until
-        # explicitly set).
-        print("[manifest-cache] enabled (psutil unavailable, skipping capacity probe)")
-        # Conservative fallback so the image cache still works
-        # without the RAM probe.
-        _set_image_cache_budget(1_000_000_000)
-        print("[image-cache] budget: 1.0 GB (default - psutil unavailable)")
+        budget = 1_000_000_000
+    _set_image_cache_budget(budget)
+    print(f"[image-cache] budget: {budget / 1e9:.1f} GB")
 
 
-# Now that load_manifest is defined we can finish wiring the
-# project-ownership dependency. `require_project_owner` reads the
-# manifest at request time so a deletion / rename of the project
-# between token issue and request lands as a 404 not a stale 200.
-require_project_owner = _require_project_owner_factory(load_manifest)
-# Read-access gate. Public projects readable anonymously; private
-# projects readable only by their owner (anyone else gets 404 so the
-# UUID's existence can't be probed).
-require_project_read_access = _require_project_read_access_factory(load_manifest)
-# Manage gate (rename / cover / privacy / members / delete). Standalone dataset
-# -> owner; dataset in a Project container -> the container owner only. Applied
-# to settings/delete routes (editors get write via require_project_owner but not
-# manage).
-require_project_manage = _require_project_manage_factory(load_manifest)
-# DESTROY a dataset: strictly the dataset's own creator (manifest owner), never
-# a Project editor and never even the Project owner.
-require_dataset_creator = _require_dataset_creator_factory(load_manifest)
-
-
-
-def empty_manifest(name: str, owner: str = "", project_id: str | None = None) -> dict:
+def empty_manifest(name: str, project_id: str | None = None) -> dict:
     return {
         "id": project_id or _uuid.uuid4().hex,
         "name": name,
-        "owner": owner,
-        "createdBy": owner,
         "createdAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "updatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "prompt": "",
         "tags": [],
-        # Match the frontend's "Normal" preset so new projects open
-        # cleanly on Normal mode in the picker - the old (0.25, 0.25,
-        # 0.5) defaults don't line up with any named mode and so showed
-        # up as a Custom pill on first load, which surprised users.
-        "thresholds": {"box": 0.05, "text": 0.15, "nms": 0.7},
         "results": [],
         "verdicts": {},
         "editedBoxes": {},
         "cover": None,
         "hasModel": False,
-        "likedBy": [],
         "favouritedBy": [],
-        # When true the project is hidden from the public Projects feed.
-        # Owner can always see and edit their own private projects.
-        "private": False,
-        # Per-label colour overrides set in Project settings. Keyed by
-        # canonical-lower label; value is a #rrggbb hex string. Missing
-        # entries fall back to the stable hash-based palette on the FE.
+        # Lower-case label -> #rrggbb colour override.
         "labelColours": {},
     }
 
 
-def _ensure_random_cover(manifest: dict) -> bool:
-    """If no cover is set, pick a random image from `results`.
-
-    Called from the upload paths after new images land so a freshly
-    created project gets a varied thumbnail in the Projects grid
-    instead of always defaulting to the first uploaded image.
-    Returns True when the manifest was modified so the caller knows
-    to re-save.
-    """
-    if manifest.get("cover"):
-        return False
-    results = manifest.get("results", []) or []
-    candidates = [r.get("image") for r in results if r.get("image")]
-    if not candidates:
-        return False
+def _replace_missing_cover(manifest: dict) -> None:
+    """A cover that names no import or reference is replaced by a random
+    import, else a reference, else None."""
+    cover = manifest.get("cover")
+    if not cover:
+        return
+    imports = [e.get("filename") for e in manifest.get("imports") or []
+               if isinstance(e, dict) and e.get("filename")]
+    refs = [e.get("filename") for e in manifest.get("references") or []
+            if isinstance(e, dict) and e.get("filename")]
+    if cover in imports or cover in refs:
+        return
     import random
-    manifest["cover"] = random.choice(candidates)
-    return True
+    manifest["cover"] = random.choice(imports or refs) if (imports or refs) else None
+    manifest["cover_blurhash"] = None  # re-derived on next read
 
-
-def parse_phrase(label):
-    if "(" in label and label.endswith(")"):
-        text, score = label.rsplit("(", 1)
-        try:
-            return text.strip(), float(score.rstrip(")"))
-        except ValueError:
-            pass
-    return label, None
-
-
-# Preference-model code (review checkpoint, logistic-regression trainer,
-# CLIP-augmented features) lived here. Removed - VLM validation alone
-# now decides accept/reject, and auto-label runs through to completion.
-
-
-# ---------------------------------------------------------------------------
-# Tag synonym expansion (auto prompt-engineering for GroundingDINO).
-# ---------------------------------------------------------------------------
-# GD recall is meaningfully better when the user's tag is fed alongside
-# a few synonyms / near-synonyms ("potholes" + "road damage" + "crack").
-# (SaaS build asked an LLM for variants; the portable build caches only)
-# them on disk, and on each inference run pass GD the merged list.
-# Detected variants are mapped back to the user's canonical tag in
-# post so the manifest never sees the synthetic labels.
 
 def _charlie_embed_detections(
     pil: "PILImage.Image",
     detections: list[dict],
 ) -> list:
-    """Embed each Charlie detection's masked (inpainted) crop with DINOv2
-    (and SigLIP when loaded), mutating the dicts in place to populate
-    `embedding`/`embed_version` and `siglip_embedding`/`siglip_version`.
-
-    Returns the per-detection squares (parallel to `detections`) so the
-    caller can run patch-token encoding without rebuilding from polygons.
-    Empty list when DINOv2 isn't loaded or there are no detections.
-
-    Matches V2's reference-upload schema exactly so the resolver
-    consumes Charlie detections the same way it does V2 detections.
-    """
+    """Embed each detection's inpainted crop with DINOv2, setting `embedding`
+    and `embed_version` in place. Returns the square crops, parallel to
+    `detections`, or [] when DINOv2 is not loaded."""
     if not detections:
         return []
     import v2_dinov2 as _v2d
-    import v2_siglip as _v2s
 
     if not _v2d.is_loaded():
         return []
@@ -1964,9 +1360,7 @@ def _charlie_embed_detections(
             clean = _v2d.inpaint_bbox_crop(pil, box, polys)
             square = _v2d.center_square_crop(clean)
         except Exception:
-            # Degenerate box / decode error: use a neutral tile. Its
-            # embedding will score poorly against all ref classes and
-            # the detection will be rejected by the embed-low rule.
+            # Neutral tile for a degenerate box; the embed-low rule rejects it.
             square = PILImage.new("RGB", (16, 16), (0, 0, 0))
         squares.append(square)
 
@@ -1976,27 +1370,16 @@ def _charlie_embed_detections(
         print(f"[label-charlie] DINOv2 encode failed: {e}")
         d_vecs = None
 
-    s_vecs = None
-    if _v2s.is_loaded():
-        try:
-            s_vecs = _v2s.encode_images_batch(squares)
-        except Exception as e:
-            print(f"[label-charlie] SigLIP encode failed: {e}")
-
     for k, d in enumerate(detections):
         if d_vecs is not None and k < d_vecs.shape[0]:
             d["embedding"] = [round(float(x), 6) for x in d_vecs[k].tolist()]
             d["embed_version"] = _v2d.EMBED_VERSION
-        if s_vecs is not None and k < s_vecs.shape[0]:
-            d["siglip_embedding"] = [round(float(x), 6) for x in s_vecs[k].tolist()]
-            d["siglip_version"] = _v2s.EMBED_VERSION
 
     return squares
 
 
 def _charlie_box_iou(box_a, box_b) -> float:
-    """Axis-aligned IoU on [x0, y0, x1, y1] boxes. Returns 0.0 on any
-    degenerate input (None / wrong arity / negative area)."""
+    """IoU of two [x0, y0, x1, y1] boxes; 0.0 for degenerate input."""
     if not box_a or not box_b or len(box_a) < 4 or len(box_b) < 4:
         return 0.0
     ax0, ay0, ax1, ay1 = float(box_a[0]), float(box_a[1]), float(box_a[2]), float(box_a[3])
@@ -2013,19 +1396,14 @@ def _charlie_box_iou(box_a, box_b) -> float:
     return inter / union if union > 0 else 0.0
 
 
-# Tunables for Charlie's specific path. Each defaults to the value
-# we've found works for the alpaca/llama / hare/rabbit fixtures and
-# can be overridden per deployment via env vars.
+# Tunables for Charlie's specific path, overridable by env vars.
 _CHARLIE_AMBIGUOUS_MARGIN = float(os.environ.get("CHARLIE_AMBIGUOUS_MARGIN", "0.08"))
-_CHARLIE_VLM_WEIGHT = float(os.environ.get("CHARLIE_VLM_WEIGHT", "0.3"))
 _CHARLIE_POST_FUSION_AMBIGUOUS_MARGIN = float(
     os.environ.get("CHARLIE_POST_FUSION_AMBIGUOUS_MARGIN", "0.01")
 )
 
-# Broad concept prompts used to recover candidate boxes for SPECIFIC-mode
-# labels that SAM3's text prompt can't localise (e.g. "orangutan", or a
-# made-up label). SAM3 finds the generic object, then the reference
-# resolver assigns the real label. Override via env (comma-separated).
+# Broad prompts for specific-mode labels SAM3 cannot localise. The
+# reference resolver assigns the real label.
 _CHARLIE_GENERIC_FALLBACK_PROMPTS = [
     p.strip() for p in os.environ.get(
         "CHARLIE_GENERIC_FALLBACK_PROMPTS", "object,animal"
@@ -2046,22 +1424,9 @@ def _charlie_segment_specific_with_fallback(
     tile_size: int | None = None,
     cancel_check=None,
 ) -> tuple[list[dict], dict]:
-    """SAM3 detection for the SPECIFIC pipeline with a generic recovery
-    pass. Runs the label words first; for any label that yields ZERO
-    detections, re-runs SAM3 with broad concept prompts
-    (_CHARLIE_GENERIC_FALLBACK_PROMPTS) so a candidate box still surfaces.
-    The reference resolver downstream assigns the real label to those
-    boxes (or rejects them), which is what lets the pipeline detect
-    categories whose label word SAM3 doesn't recognise.
-
-    Conservative by design: the fallback only fires for labels that found
-    nothing, so well-behaved projects (every label detected) are
-    untouched. Generic boxes overlapping an existing detection (IoU > 0.5)
-    are dropped, and their `gd_label` is cleared so "object"/"animal"
-    never leaks in as a label prior - the references decide.
-    """
-    # Both passes (real labels + generic fallback) honour the same
-    # resolution choice - tiled native crops or the classic 1500px pass.
+    """SAM3 detection for the specific pipeline. When a label finds nothing,
+    a second pass runs the generic fallback prompts; its boxes overlapping a
+    detection at IoU > 0.5 are dropped and the rest carry no gd_label."""
     def _seg(im, lbls):
         if tile_native:
             return charlie.segment_labels_tiled(
@@ -2077,9 +1442,7 @@ def _charlie_segment_specific_with_fallback(
         )
 
     dets, timings = _seg(pil, label_names)
-    # If the first pass was cancelled it returns [], which would make every
-    # label look "missing" and trigger a wasted generic-fallback sweep on an
-    # already-cancelled job. Bail immediately.
+    # A cancelled pass returns [], which would look like every label missing.
     if (timings or {}).get("cancelled") or (cancel_check is not None and cancel_check()):
         return dets, timings
     found = {(d.get("gd_label") or "").strip().lower() for d in dets}
@@ -2098,7 +1461,7 @@ def _charlie_segment_specific_with_fallback(
             continue
         if any(_charlie_box_iou(gb, d.get("box") or []) > 0.5 for d in dets):
             continue  # already covered by a real-label detection
-        g["gd_label"] = None      # references decide; don't bias on "object"
+        g["gd_label"] = None      # the references decide
         g["gd_variant"] = None    # every label reader falls back to this key
         g["gd_score"] = None
         g["generic"] = True
@@ -2112,77 +1475,33 @@ def _charlie_segment_specific_with_fallback(
     return dets, timings
 
 
-def _charlie_fuse_embed_vlm(
-    embed_sims: dict[str, float],
-    vlm_label: str | None,
-    vlm_score: float | None,
-    *,
-    weight: float = _CHARLIE_VLM_WEIGHT,
-) -> tuple[str | None, float, dict[str, float]]:
-    """Combine embedding similarity with the VLM's verdict into a
-    fused score per top-2 candidate label.
-
-    For each top-2 label the fused score is `embed_sim + Δ`, where Δ
-    is `+weight*vlm_score` if the VLM picked this label, `-weight*vlm_score`
-    if the VLM picked the OTHER candidate (an active vote against
-    this one), and 0 if the VLM declined or picked outside the
-    candidate set. `weight` controls how much the VLM can move things
-    relative to the embedding signal - at the default 0.3 a VLM at
-    full confidence can flip an embed sim margin of up to ~0.6.
-
-    Returns `(winner_label, fused_margin, fused_scores)`. The margin
-    is over the candidate set only - it's the post-fusion equivalent
-    of the resolver's `embed_margin` and the caller uses it to decide
-    whether the detection is still ambiguous after fusion.
-    """
-    if not embed_sims:
-        return None, 0.0, {}
-    candidates = sorted(embed_sims.items(), key=lambda kv: -kv[1])[:2]
-    if not candidates:
-        return None, 0.0, {}
-    cand_lower = {lab.strip().lower(): lab for lab, _ in candidates}
-    vlm_lower = (vlm_label or "").strip().lower() if vlm_label else None
-    vlm_conf = float(vlm_score) if vlm_score is not None else 0.0
-
-    fused: dict[str, float] = {}
-    for lab, sim in candidates:
-        lab_lower = lab.strip().lower()
-        if vlm_lower == lab_lower:
-            delta = +weight * vlm_conf
-        elif vlm_lower and vlm_lower in cand_lower:
-            delta = -weight * vlm_conf
-        else:
-            delta = 0.0
-        fused[lab] = float(sim) + delta
-
-    sorted_scores = sorted(fused.values(), reverse=True)
-    margin = sorted_scores[0] - (sorted_scores[1] if len(sorted_scores) >= 2 else 0.0)
-    winner = max(fused, key=fused.get)
-    return winner, margin, fused
+def _charlie_tiebreak(d: dict, sims: dict[str, float]) -> None:
+    """Give an ambiguous verdict or detection the top label of `sims`, the
+    first on a tie, in place. It stays ambiguous when the top two are closer
+    than _CHARLIE_POST_FUSION_AMBIGUOUS_MARGIN."""
+    top2 = {lab: float(sim) for lab, sim in sorted(sims.items(), key=lambda kv: -kv[1])[:2]}
+    first, second = sorted(top2.values(), reverse=True)
+    winner = max(top2, key=top2.get)
+    d["pred_label"] = winner
+    d["pred_source"] = "embed-vlm"
+    d["vlm_action"] = "tiebreak"
+    d["embed_sim_for_label"] = round(top2[winner], 4)
+    d["fused_scores"] = {lab: round(sim, 4) for lab, sim in top2.items()}
+    d["fused_margin"] = round(first - second, 4)
+    d["ambiguous"] = first - second < _CHARLIE_POST_FUSION_AMBIGUOUS_MARGIN
 
 
-# Cross-label IoU threshold for Charlie-specific NMS. SAM3 prompts
-# each project label individually, so a single physical alpaca often
-# comes back as one detection under "alpaca" AND a near-identical one
-# under "llama". 0.6 is loose enough to catch sibling-prompt duplicates
-# but strict enough to keep two genuinely-distinct objects standing
-# close together. Override via CHARLIE_SPECIFIC_NMS_IOU.
+# NMS IoU threshold. SAM3 prompts each label separately, so one object can
+# come back under two labels.
 _CHARLIE_NMS_IOU = float(os.environ.get("CHARLIE_SPECIFIC_NMS_IOU", "0.6"))
 
-# Containment ratio: when one same-label box is THIS fraction-or-more
-# inside another (intersection / smaller_area), suppress regardless
-# of IoU. Catches the partial-mask case where SAM3 segments most of
-# an object once AND segments a sub-region a second time - the two
-# boxes share a label and the smaller is clearly the same object
-# viewed at a smaller crop. 0.7 keeps "two glasses overlapping at a
-# corner" out but kills "one box inside another" duplicates.
+# Same-label boxes whose intersection / smaller area reaches this merge
+# regardless of IoU.
 _CHARLIE_NMS_CONTAINMENT = float(os.environ.get("CHARLIE_NMS_CONTAINMENT", "0.7"))
 
 
 def _charlie_boxes_should_merge(box_a, box_b) -> bool:
-    """Same-label dedupe predicate. True when boxes a + b probably
-    cover the same physical object - high IoU OR one box mostly
-    contained inside the other."""
+    """True when two same-label boxes likely cover one object: high IoU or containment."""
     if not box_a or not box_b or len(box_a) < 4 or len(box_b) < 4:
         return False
     ax0, ay0, ax1, ay1 = (float(c) for c in box_a[:4])
@@ -2203,29 +1522,17 @@ def _charlie_boxes_should_merge(box_a, box_b) -> bool:
 
 
 def _charlie_nms_same_label(detections: list[dict]) -> list[dict]:
-    """Same-label NMS for Charlie's GENERAL path.
-
-    Two boxes with the same gd_label that overlap heavily are almost
-    always the same object detected twice (SAM3 occasionally fires
-    duplicate concept matches on the same region). Drop the lower-
-    scoring member of each high-IoU same-label pair; keep the rest
-    untouched. Different-label boxes are NEVER suppressed here - a
-    "person" overlapping a "skateboard" is a real annotation and
-    the user picks both.
-    """
+    """Same-label NMS for Charlie's general path: drops the lower-scoring box
+    of each overlapping same-label pair. Different labels are never suppressed."""
     if len(detections) <= 1:
         return detections
 
     def _label(d: dict) -> str:
-        # pred_label > gd_label, lowercased. pred_label only fires
-        # on specific (resolver-set) and shouldn't differ from
-        # gd_label on general - but we look at both for safety.
         lab = (d.get("pred_label") or d.get("gd_label") or "").strip().lower()
         return lab
 
     def _score(d: dict) -> float:
-        # gd_score is SAM3's mask score on the general path; the
-        # specific path's embed sim doesn't apply.
+        # SAM3's mask score.
         return float(d.get("gd_score") or 0.0)
 
     order = sorted(
@@ -2254,25 +1561,14 @@ def _charlie_nms_same_label(detections: list[dict]) -> list[dict]:
         return detections
     print(
         f"[label-charlie] same-label NMS dropped {len(suppressed)} duplicate(s) "
-        f"of {len(detections)} (IoU≥{_CHARLIE_NMS_IOU} or containment≥{_CHARLIE_NMS_CONTAINMENT})"
+        f"of {len(detections)} (IoU >= {_CHARLIE_NMS_IOU} or containment >= {_CHARLIE_NMS_CONTAINMENT})"
     )
     return [d for i, d in enumerate(detections) if i not in suppressed]
 
 
 def _charlie_nms_post_resolve(detections: list[dict], iou_thresh: float = _CHARLIE_NMS_IOU) -> list[dict]:
-    """Post-resolution NMS for Charlie's specific path.
-
-    SAM3's per-label prompting makes the same physical object appear
-    once per sibling label - same box, near-identical mask, possibly
-    resolver-assigned to different labels depending on which crop
-    landed on top of which reference cluster. Drops the lower-scoring
-    member of each high-IoU pair so the gallery shows one detection
-    per object, not N (one per project label).
-
-    Tiebreak: embed_sim_for_label first (the actual decision metric),
-    gd_score second. Ties on both keep the earlier-listed detection
-    so the function is stable.
-    """
+    """Post-resolution NMS for Charlie's specific path, across labels.
+    Ranked by embed_sim_for_label, then gd_score; ties keep list order."""
     if len(detections) <= 1:
         return detections
 
@@ -2282,10 +1578,6 @@ def _charlie_nms_post_resolve(detections: list[dict], iou_thresh: float = _CHARL
             float(d.get("gd_score") or 0.0),
         )
 
-    # Sort indices by score desc; pop best-first into kept[], skipping
-    # any with high IoU vs an already-kept one. Operating on indices
-    # keeps the original detections list untouched and makes the
-    # stable-order rebuild at the end straightforward.
     order = sorted(
         range(len(detections)),
         key=lambda i: _score(detections[i]),
@@ -2309,7 +1601,7 @@ def _charlie_nms_post_resolve(detections: list[dict], iou_thresh: float = _CHARL
     keep = set(kept_idx)
     print(
         f"[label-charlie] NMS dropped {len(suppressed)} duplicate(s) of "
-        f"{len(detections)} detection(s) (IoU≥{_CHARLIE_NMS_IOU})"
+        f"{len(detections)} detection(s) (IoU >= {_CHARLIE_NMS_IOU})"
     )
     return [d for i, d in enumerate(detections) if i in keep]
 
@@ -2319,26 +1611,21 @@ def _charlie_classify_general_sam3(
     box_xyxy: list[float],
     candidate_labels: list[str],
 ) -> tuple[dict | None, dict[str, float]]:
-    """Run SAM3 once per candidate label and pick the one whose
-    detection bbox best overlaps the user's box. Used by Charlie's
-    interactive endpoints on GENERAL projects, where the user hasn't
-    uploaded references so the embedding pipeline has nothing to
-    compare against. SAM3's text-prompted concept segmentation IS
-    the label signal for these projects.
-    """
+    """Run SAM3 once per candidate label and pick the one whose detection
+    best overlaps the box. For general projects, which have no references."""
     charlie = state.get("charlie")
     if charlie is None:
         return None, {}
     try:
         label, score, timings = charlie.classify_box(image_pil, box_xyxy, candidate_labels)
     except Exception as e:
-        print(f"[charlie/classify-general] SAM3 classify failed: {e}")
+        print(f"[charlie/classify-general] SAM 3 classify failed: {e}")
         return None, {}
     if not label:
         return None, {"sam3_classify_ms": float(timings.get("total_ms", 0.0))}
     verdict = {
         "pred_label": label,
-        "pred_source": "vlm",  # closest existing enum value the FE understands
+        "pred_source": "vlm",  # the nearest value the UI knows
         "embed_nearest_label": label,
         "embed_nearest_sim": float(score) if score is not None else None,
         "embed_sim_for_label": float(score) if score is not None else None,
@@ -2359,24 +1646,17 @@ def _charlie_resolve_label_for_box(
     project_id: str,
     candidate_labels: list[str],
 ) -> tuple[dict | None, dict[str, float]]:
-    """Embed one box-crop + run the V2 specific resolver against the
-    project's reference centroids. Returns (verdict_or_None, timings).
-
-    Shared helper used by Charlie's interactive endpoints
-    (detect_point + classify_box) so click-to-detect and add-box
-    both go through the same code path the labelling job does. The
-    caller decides whether to fire a VLM tiebreak on top.
-    """
+    """Embed one box crop and run the specific resolver against the project's
+    reference centroids. Returns (verdict or None, timings). Used by
+    classify_box."""
     import v2_dinov2 as _v2d
-    import v2_siglip as _v2s
     if not _v2d.is_loaded():
         return None, {}
 
     timings: dict[str, float] = {}
     t_embed = time.perf_counter()
 
-    # Inpainted-square crop, same procedure references go through so
-    # the cosine comparison stays apples-to-apples.
+    # The same crop procedure as the references.
     clean = _v2d.inpaint_bbox_crop(image_pil, box_xyxy, mask_polys or [])
     square = _v2d.center_square_crop(clean)
     d_vecs = _v2d.encode_images_batch([square])
@@ -2384,144 +1664,73 @@ def _charlie_resolve_label_for_box(
         [round(float(x), 6) for x in d_vecs[0].tolist()]
         if d_vecs is not None and d_vecs.shape[0] > 0 else []
     )
-    emb_siglip_raw: list[float] | None = None
-    if _v2s.is_loaded():
-        try:
-            s_vecs = _v2s.encode_images_batch([square])
-            if s_vecs is not None and s_vecs.shape[0] > 0:
-                emb_siglip_raw = [round(float(x), 6) for x in s_vecs[0].tolist()]
-        except Exception as e:
-            print(f"[charlie/resolve] siglip encode failed: {e}")
     timings["embed_ms"] = round((time.perf_counter() - t_embed) * 1000.0, 1)
 
     if not emb_raw:
         return None, timings
 
-    # Reference embeddings loaded from disk for this project, then scored
-    # via _charlie_resolve_from_refs (interactive click-to-detect / add-box
-    # path - uses Fisher + patch tokens). NOTE: the labelling JOB
-    # (label_charlie) and the public demo deliberately skip Fisher/patches
-    # and call _v2_resolve_label_specific directly with raw refs.
     try:
-        by_label, by_label_siglip, _dirty = _v2_load_or_backfill_reference_embeddings(project_id)
+        by_label = _v2_load_or_backfill_reference_embeddings(project_id)
     except Exception as e:
         print(f"[charlie/resolve] reference load failed: {e}")
         return None, timings
     return _charlie_resolve_from_refs(
-        emb_raw, emb_siglip_raw, square,
-        by_label, by_label_siglip, candidate_labels,
+        emb_raw, square, by_label, candidate_labels,
         project_id=project_id, timings=timings,
     )
 
 
 def _charlie_resolve_from_refs(
     emb_raw,
-    emb_siglip_raw,
     square,
     by_label,
-    by_label_siglip,
     candidate_labels,
     *,
     project_id: str | None = None,
     timings: dict | None = None,
     refs_patch: dict | None = None,
-    refs_patch_siglip: dict | None = None,
 ):
-    """Score one already-embedded box crop against pre-loaded reference
-    embeddings with the V2 specific resolver. Extracted from
-    _charlie_resolve_label_for_box so the public demo - which encodes
-    references in memory and has no persisted project - runs the
-    IDENTICAL resolver the app's labelling job + interactive endpoints
-    use: same kNN scoring, same Fisher handling, same LOO class
-    thresholds, same patch-token refinement.
-
-    Patch tokens come from disk for a persisted project (project_id set),
-    or the caller can pass them in directly (refs_patch / refs_patch_siglip
-    keyed by lowercased label) - that's how the demo gets patch-token
-    parity without a project on disk. When neither is available the
-    resolver falls back to pooled scoring.
-    """
+    """Score one embedded box crop against loaded reference embeddings with
+    the specific resolver. Patch tokens come from refs_patch, keyed by
+    lower-case label, else from disk when project_id is set; without them
+    scoring is pooled."""
     import v2_dinov2 as _v2d
-    import v2_siglip as _v2s
-    import numpy as _np
     if timings is None:
         timings = {}
 
     refs_dino_arr = _v2_stack_refs(by_label)
-    refs_siglip_arr = _v2_stack_refs(by_label_siglip)
     if not refs_dino_arr:
         return None, timings
 
-    # No Fisher reweighting - match the batch labelling job, which
-    # resolves with RAW refs (see _run_label_charlie_job_impl: "Pass raw
-    # embeddings directly, no Fisher weighting. Fisher LDA overfits on
-    # small reference sets and was causing systematic bias toward one
-    # class"). Applying it here made an interactive click on the same crop
-    # return a different, biased label than the auto-pass, with no
-    # reconciliation. class_thresholds come from the raw refs, as in batch.
-    fisher_dino = None
-    fisher_siglip = None
     class_thresholds_local = _v2_compute_class_thresholds(refs_dino_arr) or None
 
-    # Caller-provided patches (demo, in-memory) take precedence; else
-    # load from disk for a persisted project; else pooled-only.
-    if refs_patch is None and refs_patch_siglip is None:
-        refs_patch, refs_patch_siglip = {}, {}
+    if refs_patch is None:
+        refs_patch = {}
         if project_id and _v2_patch_match_enabled():
             try:
-                refs_patch, refs_patch_siglip = _v2_load_or_backfill_patch_tokens(project_id)
+                refs_patch = _v2_load_or_backfill_patch_tokens(project_id)
             except Exception as e:
                 print(f"[charlie/resolve] patch refs load failed: {e}")
-                refs_patch, refs_patch_siglip = {}, {}
-    else:
-        refs_patch = refs_patch or {}
-        refs_patch_siglip = refs_patch_siglip or {}
+                refs_patch = {}
 
     q_patch_dino = (None, None)
-    q_patch_siglip = (None, None)
     try:
         if refs_patch and square is not None:
             q_patch_dino = _v2d.encode_image_patches(square)
     except Exception as e:
         print(f"[charlie/resolve] dino patch encode failed: {e}")
-    if refs_patch_siglip and square is not None and _v2s.is_loaded():
-        try:
-            q_patch_siglip = _v2s.encode_image_patches(square)
-        except Exception as e:
-            print(f"[charlie/resolve] siglip patch encode failed: {e}")
-
-    # Apply Fisher to query for scoring (not stored).
-    emb_for_scoring = emb_raw
-    emb_siglip_for_scoring = emb_siglip_raw
-    if fisher_dino is not None:
-        emb_for_scoring = [
-            round(float(x), 6) for x in
-            _v2_apply_fisher_to_arr(_np.asarray([emb_raw], dtype=_np.float32), fisher_dino)[0].tolist()
-        ]
-    if fisher_siglip is not None and emb_siglip_raw is not None:
-        emb_siglip_for_scoring = [
-            round(float(x), 6) for x in
-            _v2_apply_fisher_to_arr(_np.asarray([emb_siglip_raw], dtype=_np.float32), fisher_siglip)[0].tolist()
-        ]
 
     label_display_local = {t.lower(): t for t in candidate_labels}
     try:
         verdict = _v2_resolve_label_specific(
-            emb_for_scoring,
+            emb_raw,
             None,
             refs_dino_arr,
             label_display_local,
-            score_mode="knn",
-            gd_score=None,
-            embedding_siglip=emb_siglip_for_scoring,
-            refs_by_label_siglip=refs_siglip_arr or None,
             class_thresholds=class_thresholds_local,
             query_patch_tokens=q_patch_dino[0],
             query_patch_fg=q_patch_dino[1],
             refs_by_label_patches=refs_patch or None,
-            query_patch_tokens_siglip=q_patch_siglip[0],
-            query_patch_fg_siglip=q_patch_siglip[1],
-            refs_by_label_patches_siglip=refs_patch_siglip or None,
             ambiguous_margin=_CHARLIE_AMBIGUOUS_MARGIN,
         )
     except Exception as e:
@@ -2530,121 +1739,10 @@ def _charlie_resolve_from_refs(
     return verdict, timings
 
 
-def _charlie_interactive_ref_label(
-    image_pil,
-    box_xyxy,
-    mask_polys,
-    project_id: str,
-    candidate_labels: list[str],
-) -> tuple[str | None, float | None]:
-    """Resolve a label for an interactively-placed region (a SAM2 point /
-    box mask) against the project's references - the SAME basis the batch
-    labelling job uses. Returns (label, score), or (None, None) when there
-    are no usable references (general projects), so the caller falls back
-    to the SAM3 / VLM path.
-
-    This is what lets click-to-detect & add-box label categories whose
-    word SAM3 can't text-match (e.g. "orangutan", a made-up label): SAM2
-    localises the region label-agnostically, then the reference embeddings
-    decide the label. The box is drawn deliberately by the user, so even a
-    low-similarity verdict returns its best guess (pred / nearest) rather
-    than rejecting outright."""
-    try:
-        verdict, _t = _charlie_resolve_label_for_box(
-            image_pil, [float(c) for c in box_xyxy], mask_polys or [],
-            project_id, candidate_labels,
-        )
-    except Exception as e:
-        print(f"[charlie/interactive] reference resolve failed: {e}")
-        return None, None
-    if not verdict:
-        return None, None
-    label = verdict.get("pred_label") or verdict.get("embed_nearest_label")
-    if not label:
-        return None, None
-    sim = verdict.get("embed_sim_for_label")
-    if sim is None:
-        sim = verdict.get("embed_nearest_sim")
-    return label, (round(float(sim), 4) if sim is not None else None)
-
-
-async def _charlie_vlm_tiebreak_async(
-    verdict: dict,
-    image_pil: "PILImage.Image",
-    box_xyxy: list[float],
-    mask_polys: list | None,
-    loop,
-) -> tuple[dict, float | None]:
-    """Run the VLM tiebreak on an ambiguous verdict, then fuse the
-    answer with the embed sims via the confidence-weighted strategy.
-    Returns the mutated verdict + the VLM call duration (ms) or None
-    if the VLM wasn't available."""
-    sims_dict = verdict.get("sims") or {}
-    if len(sims_dict) < 2:
-        return verdict, None
-    try:
-        from vlm_validate import vlm_classify as _vlm_classify
-    except Exception as e:
-        print(f"[charlie/vlm] import failed: {e}")
-        return verdict, None
-    top2 = sorted(sims_dict.items(), key=lambda kv: -kv[1])[:2]
-    top2_labels = [lab for lab, _ in top2]
-    t0 = time.perf_counter()
-    try:
-        async with state["gpu_lock"]:
-            v_label, v_score = await loop.run_in_executor(
-                None, _vlm_classify, image_pil, box_xyxy, top2_labels, mask_polys,
-            )
-    except Exception as e:
-        print(f"[charlie/vlm] call failed: {e}")
-        return verdict, None
-    vlm_ms = (time.perf_counter() - t0) * 1000.0
-
-    winner, fused_margin, fused_scores = _charlie_fuse_embed_vlm(
-        sims_dict, v_label, v_score,
-    )
-    verdict["vlm_label"] = v_label
-    verdict["vlm_score"] = v_score
-    if winner is not None:
-        cur_pred = (verdict.get("pred_label") or "").strip().lower()
-        winner_lower = winner.strip().lower()
-        if winner_lower != cur_pred:
-            verdict["pred_label"] = winner
-            verdict["pred_source"] = "embed-vlm"
-            verdict["vlm_action"] = "tiebreak"
-        else:
-            verdict["pred_source"] = "embed-vlm"
-            verdict["vlm_action"] = (
-                "confirm" if v_label and v_label.strip().lower() == cur_pred
-                else "tiebreak"
-            )
-        for kk, vv in sims_dict.items():
-            if kk.strip().lower() == winner_lower:
-                verdict["embed_sim_for_label"] = round(float(vv), 4)
-                break
-        verdict["fused_margin"] = round(float(fused_margin), 4)
-        verdict["fused_scores"] = {
-            k: round(float(v), 4) for k, v in fused_scores.items()
-        }
-        verdict["ambiguous"] = fused_margin < _CHARLIE_POST_FUSION_AMBIGUOUS_MARGIN
-    return verdict, vlm_ms
-
-
 async def _run_label_charlie_job(job, emit, cancel_event):
-    """Thin guard around the V2 Charlie labelling job that ALWAYS lifts
-    the per-job sidecar-refresh suppression (even on a mid-job exception)
-    and fires one final rebuild. Previously the discard lived inline at
-    the end with no try/finally, so any unhandled error mid-job left the
-    project suppressed for the process lifetime, freezing its
-    overview/stats/initial sidecars. The work is in the _impl below."""
-    # Suppress sidecar rebuilds during the job. Each flush would otherwise
-    # kick a full overview+stats+initial+workspace rebuild, which on a
-    # 1000-image manifest can each take seconds. The finally lifts it and
-    # fires one post-job rebuild capturing the final state.
+    """Run _run_label_charlie_job_impl with sidecar refresh suppressed and
+    background embeddings paused, then refresh the sidecars once."""
     _SIDECAR_REFRESH_SUPPRESSED.add(job.project)
-    # Pause fire-and-forget background embeddings for the duration of the
-    # job so a post-import embedding backlog can't steal GPU time from
-    # SAM3 and make labelling crawl. They resume + drain when the job ends.
     _pause_bg_embeddings()
     try:
         return await _run_label_charlie_job_impl(job, emit, cancel_event)
@@ -2658,49 +1756,31 @@ async def _run_label_charlie_job(job, emit, cancel_event):
 
 
 async def _run_label_charlie_job_impl(job, emit, cancel_event):
-    """V2 Charlie labelling job. Iterates the project's manifest for
-    every import marked `labelled: False` (or with empty detections,
-    for backwards compat with imports that pre-date the flag) and
-    runs the SAM3 charlie pipeline against each one. After each
-    image, the entry's detections + timings + `labelled` flag are
-    written back to the manifest and the labelled_preview is
-    re-baked. Emits one progress event per image so the FE job card
-    can stream a counter + filename. Sidecar-refresh suppression is
-    owned by the wrapper _run_label_charlie_job.
-    """
+    """Label each unlabelled import with the SAM3 Charlie pipeline, writing
+    its detections back and emitting one progress event per image."""
     proj = project_dir(job.project)
     if not proj.exists():
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
 
     charlie = state.get("charlie")
     if charlie is None:
-        raise RuntimeError("pipeline_charlie not loaded - cannot run labelling")
+        raise RuntimeError("SAM 3 is not loaded, so labelling cannot run")
 
-    # Timestamped progress markers so we can attribute slow labelling
-    # jobs to specific stages (setup vs SAM3 vs resolver). The user
-    # report was "hangs at 0/1 forever on a 1000-image project" - the
-    # logs needed to differentiate "setup takes forever" from "first
-    # SAM3 call takes forever" from "GPU is busy with another job".
     _t_job_start = time.perf_counter()
     def _stage(label: str) -> None:
         dt = (time.perf_counter() - _t_job_start) * 1000.0
         print(f"[label-charlie] {job.project} +{dt:.0f}ms {label}")
 
     _stage("setup: load manifest")
-    # copy=False - we read tags + iterate imports for the pending
-    # filter without mutating. Saves 200-500ms of deepcopy on big
-    # manifests at job start.
+    # Read only, so copy=False.
     manifest = load_manifest(job.project, copy=False) or {}
     tags = list(manifest.get("tags") or [])
     if not tags:
         raise RuntimeError("no labels defined for this project")
 
 
-    # Per-run SAM3 knobs - sent from the project page's Annotations
-    # card. Each value is optional; None means "use the SAM3_* module
-    # default in pipeline_charlie." Sanity-clamped so a malformed FE
-    # payload can't push thresholds outside [0, 1] (which would either
-    # drop every box or run the model with nonsensical inputs).
+    # Optional per-run SAM3 settings. None, or a value outside [0, 1], uses
+    # the pipeline_charlie default.
     sam3_params = (job.params or {})
 
     def _clamp01(v, default=None):
@@ -2717,106 +1797,61 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
     sam3_threshold = _clamp01(sam3_params.get("sam3_threshold"))
     sam3_mask_threshold = _clamp01(sam3_params.get("sam3_mask_threshold"))
     sam3_min_relative_area = _clamp01(sam3_params.get("sam3_min_relative_area"))
-    # Native-resolution tiling opt-in ("Downscale vs Tile" on the FE).
-    # tile_size None = pipeline default (SAM3_TARGET_LONGEST_EDGE), the
-    # only value where per-tile resize is a true no-op.
+    # tile_size None is the pipeline default, SAM3_TARGET_LONGEST_EDGE.
     charlie_tile_native = bool(sam3_params.get("tile_native"))
     try:
         charlie_tile_size = int(sam3_params.get("tile_size") or 0) or None
     except (TypeError, ValueError):
         charlie_tile_size = None
-    # Range-gate the only sam3 param that isn't _clamp01'd: a tiny tile on
-    # a 4K frame means 10^5+ SAM3 passes under the GPU lock. The pipeline
-    # floors it too; rejecting here keeps garbage out of settingsLastRun.
     if charlie_tile_size is not None and not (256 <= charlie_tile_size <= 8192):
         charlie_tile_size = None
 
     _stage("setup: classifying dataset type")
-    # Dataset-type lookup. Specific projects route detections through
-    # V2's embedding-based resolver (SAM3 picks the boxes, reference
-    # embeddings pick the labels); general projects keep today's pure
-    # SAM3 path where the text prompt IS the label.
-    try:
-        dt_record = _classify_dataset_type_cached(job.project, list(tags))
-        dataset_type = (
-            (dt_record.get("type") or "general")
-            if isinstance(dt_record, dict) else "general"
-        )
-    except Exception as e:
-        print(f"[label-charlie] dataset_type lookup failed: {e}, defaulting to general")
-        dataset_type = "general"
+    # Specific: SAM3 finds boxes and reference embeddings pick labels.
+    # General: the SAM3 prompt is the label.
+    dataset_type = _dataset_type(job.project)["type"]
 
-    # Resolver context (specific only). Loaded once for the whole job
-    # so we don't re-stack reference embeddings per image.
+    # Resolver context, specific only, loaded once per job.
     refs_by_label_arr: dict = {}
-    refs_by_label_siglip_arr: dict = {}
-    refs_by_label_patches: dict = {}
-    refs_by_label_patches_siglip: dict = {}
     class_thresholds: dict | None = None
     label_display: dict[str, str] = {t.lower(): t for t in tags}
     if dataset_type == "specific":
         try:
             _stage("setup: loading reference embeddings")
-            # A backfill runs DINOv2: in a thread and under the GPU gate,
-            # or every request (progress included) froze until it ended.
+            # A backfill runs DINOv2, so this runs in a thread under the GPU gate.
             async with state["gpu_lock"]:
-                by_label, by_label_siglip, _dirty = await asyncio.to_thread(
+                by_label = await asyncio.to_thread(
                     _v2_load_or_backfill_reference_embeddings, job.project)
-            # Only labels the dataset still has: a reference left over
-            # from a deleted label must not bring it back.
+            # Drops references of deleted labels.
             by_label = {k: v for k, v in by_label.items() if str(k).lower() in label_display}
-            by_label_siglip = {k: v for k, v in by_label_siglip.items() if str(k).lower() in label_display}
-            _stage(f"setup: reference embeddings ready (dino={sum(len(v) for v in by_label.values())} siglip={sum(len(v) for v in by_label_siglip.values())})")
+            _stage(f"setup: reference embeddings ready ({sum(len(v) for v in by_label.values())})")
             refs_by_label_arr = _v2_stack_refs(by_label)
-            refs_by_label_siglip_arr = _v2_stack_refs(by_label_siglip)
 
-            # Plain LOO thresholds on raw (un-weighted) ref arrays.
-            # No Fisher LDA weighting - it overfits on small ref sets
-            # (hare/rabbit with <20 refs per class) and amplifies noise
-            # dimensions. Patch matching also disabled: plain pooled kNN
-            # is more reliable when classes look visually similar.
-            # VLM handles the borderline calls instead.
+            # Leave-one-out thresholds; the job scores pooled embeddings, without patch matching.
             class_thresholds = _v2_compute_class_thresholds(refs_by_label_arr) or None
 
             print(
                 f"[label-charlie] {job.id} specific resolver ready "
-                f"({len(refs_by_label_arr)} dino classes, "
-                f"{len(refs_by_label_siglip_arr)} siglip classes, "
-                f"no Fisher, no patch matching, VLM margin={_CHARLIE_AMBIGUOUS_MARGIN})"
+                f"({len(refs_by_label_arr)} classes, "
+                f"ambiguous margin={_CHARLIE_AMBIGUOUS_MARGIN})"
             )
         except Exception as e:
             print(f"[label-charlie] reference embedding setup failed: {e}")
             refs_by_label_arr = {}
-            refs_by_label_siglip_arr = {}
-            refs_by_label_patches = {}
-            refs_by_label_patches_siglip = {}
             class_thresholds = None
     print(f"[label-charlie] {job.id} dataset_type={dataset_type}")
 
     imports_dir = proj / "images"
     pending: list[dict] = []
-    # `force_relabel` flips the runner from "process only unlabelled
-    # images" to "re-process every image". Used by the FE when the
-    # user adds a fresh label to an already-fully-labelled dataset
-    # so the new tag surfaces on existing images. Auto detections
-    # get replaced; user-edited boxes are kept untouched by the
-    # per-image save below.
+    # force_relabel reprocesses every image. Edited boxes are kept.
     force_relabel = bool((job.params or {}).get("force_relabel"))
     for entry in (manifest.get("imports") or []):
-        # A background image is the user's decision, even on a relabel.
-        # Otherwise user-edited boxes win (_import_has_labels): a "Clear
-        # all" leaves labelled=True but an empty edit, which says "label
-        # this again".
+        # Background images are skipped, even on a relabel.
         if not isinstance(entry, dict) or entry.get("background"):
             continue
         if force_relabel or not _import_has_labels(entry):
             pending.append(entry)
-    # Process pending in the same order the FE gallery shows them
-    # (createdAt DESC - newest at top-left, oldest at bottom-right).
-    # The FE pre-assigns timestamps in REVERSE drop order within
-    # each batch so this DESC iteration walks the grid top-left
-    # → bottom-right consistently with how the user sees uploads
-    # filling in.
+    # Newest first, the gallery's order.
     def _entry_sort_key(e: dict) -> float:
         ca = e.get("createdAt")
         if isinstance(ca, (int, float)):
@@ -2843,18 +1878,8 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
     def _load_pil_sync(p: Path) -> "PILImage.Image":
         return _open_upright(p)
 
-    # Batched per-image manifest writes. Each save_manifest call
-    # serialises + writes the WHOLE manifest, which becomes the
-    # dominant per-iteration cost once a project has more than ~100
-    # images persisted (each detection record carries embedding +
-    # mask polygons, so the file grows past several MB very fast).
-    # Coalesce updates and flush every LABEL_FLUSH_EVERY images;
-    # final flush at job-end captures the tail.
+    # Updates are batched and flushed every LABEL_FLUSH_EVERY images.
     pending_label_updates: list[dict] = []
-    # Running tally of import ids the runner has actually committed
-    # labels to. Threaded into the auto-augment hook so the post-
-    # labelling regen scopes itself to just-labelled images instead
-    # of re-augmenting the whole project.
     labelled_import_ids: list[str] = []
     LABEL_FLUSH_EVERY = 10
 
@@ -2864,30 +1889,14 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
         updates = list(pending_label_updates)
         lock = await _manifest_write_lock(job.project)
         async with lock:
-            # copy=False skips the 200-500ms deepcopy on a 30MB
-            # manifest. Safe here because we mutate-then-save_manifest
-            # in the same critical section: save_manifest re-seeds the
-            # cache with its own deepcopy after the write lands, so
-            # any concurrent reader who picks up our mutations
-            # transiently sees the post-flush state - which is the
-            # state we're about to persist anyway. The per-project
-            # _manifest_write_lock above keeps other writers out of
-            # the cache while we're mutating.
+            # copy=False is safe: the mutation and the save happen under the write lock.
             mm = load_manifest(job.project, copy=False) or {}
             by_id = {e.get("id"): e for e in (mm.get("imports") or []) if isinstance(e, dict)}
             for upd in updates:
                 e = by_id.get(upd["id"])
                 if e is None:
                     continue
-                # If this image is here because the prior state was
-                # "edited boxes explicitly empty" (e.g. user did click-
-                # to-detect, then deleted that label - purge_label leaves
-                # editedBoxes=[] + editedBoxesSet=True), the new auto
-                # detections we're about to write should become the
-                # source of truth in the viewer. Without this clear,
-                # BoxEditor keeps reading the empty editedBoxes (because
-                # editedBoxesSet=True overrides) and the user sees the
-                # segmented cover but no boxes/labels inside.
+                # An explicitly empty edit would hide the new detections, so it is cleared.
                 prior_edited = e.get("editedBoxes")
                 if (
                     e.get("editedBoxesSet")
@@ -2896,70 +1905,29 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
                 ):
                     e.pop("editedBoxes", None)
                     e.pop("editedBoxesSet", None)
-                # Persist the resolved detections WITHOUT the raw
-                # embedding vectors. The DINOv2 (1024-d) + SigLIP (768-d)
-                # float arrays on each detection are only needed during
-                # the resolve step above - which already ran - and a
-                # re-label always re-embeds fresh crops (see the
-                # _charlie_embed_detections call earlier in the loop), so
-                # a stored test-image embedding is never read back. Every
-                # other reader of persisted embeddings is a *reference*
-                # (manifest["references"], untouched here) or a freshly
-                # computed vector. Keeping them on test-image detections
-                # ballooned the manifest ~10× on specific projects (~200 MB
-                # at 4000 imgs) - which is what turned each flush's
-                # whole-manifest write into an O(n²) slog past ~400 labels
-                # AND left the bloated cache + sidecar rebuilds dragging
-                # every other project's load. Stripping at the source
-                # keeps every flush's write small, so labelling stays
-                # fast regardless of dataset size. _strip_embedding keeps
-                # mask polygons + embed_sims, so the gallery overlay and
-                # the pipeline popup still work - it only drops the dead
-                # vectors.
+                # Stored without embedding vectors: a relabel re-embeds fresh crops.
                 e["detections"] = [
                     _strip_embedding(d) if isinstance(d, dict) else d
                     for d in upd["detections"]
                 ]
                 e["timings"] = upd["timings"]
                 e["labelled"] = True
-                # Persisted cachebuster (epoch ms) for the labelled
-                # preview. Surfaced in _tile_overview so a cold reopen
-                # rebuilds the SAME ?v= the browser cached the segmented
-                # bake under - instead of dropping to the bare URL where
-                # the pre-label blank preview is still cached.
+                # Epoch ms; the labelled preview's ?v= cachebuster.
                 e["labelledAt"] = int(time.time() * 1000)
-                # Snapshot the tags this entry was searched with so the
-                # FE's "fresh label" detection compares against what was
-                # actually run, not what happened to produce detections.
-                # Without this a label that's prompted-for but never
-                # matches anywhere in the dataset would stay flagged
-                # "fresh" forever and force_relabel every single click.
+                # Tags this entry was searched with, for the UI's fresh-label check.
                 e["labelsRun"] = list(tags)
                 if not e.get("width") and upd.get("width"):
                     e["width"] = upd["width"]
                 if not e.get("height") and upd.get("height"):
                     e["height"] = upd["height"]
-                # Remember which imports we touched so the post-job
-                # auto-augment hook can scope its regen to only the
-                # just-labelled set.
                 if upd["id"]:
                     labelled_import_ids.append(upd["id"])
-            # Snapshot the project-level label list + settings this pass
-            # ran with, but ONLY when the job actually completes (mark_run).
-            # Writing it on every flush meant a CANCELLED force_relabel
-            # (which still hits the final flush) marked the new label as
-            # fully run after ~10 images, so the FE dropped it from
-            # freshLabels and disabled re-triggering. Gating on mark_run
-            # keeps "fully run" honest; folded into the same write so a
-            # completed job costs no extra save.
+            # Only a completed job records labelsLastRun and settingsLastRun;
+            # a cancelled one still flushes.
             if mark_run:
                 mm["labelsLastRun"] = list(tags)
-                # settingsLastRun mirrors labelsLastRun. The slider trio is
-                # only written when all three are present (a missing value
-                # means "use backend default", not a real pick); the tiling
-                # choice is written unconditionally - OUTSIDE that gate - so
-                # a default-slider run with tiling on still persists it for
-                # the FE to re-hydrate.
+                # The thresholds are stored only when all three are set;
+                # tile_native always.
                 slr = dict(mm.get("settingsLastRun") or {})
                 if (
                     sam3_threshold is not None
@@ -2975,37 +1943,20 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
                 if charlie_tile_size:
                     slr["tile_size"] = charlie_tile_size
                 else:
-                    # Don't let an older run's explicit tile_size linger next
-                    # to this run's settings - absent means "backend default".
+                    # Absent means the default.
                     slr.pop("tile_size", None)
                 mm["settingsLastRun"] = slr
             mm["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            # cache_by_ref, we hold the only reference to `mm`
-            # (load_manifest(copy=False) + our mutations under the
-            # per-project write lock) and discard it right after
-            # return. Skipping the deepcopy here is the biggest
-            # per-flush speedup on big projects.
-            # Serialise + write OFF the event loop: on a big labelled
-            # project the manifest is multi-MB and orjson.dumps + the
-            # file write are synchronous, so doing them inline stalled
-            # every other request (the FE's job-progress + overview polls)
-            # for the duration of each flush, which read as the page
-            # freezing mid-label. save_manifest is already called from
-            # worker threads elsewhere, so this is safe; the async write
-            # lock still serialises same-project writes.
+            # Off the event loop, since the multi-MB write is synchronous.
+            # cache_by_ref is safe: mm is discarded after the save.
             await loop.run_in_executor(
                 None, lambda: save_manifest(job.project, mm, cache_by_ref=True)
             )
-        # Clear only AFTER the write lands, so a save failure (disk full /
-        # serialization) can't silently drop these images' detections.
+        # Cleared only after the write, so a failed save keeps the updates.
         pending_label_updates.clear()
 
-    # Prefetch: kick off PIL decode for the first valid entry before the
-    # loop starts so the GPU never waits for disk I/O on image 0. After
-    # that, each iteration starts the next decode before acquiring the
-    # GPU lock so PIL's CPU work overlaps GPU inference. The decode is
-    # keyed by its import: when that image is skipped (deleted mid-job),
-    # the next one must not be labelled from its pixels.
+    # Decodes run one image ahead, keyed by import id so a skipped image's
+    # pixels are never used for the next one.
     _prefetch: "tuple[str, asyncio.Future] | None" = None
     for _pe in pending:
         _pfn = _pe.get("filename")
@@ -3025,21 +1976,13 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
             print(f"[label-charlie] {import_id}: file missing on disk: {path}")
             continue
 
-        _stage(f"image {n_done + 1}/{len(pending)}: opening {filename}")
-        # Pre-emit so the FE knows which image is currently in flight
-        # (paints a "Labelling…" overlay on the matching tile). The
-        # post-emit at the bottom of the loop bumps n_done after the
-        # manifest write - the index never goes backwards.
+        # The image in flight; index counts finished images.
         await emit("progress", {
             "index": n_done,
             "total": len(pending),
             "image": filename,
         })
 
-        # Retrieve the PIL image - either from the prefetch future
-        # (started at end of previous iteration / before the loop) or
-        # freshly decoded. Running in executor keeps the event loop
-        # free during the PIL decode (~20-100 ms for large images).
         try:
             if _prefetch is not None and _prefetch[0] == import_id:
                 pil = await _prefetch[1]
@@ -3054,10 +1997,7 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
             _prefetch = None
             continue
 
-        # Start decoding the NEXT image NOW, before we touch the GPU,
-        # so PIL's CPU work runs concurrently with GPU inference and
-        # the event loop doesn't stall on disk I/O at the top of the
-        # next iteration.
+        # Start the next decode before taking the GPU lock.
         _prefetch = None
         for _ni in range(_pending_idx + 1, len(pending)):
             _ne = pending[_ni]
@@ -3069,20 +2009,11 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
                 _prefetch = (_ne["id"], loop.run_in_executor(None, _load_pil_sync, _np))
                 break
 
-        _stage(f"image {n_done + 1}/{len(pending)}: waiting for GPU lock")
-        # Acquire the GPU lock ONCE and run both SAM3 and the embedding
-        # pass under it. This eliminates the release/re-acquire round-
-        # trip between detection and embedding that previously let other
-        # jobs interleave (causing OOM on the next acquire) and removes
-        # one Python async overhead cycle per image.
+        # SAM3 and the embedding pass share one hold of the GPU lock.
         try:
             async with state["gpu_lock"]:
-                _stage(f"image {n_done + 1}/{len(pending)}: running SAM3")
-                # Specific datasets get the generic-fallback detector so a
-                # candidate box still surfaces for labels SAM3 can't localise
-                # by name (the references then assign the real label). General
-                # datasets keep plain segment_labels - SAM3's text label IS
-                # their label, so a generic box would have no meaning.
+                # Only specific datasets use the generic fallback: in a general
+                # one the SAM3 prompt is the label.
                 if dataset_type == "specific":
                     detections, timings = await loop.run_in_executor(
                         None,
@@ -3118,11 +2049,6 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
                             min_relative_area=sam3_min_relative_area,
                         ),
                     )
-                # Specific-dataset path: embed immediately under the same
-                # lock so we don't pay a second acquire cycle or risk
-                # another job stealing the GPU slot between the two passes.
-                # General projects skip this - SAM3's text-prompt assignment
-                # is the label source of truth for them.
                 if dataset_type == "specific" and detections and refs_by_label_arr:
                     t_embed = time.perf_counter()
                     await loop.run_in_executor(
@@ -3137,61 +2063,38 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
             first_error = first_error or f"labelling {filename} failed: {e}"
             continue
 
-        # Cancel landed mid-image (tiled runs are ~7× the work, so this is
-        # the likely cancel point). The tiled detector returns ([], cancelled)
-        # - DON'T queue that as a real result: persisting it would mark the
-        # image labelled-with-zero-detections and, on a force_relabel run,
-        # wipe its existing boxes. Bail before the append so the image stays
-        # exactly as it was and is re-picked next run. Deliberately checks
-        # ONLY the sentinel (not cancel_event): an image whose pass COMPLETED
-        # just as cancel landed is real work and persists, as it always has.
+        # A cancelled pass returns no detections: stop without saving, so the
+        # image stays as it was. A pass that completed as the cancel landed saves.
         if (timings or {}).get("cancelled"):
             break
 
         if dataset_type == "specific" and detections and refs_by_label_arr:
             t_resolve = time.perf_counter()
-            import numpy as _np_resolve
             for k_det, d in enumerate(detections):
                 emb_raw = d.get("embedding") or []
                 if not emb_raw:
-                    # Encoder failed for this crop - leave SAM3's
-                    # text-prompt label in place rather than rejecting
-                    # outright. The detection will surface in the
-                    # gallery; the user can fix it manually if wrong.
+                    # No embedding: SAM3's label stays.
                     continue
-                emb_siglip_raw = d.get("siglip_embedding") or None
-
-                # Pass raw embeddings directly - no Fisher weighting.
-                # Fisher LDA overfits on small reference sets and was
-                # causing systematic bias toward one class.
                 try:
                     verdict = _v2_resolve_label_specific(
                         emb_raw,
                         d.get("gd_label"),
                         refs_by_label_arr,
                         label_display,
-                        score_mode="knn",
-                        gd_score=None,
-                        embedding_siglip=emb_siglip_raw,
-                        refs_by_label_siglip=refs_by_label_siglip_arr or None,
                         class_thresholds=class_thresholds or None,
                         ambiguous_margin=_CHARLIE_AMBIGUOUS_MARGIN,
                     )
                 except Exception as e:
                     print(f"[label-charlie] resolver failed for one detection: {e}")
                     continue
-                # Merge resolver output into the detection - keys
-                # mirror what V2's runner writes so the FE pipeline
-                # popup + reject-reason explanations work without any
-                # wire-shape changes on Charlie's side.
+                # The verdict's fields a detection keeps.
                 for k_v in (
                     "pred_label", "pred_source",
                     "embed_nearest_label", "embed_nearest_sim",
                     "embed_sim_for_label", "embed_margin",
                     "rejected", "reject_reason",
                     "ambiguous", "vlm_action",
-                    "siglip_weight",
-                    "patch_match_used", "patch_match_used_siglip",
+                    "patch_match_used",
                 ):
                     if k_v in verdict:
                         d[k_v] = verdict[k_v]
@@ -3199,138 +2102,19 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
                     d["embed_sims"] = verdict["sims"]
                 if verdict.get("sims_dino") is not None:
                     d["embed_sims_dino"] = verdict["sims_dino"]
-                if verdict.get("sims_siglip") is not None:
-                    d["embed_sims_siglip"] = verdict["sims_siglip"]
             timings["resolve_ms"] = round((time.perf_counter() - t_resolve) * 1000.0, 1)
 
-            # VLM tiebreak. Detections the resolver flagged ambiguous
-            # (top-1 vs top-2 embed sim within V2_AMBIGUOUS_MARGIN -
-            # default 0.005) are coin-flip calls. Restrict Qwen-VL to
-            # those two labels and let it pick - same logic V2 uses
-            # for its specific path. Confident embed decisions skip
-            # the VLM entirely so the per-image cost stays low.
-            ambiguous_indices = [
-                idx for idx, d in enumerate(detections)
-                if d.get("ambiguous") and not d.get("rejected")
-            ]
-            if ambiguous_indices:
-                try:
-                    from vlm_validate import vlm_classify as _vlm_classify
-                except Exception as e:
-                    print(f"[label-charlie] vlm_validate import failed: {e}")
-                    _vlm_classify = None
-                if _vlm_classify is not None:
-                    print(
-                        f"[label-charlie] {import_id}: VLM tiebreak on "
-                        f"{len(ambiguous_indices)} ambiguous detection(s)"
-                    )
-                    t_vlm = time.perf_counter()
-                    vlm_total_ms = 0.0
-                    async with state["gpu_lock"]:
-                        for idx in ambiguous_indices:
-                            d = detections[idx]
-                            sims_dict = d.get("embed_sims") or {}
-                            if len(sims_dict) < 2:
-                                continue
-                            # Top-2 labels by combined sim. Keys are
-                            # the project's display labels (preserved
-                            # case) so they pass straight to vlm_classify.
-                            top2 = sorted(
-                                sims_dict.items(), key=lambda kv: -kv[1],
-                            )[:2]
-                            top2_labels = [lab for lab, _ in top2]
-                            bx = d.get("box")
-                            mask_obj = d.get("mask")
-                            mask_polys = (
-                                mask_obj.get("polygons")
-                                if isinstance(mask_obj, dict) else None
-                            )
-                            t_call = time.perf_counter()
-                            try:
-                                v_label, v_score = await loop.run_in_executor(
-                                    None,
-                                    _vlm_classify,
-                                    pil, bx, top2_labels, mask_polys,
-                                )
-                            except Exception as e:
-                                print(f"[label-charlie] VLM tiebreak failed for box {bx}: {e}")
-                                v_label, v_score = None, None
-                            vlm_ms = (time.perf_counter() - t_call) * 1000.0
-                            vlm_total_ms += vlm_ms
-                            d["vlm_label"] = v_label
-                            d["vlm_score"] = v_score
-                            d["vlm_ms"] = round(vlm_ms, 1)
+            for d in detections:
+                if d.get("ambiguous"):
+                    _charlie_tiebreak(d, d["embed_sims"])
 
-                            # Confidence-weighted fusion: the VLM
-                            # casts a soft vote scaled by its own
-                            # confidence rather than overriding the
-                            # embedding outright. Lets weak VLM
-                            # answers nudge tight embed margins
-                            # without strong VLM picks tipping
-                            # decisive embed cases.
-                            winner, fused_margin, fused_scores = _charlie_fuse_embed_vlm(
-                                sims_dict, v_label, v_score,
-                            )
-                            d["fused_scores"] = {
-                                k: round(float(v), 4) for k, v in fused_scores.items()
-                            }
-                            d["fused_margin"] = round(float(fused_margin), 4)
-                            if winner is not None:
-                                cur_pred = (d.get("pred_label") or "").strip().lower()
-                                winner_lower = winner.strip().lower()
-                                if winner_lower != cur_pred:
-                                    d["pred_label"] = winner
-                                    d["pred_source"] = "embed-vlm"
-                                    d["vlm_action"] = "tiebreak"
-                                else:
-                                    d["pred_source"] = "embed-vlm"
-                                    d["vlm_action"] = (
-                                        "confirm" if v_label and v_label.strip().lower() == cur_pred
-                                        else "tiebreak"
-                                    )
-                                # Refresh embed_sim_for_label to the
-                                # winner's raw similarity.
-                                for kk, vv in sims_dict.items():
-                                    if kk.strip().lower() == winner_lower:
-                                        d["embed_sim_for_label"] = round(float(vv), 4)
-                                        break
-                                # Re-evaluate ambiguity from the
-                                # POST-fusion margin: even after
-                                # combining both signals, if the
-                                # winner only edges past the runner-
-                                # up by less than CHARLIE_POST_FUSION
-                                # _AMBIGUOUS_MARGIN we leave the
-                                # detection flagged so the user gets
-                                # a chance to review it.
-                                d["ambiguous"] = (
-                                    fused_margin < _CHARLIE_POST_FUSION_AMBIGUOUS_MARGIN
-                                )
-                    timings["vlm_ms"] = round(vlm_total_ms, 1)
-                    timings["vlm_wall_ms"] = round((time.perf_counter() - t_vlm) * 1000.0, 1)
-                    print(
-                        f"[label-charlie] {import_id}: VLM tiebreak block "
-                        f"{vlm_total_ms:.0f} ms across {len(ambiguous_indices)} call(s)"
-                    )
-
-            # Cross-label NMS. SAM3 prompted each project label
-            # separately, so a single physical alpaca often comes
-            # back as one detection under "alpaca" AND a near-duplicate
-            # under "llama"; the resolver might assign each one a
-            # different final label. Drop the lower-scoring member of
-            # each high-IoU pair so the gallery shows one detection
-            # per object. Runs after VLM so the dedupe uses post-
-            # tiebreak labels + scores.
+            # Cross-label NMS, after the tiebreak so it sees the final labels.
             t_nms = time.perf_counter()
             detections = _charlie_nms_post_resolve(detections)
             timings["nms_ms"] = round((time.perf_counter() - t_nms) * 1000.0, 1)
 
-            # Specific datasets never hard-reject. Any detection the
-            # resolver would have rejected (low ref similarity, signal
-            # disagreement, etc.) is surfaced as "unsure" instead - kept
-            # with its best-guess label + the amber Unsure chip so the
-            # user reviews it rather than silently losing the box. Runs
-            # after NMS so overlapping duplicates are already gone (we
-            # don't resurrect a rejected duplicate of a kept box).
+            # Specific datasets never reject: a rejected detection is kept
+            # as ambiguous. Runs after NMS, so no rejected duplicate returns.
             for d in detections:
                 if d.get("rejected"):
                     d["rejected"] = False
@@ -3338,45 +2122,18 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
                     if not d.get("pred_label"):
                         d["pred_label"] = d.get("embed_nearest_label")
 
-        # A generic fallback box the references never labelled (no
-        # embedding, DINOv2 not loaded) has no label to store.
+        # A generic box with no resolved label has nothing to store.
         detections = [d for d in detections if not (d.get("generic") and not d.get("pred_label"))]
 
-        # General-path NMS. SAM3 is run once per label so the
-        # cross-label dedupe the specific path needs doesn't apply
-        # here. But the same-label path occasionally fires duplicate
-        # concept hits on one object (e.g. two "person" boxes covering
-        # the same figure with slightly different masks). Drop the
-        # lower-scoring member of each same-label IoU cluster so the
-        # gallery shows one detection per object. Skipped on specific
-        # since the cross-label NMS above already removes these as a
-        # subset.
         if dataset_type != "specific" and detections:
             t_nms_g = time.perf_counter()
             detections = _charlie_nms_same_label(detections)
-            # Cross-label NMS for multi-label general projects. SAM3 is
-            # prompted once per label so "hare" and "rabbit" each fire on
-            # the same physical animal → two near-identical detections.
-            # _charlie_nms_post_resolve drops the lower-gd_score member of
-            # each high-IoU pair regardless of label, so one detection per
-            # object survives. Only needed when >1 label; single-label
-            # projects can't have cross-label duplicates.
             if len(tags) > 1:
-                # Stricter IoU on the GENERAL path: only merge near-
-                # identical cross-label boxes (one object matched by two
-                # sibling prompts). Two genuinely distinct overlapping
-                # classes (plate+food, picture+frame) sit below 0.9 box
-                # IoU and BOTH survive, instead of silently dropping the
-                # lower-scoring one (general has no "unsure" fallback).
+                # Cross-label NMS at IoU 0.9 only, so distinct overlapping
+                # classes both survive.
                 detections = _charlie_nms_post_resolve(detections, iou_thresh=0.9)
             timings["nms_ms"] = round((time.perf_counter() - t_nms_g) * 1000.0, 1)
 
-        # Stash the per-image update in memory; we flush every
-        # FLUSH_EVERY images to amortise the manifest serialisation
-        # cost. Per-image save_manifest used to dominate the loop on
-        # a >100-image project because every save rewrote the entire
-        # multi-MB manifest. Batching keeps the runner roughly
-        # linear in image count instead of quadratic.
         pending_label_updates.append({
             "id": import_id,
             "detections": detections,
@@ -3387,8 +2144,6 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
         if len(pending_label_updates) >= LABEL_FLUSH_EVERY:
             await _flush_label_updates()
 
-        # Re-bake the labelled preview so the gallery thumb refreshes
-        # next time the FE asks for it.
         try:
             loop.run_in_executor(
                 None,
@@ -3403,62 +2158,28 @@ async def _run_label_charlie_job_impl(job, emit, cancel_event):
             print(f"[label-charlie] {import_id}: preview bake schedule failed: {e}")
 
         n_done += 1
-        # Post-emit clears `image` so the FE drops the labelling
-        # overlay between images instead of leaving it stuck on the
-        # last completed tile. The next iteration's pre-emit names
-        # the next file in flight.
+        # image None: nothing in flight between images.
         await emit("progress", {
             "index": n_done,
             "total": len(pending),
             "image": None,
             "n_detections": len(detections),
         })
-        # Yield to the event loop between images. Matches the same
-        # pattern in _run_augment_generate_job - without this the
-        # labelling runner hogged the loop for the full duration of
-        # a 941-image run, blocking concurrent image fetches /
-        # click-to-detect calls from other tabs.
+        # Lets other requests run between images.
         await asyncio.sleep(0)
 
-    # Final flush so any tail-end updates that didn't reach the
-    # FLUSH_EVERY threshold still land before the job emits done. Only a
-    # run that COMPLETED (not cancelled) marks the label set as fully run
-    # (labelsLastRun / settingsLastRun); a cancelled job leaves the FE's
-    # freshLabels intact so the user can re-trigger the unfinished label.
     await _flush_label_updates(mark_run=not cancel_event.is_set())
 
-    # Auto-augment-after-labelling hook removed by user request -
-    # augmentations now only run when the user explicitly clicks
-    # the Update button in the Augmentations card. The previous
-    # implementation scheduled augment_generate at the end of every
-    # label_charlie run, which tied up the worker (and on big
-    # projects could queue behind the labelling job's own flushes),
-    # and dragged out the perceived time-to-first-label.
-
-    # Cache invalidation at completion. /annotations + /overview both
-    # sit behind a stale-while-revalidate cache; without this the
-    # FE's immediate post-completion syncAnnotations call gets the
-    # PRE-completion snapshot back (and a background rebuild fires
-    # too late to help that response), which leaves freshly-labelled
-    # tiles flashing Unlabelled until the user hard-refreshes the
-    # page.
+    # The cached payloads would otherwise serve the pre-completion snapshot.
     try:
         _invalidate_project_payloads(job.project)
     except Exception as e:
         print(f"[label-charlie] payload invalidation failed: {e}")
 
-    # Per-image failures are logged and skipped; a run in which none
-    # succeeded (the model unloaded under it, every file unreadable) must
-    # not report "done".
+    # A run in which every image failed does not report done.
     if n_failed and not n_done and not cancel_event.is_set():
         raise RuntimeError(f"no image could be labelled ({n_failed} failed): {first_error}")
     return {"labelled": n_done, "failed": n_failed}
-
-    # Sidecar suppression is lifted + the final rebuild fired by the
-    # wrapper's finally block (so it runs even if the job raised).
-    # _invalidate_project_payloads above already deleted the stale sidecar
-    # files; the wrapper's _kick_sidecar_refresh rebuilds them so the next
-    # /overview / /initial GET serves from disk, not a request-thread synth.
 
 
 _TRAIN_IMGSZ = (128, 192, 256, 320, 416)
@@ -3478,9 +2199,8 @@ def _fmt_eta(seconds: float) -> str:
 
 
 def _train_cfg_from_params(params: dict, device: str):
-    """Job params -> TrainConfig, every field clamped to what the UI
-    offers. A resume request carries only the run id: the checkpoint's
-    own settings win inside the trainer."""
+    """Job params -> TrainConfig, each field clamped to what the UI offers.
+    On resume the checkpoint's own settings win."""
     import train_yolox as _ty
 
     def _int(k, d, lo, hi):
@@ -3534,9 +2254,7 @@ def _train_cfg_from_params(params: dict, device: str):
 
 
 def _second_gpu(engine_dev: str) -> str | None:
-    """On a multi-GPU machine, train on the CUDA device with the most
-    free memory OTHER than the one labelling runs on, so labelling
-    stays interactive. None when there is no second card."""
+    """The CUDA device with the most free memory other than the labelling one, or None."""
     try:
         if not engine_dev.startswith("cuda") or torch.cuda.device_count() < 2:
             return None
@@ -3552,7 +2270,7 @@ def _second_gpu(engine_dev: str) -> str | None:
             if free > best_free:
                 best, best_free = i, free
         return f"cuda:{best}" if best is not None else None
-    except Exception:  # noqa: BLE001 - a driver hiccup must not block training
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -3564,9 +2282,8 @@ def _train_job_active(project_id: str) -> bool:
 
 
 def _label_model_targets(manifest: dict, overwrite: bool) -> list[dict]:
-    """Imports a trained model may write boxes to: never one the user
-    edited by hand (an explicitly emptied image is a decision too);
-    without overwrite, only ones with no boxes at all."""
+    """Imports a trained model may label: never hand-edited ones, and
+    without overwrite only those with no boxes."""
     out = []
     for e in manifest.get("imports") or []:
         if not isinstance(e, dict) or not e.get("filename"):
@@ -3581,19 +2298,15 @@ def _label_model_targets(manifest: dict, overwrite: bool) -> list[dict]:
 
 
 async def _run_train_yolox_job(job, emit, cancel_event):
-    """YOLOX-Nano training + Neuro N6 export (gd/train_yolox.py).
-
-    Holds the GPU gate at job priority while training shares the
-    labelling device, and hands it over between steps to any click or
-    labelling image waiting for the card, so labelling carries on
-    while a model trains. A params.device targeting a DIFFERENT CUDA
-    index (multi-GPU boxes) trains outside the gate."""
+    """YOLOX-Nano training and Neuro N6 export. On the labelling device it
+    holds the GPU gate and hands it over between steps; on another device
+    it trains outside the gate."""
     import train_yolox as _ty
 
     params = job.params or {}
 
     def _norm_dev(s: str) -> str:
-        # "cuda" and "cuda:0" are the same card; compare them as such.
+        # "cuda" and "cuda:0" are the same card.
         try:
             d = torch.device(s)
         except (RuntimeError, TypeError, ValueError):
@@ -3659,6 +2372,7 @@ async def _run_train_yolox_job(job, emit, cancel_event):
         return {"cancelled": True}
     print(f"[train-yolox] {job.project}: AP50 fp32={report.get('ap50_fp32')} "
           f"int8={report.get('ap50_int8')} run={report.get('run')}")
+    await _sync_has_model(job.project)
     return {
         "run": report.get("run"), "model": report.get("model"), "size": report.get("size"),
         "ap50_fp32": report.get("ap50_fp32"), "ap50_int8": report.get("ap50_int8"),
@@ -3666,17 +2380,35 @@ async def _run_train_yolox_job(job, emit, cancel_event):
     }
 
 
-async def _run_label_model_job(job, emit, cancel_event):
-    """Pre-label images with a model trained on this dataset: the run's
-    exported int8 ONNX through ONNX Runtime on the CPU, at the run's
-    calibrated threshold unless params.conf overrides it. Detections
-    are written the way the SAM 3 labelling job writes them, so the
-    editor, the exports and the trainer read them the same way. Images
-    the user edited by hand are never touched; auto-labelled images
-    only with params.overwrite.
+def _has_exported_run(project_id: str) -> bool:
+    """Whether any of the dataset's training runs has an export."""
+    try:
+        return any((project_dir(project_id) / "models").glob("*/*/export.zip"))
+    except (OSError, KeyError):
+        return False
 
-    Sidecar rebuilds are suppressed for the job's duration (each flush
-    would otherwise rebuild the overview) and fired once at the end."""
+
+async def _sync_has_model(project_id: str) -> None:
+    """Sets the dataset's hasModel to whether a run has an export. A dataset
+    deleted meanwhile is left alone; the run it trained is not failed."""
+    try:
+        want = await asyncio.to_thread(_has_exported_run, project_id)
+        lock = await _manifest_write_lock(project_id)
+        async with lock:
+            m = load_manifest(project_id)
+            if not m or bool(m.get("hasModel")) == want:
+                return
+            m["hasModel"] = want
+            save_manifest(project_id, m)
+    except Exception as e:  # noqa: BLE001
+        print(f"[train-yolox] {project_id}: model badge not updated: {e}")
+
+
+async def _run_label_model_job(job, emit, cancel_event):
+    """Pre-label images with a model trained on this dataset: the run's int8
+    ONNX on the CPU, at its calibrated threshold unless params.conf
+    overrides it. Hand-edited images are never touched; auto-labelled ones
+    only with params.overwrite."""
     _SIDECAR_REFRESH_SUPPRESSED.add(job.project)
     try:
         return await _run_label_model_job_impl(job, emit, cancel_event)
@@ -3753,7 +2485,7 @@ async def _run_label_model_job_impl(job, emit, cancel_event):
             for upd in updates:
                 e = by_id.get(upd["id"])
                 if e is None or e.get("editedBoxesSet"):
-                    continue  # edited by hand since the job started: leave it
+                    continue  # edited by hand since the job started
                 e["detections"] = upd["detections"]
                 e["labelled"] = True
                 e["labelledAt"] = int(time.time() * 1000)
@@ -3788,8 +2520,8 @@ async def _run_label_model_job_impl(job, emit, cancel_event):
             name = classes[ci]
             sc = round(float(r[4]), 4)
             bx = [round(float(v), 2) for v in r[:4]]
-            # Every reader's key: the editor unwraps pred_label/gd_label and
-            # gd_score, exports and the trainer read label/box_xyxy/box.
+            # The editor reads pred_label, gd_label and gd_score; exports and
+            # the trainer read label, box_xyxy and box.
             dets.append({
                 "id": f"pm_{secrets.token_hex(4)}",
                 "label": name, "pred_label": name, "gd_label": name,
@@ -3810,19 +2542,11 @@ async def _run_label_model_job_impl(job, emit, cancel_event):
 
 
 async def _run_purge_label_job(job, emit, cancel_event):
-    """Strip every reference to a single label from a project - across
-    all imports' detections + editedBoxes, plus the manifest's tags /
-    labelColours / label_aliases / verdicts. Emits per-image progress
-    so the FE can render a labelling-style progress card. Survives a
-    browser refresh because the JobManager hydrates from the audit
-    log on startup; the user reattaches via /jobs/active on mount.
-
-    Per-image work happens INSIDE the per-project manifest write lock
-    so concurrent label / augment jobs can't clobber the strip pass.
-    """
+    """Remove one label from a project: each import's detections and
+    editedBoxes, under the write lock per image, then the project-level fields."""
     proj = project_dir(job.project)
     if not proj.exists():
-        raise RuntimeError("project not found")
+        raise RuntimeError("dataset not found")
 
     target_raw = str((job.params or {}).get("label") or "")
     target_key = target_raw.strip().lower()
@@ -3843,12 +2567,7 @@ async def _run_purge_label_job(job, emit, cancel_event):
     }
 
     def _label_of(d: dict) -> str:
-        # Detections store the canonical under any of these keys
-        # depending on which pipeline produced them. Charlie writes
-        # `gd_label`, the V2 resolver overwrites with `pred_label`,
-        # edited boxes use `label`, and the FE camelCase forms can
-        # land on disk too if the FE ever serialised before the
-        # backend re-write.
+        # The key depends on which pipeline wrote the detection.
         v = (
             d.get("label")
             or d.get("pred_label")
@@ -3879,12 +2598,8 @@ async def _run_purge_label_job(job, emit, cancel_event):
                 if target_imp is not None:
                     dets = list(target_imp.get("detections") or [])
                     new_dets = [d for d in dets if _label_of(d) != target_key]
-                    # Only touch editedBoxes if it ALREADY exists on
-                    # this import - otherwise we'd persist an empty
-                    # list for an image that never had user edits,
-                    # which makes the FE treat it as "user cleared
-                    # everything" and flag the tile Unlabelled until
-                    # a refresh reads the tile from /overview again.
+                    # A missing editedBoxes stays missing: an empty list
+                    # means the image was cleared by hand.
                     had_edited_field = isinstance(target_imp.get("editedBoxes"), list)
                     edited = list(target_imp.get("editedBoxes") or []) if had_edited_field else []
                     new_edited = [
@@ -3896,23 +2611,12 @@ async def _run_purge_label_job(job, emit, cancel_event):
                     removed = removed_dets + removed_edited
                     if removed > 0:
                         target_imp["detections"] = new_dets
-                        # Only write editedBoxes back when this image
-                        # already had user edits. Empty edited result
-                        # is fine to persist - that's the user having
-                        # explicitly cleared a labelled image - but a
-                        # MISSING editedBoxes must stay missing so
-                        # the gallery's "is this user-edited?" gate
-                        # doesn't misfire.
                         if had_edited_field:
                             target_imp["editedBoxes"] = new_edited
-                            # Editedboxes existed → it was already
-                            # user-set; keep that flag accurate.
                             target_imp["editedBoxesSet"] = True
                             target_imp["editedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
                         m_now["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
                         save_manifest(job.project, m_now)
-                        # Force the gallery to refetch the labelled
-                        # preview JPEG next paint.
                         try:
                             _invalidate_labelled_preview(job.project, import_id)
                         except Exception:
@@ -3939,17 +2643,13 @@ async def _run_purge_label_job(job, emit, cancel_event):
         # Yield so concurrent endpoints stay responsive.
         await asyncio.sleep(0)
 
-    # Final pass - strip the label from the project-level fields so
-    # the chip rail + colour map don't reanimate the term on next
-    # mount. Done in one lock acquisition.
+    # Project-level fields, under one lock hold.
     async with write_lock:
         m_now = load_manifest(job.project) or {}
         tags = m_now.get("tags") or []
         m_now["tags"] = [t for t in tags if str(t).strip().lower() != target_key]
-        # References teach the labeller the label; left in place they
-        # brought the deleted label back on the next run. A reference
-        # that was only about this label is dropped (its picture stays
-        # on disk, so a snapshot restore still finds it).
+        # A reference only about this label is dropped; its picture stays
+        # on disk for snapshot restores.
         kept_refs = []
         for ref in m_now.get("references") or []:
             if not isinstance(ref, dict):
@@ -3988,8 +2688,7 @@ async def _run_purge_label_job(job, emit, cancel_event):
 
 @app.get("/api/health")
 async def health():
-    # Live VRAM for the status bar (cuda only; mem_get_info is a cheap
-    # driver query). Never let a driver hiccup fail the health check.
+    # VRAM in GB on cuda; None elsewhere or on a driver error.
     vram = None
     dev = state.get("device") or ""
     if dev.startswith("cuda") and torch.cuda.is_available():
@@ -4003,35 +2702,23 @@ async def health():
             vram = None
     return {
         "ok": True,
-        # Identity marker: the desktop shell refuses to adopt a server on
-        # this port that doesn't identify as a PixelKit engine.
+        # The desktop shell adopts a server on this port only with this marker.
         "app": "pixelkit",
         "version": PK_VERSION,
         "device": state["device"],
         "vram": vram,
-        "model_loaded": state["model"] is not None,
+        "model_loaded": state.get("charlie") is not None,
     }
 
 
 def _charlie_reference_detections(image_pil, tags) -> "list[dict] | None":
-    """Run the SAM3 (Charlie) pipeline on a reference image and map the
-    output to the reference response shape [{label, score, box, mask}].
-
-    This makes reference onboarding use the SAME detector as the project
-    import labelling (label_charlie) instead of the old GroundingDINO +
-    SAM2 path. Returns None when Charlie isn't loaded so callers fall
-    back to GD+SAM2. Boxes/masks are in `image_pil`'s coordinate space;
-    the caller scales back if it downsized first.
-    """
+    """Run SAM3 on a reference image. Returns [{label, score, box, mask}] in
+    image_pil's coordinates, or None when SAM3 is not loaded."""
     charlie = state.get("charlie")
     if charlie is None:
         return None
     dets_raw, _timings = charlie.segment_labels(image_pil, list(tags), include_crops=False)
-    # Cross-label NMS. SAM3 prompts every label separately, so one
-    # physical object (e.g. a single hare) comes back as overlapping
-    # detections under BOTH "hare" and "rabbit". Drop the lower-gd_score
-    # member of each high-IoU pair so only the highest-probability label
-    # survives per object. Only needed with >1 label.
+    # Cross-label NMS: one object can match several label prompts.
     if len(list(tags)) > 1 and len(dets_raw) > 1:
         dets_raw = _charlie_nms_post_resolve(dets_raw)
     out: list[dict] = []
@@ -4040,8 +2727,7 @@ def _charlie_reference_detections(image_pil, tags) -> "list[dict] | None":
         if not (isinstance(box, list) and len(box) == 4):
             continue
         out.append({
-            # SAM3's text-prompt match IS the label (same as the
-            # general label_charlie path - no reference resolver here).
+            # The SAM3 prompt is the label; no reference resolver.
             "label": d.get("gd_label") or d.get("pred_label"),
             "score": round(float(d.get("gd_score") or 0.0), 4),
             "box": [float(c) for c in box],
@@ -4054,32 +2740,12 @@ def _charlie_reference_detections(image_pil, tags) -> "list[dict] | None":
 async def v2_process_reference(
     image: UploadFile = File(...),
     labels: str = Form(...),
-    box_thr: float = Form(0.35),
-    text_thr: float = Form(0.25),
-    nms_iou: float = Form(0.50),
     force_label: str = Form(""),
 ):
-    """Detect + segment a single reference image, no VLM, no project
-    context. Prefers SAM3 (Charlie) - the same detector as the project
-    import labelling - and falls back to GroundingDINO + SAM2 when SAM3
-    isn't loaded.
+    """Detect and segment one reference image with SAM3; returns {width, height, detections}."""
+    if state.get("charlie") is None:
+        raise HTTPException(503, "SAM 3 is not loaded")
 
-    Request: multipart with the image file + a JSON-encoded list of
-    label strings + optional thresholds (defaults match the V2
-    annotations panel's "Normal" mode; ignored on the SAM3 path).
-
-    Response: `{ width, height, detections: [{ label, score, box, mask }] }`
-    where `box` is `[x1, y1, x2, y2]` in pixel coords and `mask` is
-    `{ polygons: [[[x, y], ...], ...] }` (or null if no usable mask).
-    """
-    # Need SAM3 (charlie) OR the GD+SAM2 pair. 503 only if neither path
-    # is available.
-    if state.get("charlie") is None and (
-        state.get("model") is None or state.get("segmenter") is None
-    ):
-        raise HTTPException(503, "no detection pipeline loaded (SAM3 + GD/SAM2 both unavailable)")
-
-    # Parse the labels JSON.
     try:
         tag_list = json.loads(labels)
         if not isinstance(tag_list, list) or not all(isinstance(t, str) for t in tag_list):
@@ -4088,30 +2754,23 @@ async def v2_process_reference(
         raise HTTPException(400, f"invalid labels payload: {e}")
     tags = [t.strip() for t in tag_list if t and t.strip()]
     if not tags:
-        # No labels means nothing to detect - fast-path empty result.
-        data = await image.read()
+        data = await _read_upload(image)
         with PILImage.open(io.BytesIO(data)) as pil:
             W, H = _upright_size(pil)
         return {"width": W, "height": H, "detections": []}
 
-    # Read the upload + open as PIL.
-    raw = await image.read()
+    raw = await _read_upload(image)
     if not raw:
         raise HTTPException(400, "empty image upload")
 
-    # NSFW gate - same classifier as import endpoints. Blocks NSFW
-    # reference images before any GPU work is done.
-    _enforce_nsfw_or_451(raw, label="v2-ref-process", file=image.filename or "")
 
     try:
         image_pil = _open_upright(raw)
     except Exception as e:
         raise HTTPException(400, f"could not decode image: {e}")
 
-    # Cap resolution at 1280px longest edge so GD doesn't spend 5+
-    # extra seconds processing a 4K photo. Detections are scaled back
-    # to original coords before returning so the FE sees pixel-accurate
-    # boxes regardless of whether we downsampled.
+    # Detection runs at most 1280 px on the long edge; results are scaled
+    # back to the original size.
     _MAX_REF_DIM = 1280
     W_orig, H_orig = image_pil.size
     scale = 1.0
@@ -4126,11 +2785,9 @@ async def v2_process_reference(
 
     def _infer():
         try:
-            # SAM3 (Charlie) path - same detector as the project's import
-            # labelling. Preferred when loaded; falls back to GD+SAM2.
             charlie_dets = _charlie_reference_detections(image_pil, tags)
             if charlie_dets is not None:
-                print(f"[v2-ref] SAM3 tags={tags} → {len(charlie_dets)} det(s) size={W}x{H} (orig {W_orig}x{H_orig})")
+                print(f"[v2-ref] SAM 3 tags={tags} -> {len(charlie_dets)} det(s) size={W}x{H} (orig {W_orig}x{H_orig})")
                 if scale != 1.0:
                     for d in charlie_dets:
                         d["box"] = [round(c / scale, 2) for c in d["box"]]
@@ -4148,27 +2805,22 @@ async def v2_process_reference(
                     for d in charlie_dets:
                         d["box"] = [round(c, 2) for c in d["box"]]
                 return charlie_dets
-            # GD+SAM2 fallback removed in the portable build - SAM3 is the
-            # only reference detector. None here means it isn't loaded yet.
-            raise RuntimeError("SAM3 not loaded - reference processing unavailable")
+            # None: SAM3 is not loaded yet.
+            raise RuntimeError("SAM 3 is not loaded")
         except Exception as exc:
             import traceback
             traceback.print_exc()
             raise RuntimeError(f"v2 reference pipeline failed: {exc}") from exc
 
-    # Interactive GPU priority - the user is watching a progress
-    # spinner and reference processing blocks onboarding. Jumps ahead
-    # of background label_charlie / augment jobs.
+    # Interactive priority: onboarding waits on this.
     try:
         async with state["gpu_lock"].interactive():
             detections = await loop.run_in_executor(None, _infer)
     except Exception as exc:
-        raise HTTPException(500, f"pipeline error: {exc}")
+        raise HTTPException(500, f"detection failed: {exc}")
 
-    # Section-scoped reference: the caller dropped this image into a
-    # specific label's section, so the label is known. The detector is
-    # used only to localise the object; force every detection onto the
-    # section label rather than letting it classify among siblings.
+    # force_label: the image was dropped into one label's section, so every
+    # detection takes that label.
     _force = (force_label or "").strip()
     if _force:
         for d in detections:
@@ -4182,14 +2834,8 @@ async def v2_create_project(
     name: str = Form(...),
     labels: str = Form(...),
     label_colours: str = Form("{}"),
-    is_private: str = Form("false"),
-    user: str = Depends(current_user),
 ):
-    """Create a V2 project on the backend with a UUID + manifest. Returns
-    `{project_id, name}`. Owner is forced to the authenticated user
-    (the frontend can't spoof someone else's account by sending a
-    different `owner`). References are uploaded separately via
-    /api/v2/projects/{id}/references."""
+    """Create a dataset; returns {project_id, name}."""
     try:
         label_list = json.loads(labels)
         if not isinstance(label_list, list):
@@ -4198,21 +2844,6 @@ async def v2_create_project(
         raise HTTPException(400, f"invalid labels payload: {e}")
     tag_list = [str(l).strip() for l in label_list if str(l).strip()]
 
-    # Profanity gate on the project name + every label in one pass.
-    # assert_clean raises HTTPException(400) with the offending term;
-    # we re-raise with a clearer prefix so the FE error toast tells
-    # the user which field tripped.
-    from profanity import assert_clean
-    try:
-        assert_clean(name, field="project name")
-    except HTTPException as e:
-        raise HTTPException(e.status_code, f"project name: {e.detail}") from None
-    for lab in tag_list:
-        try:
-            assert_clean(lab, field="label")
-        except HTTPException as e:
-            raise HTTPException(e.status_code, f"label '{lab}': {e.detail}") from None
-
     colour_map: dict[str, str] = {}
     try:
         raw_colours = json.loads(label_colours) if label_colours else {}
@@ -4220,8 +2851,7 @@ async def v2_create_project(
             for k, v in raw_colours.items():
                 key = str(k).strip().lower()
                 val = str(v).strip()
-                # Loose hex validation - anything malformed silently
-                # drops, the frontend will derive a fallback colour.
+                # Malformed colours are dropped.
                 if key and val.startswith("#") and 4 <= len(val) <= 9:
                     colour_map[key] = val
     except Exception:
@@ -4231,25 +2861,17 @@ async def v2_create_project(
     proj = store.create_dataset_dir(project_id, name)
     (proj / "references").mkdir(exist_ok=True)
 
-    manifest = empty_manifest(name, owner=user, project_id=project_id)
+    manifest = empty_manifest(name, project_id=project_id)
     manifest["v2"] = True
     manifest["tags"] = tag_list
     manifest["references"] = []
     if colour_map:
         manifest["labelColours"] = colour_map
-    # Visibility - onboarding toggle. Same {private: true|false} flag
-    # the settings page sets via PUT; baking it in at creation time
-    # saves a follow-up round-trip.
-    if str(is_private).strip().lower() in ("true", "1", "yes"):
-        manifest["private"] = True
     save_manifest(project_id, manifest)
     return {"project_id": project_id, "name": name}
 
 
-@app.post(
-    "/api/v2/projects/{project_id}/derive",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.post("/api/v2/projects/{project_id}/derive")
 async def v2_derive_project(
     project_id: str,
     name: str = Form(...),
@@ -4260,28 +2882,17 @@ async def v2_derive_project(
     fixed_size: str = Form("0"),
     label_mode: str = Form("inherit"),
     create_project: str = Form("true"),
-    user: str = Depends(current_user),
 ):
-    """Create a CHILD project: per-detection crops of this (parent) project for
-    the selected labels - one image + one box + one label each. One-way linked:
-    the child re-syncs from the parent and never writes back."""
+    """Create a child project of per-detection crops, synced one way from this project."""
     parent = load_manifest(project_id, copy=False)
     if not parent:
         raise HTTPException(404, "parent project not found")
-    # No derivatives of derivatives: a derived (child) dataset can't itself be
-    # derived. A parent may have MANY children, but the lineage stays one level
-    # deep (a crop-of-a-crop is meaningless and would double-suppress edits).
     if parent.get("derived"):
         raise HTTPException(400, "Cannot create a derived dataset from another derived dataset.")
     try:
         sel = [str(l).strip() for l in json.loads(labels or "[]") if str(l).strip()]
     except Exception:
         raise HTTPException(400, "invalid labels payload")
-    from profanity import assert_clean
-    try:
-        assert_clean(name, field="project name")
-    except HTTPException as e:
-        raise HTTPException(e.status_code, f"project name: {e.detail}") from None
     try:
         pad = max(0.0, min(1.0, float(padding)))
     except Exception:
@@ -4290,18 +2901,15 @@ async def v2_derive_project(
         min_px = max(0, min(1024, int(float(min_size))))
     except Exception:
         min_px = 256
-    # Optional fixed crop size: every crop is resized to exactly fixed_px square.
-    # 0 = off (crops keep their natural per-detection size).
+    # Square crop size in px; 0 keeps each crop's own size.
     try:
         fixed_px = max(0, min(1024, int(float(fixed_size))))
     except Exception:
         fixed_px = 0
     square_mode = str(square).strip().lower() in ("1", "true", "yes", "on")
-    # "new" → child starts with a blank label vocabulary (user makes their own);
-    # "inherit" (default) → child carries the parent's labels.
+    # "new": the child starts with no labels; "inherit": the parent's.
     new_labels = str(label_mode).strip().lower() == "new"
-    # Whether to group the child (and parent) under a workspace Project
-    # (container). Off → the child is created as a standalone dataset.
+    # Group the child and parent under a workspace Project.
     make_project = str(create_project).strip().lower() in ("1", "true", "yes", "on")
 
     child_id = _uuid.uuid4().hex
@@ -4309,18 +2917,12 @@ async def v2_derive_project(
     (proj / "references").mkdir(exist_ok=True)
     (proj / "images").mkdir(exist_ok=True)
 
-    child = empty_manifest(name, owner=user, project_id=child_id)
+    child = empty_manifest(name, project_id=child_id)
     child["v2"] = True
-    # "new" label mode → blank vocabulary (the user creates their own labels);
-    # otherwise inherit the selected (or all) parent labels.
     child["tags"] = [] if new_labels else (sel or list(parent.get("tags") or []))
     child["references"] = []
-    # If the parent is a SPECIFIC dataset (has reference images), pull its
-    # references through so the child is specific too - copy the ref entries
-    # (with their detection embeddings) + the image files, keeping only refs
-    # relevant to the selected labels. Skipped entirely in "new" label mode:
-    # the parent's references are tied to the parent's labels, which we're
-    # discarding, so copying them across would be meaningless.
+    # The parent's references for the selected labels are copied with their
+    # files, except in "new" label mode.
     parent_refs = [] if new_labels else (parent.get("references") or [])
     if parent_refs:
         import shutil as _sh
@@ -4343,23 +2945,17 @@ async def v2_derive_project(
                 try:
                     _sh.copy2(src_refs / fn, dst_refs / fn)
                 except Exception:
-                    continue  # missing source file - skip this ref
+                    continue  # missing source file
             kept_refs.append(dict(ref))
         child["references"] = kept_refs
-    # Carry the parent's label colours only when inheriting labels; "new" mode
-    # starts with a clean palette.
     pcol = parent.get("labelColours")
     if not new_labels and isinstance(pcol, dict):
         lower_sel = {s.lower() for s in sel}
         child["labelColours"] = {k: v for k, v in pcol.items() if not sel or str(k).lower() in lower_sel}
-    # Derived datasets are private by default - they're a working copy of the
-    # parent, not something to publish to the community feed.
-    child["private"] = True
     child["derived"] = {
         "parentProjectId": project_id,
         "parentName": parent.get("name") or "",
-        # `labels` is the SELECTION of parent labels to crop (the sync filter),
-        # independent of whether the child keeps or replaces the label text.
+        # The parent labels to crop, whatever labelMode is.
         "labels": sel,
         "labelMode": "new" if new_labels else "inherit",
         "crop": {"padding": pad, "minSize": min_px, "square": square_mode, "fixedSize": fixed_px},
@@ -4368,50 +2964,34 @@ async def v2_derive_project(
     save_manifest(child_id, child)
     _register_child(project_id, child_id)
 
-    # Group derived datasets under a Project (container) alongside their parent
-    # so the workspace keeps related datasets together. If the parent is already
-    # in a Project the child joins it; otherwise auto-create a Project named
-    # after the parent (privacy = the parent's own, so the parent's visibility is
-    # unchanged) and add both. Best-effort: a failure here never blocks the
-    # derive itself. Skipped entirely when create_project is off - the child is
-    # then left as a standalone dataset (not in any Project).
+    # The child joins the parent's Project, or a new one named after the parent.
+    # A failure here does not fail the derive.
     if make_project:
         try:
             parent_cid = (parent.get("container_id") or "").strip()
             cont = containers.load_container(parent_cid) if parent_cid else None
             if cont is None:
-                cont = containers.create_container(
-                    parent.get("name") or name,
-                    user,
-                    private=bool(parent.get("private", True)),
-                )
-                add_event("container_create", container=cont["id"], actor=user, name=cont.get("name"))
-                # Pull the standalone parent in. Its effective privacy is unchanged
-                # because the new Project inherits the parent's own privacy.
+                cont = containers.create_container(parent.get("name") or name)
+                add_event("container_create", container=cont["id"], name=cont.get("name"))
                 pm = load_manifest(project_id)
                 if pm and not (pm.get("container_id") or "").strip():
                     pm["container_id"] = cont["id"]
-                    pm["private"] = bool(cont.get("private"))
                     save_manifest(project_id, pm)
                     if project_id not in (cont.get("dataset_ids") or []):
                         cont.setdefault("dataset_ids", []).append(project_id)
-                    add_event("dataset_add", container=cont["id"], dataset=project_id, actor=user)
-            # Add the child and inherit the Project's privacy.
+                    add_event("dataset_add", container=cont["id"], dataset=project_id)
             cm = load_manifest(child_id)
             if cm:
                 cm["container_id"] = cont["id"]
-                cm["private"] = bool(cont.get("private"))
                 save_manifest(child_id, cm)
             if child_id not in (cont.get("dataset_ids") or []):
                 cont.setdefault("dataset_ids", []).append(child_id)
             containers.save_container(cont)
-            add_event("dataset_add", container=cont["id"], dataset=child_id, actor=user)
+            add_event("dataset_add", container=cont["id"], dataset=child_id)
         except Exception as e:
             print(f"[derived] auto-project grouping failed for {child_id}: {e}", flush=True)
 
-    # Crop pass in the background so the request returns immediately; the child
-    # appears and fills in as its crops are generated. Errors are logged (not
-    # swallowed silently) so a failed crop pass is diagnosable.
+    # The first crop pass runs in the background.
     def _initial_crop() -> None:
         try:
             _resync_child_from_thread(child_id)
@@ -4421,11 +3001,8 @@ async def v2_derive_project(
     return {"project_id": child_id, "name": name, "parent_project_id": project_id}
 
 
-@app.post(
-    "/api/v2/projects/{project_id}/resync",
-    dependencies=[Depends(require_project_owner)],
-)
-async def v2_resync_child(project_id: str, user: str = Depends(current_user)):
+@app.post("/api/v2/projects/{project_id}/resync")
+async def v2_resync_child(project_id: str):
     """Manually re-derive a child project from its parent's current state."""
     m = load_manifest(project_id, copy=False)
     if not (m.get("derived") or {}).get("parentProjectId"):
@@ -4436,13 +3013,9 @@ async def v2_resync_child(project_id: str, user: str = Depends(current_user)):
     return {"ok": True, "n_images": len(updated.get("imports") or [])}
 
 
-@app.get(
-    "/api/v2/projects/{project_id}/children",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.get("/api/v2/projects/{project_id}/children")
 async def v2_list_children(project_id: str):
-    """The derived (child) projects of this parent - for the parent's 'Derived
-    datasets' list."""
+    """The derived projects of this parent."""
     _ensure_derived_index()
     out = []
     for cid in _children_of(project_id):
@@ -4462,10 +3035,7 @@ async def v2_list_children(project_id: str):
     return {"children": out}
 
 
-@app.post(
-    "/api/v2/projects/{project_id}/references",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.post("/api/v2/projects/{project_id}/references")
 async def v2_upload_reference(
     project_id: str,
     image: UploadFile = File(...),
@@ -4474,47 +3044,23 @@ async def v2_upload_reference(
     height: int = Form(0),
     labels: str = Form(""),
     label: str = Form(""),
-    box_thr: float = Form(0.35),
-    text_thr: float = Form(0.25),
-    nms_iou: float = Form(0.50),
 ):
-    """Upload a reference image to a V2 project, run GD+SAM if no
-    pre-computed detections were supplied, persist DINOv2 embeddings
-    inline on each detection, then append the result to the
-    manifest's `references` array.
-
-    Two call modes:
-
-      a) Pre-computed (legacy): caller passes `detections` (already
-         from /api/v2/references/process) - server skips inference.
-      b) Single-shot: caller passes `labels` (a JSON list of label
-         strings) and an empty `detections` - server runs GD+SAM
-         inline, replacing the now-deprecated /process round-trip.
-         This is what the V2 onboarding does so each reference image
-         hits the server exactly once instead of twice.
-
-    In both modes the server embeds each kept detection's bbox via
-    DINOv2 and stores the embedding next to the detection so future
-    reopens skip the embed-on-every-mount round-trip.
-    """
+    """Store a reference image with embedded detections; detects with SAM3 when none are given."""
     proj = project_dir(project_id)
     if not proj.exists():
-        raise HTTPException(404, "project not found")
-    # Existence check only - the actual manifest used for the
-    # mutate+save lives inside the manifest_write lock at the
-    # bottom of the handler so concurrent uploads don't clobber
-    # each other's appends.
+        raise HTTPException(404, "dataset not found")
+    # Existence check only; the write happens under the lock below.
     if load_manifest(project_id) is None or load_manifest(project_id) == {}:
-        raise HTTPException(404, "manifest not found")
+        raise HTTPException(404, "dataset not found")
 
-    raw = await image.read()
+    raw = await _read_upload(image)
     if not raw:
         raise HTTPException(400, "empty image upload")
+    raw, ext = await asyncio.to_thread(_stored_image, raw)
 
     refs_dir = proj / "references"
     refs_dir.mkdir(exist_ok=True)
     ref_id = _uuid.uuid4().hex
-    ext = Path(image.filename or "image").suffix or ".jpg"
     stored_name = f"{ref_id}{ext}"
     (refs_dir / stored_name).write_bytes(raw)
 
@@ -4525,11 +3071,6 @@ async def v2_upload_reference(
     except Exception as e:
         raise HTTPException(400, f"invalid detections payload: {e}")
 
-    # Decode the image once so we can both read its dimensions AND
-    # crop each box for DINOv2-base embedding. Embeddings are stored
-    # inline alongside the detection so the imports endpoint can
-    # compute per-label centroids on-the-fly without re-running the
-    # encoder on every reference.
     try:
         image_pil = _open_upright(raw)
         if not (width and height):
@@ -4537,8 +3078,7 @@ async def v2_upload_reference(
     except Exception:
         image_pil = None
 
-    # Single-shot mode: caller didn't pre-compute detections, so do
-    # the inference here. Mirrors /api/v2/references/process inline.
+    # No detections supplied: detect here.
     if not det_list and labels and image_pil is not None:
         try:
             tag_list = json.loads(labels)
@@ -4547,23 +3087,17 @@ async def v2_upload_reference(
         except Exception as e:
             raise HTTPException(400, f"invalid labels payload: {e}")
         tags = [str(t).strip() for t in tag_list if str(t).strip()]
-        _have_charlie = state.get("charlie") is not None
-        _have_gd_sam = state.get("model") is not None and state.get("segmenter") is not None
-        if tags and (_have_charlie or _have_gd_sam):
+        if tags and state.get("charlie") is not None:
             loop = asyncio.get_running_loop()
 
             def _detect():
-                # Prefer SAM3 (Charlie) so reference onboarding uses the
-                # same detector as the project import labelling; fall
-                # back to GD+SAM2 when SAM3 isn't loaded.
                 charlie_dets = _charlie_reference_detections(image_pil, tags)
                 if charlie_dets is not None:
                     for d in charlie_dets:
                         d["box"] = [round(c, 2) for c in d["box"]]
-                    print(f"[v2-ref-upload] inline SAM3 tags={tags} → {len(charlie_dets)} det(s)")
+                    print(f"[v2-ref-upload] inline SAM 3 tags={tags} -> {len(charlie_dets)} det(s)")
                     return charlie_dets
-                # GD+SAM2 fallback removed - no detections when SAM3 isn't
-                # loaded; the whole-image fallback box below still applies.
+                # SAM3 not loaded: the whole-image box below still applies.
                 return []
 
             try:
@@ -4574,12 +3108,8 @@ async def v2_upload_reference(
                 traceback.print_exc()
                 raise HTTPException(500, f"inline reference detect failed: {exc}")
 
-    # Section-scoped upload: the reference was dropped into a specific
-    # label's section, so the label is known up front. Force every
-    # detection onto that label (the detector only localises here), and
-    # if nothing was found, fall back to a whole-image box so the
-    # reference still gets an embedding and a quality verdict (the
-    # "looks like other class" check needs at least one embedded crop).
+    # A section label applies to every detection; with none found the whole
+    # image becomes one box, so the reference still gets an embedding.
     section_label = (label or "").strip()
     if section_label:
         for d in det_list:
@@ -4595,7 +3125,6 @@ async def v2_upload_reference(
 
     if image_pil is not None and det_list:
         import v2_dinov2
-        import v2_siglip
         if v2_dinov2.is_loaded():
             W, H = image_pil.size
             squares: list[PILImage.Image] = []
@@ -4613,9 +3142,7 @@ async def v2_upload_reference(
                     continue
                 if x1 - x0 < 4 or y1 - y0 < 4:
                     continue
-                # Inpaint occluders inside the bbox using SAM's
-                # mask polygons so the embedding reflects only the
-                # object, not whatever is standing in front of it.
+                # Occluders inside the box are inpainted from the mask polygons.
                 mask_polys = None
                 m = d.get("mask")
                 if isinstance(m, dict):
@@ -4624,37 +3151,21 @@ async def v2_upload_reference(
                 squares.append(v2_dinov2.center_square_crop(crop))
                 indices.append(i)
             if squares:
-                def _encode():
-                    # SigLIP2 ensemble: encode the same crops via SigLIP
-                    # and store alongside the DINOv2 embedding. The
-                    # resolver scores both independently and combines.
-                    return (v2_dinov2.encode_images_batch(squares),
-                            v2_siglip.encode_images_batch(squares) if v2_siglip.is_loaded() else None)
-
-                # In a thread under the GPU gate, as /references/embed_crops
-                # does: on the event loop the encode froze every request
-                # (seconds on a CPU) and ran beside other work on the card.
+                # In a thread under the GPU gate, off the event loop.
                 async with state["gpu_lock"].interactive():
-                    vecs, sig_vecs = await asyncio.get_running_loop().run_in_executor(None, _encode)
+                    vecs = await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: v2_dinov2.encode_images_batch(squares))
                 for k, i in enumerate(indices):
                     det_list[i]["embedding"] = [round(float(x), 6) for x in vecs[k].tolist()]
                     det_list[i]["embed_version"] = v2_dinov2.EMBED_VERSION
-                    if sig_vecs is not None and k < sig_vecs.shape[0]:
-                        det_list[i]["siglip_embedding"] = [round(float(x), 6) for x in sig_vecs[k].tolist()]
-                        det_list[i]["siglip_version"] = v2_siglip.EMBED_VERSION
                 print(
                     f"[v2-ref-upload] embedded {len(indices)} of {len(det_list)} detection(s) "
-                    f"for ref {ref_id} (dinov{v2_dinov2.EMBED_VERSION}"
-                    + (f" + siglipv{v2_siglip.EMBED_VERSION}" if sig_vecs is not None else " - siglip deferred")
-                    + ")"
+                    f"for ref {ref_id} (dinov{v2_dinov2.EMBED_VERSION})"
                 )
         else:
-            print(f"[v2-ref-upload] DINOv2 not loaded yet - embeddings deferred (lazy backfill on first import).")
+            print("[v2-ref-upload] DINOv2 is not loaded yet; the embeddings are made on first use.")
 
-    # BlurHash placeholder so the FE can render a coloured gradient
-    # before the real image bytes stream in. Encoded once at upload
-    # time off the file we just saved (5-10 ms). Gracefully None if
-    # encode fails; FE then falls back to a flat grey tile.
+    # None when encoding fails.
     blurhash_str = _encode_blurhash_from_path(refs_dir / stored_name)
     ref_entry = {
         "id": ref_id,
@@ -4667,43 +3178,26 @@ async def v2_upload_reference(
         "blurhash": blurhash_str,
         "createdAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    # Atomic append: per-project manifest write lock guards the
-    # load → mutate → save sequence so two concurrent /references
-    # POSTs can't each load a stale manifest and overwrite each
-    # other's append. Reload INSIDE the lock so we always start
-    # from the latest persisted state - the manifest variable
-    # checked above was just for the existence guard.
+    # Reloaded under the write lock, so concurrent appends are kept.
     write_lock = await _manifest_write_lock(project_id)
     async with write_lock:
         manifest = load_manifest(project_id) or {}
-        was_empty = len(manifest.get("references") or []) == 0
         manifest.setdefault("references", []).append(ref_entry)
-        # Seed the project's cover from the first uploaded reference
-        # so the workspace gallery has a thumbnail to render.
         if not manifest.get("cover"):
             manifest["cover"] = stored_name
         manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         save_manifest(project_id, manifest)
         n_refs = len(manifest.get("references") or [])
-    # Going from zero → some reference images means this is a specific
-    # dataset (see _apply_reference_dataset_flip). Done once on the first
-    # upload, outside the manifest lock (it writes a separate sidecar).
-    if was_empty:
-        _apply_reference_dataset_flip(project_id)
     print(
         f"[v2-ref-upload] saved ref {ref_id} for project {project_id} "
-        f"- manifest now has {n_refs} reference(s), cover={manifest.get('cover')!r}"
+        f"({n_refs} reference(s), cover={manifest.get('cover')!r})"
     )
     return {
         "reference_id": ref_id,
         "filename": stored_name,
         "width": width,
         "height": height,
-        # Echo detections back so the FE doesn't have to re-fetch the
-        # manifest after a single-shot upload to render boxes.
-        # Embeddings are stripped from the response payload - they're
-        # 1024-dim float arrays that bloat the wire and the FE can
-        # hydrate them on next manifest GET if it actually needs them.
+        # Without the DINOv2 embeddings.
         "detections": [
             {k: v for k, v in d.items() if k not in ("embedding",)}
             for d in det_list
@@ -4712,23 +3206,17 @@ async def v2_upload_reference(
     }
 
 
-@app.delete(
-    "/api/v2/projects/{project_id}/references/{reference_id}",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.delete("/api/v2/projects/{project_id}/references/{reference_id}")
 async def v2_delete_reference(project_id: str, reference_id: str):
-    """Remove a single reference image from the project. Called when the
-    user deletes a ref during onboarding - the eager-upload path had
-    already POSTed it to the server, so a local-only delete would leave
-    an orphaned entry that would resurface on the next /initial hydration."""
+    """Remove one reference image and its file."""
     proj = project_dir(project_id)
     if not proj.exists():
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     write_lock = await _manifest_write_lock(project_id)
     async with write_lock:
         manifest = load_manifest(project_id)
         if not manifest:
-            raise HTTPException(404, "manifest not found")
+            raise HTTPException(404, "dataset not found")
         refs = manifest.get("references") or []
         kept: list[dict] = []
         found = False
@@ -4746,6 +3234,7 @@ async def v2_delete_reference(project_id: str, reference_id: str):
         if not found:
             raise HTTPException(404, "reference not found")
         manifest["references"] = kept
+        _replace_missing_cover(manifest)
         manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         save_manifest(project_id, manifest)
     return {"ok": True}
@@ -4755,32 +3244,15 @@ class UpdateRefDetectionsIn(BaseModel):
     detections: list[dict]
 
 
-@app.put(
-    "/api/v2/projects/{project_id}/references/{reference_id}",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.put("/api/v2/projects/{project_id}/references/{reference_id}")
 async def v2_update_reference(project_id: str, reference_id: str, payload: UpdateRefDetectionsIn):
-    """Replace a reference's detections in the manifest and (re-)embed
-    any boxes whose `embedding` is missing or whose geometry/mask
-    doesn't match the previously stored copy. Used when the user
-    edits boxes in the V2 editor and clicks next/prev/close - the
-    FE batches the resulting detection list here so the manifest
-    stays consistent with what they see and we don't re-encode on
-    every reopen.
-
-    Boxes that already carry a valid `embedding` (length matches
-    `v2_dinov2.EMBEDDING_DIM`) are kept as-is; new / changed ones
-    are run through DINOv2 inline. Single GPU pass per request.
-    """
+    """Replace a reference's detections, embedding boxes without a current embedding."""
     if not project_dir(project_id).exists():
-        raise HTTPException(404, "project not found")
-    # Existence check only - the actual manifest used for the
-    # mutate+save lives inside the manifest_write lock at the
-    # bottom of the handler so a concurrent /references POST
-    # can't reset the references array between our load and save.
+        raise HTTPException(404, "dataset not found")
+    # Existence check only; the write happens under the lock below.
     snapshot = load_manifest(project_id)
     if not snapshot:
-        raise HTTPException(404, "manifest not found")
+        raise HTTPException(404, "dataset not found")
 
     refs = snapshot.get("references") or []
     target = next((r for r in refs if r.get("id") == reference_id), None)
@@ -4791,13 +3263,6 @@ async def v2_update_reference(project_id: str, reference_id: str, payload: Updat
     if not isinstance(new_dets, list):
         raise HTTPException(400, "detections must be a list")
 
-    # Validate any text labels (matches V1 PUT's profanity check).
-    from profanity import assert_clean
-    for d in new_dets:
-        if isinstance(d, dict) and isinstance(d.get("label"), str):
-            assert_clean(d["label"], field="label")
-
-    # Re-embed boxes that need it. Decode the stored image once.
     refs_dir = project_dir(project_id) / "references"
     img_path = refs_dir / target.get("filename", "")
     image_pil = None
@@ -4809,47 +3274,23 @@ async def v2_update_reference(project_id: str, reference_id: str, payload: Updat
 
     if image_pil is not None and new_dets:
         import v2_dinov2
-        import v2_siglip
-        dino_loaded = v2_dinov2.is_loaded()
-        siglip_loaded = v2_siglip.is_loaded()
-        if dino_loaded:
+        if v2_dinov2.is_loaded():
             W, H = image_pil.size
             embed_dim = v2_dinov2.EMBEDDING_DIM
-            siglip_dim = getattr(v2_siglip, "EMBEDDING_DIM", None)
-            # Build a unified work list: each detection that's missing
-            # EITHER encoder's vector at the current version goes
-            # through one shared crop, then we encode whichever
-            # encoder(s) need it. Avoids re-cropping the same box
-            # twice when both DINOv2 and SigLIP need a refresh.
+            # One crop per box without a current vector.
             squares: list[PILImage.Image] = []
             indices: list[int] = []
-            need_dino: list[bool] = []
-            need_siglip: list[bool] = []
             for i, d in enumerate(new_dets):
                 emb = d.get("embedding")
                 emb_v = d.get("embed_version")
-                d_have = (
+                # Another embed_version has the same dim but a different feature space.
+                if (
                     isinstance(emb, list)
                     and len(emb) == embed_dim
                     and isinstance(emb_v, int)
                     and emb_v == v2_dinov2.EMBED_VERSION
-                )
-                s_have = True  # treat as satisfied when SigLIP isn't loaded
-                if siglip_loaded:
-                    s_emb = d.get("siglip_embedding")
-                    s_v = d.get("siglip_version")
-                    s_have = (
-                        isinstance(s_emb, list)
-                        and (siglip_dim is None or len(s_emb) == siglip_dim)
-                        and isinstance(s_v, int)
-                        and s_v == v2_siglip.EMBED_VERSION
-                    )
-                if d_have and s_have:
+                ):
                     continue
-                # Old-version embeddings get re-encoded so the manifest
-                # stops mixing v3 (224×224 input) and v4 (518×518 input)
-                # vectors - the dim is the same but the feature space
-                # subtly drifts between input resolutions.
                 bb = d.get("box") or []
                 if not (isinstance(bb, list) and len(bb) == 4):
                     continue
@@ -4869,70 +3310,34 @@ async def v2_update_reference(project_id: str, reference_id: str, payload: Updat
                 crop = v2_dinov2.inpaint_bbox_crop(image_pil, (x0, y0, x1, y1), mask_polys)
                 squares.append(v2_dinov2.center_square_crop(crop))
                 indices.append(i)
-                need_dino.append(not d_have)
-                need_siglip.append(siglip_loaded and not s_have)
             if squares:
                 loop = asyncio.get_running_loop()
-
-                # Encode under the GPU lock - sequential DINOv2 then
-                # SigLIP keeps VRAM usage bounded vs. running them in
-                # parallel (each model owns its own forward pass on
-                # the same device).
                 async with state["gpu_lock"]:
-                    if any(need_dino):
-                        d_vecs = await loop.run_in_executor(
-                            None, lambda: v2_dinov2.encode_images_batch(squares)
-                        )
-                    else:
-                        d_vecs = None
-                    if any(need_siglip):
-                        s_vecs = await loop.run_in_executor(
-                            None, lambda: v2_siglip.encode_images_batch(squares)
-                        )
-                    else:
-                        s_vecs = None
-                d_count = 0
-                s_count = 0
+                    d_vecs = await loop.run_in_executor(
+                        None, lambda: v2_dinov2.encode_images_batch(squares)
+                    )
                 for k, i in enumerate(indices):
-                    if need_dino[k] and d_vecs is not None and k < d_vecs.shape[0]:
-                        new_dets[i]["embedding"] = [
-                            round(float(x), 6) for x in d_vecs[k].tolist()
-                        ]
-                        new_dets[i]["embed_version"] = v2_dinov2.EMBED_VERSION
-                        d_count += 1
-                    if need_siglip[k] and s_vecs is not None and k < s_vecs.shape[0]:
-                        new_dets[i]["siglip_embedding"] = [
-                            round(float(x), 6) for x in s_vecs[k].tolist()
-                        ]
-                        new_dets[i]["siglip_version"] = v2_siglip.EMBED_VERSION
-                        s_count += 1
+                    new_dets[i]["embedding"] = [
+                        round(float(x), 6) for x in d_vecs[k].tolist()
+                    ]
+                    new_dets[i]["embed_version"] = v2_dinov2.EMBED_VERSION
                 print(
-                    f"[v2-ref-update] re-embedded ref {reference_id} - "
-                    f"dino={d_count}/{len(new_dets)}, siglip={s_count}/{len(new_dets)}"
+                    f"[v2-ref-update] re-embedded ref {reference_id}: "
+                    f"{len(indices)}/{len(new_dets)}"
                 )
 
-    # Atomic update under the per-project manifest write lock.
-    # Re-resolve `target` from a fresh manifest copy so any
-    # concurrent /references POSTs that landed between our snapshot
-    # above and this point are preserved. If the reference was
-    # deleted in the interim, return 404 cleanly instead of writing
-    # a stale ref entry back.
+    # Re-resolved under the write lock; a reference deleted meanwhile is a 404.
     write_lock = await _manifest_write_lock(project_id)
     async with write_lock:
         manifest = load_manifest(project_id) or {}
         refs_live = manifest.get("references") or []
         live_target = next((r for r in refs_live if r.get("id") == reference_id), None)
         if live_target is None:
-            raise HTTPException(404, "reference no longer exists (concurrent delete?)")
+            raise HTTPException(404, "reference not found")
         live_target["detections"] = new_dets
         manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         save_manifest(project_id, manifest)
     n_embedded = sum(1 for d in new_dets if isinstance(d.get("embedding"), list))
-    # Diagnostic: print the labels the FE flush actually sent so we
-    # can tell whether onboarding label corrections are landing on
-    # disk. If the manifest later loads with only one class, this
-    # log line confirms whether the PUT received both classes or
-    # the FE only flushed one.
     label_summary = {}
     for d in new_dets:
         lab = (d.get("label") or "").strip().lower() or "(blank)"
@@ -4948,14 +3353,9 @@ async def v2_update_reference(project_id: str, reference_id: str, payload: Updat
     }
 
 
-@app.get(
-    "/api/v2/projects/{project_id}/references/{filename}",
-    dependencies=[Depends(require_project_read_access)],
-)
+@app.get("/api/v2/projects/{project_id}/references/{filename}")
 async def v2_serve_reference(project_id: str, filename: str):
-    """Serve a stored reference image, with RAM-cached bytes for
-    repeat hits. Path-traversal guarded by resolving the full path
-    and verifying it stays inside the project's references dir."""
+    """Serve a stored reference image; paths outside references/ are refused."""
     proj = project_dir(project_id)
     refs_root = (proj / "references").resolve()
     target = (refs_root / filename).resolve()
@@ -4966,206 +3366,40 @@ async def v2_serve_reference(project_id: str, filename: str):
     return await _serve_cached_image(project_id, "references", filename, target)
 
 
-# ─── V2 imports persistence ──────────────────────────────────────
-# V1 stores every image bytes-and-detections in the manifest under
-# `results`. V2 keeps the same idea but in a sibling list `imports`,
-# so existing V1 endpoints / migrations can keep treating `results`
-# as the canonical V1 list while V2 reads/writes `imports`.
-
-@app.post(
-    "/api/v2/projects/{project_id}/imports",
-    dependencies=[Depends(require_project_owner)],
-)
-async def v2_upload_import(
-    project_id: str,
-    image: UploadFile = File(...),
-    detections: str = Form("[]"),
-    edited_boxes: str = Form(""),
-    timings: str = Form("{}"),
-    width: int = Form(0),
-    height: int = Form(0),
-):
-    """Persist an imported image to a V2 project. Image bytes go to
-    `projects/<id>/imports/<uuid>.<ext>`; the metadata + the FE-
-    computed detections / editedBoxes / timings appended to
-    manifest['imports'] so the project can be rehydrated on next
-    open without re-running the pipeline."""
-    proj = project_dir(project_id)
-    if not proj.exists():
-        raise HTTPException(404, "project not found")
-    if not load_manifest(project_id):
-        raise HTTPException(404, "manifest not found")
-
-    raw = await image.read()
-    if not raw:
-        raise HTTPException(400, "empty image upload")
-
-    imports_dir = proj / "images"
-    imports_dir.mkdir(exist_ok=True)
-    import_id = _uuid.uuid4().hex
-    ext = Path(image.filename or "image").suffix or ".jpg"
-    stored_name = f"{import_id}{ext}"
-    (imports_dir / stored_name).write_bytes(raw)
-
-    try:
-        det_list = json.loads(detections) if detections else []
-        if not isinstance(det_list, list):
-            raise ValueError("detections must be a JSON array")
-    except Exception as e:
-        raise HTTPException(400, f"invalid detections payload: {e}")
-
-    edited: list | None = None
-    if edited_boxes:
-        try:
-            parsed = json.loads(edited_boxes)
-            if isinstance(parsed, list):
-                edited = parsed
-        except Exception as e:
-            print(f"[v2-import-upload] invalid edited_boxes ignored: {e}")
-
-    try:
-        timing_obj = json.loads(timings) if timings else {}
-        if not isinstance(timing_obj, dict):
-            timing_obj = {}
-    except Exception:
-        timing_obj = {}
-
-    if not (width and height):
-        try:
-            image_pil = _open_upright(raw)
-            width, height = image_pil.size
-        except Exception:
-            pass
-
-    # BlurHash placeholder for the dataset gallery - same pattern
-    # as references: render a colour gradient until the image bytes
-    # arrive (lazily, on scroll-into-view).
-    blurhash_str = _encode_blurhash_from_path(imports_dir / stored_name)
-    entry = {
-        "id": import_id,
-        "filename": stored_name,
-        "originalFilename": Path(image.filename or "image").name,
-        "width": int(width or 0),
-        "height": int(height or 0),
-        "detections": det_list,
-        "editedBoxes": edited,
-        "timings": timing_obj,
-        "blurhash": blurhash_str,
-        "createdAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    }
-    # Atomic append under the per-project manifest write lock so
-    # concurrent /imports POSTs don't overwrite each other (same
-    # bug as /references - load_manifest+mutate+save needs to be
-    # an atomic critical section).
-    write_lock = await _manifest_write_lock(project_id)
-    async with write_lock:
-        manifest = load_manifest(project_id) or {}
-        manifest.setdefault("imports", []).append(entry)
-        # Seed the project's cover from the first uploaded import if no
-        # cover is set yet. V2 originally relied on references-flow to
-        # set this, but Charlie / V3 projects skip references entirely
-        # - without this fallback the workspace card stays on a 404
-        # forever.
-        if not manifest.get("cover"):
-            manifest["cover"] = stored_name
-        manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        save_manifest(project_id, manifest)
-        project_tags_snapshot = list(manifest.get("tags") or [])
-    # Bake the labelled preview off-thread so the FE's first
-    # /labelled_preview GET is a pure file serve. Fire-and-forget;
-    # the lazy GET path renders on demand if the bake hasn't
-    # landed yet (slow disk, race) so this is purely a latency
-    # optimisation, not a correctness requirement.
-    loop = asyncio.get_running_loop()
-    loop.run_in_executor(
-        None,
-        _bake_labelled_preview_sync,
-        project_id,
-        import_id,
-        imports_dir / stored_name,
-        list(edited) if isinstance(edited, list) and edited else list(det_list),
-        project_tags_snapshot,
-    )
-    return {"import_id": import_id, "filename": stored_name, "width": width, "height": height}
-
-
-@app.post(
-    "/api/v2/projects/{project_id}/imports/raw",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.post("/api/v2/projects/{project_id}/imports/raw")
 async def v2_upload_import_raw(
     project_id: str,
     image: UploadFile = File(...),
     created_at_ms: str = Form(""),
     idempotency_key: str = Form(""),
-    user: str = Depends(current_user),
 ):
-    """Persist an imported image WITHOUT running detection. The
-    image is added to the project's manifest with empty detections -
-    the labelling pass runs later, kicked off by a separate job
-    (kind='label_charlie') from the project page.
-
-    Used by the deferred-labelling flow: user uploads first, presses
-    Start to label everything in one go.
-    """
+    """Store an imported image without detection; a label_charlie job labels it later."""
     proj = project_dir(project_id)
     if not proj.exists():
-        raise HTTPException(404, "project not found")
-    # The require_project_owner dep already loaded + validated the
-    # manifest; the manifest_path existence check below covers the
-    # "manifest file disappeared between the dep and here" race
-    # without paying for a second load_manifest deepcopy (which on a
-    # 30MB / 1000-image project was 300-500ms of dead weight per
-    # upload - i.e. why "NSFW processing" felt 10s slower on a big
-    # project than a small one).
+        raise HTTPException(404, "dataset not found")
     if not manifest_path(project_id).exists():
-        raise HTTPException(404, "manifest not found")
+        raise HTTPException(404, "dataset not found")
 
-    # Idempotency probe. The FE generates a stable key per placeholder
-    # and resends it on retries; if a previous upload in this project
-    # landed with the same key, return that existing record instead
-    # of creating a duplicate. Without this, a network blip between
-    # request-completion and response-reception (Safari "Load failed",
-    # intermediary timeout) triggers the FE catch-block retry and
-    # creates two records for one user action. Cheap manifest scan
-    # - we re-check under the write lock below to close the TOCTOU
-    # gap on concurrent retries.
+    # A retry with the same idempotency_key gets the existing record. Checked
+    # again under the write lock below.
     idem = (idempotency_key or "").strip()
     if idem:
         existing = _find_import_by_idempotency_key(project_id, idem)
         if existing is not None:
             return existing
 
-    raw = await image.read()
+    raw = await _read_upload(image)
     if not raw:
         print(
-            f"[v2-import-raw] 400 empty upload - filename={image.filename!r} "
+            f"[v2-import-raw] 400 empty upload: filename={image.filename!r} "
             f"content_type={image.content_type!r}"
         )
         raise HTTPException(400, "empty image upload")
-    # Per-file size cap. FastAPI streams UploadFile so we can only
-    # know the actual size after .read(); rejecting here still
-    # prevents the much heavier NSFW + PIL + manifest work below.
-    if len(raw) > MAX_UPLOAD_BYTES_PER_FILE:
-        raise HTTPException(
-            413,
-            f"image too large ({len(raw)} bytes, max {MAX_UPLOAD_BYTES_PER_FILE})",
-        )
 
     _orig_filename = image.filename or ""
     _loop = asyncio.get_running_loop()
 
-    # Decode header for dimensions + detect format. JPEG sources are
-    # stored as-is (fast - no re-encode). Every NON-JPEG source (AVIF,
-    # WEBP, PNG, HEIC, CMYK JPEG, …) is FULLY decoded and re-encoded to
-    # a baseline RGB JPEG so every downstream consumer handles a single
-    # uniform format: the SAM3 labelling pipeline, the labelled_preview
-    # renderer, and the raw byte serve. Previously a non-JPEG upload
-    # kept its original bytes but was stored under a forced ".jpg" name
-    # (format/extension mismatch); the GPU pipeline + preview renderer
-    # couldn't always decode it, leaving the gallery tile a white square
-    # that never labelled - even though the browser, which decodes the
-    # raw bytes itself, still showed the image in the viewer.
+    # JPEG is stored as uploaded; any other format is decoded and stored as RGB JPEG.
     store_bytes = raw
     try:
         with PILImage.open(io.BytesIO(raw)) as _im:
@@ -5185,8 +3419,8 @@ async def v2_upload_import_raw(
                 _norm.save(_buf, "JPEG", quality=90)
                 store_bytes = _buf.getvalue()
                 print(
-                    f"[v2-import-raw] normalised {_fmt or '?'} → JPEG "
-                    f"({len(raw)}→{len(store_bytes)} bytes) for {_orig_filename!r}"
+                    f"[v2-import-raw] normalised {_fmt or '?'} to JPEG "
+                    f"({len(raw)} -> {len(store_bytes)} bytes) for {_orig_filename!r}"
                 )
     except Exception as _e:
         raise HTTPException(400, f"cannot decode image: {_e}")
@@ -5199,9 +3433,6 @@ async def v2_upload_import_raw(
     imports_dir = proj / "images"
     imports_dir.mkdir(exist_ok=True)
     import_id = _uuid.uuid4().hex
-    # Stored format is always server-decodable: JPEG sources keep their
-    # bytes + .jpg/.jpeg extension; everything else was normalised to
-    # JPEG above, so it's stored as .jpg.
     if store_bytes is raw:
         ext = Path(_orig_filename or "image").suffix.lower()
         if ext not in (".jpg", ".jpeg"):
@@ -5210,8 +3441,6 @@ async def v2_upload_import_raw(
         ext = ".jpg"
     stored_name = f"{import_id}{ext}"
 
-    # Build manifest entry before the write so the under-lock
-    # idempotency re-check can return it immediately.
     fe_ts_iso: str | None = None
     if created_at_ms:
         try:
@@ -5236,42 +3465,8 @@ async def v2_upload_import_raw(
     if idem:
         entry["idempotencyKey"] = idem
 
-    # NSFW gate - run synchronously BEFORE writing anything, so a blocked
-    # image never lands on disk or in the manifest. Previously this ran
-    # in a background task AFTER the upload returned 200, which deleted
-    # the file out from under a tile the FE had already painted, leaving
-    # a white un-labellable ghost. Now a block raises 451 here and the
-    # FE's existing 451 handler drops the tile immediately. Uses the
-    # strict EXPOSED-only set (see _enforce_nsfw_or_451) on a 640px copy,
-    # on the bg pool so the event loop stays free.
-    if state.get("nsfw") is not None:
-        def _nsfw_enforce():
-            _bytes = store_bytes
-            try:
-                with PILImage.open(io.BytesIO(store_bytes)) as _p:
-                    _w, _h = _p.size
-                    if max(_w, _h) > 640:
-                        _sc = 640.0 / max(_w, _h)
-                        _sm = _p.resize(
-                            (int(_w * _sc), int(_h * _sc)), PILImage.BILINEAR
-                        )
-                        _buf = io.BytesIO()
-                        _sm.convert("RGB").save(_buf, "JPEG", quality=85)
-                        _bytes = _buf.getvalue()
-            except Exception:
-                pass
-            # Raises HTTPException(451) on a block; the await re-raises it
-            # into the handler, FastAPI returns 451, FE removes the tile.
-            _enforce_nsfw_or_451(
-                _bytes, label="v2-import-raw",
-                project=project_id, file=_orig_filename, user=user,
-            )
-        await _loop.run_in_executor(_BG_IMAGE_EXECUTOR, _nsfw_enforce)
 
-    # Write file to disk and update manifest concurrently - neither
-    # depends on the other and both are fast I/O. Scheduling the write
-    # here (before awaiting anything) means the file lands on disk in
-    # parallel with the manifest lock acquisition.
+    # The file write runs alongside the manifest update.
     file_write_fut = _loop.run_in_executor(
         None, (imports_dir / stored_name).write_bytes, store_bytes
     )
@@ -5282,9 +3477,7 @@ async def v2_upload_import_raw(
         if idem:
             for existing_entry in manifest.get("imports", []) or []:
                 if existing_entry.get("idempotencyKey") == idem:
-                    # Race: another request already committed this key.
-                    # Cancel our file write (best-effort) and return
-                    # the winning entry so the FE stays consistent.
+                    # Another request committed this key first.
                     file_write_fut.cancel()
                     return {
                         "import_id": existing_entry.get("id"),
@@ -5300,17 +3493,13 @@ async def v2_upload_import_raw(
         manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         save_manifest(project_id, manifest, cache_by_ref=True)
 
-    # Ensure file write is done before handing off to background tasks
-    # that need to read it. Typically completes before we reach here.
+    # The background tasks below read the file.
     try:
         await file_write_fut
     except Exception as _fw_err:
         print(f"[v2-import-raw] file write failed for {import_id}: {_fw_err}")
 
-    # Background task: blurhash only. NSFW already ran synchronously
-    # above (a blocked image 451s before it ever reaches here), so
-    # there's no file/manifest entry to purge - we just compute the
-    # BlurHash gradient placeholder and stamp it onto the entry.
+    # BlurHash, computed in the background and stored on the entry.
     _bg_pid = project_id
     _bg_iid = import_id
     _bg_stored = stored_name
@@ -5338,46 +3527,11 @@ async def v2_upload_import_raw(
 
     asyncio.create_task(_bg_blurhash())
 
-    # Fire-and-forget whole-image embedding. The stats card uses
-    # these for the 2-D variation plot, the near-duplicate flag,
-    # and one of the health-score factors. Computed here so the
-    # backfill window is "one model pass per upload" rather than a
-    # batch sweep later. Failure (model not loaded, decode error)
-    # is non-fatal: the stats endpoint backfills missing ones on
-    # demand.
-    #
-    # Routed through the GPU gate at P_BACKGROUND + the dedicated bg
-    # executor: a burst of uploads yields the GPU to any click-to-detect
-    # (P_INTERACTIVE) or labelling job (P_JOB) instead of storming it,
-    # and never ties up a request-path thread. This is what stops the
-    # import burst from stalling - embeddings trickle through in the
-    # background while uploads return immediately.
-    # Whole-image embedding for the stats card, off the hot path. The
-    # shared helper bounds concurrency + pauses while a GPU job runs so a
-    # bulk-import backlog can't starve labelling of the GPU.
+    # Whole-image embedding for the dataset stats, in the background.
     asyncio.create_task(_run_bg_embedding(project_id, import_id, imports_dir / stored_name))
 
-    # Audit row for the upload. V2 uploads land directly without
-    # going through the job ledger, so the per-user usage rollup
-    # (sum_uploaded_images_for_user, which the profile page reads)
-    # needs an explicit `job`-shaped event with job_kind="upload"
-    # for each successful upload. One audit row per uploaded image
-    # keeps the per-image counter accurate.
-    try:
-        add_event(
-            "job",
-            id=import_id,
-            job_kind="upload",
-            project=project_id,
-            user=user or "anonymous",
-            status="done",
-            elapsed_s=0.0,
-            cost_pence=0.0,
-            n_images=1,
-            error=None,
-        )
-    except Exception as e:
-        print(f"[v2-import-raw] upload audit failed for {import_id}: {e}")
+    # One activity row per upload request.
+    add_event("job", id=import_id, job_kind="upload", project=project_id, status="done", n_images=1)
 
     return {
         "import_id": import_id,
@@ -5390,14 +3544,10 @@ async def v2_upload_import_raw(
 
 
 def _sanitize_imported_boxes(raw_boxes, width: int, height: int) -> tuple[list[dict], int]:
-    """Normalise externally-imported annotation boxes (Pascal VOC / COCO /
-    YOLO, converted to absolute pixels client-side) into the canonical
-    editable-box shape the editor + exporters consume:
-    {id, label, x0, y0, x1, y1, score, mask?} in absolute top-left pixel
-    coords. Coerces numbers, repairs reversed corners, clamps to the image,
-    and drops degenerate (effectively zero-area) boxes so a later re-export
-    can't silently lose them - _box_xyxy rejects any box with x1<=x0 or
-    y1<=y0. Returns (clean_boxes, n_dropped)."""
+    """Normalise imported boxes, already in absolute pixels, to {id, label,
+    x0, y0, x1, y1, score, mask?}: reversed corners are swapped, boxes
+    clamped to the image and boxes under 1 px dropped. Returns
+    (clean_boxes, n_dropped)."""
     clean: list[dict] = []
     dropped = 0
     W = float(width or 0)
@@ -5445,49 +3595,20 @@ def _sanitize_imported_boxes(raw_boxes, width: int, height: int) -> tuple[list[d
     return clean, dropped
 
 
-@app.post(
-    "/api/v2/projects/{project_id}/imports/raw_batch",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.post("/api/v2/projects/{project_id}/imports/raw_batch")
 async def v2_upload_import_raw_batch(
     project_id: str,
     images: list[UploadFile] = File(...),
     created_at_ms: list[str] = Form(default=[]),
     idempotency_key: list[str] = Form(default=[]),
     boxes: list[str] = Form(default=[]),
-    user: str = Depends(current_user),
 ):
-    """Batch sibling of /imports/raw: accept many images in ONE
-    multipart request and append them all to the manifest with a
-    SINGLE write, instead of a full-manifest rewrite per image.
-
-    When the optional per-image `boxes` field is supplied (a JSON array of
-    editable boxes, aligned by index to `images`), the item is stored as an
-    ALREADY-LABELLED import: the boxes become its authoritative `editedBoxes`
-    (editedBoxesSet=True, labelled=True), so the editor renders + edits them
-    and every exporter round-trips them. This powers the "import a labelled
-    dataset as a fully-editable project" flow. Items with no `boxes` entry
-    behave exactly as a deferred-label upload (the original behaviour).
-
-    Importing thousands of images one-request-per-image made the
-    manifest write O(n) per upload (the whole growing manifest is
-    re-serialised under the write lock each time) -> O(n^2) overall,
-    plus n separate HTTP round-trips, n idempotency scans, AND a second
-    full rewrite per image from the background blurhash task. Batching
-    collapses the write + round-trip count by the batch size and folds
-    the blurhash compute inline (one write, not two), which is the
-    dominant cost at thousands-of-images scale.
-
-    Each item is processed independently on the bg image pool; a decode
-    error or NSFW block on one image is reported per-item and never
-    fails the rest of the batch. Returns {results: [...]} aligned to the
-    input order so the FE can map each placeholder tile to its outcome.
-    """
+    """Batch /imports/raw with one manifest write; items with `boxes` are stored labelled."""
     proj = project_dir(project_id)
     if not proj.exists():
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     if not manifest_path(project_id).exists():
-        raise HTTPException(404, "manifest not found")
+        raise HTTPException(404, "dataset not found")
     if not images:
         raise HTTPException(400, "no images")
     if len(images) > MAX_FILES_PER_UPLOAD_BATCH:
@@ -5500,12 +3621,9 @@ async def v2_upload_import_raw_batch(
     imports_dir.mkdir(exist_ok=True)
     loop = asyncio.get_running_loop()
 
-    # Read every part's bytes up front (FastAPI streams UploadFile).
-    raws: list[bytes] = [await up.read() for up in images]
+    raws: list[bytes] = [await up.read(MAX_UPLOAD_BYTES_PER_FILE + 1) for up in images]
 
-    # Idempotency: a retried batch resends the same per-image keys.
-    # Scan the manifest ONCE (not once per image) and echo any record
-    # that already landed.
+    # An item whose idempotency key already landed gets the existing record.
     existing_by_key: dict[str, dict] = {}
     try:
         _m0 = load_manifest(project_id, copy=False) or {}
@@ -5517,11 +3635,8 @@ async def v2_upload_import_raw_batch(
         existing_by_key = {}
 
     def _process_one(idx: int) -> dict:
-        """Sync worker (bg image pool): decode + normalise, NSFW-gate,
-        write the file, encode the blurhash. Builds the manifest entry
-        but does NOT touch the manifest (the caller appends all entries
-        under a single write lock). On reject/error writes nothing and
-        returns a status the FE can surface on the tile."""
+        """Decode, store and blurhash one item. Returns its result with the
+        manifest entry; the caller does the manifest write."""
         raw = raws[idx]
         orig_filename = images[idx].filename or ""
         idem = idempotency_key[idx].strip() if idx < len(idempotency_key) else ""
@@ -5539,10 +3654,10 @@ async def v2_upload_import_raw_batch(
         if not raw:
             return {"idempotency_key": idem, "status": "failed", "error": "empty image upload"}
         if len(raw) > MAX_UPLOAD_BYTES_PER_FILE:
-            return {"idempotency_key": idem, "status": "failed", "error": f"image too large ({len(raw)} bytes)"}
+            return {"idempotency_key": idem, "status": "failed",
+                    "error": f"image too large (max {MAX_UPLOAD_BYTES_PER_FILE} bytes)"}
 
-        # Decode header + normalise non-JPEG to baseline RGB JPEG, same
-        # rules as the single /imports/raw endpoint.
+        # The format rules of /imports/raw.
         store_bytes = raw
         try:
             with PILImage.open(io.BytesIO(raw)) as _im:
@@ -5566,42 +3681,6 @@ async def v2_upload_import_raw_batch(
         except Exception as _e:
             return {"idempotency_key": idem, "status": "failed", "error": f"cannot decode image: {_e}"}
 
-        # Per-item NSFW gate. Unlike the single endpoint (which 451s the
-        # whole request), a block here just marks THIS item rejected so
-        # the rest of the batch still lands. Strict EXPOSED-only set.
-        if state.get("nsfw") is not None:
-            try:
-                _bytes = store_bytes
-                with PILImage.open(io.BytesIO(store_bytes)) as _p:
-                    _w, _h = _p.size
-                    if max(_w, _h) > 640:
-                        _sc = 640.0 / max(_w, _h)
-                        _sm = _p.resize((int(_w * _sc), int(_h * _sc)), PILImage.BILINEAR)
-                        _b = io.BytesIO()
-                        _sm.convert("RGB").save(_b, "JPEG", quality=85)
-                        _bytes = _b.getvalue()
-                import tempfile as _tempfile
-                with _tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as _tmp:
-                    _tmp.write(_bytes)
-                    _tmp_path = Path(_tmp.name)
-                try:
-                    _score, _cls = nsfw_score(state["nsfw"], _tmp_path, classes=EXPOSED_CLASSES)
-                except Exception:
-                    _score, _cls = 0.0, ""
-                finally:
-                    try:
-                        _tmp_path.unlink()
-                    except Exception:
-                        pass
-                if _score >= NSFW_THRESHOLD:
-                    print(f"[v2-import-raw-batch] 451 nsfw, score={_score:.3f} class={_cls or '-'}")
-                    add_event(
-                        "nsfw_block", project=project_id, file=orig_filename,
-                        score=round(float(_score), 3), classification=_cls or "", user=user,
-                    )
-                    return {"idempotency_key": idem, "status": "rejected", "error": "nsfw"}
-            except Exception:
-                pass
 
         import_id = _uuid.uuid4().hex
         if store_bytes is raw:
@@ -5616,9 +3695,7 @@ async def v2_upload_import_raw_batch(
         except Exception as _e:
             return {"idempotency_key": idem, "status": "failed", "error": f"write failed: {_e}"}
 
-        # Blurhash inline so the gallery gets a placeholder immediately
-        # AND we avoid the single endpoint's second per-image manifest
-        # write from a background blurhash task.
+        # Inline, so the batch needs one manifest write.
         try:
             with PILImage.open(io.BytesIO(store_bytes)) as _p:
                 _bh = _compute_blurhash_safe(ImageOps.exif_transpose(_p).convert("RGB"))
@@ -5648,21 +3725,12 @@ async def v2_upload_import_raw_batch(
         if idem:
             entry["idempotencyKey"] = idem
 
-        # Pre-labelled dataset import: when the caller supplies boxes for this
-        # item, attach them as the authoritative editable annotation set.
-        # editedBoxesSet=True is what makes the read paths (/annotations,
-        # /v3/viewport) surface editedBoxes and the editor treat them as the
-        # source of truth; labelled=True so the image counts as labelled even
-        # when its annotation is intentionally EMPTY (background/negative
-        # frames are valid training data). Boxes arrive in the uploaded
-        # image's pixel space - the FE scales them to match any downscale.
+        # Supplied boxes, in the uploaded image's pixels, become the item's
+        # editedBoxes, and it counts as labelled even when they are empty.
         _labels: list[str] = []
         _dropped = 0
         if idx < len(boxes):
-            # Belt-and-braces: a malformed box payload for one item must never
-            # fail the whole batch (the endpoint's contract is per-item
-            # isolation). On any error the item still lands as an explicitly
-            # empty (background) labelled image rather than crashing the gather.
+            # A malformed payload leaves the item labelled with no boxes.
             try:
                 _parsed = json.loads(boxes[idx] or "[]")
                 _clean, _dropped = _sanitize_imported_boxes(_parsed, width, height)
@@ -5692,15 +3760,11 @@ async def v2_upload_import_raw_batch(
             "_labels": _labels,
         }
 
-    # Decode / NSFW / write / blurhash for every item, concurrently on
-    # the bounded bg image pool (3 workers), so the request stays off
-    # the event loop and a big batch parallelises across cores.
     results: list[dict] = list(await asyncio.gather(*[
         loop.run_in_executor(_BG_IMAGE_EXECUTOR, _process_one, i)
         for i in range(len(images))
     ]))
 
-    # ONE manifest write for the whole batch's new entries.
     new_entries = [r["_entry"] for r in results if r.get("_entry")]
     if new_entries:
         write_lock = await _manifest_write_lock(project_id)
@@ -5711,19 +3775,13 @@ async def v2_upload_import_raw_batch(
                 for e in (mm.get("imports") or [])
                 if e.get("idempotencyKey")
             }
-            # Under-lock guard against a concurrent batch that committed
-            # the same idempotency key first.
+            # Skips keys a concurrent batch committed first.
             to_add = [
                 e for e in new_entries
                 if not (e.get("idempotencyKey") and e.get("idempotencyKey") in have_keys)
             ]
             mm.setdefault("imports", []).extend(to_add)
-            # Union any imported class names into the project's label
-            # vocabulary (manifest['tags']) so every imported box label is a
-            # first-class tag - colour assignment, the label picker, and the
-            # YOLO/COCO export category order all key off tags. Normally a
-            # no-op (the project is created with the dataset's class list),
-            # but it keeps boxes whose label is somehow missing exportable.
+            # Imported box labels join the project's tags, which exports key off.
             _added_ids = {e.get("id") for e in to_add}
             _existing_tags = {
                 t.strip().lower()
@@ -5741,13 +3799,7 @@ async def v2_upload_import_raw_batch(
             if not mm.get("cover") and to_add:
                 mm["cover"] = to_add[0].get("filename")
             mm["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            # Serialise + write off the event loop. On a big import the
-            # manifest grows large and orjson.dumps + the file write are
-            # synchronous; doing them inline would stall EVERY other
-            # request (FE polls, other batches) for the duration of each
-            # batch write. save_manifest is already called from worker
-            # threads elsewhere (blurhash backfill), so this is safe. The
-            # async write lock still serialises same-project writes.
+            # Off the event loop, since the write is synchronous.
             await loop.run_in_executor(
                 None, lambda: save_manifest(project_id, mm, cache_by_ref=True)
             )
@@ -5756,28 +3808,14 @@ async def v2_upload_import_raw_batch(
         except Exception as e:
             print(f"[v2-import-raw-batch] payload invalidate failed: {e}")
 
-    # Per-image audit row + fire-and-forget whole-image embedding, same
-    # as the single endpoint. Embeddings trickle through the GPU gate at
-    # background priority so the import burst never starves a click or
-    # labelling job.
-    for r in results:
-        if r.get("status") != "ok" or not r.get("_entry"):
-            continue
-        _iid = r["import_id"]
-        try:
-            add_event(
-                "job", id=_iid, job_kind="upload", project=project_id,
-                user=user or "anonymous", status="done", elapsed_s=0.0,
-                cost_pence=0.0, n_images=1, error=None,
-            )
-        except Exception as e:
-            print(f"[v2-import-raw-batch] upload audit failed for {_iid}: {e}")
-        # Off-hot-path embedding via the shared bounded/pausable helper
-        # (see _run_bg_embedding) so the batch's embeddings can't pile
-        # onto the GPU and starve a subsequent labelling job.
-        asyncio.create_task(_run_bg_embedding(project_id, _iid, project_dir(project_id) / "images" / r["filename"]))
+    # One activity row for the request, and a background embedding per image.
+    stored = [r for r in results if r.get("status") == "ok" and r.get("_entry")]
+    if stored:
+        add_event("job", id=stored[0]["import_id"], job_kind="upload", project=project_id,
+                  status="done", n_images=len(stored))
+    for r in stored:
+        asyncio.create_task(_run_bg_embedding(project_id, r["import_id"], project_dir(project_id) / "images" / r["filename"]))
 
-    # Strip internal-only keys before returning.
     out = [{k: v for k, v in r.items() if not k.startswith("_")} for r in results]
     return {"results": out}
 
@@ -5787,28 +3825,12 @@ class V2ImportsFromUrlsRequest(BaseModel):
     query: str | None = None
 
 
-@app.post(
-    "/api/v2/projects/{project_id}/imports/from_urls",
-    dependencies=[
-        Depends(require_project_owner),
-    ],
-)
+@app.post("/api/v2/projects/{project_id}/imports/from_urls")
 async def v2_imports_from_urls(
     project_id: str,
     body: V2ImportsFromUrlsRequest,
-    user: str = Depends(current_user),
 ):
-    """V2 mirror of /api/projects/{id}/images_from_urls. Pulls a
-    list of Openverse-curated URLs, downloads each, validates,
-    NSFW-gates, and appends to manifest["imports"] using the V2
-    deferred-labelling shape - same envelope /imports/raw writes,
-    so the gallery + label_charlie job pick the new images up
-    without any further FE work.
-
-    Returns {added: [import_id], skipped: [url], rejected: [{url,
-    reason}]} so the FE can drive a post-import refresh + show the
-    user what failed.
-    """
+    """Download Openverse URLs as unlabelled imports; returns {added, skipped, rejected}."""
     import hashlib
     import uuid as _uuid
     import openverse
@@ -5816,15 +3838,12 @@ async def v2_imports_from_urls(
 
     proj = project_dir(project_id)
     if not proj.exists():
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     manifest = load_manifest(project_id)
     if not manifest:
-        raise HTTPException(404, "manifest not found")
+        raise HTTPException(404, "dataset not found")
 
     raw_urls = [u.strip() for u in (body.urls or []) if isinstance(u, str) and u.strip()]
-    # Cap the URL list so a single request can't queue thousands of
-    # downloads against the backend's bandwidth/disk. 100 is well
-    # above the Openverse panel's typical batch (24 results/page).
     if len(raw_urls) > 100:
         raise HTTPException(400, "too many urls, max 100 per request")
     if not raw_urls:
@@ -5887,35 +3906,11 @@ async def v2_imports_from_urls(
         except Exception:
             rejected.append({"url": url, "reason": "not_an_image"})
             continue
-        # NSFW gate (skipped when classifier isn't loaded).
-        if state.get("nsfw") is not None:
-            import tempfile as _tempfile
-            with _tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as _tmp:
-                _tmp.write(data)
-                _tmp_path = Path(_tmp.name)
-            try:
-                # Strict EXPOSED-only set - same rationale as the
-                # /imports/raw gate: the broad COVERED classes
-                # false-positive on innocuous dataset/Openverse imagery
-                # (fruit, animals, people in PPE) and wrongly reject them.
-                score, cls = nsfw_score(state["nsfw"], _tmp_path, classes=EXPOSED_CLASSES)
-            except Exception:
-                score, cls = 0.0, ""
-            finally:
-                try:
-                    _tmp_path.unlink()
-                except Exception:
-                    pass
-            if score >= NSFW_THRESHOLD:
-                rejected.append({"url": url, "reason": "nsfw", "score": round(float(score), 3), "class": cls or None})
-                continue
         sha = hashlib.sha256(data).hexdigest()
         if sha in existing_hashes:
             rejected.append({"url": url, "reason": "duplicate"})
             skipped.append(url)
             continue
-        # Decode to a normalised RGB image + EXIF transpose, mirror
-        # the /imports/raw write path.
         try:
             with PILImage.open(io.BytesIO(data)) as pil:
                 pil = ImageOps.exif_transpose(pil)
@@ -5926,8 +3921,7 @@ async def v2_imports_from_urls(
             rejected.append({"url": url, "reason": "decode_failed", "detail": str(e)})
             continue
 
-        # Pick a stable, slug-prefixed filename so the import is
-        # self-documenting on disk + survives a `ls`.
+        # Stored as <query slug>_<random hex><ext>.
         ext = ""
         try:
             path = urlparse(url).path
@@ -5962,9 +3956,7 @@ async def v2_imports_from_urls(
             rejected.append({"url": url, "reason": "storage_failed", "detail": str(e)})
             continue
 
-        # Reverse-order timestamps within the batch so the gallery
-        # DESC sort puts the first URL at top-left (same trick the
-        # raw upload uses for drag-drop).
+        # Descending timestamps, so the first URL sorts first in the gallery.
         ts = base_ts + (len(urls) - idx) * 0.001
         entry = {
             "id": import_id,
@@ -5976,7 +3968,8 @@ async def v2_imports_from_urls(
             "timings": {},
             "blurhash": blurhash_str,
             "hash": sha,
-            "source": {"kind": "openverse", "url": url, "query": body.query or ""},
+            "source": {"kind": "openverse", "url": url, "query": body.query or "",
+                       **_OPENVERSE_META.get(url, {})},
             "createdAt": datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(),
             "labelled": False,
         }
@@ -5992,34 +3985,15 @@ async def v2_imports_from_urls(
                 mm["cover"] = new_entries[0].get("filename")
             mm["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             save_manifest(project_id, mm)
-        # Drop the cached /overview + sidecar payloads so the FE's
-        # immediate post-import refresh recomputes FRESH instead of being
-        # served the pre-import list by the stale-while-revalidate path
-        # (which is why the new images only appeared after a manual page
-        # reload). Same fix the dedupe / delete mutations use.
+        # Otherwise the cached payloads serve the pre-import list.
         try:
             _invalidate_project_payloads(project_id)
         except Exception as e:
             print(f"[v2-import-from-urls] payload invalidate failed: {e}")
-        # One audit row per successfully-added Openverse image so the
-        # profile usage panel counts these the same way it counts
-        # direct uploads. Parity with the /imports/raw endpoint.
-        for import_id in added:
-            try:
-                add_event(
-                    "job",
-                    id=import_id,
-                    job_kind="upload",
-                    project=project_id,
-                    user=user or "anonymous",
-                    status="done",
-                    elapsed_s=0.0,
-                    cost_pence=0.0,
-                    n_images=1,
-                    error=None,
-                )
-            except Exception as e:
-                print(f"[v2-import-from-urls] upload audit failed for {import_id}: {e}")
+        # One activity row for the request.
+        if added:
+            add_event("job", id=added[0], job_kind="upload", project=project_id,
+                      status="done", n_images=len(added))
 
     return {
         "added": added,
@@ -6029,11 +4003,7 @@ async def v2_imports_from_urls(
 
 
 def _compute_blurhash_safe(pil_image) -> str | None:
-    """Best-effort blurhash from a PIL image. Mirrors the encode
-    fallbacks used by _encode_blurhash_from_path so we cover all the
-    blurhash library version differences in one place. Returns None
-    on any error so the upload path never fails because of blurhash;
-    FE falls back to a shimmer placeholder when null."""
+    """BlurHash of a PIL image, or None on any error."""
     try:
         import blurhash as _bh  # type: ignore
         small = pil_image.copy().convert("RGB")
@@ -6054,32 +4024,23 @@ def _compute_blurhash_safe(pil_image) -> str | None:
 class V2ImportPatch(BaseModel):
     editedBoxes: list | None = None
     detections: list | None = None
-    # True marks the image background: checked, with nothing in it to
-    # label. It then carries no boxes, labelling passes skip it and
-    # training uses it as a negative. Saving boxes onto it unmarks it.
+    # True marks the image background: no boxes, skipped by labelling, a
+    # training negative. Saving boxes onto it unmarks it.
     background: bool | None = None
 
 
-@app.put(
-    "/api/v2/projects/{project_id}/imports/{import_id}",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.put("/api/v2/projects/{project_id}/imports/{import_id}")
 async def v2_update_import(project_id: str, import_id: str, payload: V2ImportPatch):
-    """Patch an existing import - typically the user's editedBoxes
-    after they've drawn / edited / deleted boxes in the viewer."""
+    """Patch an import's editedBoxes, detections or background flag."""
     proj = project_dir(project_id)
     if not proj.exists():
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     write_lock = await _manifest_write_lock(project_id)
     async with write_lock:
-        # copy=False - we mutate + save under the per-project write
-        # lock and discard `manifest` right after. cache_by_ref on
-        # the save closes the loop, both removing the deepcopies that
-        # made each box-drag take 200-500ms longer than necessary on
-        # big projects.
+        # copy=False is safe: mutated and saved under the write lock.
         manifest = load_manifest(project_id, copy=False)
         if not manifest:
-            raise HTTPException(404, "manifest not found")
+            raise HTTPException(404, "dataset not found")
         imports = manifest.get("imports") or []
         edited_boxes = [] if payload.background else payload.editedBoxes
         for i, imp in enumerate(imports):
@@ -6090,26 +4051,10 @@ async def v2_update_import(project_id: str, import_id: str, payload: V2ImportPat
                     imp.pop("background", None)
                 if edited_boxes is not None:
                     imp["editedBoxes"] = edited_boxes
-                    # Mark this import as user-edited. The annotations
-                    # endpoint reads this flag to decide whether to
-                    # send `editedBoxes` to the FE - without it, an
-                    # explicit delete-all (editedBoxes: []) would be
-                    # indistinguishable from "no edits yet" and the
-                    # auto detections would re-appear.
+                    # Tells an explicit delete-all apart from no edits.
                     imp["editedBoxesSet"] = True
-                    # Mark the project as "needs re-augment". The PUT
-                    # endpoint is hot (every drag fires one), so we
-                    # only flag the manifest here and let a debounced
-                    # check at the end of the request decide whether
-                    # to schedule a fresh augment_generate. Stamping
-                    # the timestamp also lets the dataset stats card
-                    # detect freshly-edited imports for its health
-                    # score.
                     imp["editedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-                    # Persisted labelled-preview cachebuster (epoch ms).
-                    # The preview is re-baked below; bumping this makes a
-                    # cold reopen request the fresh bake instead of a
-                    # stale cached one. See _tile_overview's labelledAt.
+                    # Epoch ms; the labelled preview's cachebuster.
                     imp["labelledAt"] = int(time.time() * 1000)
                 if payload.detections is not None:
                     imp["detections"] = payload.detections
@@ -6118,21 +4063,14 @@ async def v2_update_import(project_id: str, import_id: str, payload: V2ImportPat
                 manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 save_manifest(project_id, manifest, cache_by_ref=True)
                 _drop_annotation_payloads(project_id)
-                # The labelled preview was rendered from the previous
-                # detection set - drop it AND queue an immediate re-
-                # bake so the next gallery thumb request hits a warm
-                # cache. The lazy GET path covers the race between
-                # invalidate + bake completion.
+                # Re-baked now; the GET renders on demand until the bake lands.
                 _invalidate_labelled_preview(project_id, import_id)
                 fn = imp.get("filename")
                 if fn:
                     src = proj / "images" / fn
                     edited = imp.get("editedBoxes")
                     edited_set = bool(imp.get("editedBoxesSet"))
-                    # Trust an explicit user-cleared state (set=True,
-                    # list=[]) so the preview matches the canvas. Only
-                    # fall through to auto detections when the user
-                    # hasn't touched this tile.
+                    # An explicitly cleared edit bakes an empty preview.
                     if isinstance(edited, list) and (edited or edited_set):
                         det_for_bake = list(edited)
                     else:
@@ -6147,81 +4085,52 @@ async def v2_update_import(project_id: str, import_id: str, payload: V2ImportPat
                         det_for_bake,
                         list(manifest.get("tags") or []),
                     )
-                # Auto-augment-after-edit hook removed by user request.
-                # Augmentations only run when the user explicitly
-                # clicks the Update button in the Augmentations card.
                 return {"ok": True}
     raise HTTPException(404, "import not found")
 
 
-@app.delete(
-    "/api/v2/projects/{project_id}/imports/{import_id}",
-    dependencies=[Depends(require_project_owner)],
-)
+def _remove_imports(project_id: str, manifest: dict, ids: set[str], tag: str) -> list[str]:
+    """Drops the imports in `ids` from `manifest`, with their image files and
+    previews, and moves a cover that named one. In a derived dataset each
+    crop's source detection is suppressed, so a re-sync does not restore it.
+    Returns the ids removed; the caller holds the write lock and saves."""
+    proj = project_dir(project_id)
+    derived = _derived_mod is not None and bool((manifest.get("derived") or {}).get("parentProjectId"))
+    kept: list[dict] = []
+    removed: list[str] = []
+    for imp in manifest.get("imports") or []:
+        iid = imp.get("id")
+        if iid not in ids:
+            kept.append(imp)
+            continue
+        removed.append(iid)
+        fn = imp.get("filename")
+        if fn:
+            try:
+                (proj / "images" / fn).unlink(missing_ok=True)
+            except Exception as e:
+                print(f"[{tag}] couldn't unlink {fn}: {e}")
+        _invalidate_labelled_preview(project_id, iid)
+        detkey = (imp.get("derivedFrom") or {}).get("detKey")
+        if derived and detkey:
+            _derived_mod.suppress_detkey(manifest, detkey)
+    manifest["imports"] = kept
+    _replace_missing_cover(manifest)
+    return removed
+
+
+@app.delete("/api/v2/projects/{project_id}/imports/{import_id}")
 async def v2_delete_import(project_id: str, import_id: str):
     proj = project_dir(project_id)
     if not proj.exists():
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     write_lock = await _manifest_write_lock(project_id)
     async with write_lock:
         manifest = load_manifest(project_id)
         if not manifest:
-            raise HTTPException(404, "manifest not found")
-        imports = manifest.get("imports") or []
-        kept: list[dict] = []
-        found = False
-        deleted_detkey: str | None = None
-        for imp in imports:
-            if imp.get("id") == import_id:
-                found = True
-                deleted_detkey = (imp.get("derivedFrom") or {}).get("detKey")
-                fn = imp.get("filename")
-                if fn:
-                    try:
-                        (proj / "images" / fn).unlink(missing_ok=True)
-                    except Exception as e:
-                        print(f"[v2-import-delete] couldn't unlink {fn}: {e}")
-                _invalidate_labelled_preview(project_id, import_id)
-            else:
-                kept.append(imp)
-        if not found:
+            raise HTTPException(404, "dataset not found")
+        if not _remove_imports(project_id, manifest, {import_id}, "v2-import-delete"):
             raise HTTPException(404, "import not found")
-        manifest["imports"] = kept
-
-        # Child project: tombstone the source detection so a re-sync from the
-        # parent won't resurrect a crop the user deleted here. One-way only -
-        # this never touches the parent.
-        if deleted_detkey and _derived_mod is not None and (manifest.get("derived") or {}).get("parentProjectId"):
-            _derived_mod.suppress_detkey(manifest, deleted_detkey)
-
-        # If the deleted import was the project's cover, pick a fresh
-        # one from whatever's left so the workspace card doesn't fall
-        # back to a placeholder gradient. Priority: a remaining import
-        # → a reference → None when the project is genuinely empty.
-        cover_filename = manifest.get("cover")
-        if cover_filename and not any(
-            imp.get("filename") == cover_filename for imp in kept
-        ) and not any(
-            ref.get("filename") == cover_filename
-            for ref in (manifest.get("references") or [])
-        ):
-            import random as _rnd
-            kept_filenames = [
-                imp.get("filename") for imp in kept if imp.get("filename")
-            ]
-            ref_filenames = [
-                ref.get("filename")
-                for ref in (manifest.get("references") or [])
-                if ref.get("filename")
-            ]
-            new_cover: str | None = None
-            if kept_filenames:
-                new_cover = _rnd.choice(kept_filenames)
-            elif ref_filenames:
-                new_cover = _rnd.choice(ref_filenames)
-            manifest["cover"] = new_cover
-            manifest["cover_blurhash"] = None  # re-derived on next read
-
         manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         save_manifest(project_id, manifest)
     return {"ok": True}
@@ -6231,18 +4140,12 @@ class DeleteImportsBatchIn(BaseModel):
     ids: list[str]
 
 
-@app.post(
-    "/api/v2/projects/{project_id}/imports/delete_batch",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.post("/api/v2/projects/{project_id}/imports/delete_batch")
 async def v2_delete_imports_batch(project_id: str, payload: DeleteImportsBatchIn):
-    """Delete many imports in one shot. Held under a single write lock
-    so a 50-image bulk delete doesn't fan out 50 separate manifest
-    saves + cover-rescue passes (each of which would also serialise
-    against any ongoing labelling work)."""
+    """Delete many imports with one manifest save under one lock hold."""
     proj = project_dir(project_id)
     if not proj.exists():
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     target_ids = {x for x in (payload.ids or []) if isinstance(x, str) and x}
     if not target_ids:
         return {"deleted": [], "not_found": []}
@@ -6250,52 +4153,8 @@ async def v2_delete_imports_batch(project_id: str, payload: DeleteImportsBatchIn
     async with write_lock:
         manifest = load_manifest(project_id)
         if not manifest:
-            raise HTTPException(404, "manifest not found")
-        imports = manifest.get("imports") or []
-        kept: list[dict] = []
-        deleted_ids: list[str] = []
-        for imp in imports:
-            iid = imp.get("id")
-            if iid in target_ids:
-                deleted_ids.append(iid)
-                fn = imp.get("filename")
-                if fn:
-                    try:
-                        (proj / "images" / fn).unlink(missing_ok=True)
-                    except Exception as e:
-                        print(f"[v2-import-delete-batch] couldn't unlink {fn}: {e}")
-                _invalidate_labelled_preview(project_id, iid)
-            else:
-                kept.append(imp)
-        manifest["imports"] = kept
-
-        # Same cover-rescue logic as the single-import delete - if the
-        # cover pointed at a now-deleted file, pick a fresh one from
-        # what's left so the workspace card keeps a thumbnail.
-        cover_filename = manifest.get("cover")
-        if cover_filename and not any(
-            imp.get("filename") == cover_filename for imp in kept
-        ) and not any(
-            ref.get("filename") == cover_filename
-            for ref in (manifest.get("references") or [])
-        ):
-            import random as _rnd
-            kept_filenames = [
-                imp.get("filename") for imp in kept if imp.get("filename")
-            ]
-            ref_filenames = [
-                ref.get("filename")
-                for ref in (manifest.get("references") or [])
-                if ref.get("filename")
-            ]
-            new_cover: str | None = None
-            if kept_filenames:
-                new_cover = _rnd.choice(kept_filenames)
-            elif ref_filenames:
-                new_cover = _rnd.choice(ref_filenames)
-            manifest["cover"] = new_cover
-            manifest["cover_blurhash"] = None
-
+            raise HTTPException(404, "dataset not found")
+        deleted_ids = _remove_imports(project_id, manifest, target_ids, "v2-import-delete-batch")
         manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         save_manifest(project_id, manifest)
     not_found = sorted(target_ids - set(deleted_ids))
@@ -6303,16 +4162,7 @@ async def v2_delete_imports_batch(project_id: str, payload: DeleteImportsBatchIn
 
 
 def _invalidate_project_payloads(project_id: str) -> None:
-    """Drop the in-memory payload cache entries AND the on-disk sidecars
-    for a project. Called from any mutation that doesn't naturally fall
-    out of the sidecar mtime check - for instance the dedupe commit,
-    which deletes imports + bumps manifest mtime but, without this, lets
-    the stale-while-revalidate path serve the pre-delete /overview +
-    /dataset-stats payloads to the very next request after the user's
-    page reload. That manifested as: the deduped count flashing
-    briefly, then the workspace card / stats card "reverting" to the
-    original count because the stale cache responded faster than the
-    background revalidate."""
+    """Drop the project's cached payloads and on-disk sidecars."""
     with _PAYLOAD_CACHE_LOCK:
         _PAYLOAD_DROPS[project_id] = _PAYLOAD_DROPS.get(project_id, 0) + 1
         keys = [k for k in _PAYLOAD_CACHE if k[0] == project_id]
@@ -6331,23 +4181,16 @@ def _invalidate_project_payloads(project_id: str) -> None:
 
 
 class DedupeIn(BaseModel):
-    """Body for /imports/dedupe. `mode` switches between dry-run and
-    destructive. `strategy` picks between exact byte-hash dedup
-    (catches literal "same file uploaded twice" cases) and embedding-
-    based near-duplicate dedup (catches the common "Roboflow re-export
-    of my own dataset" case - same pixels but JPEG-recompressed so byte
-    hashes differ). `threshold` is the cosine cutoff for "near" mode;
-    default matches the dataset-stats card so the count it reports
-    and the modal's group list reference the same source."""
+    """Body for /imports/dedupe. `threshold` is the cosine cutoff for near
+    matches; the dataset stats use 0.95."""
 
     mode: str = "preview"  # "preview" or "commit"
-    strategy: str = "near"  # "exact" or "near"
+    strategy: str = "near"  # "exact", "near" or "auto"
     threshold: float = 0.95
 
 
 def _import_file_sha256(project_id: str, filename: str) -> str | None:
-    """SHA256 of an import's file bytes. None on missing/unreadable -
-    those imports just don't participate in the exact-dedup groups."""
+    """SHA256 of an import's file, or None when missing or unreadable."""
     import hashlib
     p = project_dir(project_id) / "images" / filename
     if not p.exists():
@@ -6364,8 +4207,7 @@ def _import_file_sha256(project_id: str, filename: str) -> str | None:
 
 
 def _import_keeper_score(imp: dict) -> tuple[int, int, int]:
-    """Higher = keep. Ranks by: edited boxes > detections > has filename.
-    Used to pick which import survives in a duplicate group."""
+    """Rank of a duplicate group's survivor: edited boxes, then detections, then a filename."""
     edits = imp.get("editedBoxes") if isinstance(imp.get("editedBoxes"), list) else []
     n_edits = len(edits)
     dets = imp.get("detections") if isinstance(imp.get("detections"), list) else []
@@ -6374,36 +4216,12 @@ def _import_keeper_score(imp: dict) -> tuple[int, int, int]:
     return (n_edits, n_dets, has_filename)
 
 
-@app.post(
-    "/api/v2/projects/{project_id}/imports/dedupe",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.post("/api/v2/projects/{project_id}/imports/dedupe")
 async def v2_dedupe_imports(project_id: str, payload: DedupeIn):
-    """Find (and optionally remove) duplicate imports.
-
-    `strategy=exact` groups by SHA256 of the on-disk bytes - catches
-    literal repeat uploads of the same file. Fast but misses JPEG
-    re-encodes of the same image.
-
-    `strategy=near` reads the already-computed per-image DINOv2
-    embeddings (the same ones the dataset-stats variation plot uses)
-    and groups by cosine similarity above `threshold`. Catches the
-    common "I dragged in my Roboflow export AND the original raws"
-    case where the bytes differ but the pixels are visually the same.
-
-    Each group's keeper is the import with the most edited boxes,
-    then most accepted detections, then anything with a filename - so
-    we never throw away the labelled copy.
-
-    `mode=preview` returns the groups without touching anything. The
-    FE shows them in a confirm modal and then re-posts with
-    `mode=commit` to actually delete. Same write-lock + cover-rescue
-    path as the bulk-delete endpoint above so an in-flight labelling
-    job can't race a dedup.
-    """
+    """Group duplicate imports by file hash or embedding; mode=commit deletes all but each keeper."""
     proj = project_dir(project_id)
     if not proj.exists():
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     if payload.mode not in ("preview", "commit"):
         raise HTTPException(400, "mode must be 'preview' or 'commit'")
     if payload.strategy not in ("exact", "near", "auto"):
@@ -6411,15 +4229,12 @@ async def v2_dedupe_imports(project_id: str, payload: DedupeIn):
 
     m = await asyncio.to_thread(load_manifest, project_id, False)
     if not m:
-        raise HTTPException(404, "manifest not found")
+        raise HTTPException(404, "dataset not found")
     imports = [imp for imp in (m.get("imports") or []) if isinstance(imp, dict) and imp.get("id")]
     ignored = set(m.get("ignored_near_dups") or [])
     groups: list[dict] = []
 
-    # Unified union-find over all imports. Both byte-hash duplicates AND
-    # embedding-near-duplicates feed edges into the same forest, so a
-    # group like A==B (same JPEG bytes), B~C (re-encoded visual match)
-    # collapses transitively into a single cluster {A,B,C}.
+    # Union-find over all imports: hash and embedding matches join groups transitively.
     all_ids = [imp.get("id") for imp in imports]
     idx_of: dict[str, int] = {iid: i for i, iid in enumerate(all_ids) if iid}
     n_all = len(all_ids)
@@ -6436,15 +4251,7 @@ async def v2_dedupe_imports(project_id: str, payload: DedupeIn):
         if ra != rb:
             parent_all[ra] = rb
 
-    # Pass 1: exact byte-hash. Cheap-ish I/O, catches "literally the
-    # same JPEG re-uploaded" even when the import is too new to have
-    # a DINOv2 embedding on disk yet.
-    #
-    # We ALSO need the hash buckets for "near" mode: when reporting
-    # near-duplicates we want to exclude any image that's already a
-    # member of an exact-byte-duplicate group so the same set never
-    # surfaces in both the "100% duplicates" and "Near duplicates"
-    # tabs in the FE.
+    # Hash buckets. Near mode also uses them to leave exact duplicates out.
     def _hash_pass() -> dict[str, list[int]]:
         buckets: dict[str, list[int]] = {}
         for i, imp in enumerate(imports):
@@ -6460,13 +4267,8 @@ async def v2_dedupe_imports(project_id: str, payload: DedupeIn):
             buckets.setdefault(h, []).append(i)
         return buckets
 
-    hash_buckets: dict[str, list[int]] = {}
-    if payload.strategy in ("exact", "near", "auto"):
-        hash_buckets = await asyncio.to_thread(_hash_pass)
+    hash_buckets = await asyncio.to_thread(_hash_pass)
 
-    # IDs that appear in an exact-duplicate group of size >= 2.
-    # Excluded from the embedding pass below so "near" mode only
-    # surfaces clusters that AREN'T already covered by the exact tab.
     exact_dup_ids: set[str] = set()
     for members_idx in hash_buckets.values():
         if len(members_idx) < 2:
@@ -6483,16 +4285,8 @@ async def v2_dedupe_imports(project_id: str, payload: DedupeIn):
             for j in range(1, len(members_idx)):
                 union_all(members_idx[0], members_idx[j])
 
-    # Pass 2: embedding cosine similarity. Catches re-encoded copies
-    # (different bytes, same pixels) which the hash pass misses.
-    # Skipped for any import already in an exact-duplicate group so
-    # the 100% / near views are mutually exclusive.
+    # Near duplicates by embedding cosine similarity.
     if payload.strategy in ("near", "auto"):
-        try:
-            import numpy as _np
-        except Exception:
-            raise HTTPException(500, "numpy not available")
-
         def _gather_embeddings() -> tuple[list[str], "np.ndarray | None"]:
             local_ids: list[str] = []
             local_vecs: list = []
@@ -6500,9 +4294,6 @@ async def v2_dedupe_imports(project_id: str, payload: DedupeIn):
                 iid = imp.get("id")
                 if not iid or iid in ignored:
                     continue
-                # "near" mode excludes images already accounted for in
-                # the exact-byte tab; "auto" merges everything so it
-                # keeps the full set.
                 if payload.strategy == "near" and iid in exact_dup_ids:
                     continue
                 v = _load_image_embedding(project_id, iid)
@@ -6512,8 +4303,8 @@ async def v2_dedupe_imports(project_id: str, payload: DedupeIn):
                 local_vecs.append(v)
             if not local_vecs:
                 return local_ids, None
-            mat = _np.stack(local_vecs, axis=0).astype(_np.float32, copy=False)
-            norms = _np.linalg.norm(mat, axis=1, keepdims=True)
+            mat = np.stack(local_vecs, axis=0).astype(np.float32, copy=False)
+            norms = np.linalg.norm(mat, axis=1, keepdims=True)
             norms[norms == 0] = 1.0
             mat = mat / norms
             return local_ids, mat
@@ -6531,34 +4322,29 @@ async def v2_dedupe_imports(project_id: str, payload: DedupeIn):
                         if bi is not None:
                             union_all(ai, bi)
 
-    # Materialise clusters from the unified forest.
-    if True:
-        clusters: dict[int, list[int]] = {}
-        for i in range(n_all):
-            iid = all_ids[i]
-            if not iid or iid in ignored:
-                continue
-            clusters.setdefault(find_all(i), []).append(i)
-        by_id = {imp.get("id"): imp for imp in imports}
-        for members_idx in clusters.values():
-            if len(members_idx) < 2:
-                continue
-            members = [by_id[all_ids[i]] for i in members_idx if all_ids[i] in by_id]
-            if len(members) < 2:
-                continue
-            members.sort(key=_import_keeper_score, reverse=True)
-            keeper = members[0]
-            keeper_id = keeper.get("id")
-            groups.append({
-                "keep": keeper_id,
-                "keep_filename": keeper.get("filename"),
-                "drop": [{"id": x.get("id"), "filename": x.get("filename")} for x in members[1:]],
-                # Stable per-group id for FE list-key + bookkeeping.
-                # Using the keeper id (which is unique per cluster)
-                # avoids the min_sim-collision bug from the previous
-                # impl where multiple clusters shared "min_sim=1.000".
-                "key": keeper_id or "",
-            })
+    clusters: dict[int, list[int]] = {}
+    for i in range(n_all):
+        iid = all_ids[i]
+        if not iid or iid in ignored:
+            continue
+        clusters.setdefault(find_all(i), []).append(i)
+    by_id = {imp.get("id"): imp for imp in imports}
+    for members_idx in clusters.values():
+        if len(members_idx) < 2:
+            continue
+        members = [by_id[all_ids[i]] for i in members_idx if all_ids[i] in by_id]
+        if len(members) < 2:
+            continue
+        members.sort(key=_import_keeper_score, reverse=True)
+        keeper = members[0]
+        keeper_id = keeper.get("id")
+        groups.append({
+            "keep": keeper_id,
+            "keep_filename": keeper.get("filename"),
+            "drop": [{"id": x.get("id"), "filename": x.get("filename")} for x in members[1:]],
+            # The keeper id, unique per group.
+            "key": keeper_id or "",
+        })
 
     if payload.mode == "preview":
         return {
@@ -6569,9 +4355,7 @@ async def v2_dedupe_imports(project_id: str, payload: DedupeIn):
             "total_imports": len(imports),
         }
 
-    # commit path - drop everyone in `drop` lists. Use the same write-
-    # lock + cover-rescue dance as the bulk-delete endpoint so we
-    # don't reinvent the wheel.
+    # Commit: delete every group's drop list, replacing the cover as the bulk delete does.
     drop_ids = {d["id"] for g in groups for d in g["drop"] if d.get("id")}
     if not drop_ids:
         return {"deleted": [], "groups": groups, "drop_count": 0}
@@ -6579,54 +4363,10 @@ async def v2_dedupe_imports(project_id: str, payload: DedupeIn):
     async with write_lock:
         manifest = load_manifest(project_id)
         if not manifest:
-            raise HTTPException(404, "manifest not found")
-        kept_imports: list[dict] = []
-        deleted_ids: list[str] = []
-        for imp in (manifest.get("imports") or []):
-            iid = imp.get("id")
-            if iid in drop_ids:
-                deleted_ids.append(iid)
-                fn = imp.get("filename")
-                if fn:
-                    try:
-                        (proj / "images" / fn).unlink(missing_ok=True)
-                    except Exception as e:
-                        print(f"[v2-dedupe] couldn't unlink {fn}: {e}")
-                _invalidate_labelled_preview(project_id, iid)
-            else:
-                kept_imports.append(imp)
-        manifest["imports"] = kept_imports
-        cover_filename = manifest.get("cover")
-        if cover_filename and not any(
-            imp.get("filename") == cover_filename for imp in kept_imports
-        ) and not any(
-            ref.get("filename") == cover_filename
-            for ref in (manifest.get("references") or [])
-        ):
-            import random as _rnd
-            kept_filenames = [
-                imp.get("filename") for imp in kept_imports if imp.get("filename")
-            ]
-            ref_filenames = [
-                ref.get("filename")
-                for ref in (manifest.get("references") or [])
-                if ref.get("filename")
-            ]
-            new_cover: str | None = None
-            if kept_filenames:
-                new_cover = _rnd.choice(kept_filenames)
-            elif ref_filenames:
-                new_cover = _rnd.choice(ref_filenames)
-            manifest["cover"] = new_cover
-            manifest["cover_blurhash"] = None
+            raise HTTPException(404, "dataset not found")
+        deleted_ids = _remove_imports(project_id, manifest, drop_ids, "v2-dedupe")
         manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         save_manifest(project_id, manifest)
-    # Invalidate cached payloads + sidecars so the FE's next page load
-    # gets fresh data. Without this, /overview + /dataset-stats served
-    # their PRE-delete cached responses to the very first request after
-    # the user's page reload (stale-while-revalidate path), making the
-    # count appear to "revert" to the original number for a few seconds
-    # before the background revalidate landed.
     _invalidate_project_payloads(project_id)
     return {
         "deleted": deleted_ids,
@@ -6636,27 +4376,16 @@ async def v2_dedupe_imports(project_id: str, payload: DedupeIn):
 
 
 class IgnoreDupsIn(BaseModel):
-    """Body for /imports/dedupe/ignore. `ids` are import IDs the user
-    accepts as duplicates but wants to keep - the near-duplicate
-    detection skips them going forward so the stats card stops
-    reporting them and the dedupe review modal no longer surfaces
-    them as candidates for deletion."""
+    """Body for /imports/dedupe/ignore: import IDs kept as accepted duplicates."""
 
     ids: list[str]
 
 
-@app.post(
-    "/api/v2/projects/{project_id}/imports/dedupe/ignore",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.post("/api/v2/projects/{project_id}/imports/dedupe/ignore")
 async def v2_ignore_dups(project_id: str, payload: IgnoreDupsIn):
-    """Mark import IDs as 'accepted duplicates' so they're no longer
-    reported in near-dup detection. Persisted in
-    `manifest.ignored_near_dups` (a sorted list of IDs); the stats +
-    dedupe endpoints filter any pair where either member is in this
-    set."""
+    """Mark imports as accepted duplicates, kept in manifest.ignored_near_dups."""
     if not project_dir(project_id).exists():
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     add_ids = [x for x in (payload.ids or []) if isinstance(x, str) and x]
     if not add_ids:
         return {"ignored": [], "added": 0}
@@ -6665,7 +4394,7 @@ async def v2_ignore_dups(project_id: str, payload: IgnoreDupsIn):
     async with write_lock:
         manifest = load_manifest(project_id)
         if not manifest:
-            raise HTTPException(404, "manifest not found")
+            raise HTTPException(404, "dataset not found")
         existing = set(manifest.get("ignored_near_dups") or [])
         before = len(existing)
         existing.update(add_ids)
@@ -6678,11 +4407,9 @@ async def v2_ignore_dups(project_id: str, payload: IgnoreDupsIn):
 
 
 async def _serve_import_view(project_id: str, filename: str, src_path: Path, target: int):
-    """Serve a downscaled JPEG of an import (longest edge <= `target`), cached on
-    disk. Lets the image viewer paint a 4K original almost immediately instead of
-    streaming the full file; box/mask coords are unaffected (the FE renders them
-    in the ORIGINAL pixel space via imageWidth/imageHeight). Re-rendered when the
-    source changes; falls back to the original on any render failure."""
+    """Serve a JPEG of an import at most `target` px on the long edge, cached on
+    disk. Boxes stay in the original's pixels. The original is served if
+    rendering fails."""
     if not src_path.exists():
         raise HTTPException(404, "image not found")
     import hashlib
@@ -6706,9 +4433,7 @@ async def _serve_import_view(project_id: str, filename: str, src_path: Path, tar
         def _render() -> None:
             cache_dir.mkdir(parents=True, exist_ok=True)
             with PILImage.open(src_path) as im:
-                # exif_transpose bakes any orientation in so the smaller preview
-                # is visually consistent with the full original the browser
-                # auto-orients on the next progressive swap.
+                # Orientation baked in, as the browser shows the original.
                 im = ImageOps.exif_transpose(im).convert("RGB")
                 W, H = im.size
                 longest = max(W, H)
@@ -6734,15 +4459,9 @@ async def _serve_import_view(project_id: str, filename: str, src_path: Path, tar
     return await _serve_cached_image(project_id, "import_view", cached_path.name, cached_path)
 
 
-@app.get(
-    "/api/v2/projects/{project_id}/imports/{filename}",
-    dependencies=[Depends(require_project_read_access)],
-)
+@app.get("/api/v2/projects/{project_id}/imports/{filename}")
 async def v2_serve_import(project_id: str, filename: str, w: int = 0):
-    """Serve a stored import image, with RAM-cached bytes for repeat hits.
-    Path-traversal guarded. With ?w=N the viewer gets a downscaled display
-    variant (longest edge <= N) so 4K originals load fast; ?w=0 (default) serves
-    the full original."""
+    """Serve a stored import image; ?w=N serves a copy at most N px on the long edge."""
     proj = project_dir(project_id)
     imports_root = (proj / "images").resolve()
     target = (imports_root / filename).resolve()
@@ -6756,113 +4475,58 @@ async def v2_serve_import(project_id: str, filename: str, w: int = 0):
     return await _serve_cached_image(project_id, "imports", filename, target)
 
 
-# ─── Augmentation preview ─────────────────────────────────────────
-# GPU-accelerated preview pipeline used by the Augmentations tab.
-# Loads a single image, applies the requested camera/sensor effects
-# in-place on a torch tensor, and returns a JPEG. Nothing is
-# persisted - the FE drives this live as the user moves the dials
-# so the preview reflects the chain immediately.
+# Augmentation preview: the effects applied to one image on the GPU,
+# returned as a JPEG. Nothing is stored.
 
 
 class AugmentPreviewIn(BaseModel):
-    # Image source: "reference" or "import". Both resolve via the
-    # project's /references/ or /imports/ subdir respectively.
-    source: str
+    source: str  # "reference" or "import"
     filename: str
-    # Camera / sensor dials, 0..10 each (floats - the FE picks
-    # step 0.1 for finer control). 0 = identity. We map the 0..10
-    # range onto perceptually-sensible strengths inside the kernel
-    # so the FE can stay simple.
+    # Camera and sensor dials, 0..10; 0 is identity.
     motion_blur: float = 0
     noise: float = 0
     colour_distortion: float = 0
     chromatic_aberration: float = 0
     bit_depth: float = 0
-    # Four newer camera/sensor dials, also 0..10:
-    #   lens_distortion → wide-angle barrel warp
-    #   pixelation       → nearest-neighbour downsample/upsample
-    #   low_resolution   → bilinear downsample/upsample (soft blur)
-    #   lens_glare       → off-axis radial highlight overlay
+    #   lens_distortion  barrel warp
+    #   pixelation       nearest-neighbour down and up sampling
+    #   low_resolution   bilinear down and up sampling
+    #   lens_glare       off-axis radial highlight
     lens_distortion: float = 0
     pixelation: float = 0
     low_resolution: float = 0
     lens_glare: float = 0
-    # Distortion category - geometric warps applied before the
-    # sensor chain. Perspective_warp is a 0..10 strength dial.
-    # scale_min/max + rot_min/max define a range and the backend
-    # samples one (scale, rotation) per render using the seed so
-    # the preview is stable across slider moves.
+    # Geometric warps, applied before the sensor chain. One scale and one
+    # rotation are sampled from these ranges per seed.
     perspective_warp: float = 0
     scale_min: float = 1.0
     scale_max: float = 1.0
     rot_min: float = 0.0
     rot_max: float = 0.0
-    # Random block occlusion. Boxes are placed INSIDE the detection
-    # polygons of the chosen import (no effect on references - they
-    # don't carry detections). The dial controls how large each box
-    # is, as a fraction of the per-detection bounding box.
+    # Occlusion block size, a fraction of each detection's box. Imports only.
     block_size: float = 0
-    # When true, paint the segmentation polygons' outline on top of
-    # the rendered image so the user can see where their detections
-    # live in the preview. Honoured for source="import" only.
+    # Draws the detection outlines. Imports only.
     show_outlines: bool = False
-    # Object-overlay augmentation. overlay_ids reference PNGs
-    # previously created via /augment/object_overlay/segment;
-    # overlay_scale is the longest-edge size as a fraction of the
-    # target image's longest edge (0..1). Each overlay is placed
-    # independently with the 50% cap honoured across the cumulative
-    # overlay coverage (so two overlays can't sum to >50% on any
-    # polygon either). overlay_id stays for backwards compat with
-    # an older single-overlay client.
-    overlay_id: str | None = None
-    overlay_ids: list[str] | None = None
-    overlay_scale: float = 0
-    # Background randomisation. background_ids reference uploaded
-    # images stored under <project>/augment_backgrounds/. When
-    # provided AND the source has detections, the preview keeps
-    # pixels inside the union of detection polygons unchanged and
-    # replaces everything outside with one of the supplied
-    # backgrounds (picked at random by the seed).
+    # Images under <project>/augment_backgrounds/ that replace everything
+    # outside the detection polygons.
     background_ids: list[str] | None = None
-    # Lighting variation - simulates time-of-day-style scene
-    # lighting shifts. 0..10 strength dial; the direction
-    # (brighten / darken, warm / cool) is sampled by the seed so
-    # different rolls land on different illuminations.
+    # 0..10; the lighting direction is sampled from the seed.
     lighting_strength: float = 0
-    # Hue shift - rotates colour hue by a seed-sampled offset
-    # proportional to strength. Sits under Distortion in the FE.
+    # Hue offset scaled by strength, sampled from the seed.
     hue_shift: float = 0
-    # Optional: seed so the noise pattern is stable across slider
-    # moves; the FE generates a seed when it picks a random image
-    # and keeps it until the user picks another.
+    # Keeps the random pattern stable across slider moves.
     seed: int | None = None
 
 
 _AUG_DEVICE: "torch.device | None" = None
-# Dedicated single-thread executor for the augment runner. asyncio's
-# default ThreadPoolExecutor hops between many threads which makes
-# the CUDA context initialise per-thread the first time torch.cuda is
-# touched - that re-init takes hundreds of ms and starves the kernel
-# of warm caching across images. Pinning all augment work to ONE
-# dedicated thread keeps CUDA + the PyTorch caching allocator hot for
-# the full duration of a 941-image run while the event loop stays
-# free for everything else.
+# One thread for all augment work keeps the CUDA context and caching allocator warm.
 import concurrent.futures as _concurrent_futures
 _AUG_EXECUTOR = _concurrent_futures.ThreadPoolExecutor(
     max_workers=1, thread_name_prefix="augment-gpu",
 )
 
-# Dedicated pool for non-request-critical per-upload work: NSFW gate,
-# blurhash, whole-image embeddings. Keeping these OFF asyncio's default
-# executor means a burst of uploads can't starve the request-path I/O
-# (file writes, image serving, manifest reads) that the default pool
-# serves, which was the root cause of the "6 fast then 10-20s pause"
-# import stutter. Sized to the CPU count (capped at 8): the per-image
-# import work that dominates here is the NudeNet NSFW check, which is
-# CPU-bound ONNX, so 3 workers throttled a bulk import on multi-core
-# boxes. GPU embeddings still serialise behind the gpu_lock regardless
-# of pool size (only one holds the GPU at a time), so widening the pool
-# speeds the CPU decode/NSFW/blurhash path without storming the GPU.
+# Background per-upload work, kept off the default executor so request-path
+# I/O is not starved.
 _BG_IMAGE_EXECUTOR = _concurrent_futures.ThreadPoolExecutor(
     max_workers=max(4, min(8, (os.cpu_count() or 4))),
     thread_name_prefix="bg-image",
@@ -6870,9 +4534,7 @@ _BG_IMAGE_EXECUTOR = _concurrent_futures.ThreadPoolExecutor(
 
 
 def _aug_device() -> "torch.device":
-    """Lazy-pick a device the first time the augment endpoint runs.
-    cuda > mps > cpu; augmentations are plain tensor ops, so unlike the
-    models they run acceptably on CPU (just slower)."""
+    """Device for augmentations, picked on first use. Unlike the models they also run on CPU."""
     global _AUG_DEVICE
     if _AUG_DEVICE is None:
         # state["device"] is set by lifespan before any request runs.
@@ -6894,33 +4556,13 @@ def _aug_apply(
     low_resolution: float = 0.0,
     lens_glare: float = 0.0,
 ) -> "torch.Tensor":
-    """Apply the camera/sensor augmentation chain. `img_tensor` is
-    [C=3, H, W], float, range [0, 1], already on the target device.
-    Returns a new tensor on the same device.
-
-    Strengths are 0..10 floats; 0 short-circuits each kernel. Order
-    matches the physical capture pipeline:
-        lens distortion (optics)
-      → chromatic aberration (lens)
-      → colour shift
-      → motion blur (shutter)
-      → noise (sensor)
-      → bit-depth quantisation (ADC)
-      → low resolution / pixelation (compressed transmission)
-      → lens glare (baked-in optical flare overlaid last so it
-                    isn't dimmed by the bit-depth quantisation).
-
-    Six of the dials have their effective max capped below 10 - the
-    UI dial still goes 0..10 (so the user gets fine-grained control)
-    but the value handed to each kernel is scaled by (cap / 10), so
-    a UI value of 10 hits the new cap rather than the old 10. Caps
-    were chosen after empirically testing the dial range - past the
-    cap each effect stopped looking like the real-world artefact and
-    started looking destructive."""
+    """Apply the camera and sensor chain to a [3, H, W] float tensor in
+    [0, 1], on its device. Strengths are 0..10 and 0 skips a stage. Order:
+    lens distortion, chromatic aberration, colour, motion blur, noise,
+    bit depth, low resolution, pixelation, lens glare."""
     import torch.nn.functional as TF
 
-    # Per-dial cap. Multiply ui by (cap / 10) before each kernel
-    # uses it. UI stays linear 0..10.
+    # The UI's 0..10 scaled to each dial's maximum.
     motion_blur = max(0.0, min(10.0, float(motion_blur))) * 0.4   # max 4
     noise = max(0.0, min(10.0, float(noise))) * 0.8                # max 8
     bit_depth = max(0.0, min(10.0, float(bit_depth))) * 0.8        # max 8
@@ -6930,81 +4572,50 @@ def _aug_apply(
 
     x = img_tensor
 
-    # ── Lens distortion ──
-    # Wide-angle barrel warp. Dial=10 → strong fisheye; dial<0 would
-    # be pincushion (we don't expose negative values in the UI but
-    # the kernel handles them so internal callers can opt in). The
-    # warp resamples via a polynomial radial map so straight lines
-    # near the edges curve outward, matching what a cheap action-cam
-    # lens does. Implemented with grid_sample on a normalised radial
-    # field - no Python loops, runs on the same device as x.
+    # Lens distortion: barrel. The radius rho is in pixels over the half-diagonal,
+    # so the corners sit at 1; output radius rho shows the source at
+    # rho * (1 + k rho^2) / (1 + k), which keeps the corners and never folds.
     if lens_distortion > 0:
         _, H, W = x.shape
-        # Wide-angle / fisheye barrel only. The dial used to be
-        # bidirectional (negative = pincushion), but pincushion
-        # fundamentally needs source content beyond the frame -
-        # without it, the negative side either painted black
-        # corners or read as a near no-op even under normalisation.
-        # The user wanted the dial to be primarily fisheye, so
-        # negative values are now treated as 0 and the slider in
-        # the UI clamps to 0..+10.
-        # Strength 0..+10 → barrel coefficient 0..0.55. Output
-        # corner factor = 1 - 2·k1 → 0.45 at full deflection, so
-        # the corner pixel samples from source r≈0.45 - a clear,
-        # action-cam-style bulge.
-        k1 = _lens_k1(lens_distortion)
+        k = _lens_k1(lens_distortion)
+        cx, cy = (W - 1) / 2.0, (H - 1) / 2.0
         ys = torch.linspace(-1.0, 1.0, H, device=x.device, dtype=x.dtype)
         xs = torch.linspace(-1.0, 1.0, W, device=x.device, dtype=x.dtype)
         grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
-        r2 = grid_x * grid_x + grid_y * grid_y
-        factor = 1.0 - k1 * r2
-        src_x = grid_x * factor
-        src_y = grid_y * factor
-        grid = torch.stack([src_x, src_y], dim=-1).unsqueeze(0)
+        rho2 = ((grid_x * cx) ** 2 + (grid_y * cy) ** 2) / (cx * cx + cy * cy)
+        factor = (1.0 + k * rho2) / (1.0 + k)
+        grid = torch.stack([grid_x * factor, grid_y * factor], dim=-1).unsqueeze(0)
         x = TF.grid_sample(
             x.unsqueeze(0), grid,
-            mode="bilinear", padding_mode="zeros", align_corners=True,
+            mode="bilinear", padding_mode="border", align_corners=True,
         ).squeeze(0)
 
-    # ── Chromatic aberration ──
-    # Shift R channel right + B channel left by N px proportional to
-    # strength. Replicates the colour fringing you see on cheap lenses.
+    # Chromatic aberration: R shifts right and B left by max_shift px.
     if chromatic_aberration > 0:
         max_shift = max(1, int(round(chromatic_aberration * 0.6)))
-        # Roll-and-pad: keep tensor size constant, lose `max_shift`
-        # px from one edge per channel.
         r = torch.roll(x[0:1], shifts=max_shift, dims=2)
         b = torch.roll(x[2:3], shifts=-max_shift, dims=2)
-        # Zero the wrapped column so we don't get a colour bar
-        # creeping in from the opposite edge.
+        # The wrapped columns keep their own channel's original values.
         r[..., :max_shift] = x[0:1, ..., :max_shift]
         b[..., -max_shift:] = x[2:3, ..., -max_shift:]
         x = torch.cat([r, x[1:2], b], dim=0)
 
-    # ── Colour distortion ──
-    # Brightness + contrast + saturation jitter, deterministic per
-    # seed so a static slider doesn't shimmer with random changes.
+    # Colour: brightness, contrast and saturation jitter, seeded.
     if colour_distortion > 0:
         strength = float(colour_distortion) / 10.0  # 0..1
         g = torch.Generator(device="cpu").manual_seed(seed ^ 0xC0CC)
-        # All three jitter factors sampled once per render.
         b_jit = float(1.0 + (torch.rand(1, generator=g).item() - 0.5) * strength * 0.6)
         c_jit = float(1.0 + (torch.rand(1, generator=g).item() - 0.5) * strength * 0.6)
         s_jit = float(1.0 + (torch.rand(1, generator=g).item() - 0.5) * strength * 1.0)
-        # Brightness - scalar multiply, clamped.
         x = (x * b_jit).clamp(0.0, 1.0)
-        # Contrast - pull values toward / away from grey at 0.5.
+        # Contrast about each channel's mean.
         mean = x.mean(dim=(1, 2), keepdim=True)
         x = ((x - mean) * c_jit + mean).clamp(0.0, 1.0)
-        # Saturation - pull toward / away from luminance grey.
-        # Rec. 709 luma weights.
+        # Saturation about Rec. 709 luma.
         luma = (0.2126 * x[0] + 0.7152 * x[1] + 0.0722 * x[2]).unsqueeze(0)
         x = (luma + (x - luma) * s_jit).clamp(0.0, 1.0)
 
-    # ── Motion blur ──
-    # Depthwise convolution with a horizontal line kernel. Kernel
-    # length scales smoothly with the float dial - strength 0
-    # short-circuits, strength 10 ends at a 21-px kernel.
+    # Motion blur: a horizontal box kernel, 1 + 2 x round(strength) px.
     if motion_blur > 0:
         k = 1 + 2 * int(round(float(motion_blur)))
         if k > 1:
@@ -7017,41 +4628,26 @@ def _aug_apply(
                 groups=3,
             ).squeeze(0).clamp(0.0, 1.0)
 
-    # ── Sensor noise ──
-    # Additive Gaussian noise. Seeded so a steady slider yields a
-    # steady grain pattern - otherwise every preview render
-    # twinkles, which looks unstable.
+    # Sensor noise: additive Gaussian, seeded.
     if noise > 0:
-        sigma = (float(noise) / 10.0) * 0.15  # 0..0.15
+        sigma = (float(noise) / 10.0) * 0.15  # 0..0.12 after the cap
         g = torch.Generator(device="cpu").manual_seed(seed ^ 0xA15E)
-        # Generate on CPU then move so the seed is portable.
+        # Generated on the CPU, so the seed gives the same noise on any device.
         n = torch.randn(x.shape, generator=g, dtype=torch.float32).to(x.device) * sigma
         x = (x + n).clamp(0.0, 1.0)
 
-    # ── Bit-depth quantisation ──
-    # Posterise by snapping to a smaller set of levels. Dial maps
-    # 0 → 8 bits (identity), 10 → 1 bit (harsh two-level). Levels
-    # interpolated smoothly so float steps land between integer
-    # bit depths.
+    # Bit depth: 2^bits levels per channel, 8 bits at 0, fractional bits allowed.
     if bit_depth > 0:
-        # Effective bits per channel: 8 at dial=0, 1 at dial=10.
         bits = 8.0 - (float(bit_depth) / 10.0) * 7.0
         levels = max(2.0, 2.0 ** bits)
         x = (torch.round(x * (levels - 1.0)) / (levels - 1.0)).clamp(0.0, 1.0)
 
-    # ── Low resolution ──
-    # Simulates a low-res capture: downsample with bilinear filtering
-    # then upsample back to the original size with bilinear so edges
-    # come back smooth-soft. Distinct from pixelation (which uses
-    # nearest-neighbour so the blocks are crisp). Dial=10 takes the
-    # image down to 1/12 of its original long edge.
+    # Low resolution: bilinear down and up sampling.
     if low_resolution > 0:
         _, H, W = x.shape
         s = float(low_resolution) / 10.0
         long_edge = max(H, W)
-        # 0 → 1×, 10 → 1/12×. The +1 prevents divide-by-zero at low
-        # strengths; the floor at 8 guarantees the downsample stays a
-        # legal tensor size.
+        # The 8 px floor keeps the downsample a legal size.
         small = max(8, int(round(long_edge / (1.0 + s * 11.0))))
         if H >= W:
             new_h = small
@@ -7071,17 +4667,11 @@ def _aug_apply(
                 x, size=(H, W), mode="bilinear", align_corners=False,
             ).squeeze(0).clamp(0.0, 1.0)
 
-    # ── Pixelation ──
-    # Like low_resolution but with nearest-neighbour upsample so the
-    # blocks stay hard-edged. Reads as deliberate pixel-art rather
-    # than a soft-focus low-quality capture.
+    # Pixelation: as low resolution, with a nearest-neighbour upsample.
     if pixelation > 0:
         _, H, W = x.shape
         s = float(pixelation) / 10.0
         long_edge = max(H, W)
-        # 0 → 1×, 10 → 1/40× (chunky 25-pixel blocks on a 1024 long
-        # edge). Pixelation is more aggressive than low_resolution
-        # because the visual signature kicks in faster.
         small = max(4, int(round(long_edge / (1.0 + s * 39.0))))
         if H >= W:
             new_h = small
@@ -7101,32 +4691,23 @@ def _aug_apply(
                 x, size=(H, W), mode="nearest",
             ).squeeze(0).clamp(0.0, 1.0)
 
-    # ── Lens glare ──
-    # Bright off-axis radial highlights overlaid additively to mimic
-    # sunlight or strong point-source bleed through a cheap lens.
-    # One or two glares per render, position + tint sampled by the
-    # seed so different rolls land differently. Strength scales both
-    # the intensity and the apparent size of the highlight halo.
+    # Lens glare: two additive off-axis radial highlights, placed by the seed.
     if lens_glare > 0:
         _, H, W = x.shape
         s = float(lens_glare) / 10.0  # 0..1
         gen = torch.Generator(device="cpu").manual_seed(seed ^ 0x91A1E)
-        # Two glares - primary bright, secondary smaller and dimmer.
-        # Both placed off-axis (avoid centre) so they read as flare,
-        # not a vignette.
         ys = torch.linspace(-1.0, 1.0, H, device=x.device, dtype=x.dtype)
         xs = torch.linspace(-1.0, 1.0, W, device=x.device, dtype=x.dtype)
         gy, gx = torch.meshgrid(ys, xs, indexing="ij")
         accum = torch.zeros_like(x[0])
-        # Primary glare
         ang1 = float(torch.rand(1, generator=gen).item()) * 6.2831853
         rad1 = 0.45 + float(torch.rand(1, generator=gen).item()) * 0.4
         cx1 = float(rad1 * torch.cos(torch.tensor(ang1)).item())
         cy1 = float(rad1 * torch.sin(torch.tensor(ang1)).item())
-        sigma1 = 0.25 + s * 0.35  # halo size grows with strength
+        sigma1 = 0.25 + s * 0.35
         d2_1 = (gx - cx1) ** 2 + (gy - cy1) ** 2
         accum = accum + torch.exp(-d2_1 / (2.0 * sigma1 * sigma1))
-        # Secondary glare - opposite-ish side, smaller, dimmer.
+        # The second glare: roughly opposite, smaller and dimmer.
         ang2 = ang1 + 3.1415926 + (float(torch.rand(1, generator=gen).item()) - 0.5) * 1.2
         rad2 = 0.3 + float(torch.rand(1, generator=gen).item()) * 0.3
         cx2 = float(rad2 * torch.cos(torch.tensor(ang2)).item())
@@ -7134,9 +4715,7 @@ def _aug_apply(
         sigma2 = 0.15 + s * 0.2
         d2_2 = (gx - cx2) ** 2 + (gy - cy2) ** 2
         accum = accum + 0.6 * torch.exp(-d2_2 / (2.0 * sigma2 * sigma2))
-        # Warm tint (sun-like). Saturation pulled toward neutral as
-        # strength grows so a heavy glare washes the highlights out
-        # toward white instead of clipping orange.
+        # Warm tint, nearer white at higher strength.
         tint = torch.tensor(
             [1.0, 0.92 + 0.08 * s, 0.78 + 0.22 * s],
             device=x.device, dtype=x.dtype,
@@ -7153,11 +4732,7 @@ def _aug_apply_lighting(
     strength: float,
     seed: int,
 ) -> "torch.Tensor":
-    """Time-of-day-style lighting variation. strength is 0..10;
-    the kernel samples one brightness direction, one warmth shift
-    and one contrast scale per render from the seed - so different
-    rolls land darker / cooler vs brighter / warmer. Pure tensor
-    arithmetic on the input tensor's device."""
+    """Lighting variation, strength 0..10: brightness, contrast and warmth sampled from the seed."""
     if strength <= 0:
         return img
     s = max(0.0, min(1.0, float(strength) / 10.0))
@@ -7167,15 +4742,13 @@ def _aug_apply_lighting(
     b = 1.0 + (rs[0] - 0.5) * 2.0 * 0.6 * s
     # Contrast scale in [1 - 0.4s, 1 + 0.4s].
     c = 1.0 + (rs[1] - 0.5) * 2.0 * 0.4 * s
-    # Warmth shift - pushes R up and B down (or vice versa) by
-    # up to ±0.10. Independent of brightness so dark+warm and
-    # dark+cool are both reachable.
+    # Warmth: R up and B down, or the reverse, by up to 0.10.
     w = (rs[2] - 0.5) * 2.0 * 0.10 * s
 
     x = (img * b).clamp(0.0, 1.0)
     mean = x.mean(dim=(1, 2), keepdim=True)
     x = ((x - mean) * c + mean).clamp(0.0, 1.0)
-    # Per-channel warmth (no in-place on a tracked tensor).
+    # Not in place: the tensor may be tracked.
     r = (x[0] + w).clamp(0.0, 1.0)
     g_ch = x[1]
     b_ch = (x[2] - w).clamp(0.0, 1.0)
@@ -7187,34 +4760,28 @@ def _aug_apply_hue_shift(
     strength: float,
     seed: int,
 ) -> "torch.Tensor":
-    """Random hue rotation. strength 0..10 → hue factor in
-    [-0.5s, 0.5s] (torchvision's adjust_hue convention). Seeded
-    so a steady slider doesn't shimmer."""
+    """Seeded hue rotation: strength 0..10 gives an adjust_hue factor in [-0.5s, 0.5s]."""
     if strength <= 0:
         return img
     from torchvision.transforms.functional import adjust_hue as _adjust_hue
     s = max(0.0, min(1.0, float(strength) / 10.0))
     g = torch.Generator(device="cpu").manual_seed(seed ^ 0xC0F2)
     factor = (float(torch.rand(1, generator=g).item()) - 0.5) * 2.0 * (0.5 * s)
-    # adjust_hue clamps to [-0.5, 0.5]; clamp defensively.
+    # adjust_hue accepts [-0.5, 0.5].
     factor = max(-0.5, min(0.5, factor))
     out = _adjust_hue(img.unsqueeze(0), float(factor)).squeeze(0)
     return out.clamp(0.0, 1.0)
 
 
-# ─── Geometric warp helpers ─────────────────────────────────────
-# Shared math used by both the live preview kernels and the
-# augment_generate runner - the runner needs the same matrices the
-# kernels apply so it can warp detection polygons in lock-step
-# with the image and save them next to each augmentation copy.
+# Geometric warp helpers, shared by the preview and augment_generate so
+# polygons warp with the image.
 
 
 def _perspective_corner_pairs(
     strength: float, W: int, H: int, seed: int,
 ) -> "tuple[list[list[float]], list[list[float]]] | None":
-    """Replicate the sampling _aug_apply_perspective_warp does so
-    we can compute the forward homography for polygon warping in
-    augment_generate. Returns None when strength is 0 (identity)."""
+    """The corner pairs _aug_apply_perspective_warp samples, for warping
+    polygons. None at strength 0."""
     if strength <= 0:
         return None
     distortion = max(0.0, min(0.19, (float(strength) / 10.0) * 0.19))
@@ -7237,9 +4804,7 @@ def _perspective_corner_pairs(
 def _solve_homography(
     startpoints: list[list[float]], endpoints: list[list[float]],
 ) -> "list[list[float]]":
-    """Direct linear transform - solve the 8x8 system for the 8
-    parameters of a 3x3 homography (last entry fixed at 1) that
-    maps each `startpoint` to its matching `endpoint`."""
+    """3x3 homography, last entry 1, mapping each startpoint to its endpoint."""
     import numpy as _np
     A = []
     bvec = []
@@ -7262,9 +4827,7 @@ def _solve_homography(
 def _scale_rotation_sample_params(
     smin: float, smax: float, rmin: float, rmax: float, seed: int,
 ) -> "tuple[float, float] | None":
-    """Replicate _aug_apply_scale_rotation's sampling so the
-    runner can build the same affine matrix for the polygons.
-    Returns (scale, rotation_deg) or None for identity."""
+    """The (scale, rotation_deg) _aug_apply_scale_rotation samples, or None for identity."""
     if smin == 1.0 and smax == 1.0 and rmin == 0.0 and rmax == 0.0:
         return None
     g = torch.Generator(device="cpu").manual_seed(seed ^ 0x5C7A)
@@ -7281,12 +4844,9 @@ def _scale_rotation_sample_params(
 def _scale_rotation_matrix(
     s: float, r_deg: float, W: int, H: int,
 ) -> "list[list[float]]":
-    """Forward affine matrix matching torchvision.transforms.
-    functional.affine(image, angle=r, scale=s) - torchvision's
-    `angle` is "clockwise direction" on screen, so in y-down image
-    coordinates the rotation matrix is [[cos, -sin], [sin, cos]]
-    (a point at (x,0) rotates to (cos·x, sin·x), which moves
-    visually clockwise as y is screen-down)."""
+    """Forward affine matching torchvision's affine(angle=r, scale=s). Its
+    angle is clockwise on screen, so in y-down coordinates the rotation
+    is [[cos, -sin], [sin, cos]]."""
     import math
     cx = float(W) / 2.0
     cy = float(H) / 2.0
@@ -7318,39 +4878,33 @@ def _apply_matrix_to_point(M: "list[list[float]]", x: float, y: float) -> "tuple
 
 
 def _lens_k1(strength: float) -> float:
-    """Barrel coefficient of the lens-distortion dial (0..10 -> 0..0.55),
-    shared by _aug_apply and the annotations that follow its warp."""
-    return max(0.0, float(strength)) / 10.0 * 0.55
+    """Barrel coefficient for the lens dial: 0..10 -> 0..0.6, the centre's zoom less one."""
+    return max(0.0, min(10.0, float(strength))) / 10.0 * 0.6
 
 
 def _lens_forward_point(
     x: float, y: float, lens: "tuple[int, int, float]",
 ) -> "tuple[float, float, bool]":
-    """Where _aug_apply's barrel warp carries source pixel (x, y), for
-    lens = (W, H, k1), and whether the picture shows it there. The
-    kernel samples output point u from source u * (1 - k1 * |u|^2),
-    both in [-1, 1] with corners aligned, so the output point solves
-    r - k1 * r^3 = |p| along p's direction (Newton, on the branch where
-    that rises; callers clip what lands outside the frame). Past that
-    branch's top (the fold, inside the frame above strength 3) the
-    picture shows the point nowhere: it goes to the fold, the edge of
-    what the picture does show."""
-    W, H, k1 = lens
-    px, py = 2.0 * x / (W - 1) - 1.0, 2.0 * y / (H - 1) - 1.0
-    rp = (px * px + py * py) ** 0.5
-    if k1 <= 0 or rp == 0.0:
+    """Where the barrel warp carries source pixel (x, y), lens = (W, H, k), and
+    whether that lands inside the picture. Solves r (1 + k r^2) = rho (1 + k)."""
+    W, H, k = lens
+    cx, cy = (W - 1) / 2.0, (H - 1) / 2.0
+    dx, dy = x - cx, y - cy
+    half_diag = (cx * cx + cy * cy) ** 0.5
+    rho = (dx * dx + dy * dy) ** 0.5 / half_diag
+    if k <= 0 or rho == 0.0:
         return x, y, True
-    r = r_fold = (1.0 / (3.0 * k1)) ** 0.5
-    shown = rp < r_fold - k1 * r_fold ** 3
-    if shown:
-        r = rp
-        for _ in range(30):
-            step = (r - k1 * r ** 3 - rp) / (1.0 - 3.0 * k1 * r * r)
-            r -= step
-            if abs(step) < 1e-9:
-                break
-    ux, uy = px * r / rp, py * r / rp
-    return (ux + 1.0) * (W - 1) / 2.0, (uy + 1.0) * (H - 1) / 2.0, shown
+    target = rho * (1.0 + k)
+    r = min(rho, 1.0)
+    for _ in range(50):
+        step = (r * (1.0 + k * r * r) - target) / (1.0 + 3.0 * k * r * r)
+        r -= step
+        if abs(step) < 1e-12:
+            break
+    ox, oy = cx + dx * r / rho, cy + dy * r / rho
+    eps = 1e-6
+    shown = -eps <= ox <= W - 1 + eps and -eps <= oy <= H - 1 + eps
+    return ox, oy, shown
 
 
 def _warp_points(
@@ -7388,10 +4942,8 @@ def _apply_matrix_to_box(
     box: "list[float]", M: "list[list[float]] | None",
     lens: "tuple[int, int, float] | None" = None,
 ) -> "list[float] | None":
-    """The extent of a box carried through M (a homography keeps its
-    edges straight, so the corners are enough), then the lens warp,
-    which bends them, so their outline is sampled. None when the lens
-    shows none of it."""
+    """Extent of a box through M and then the lens warp, which bends its
+    edges, so the outline is sampled. None when the lens shows none of it."""
     if len(box) < 4 or (M is None and not lens):
         return list(box)
     x0, y0, x1, y1 = (float(v) for v in box[:4])
@@ -7408,16 +4960,14 @@ def _apply_matrix_to_box(
 
 
 def _clip_box_to(box: "list[float]", w: float, h: float) -> "list[float] | None":
-    """A box clipped to a w x h picture, or None when less than 2 px of it
-    is left on either axis (warped out of the frame)."""
+    """A box clipped to a w x h picture, or None when under 2 px remains on either axis."""
     x0, y0 = max(0.0, float(box[0])), max(0.0, float(box[1]))
     x1, y1 = min(float(w), float(box[2])), min(float(h), float(box[3]))
     return [x0, y0, x1, y1] if x1 - x0 >= 2.0 and y1 - y0 >= 2.0 else None
 
 
 def _clip_poly_to(poly: "list[list[float]]", w: float, h: float) -> "list[list[float]]":
-    """A polygon clipped to a w x h picture (Sutherland-Hodgman, one edge
-    at a time); [] when nothing of it is left."""
+    """A polygon clipped to a w x h picture by Sutherland-Hodgman; [] when nothing is left."""
     def cut(points, inside, cross):
         out = []
         for i, cur in enumerate(points):
@@ -7445,10 +4995,9 @@ def _clip_poly_to(poly: "list[list[float]]", w: float, h: float) -> "list[list[f
     return pts if len(pts) >= 3 else []
 
 
-def _relabel_augmentations(project_id: str, relabel: "Callable[[str], str | None]") -> int:
-    """Apply `relabel` to every augmented copy's boxes: it returns the new
-    name, the same name, or None to drop the box. Keeps generated copies
-    in step with a label rename or delete. Returns the boxes changed."""
+def _relabel_augmentations(project_id: str, relabel: Callable[[str], str | None]) -> int:
+    """Apply `relabel` to every augmented copy's boxes; it returns the new
+    name, the same name, or None to drop the box. Returns the boxes changed."""
     root = _augmentations_dir(project_id)
     changed = 0
     for path in sorted(root.glob("*/annotations.json")) if root.exists() else []:
@@ -7473,7 +5022,7 @@ def _relabel_augmentations(project_id: str, relabel: "Callable[[str], str | None
                     d["label"] = new
                     kept.append(d)
             copies[name] = kept
-        if changed != n_before:
+        if aug_source.relabel_source(data, relabel) or changed != n_before:
             store._atomic_write(path, json.dumps(data).encode("utf-8"))
     return changed
 
@@ -7483,11 +5032,8 @@ def _aug_apply_perspective_warp(
     strength: float,
     seed: int,
 ) -> "torch.Tensor":
-    """Random perspective warp. `strength` 0..10 → distortion_scale
-    0..0.5; the four image corners each get a random offset of up
-    to `distortion · dim` in either direction. Runs through
-    torchvision's perspective() which builds the homography +
-    samples via grid_sample on whatever device the tensor is on."""
+    """Random perspective warp: strength 0..10 moves each corner by up to
+    0..0.19 of the image size in either direction."""
     if strength <= 0:
         return img
     from torchvision.transforms.functional import perspective as _tv_perspective
@@ -7525,9 +5071,8 @@ def _aug_apply_scale_rotation(
     rot_max: float,
     seed: int,
 ) -> "torch.Tensor":
-    """Sample one scale in [scale_min, scale_max] and one rotation
-    in [rot_min, rot_max] (degrees), apply via torchvision's
-    affine() - runs on the input tensor's device."""
+    """One scale in [scale_min, scale_max] and one rotation in degrees in
+    [rot_min, rot_max], applied with torchvision's affine()."""
     if scale_min == 1.0 and scale_max == 1.0 and rot_min == 0.0 and rot_max == 0.0:
         return img
     from torchvision.transforms.functional import affine as _tv_affine
@@ -7556,9 +5101,7 @@ def _rasterise_polygons_to_mask(
     detections: list[dict], H: int, W: int, sx: float, sy: float,
     device: "torch.device",
 ) -> "torch.Tensor":
-    """Rasterise every detection's polygon list into a single binary
-    mask, shape [H, W] on `device`. Returns a uint8-style float
-    tensor (0.0 / 1.0). Empty when no detection has a polygon."""
+    """Every detection's polygons as one [H, W] float mask of 0.0 and 1.0 on `device`."""
     import numpy as _np
     from PIL import Image as _PIL
     from PIL import ImageDraw as _ImageDraw
@@ -7589,27 +5132,16 @@ def _aug_apply_block_occlusion(
     sy: float,
     seed: int,
 ) -> "torch.Tensor":
-    """Drop one rectangular block per detection polygon, sized so
-    its overlap with that polygon is ~`coverage_pct`% of the
-    polygon's pixel area. `coverage_pct` is 0..60 (FE dial).
-
-    Every polygon's coverage is a hard ceiling. After placement
-    each candidate zap is filtered against EVERY other polygon's
-    remaining headroom - so when polygons overlap (a small
-    segmentation inside a big one, or two siblings that share
-    pixels), no polygon can be pushed past its own pct cap by a
-    block placed for a different one. Pixels removed during the
-    cap-enforcement pass simply revert to the original image,
-    giving the bigger rectangle a "hole" where it would have
-    breached an inner polygon's cap."""
+    """One block per detection polygon, covering about `coverage_pct`%
+    (0..60) of it. No polygon's coverage passes that cap, even where
+    polygons overlap."""
     if coverage_pct <= 0:
         return img
     _C, H, W = img.shape
     g = torch.Generator(device="cpu").manual_seed(seed ^ 0xB10C)
     pct = max(0.0, min(60.0, float(coverage_pct))) / 100.0
 
-    # Build (det, poly_mask, area) tuples, drop degenerates, sort by
-    # area ascending so the tightest budgets get placed first.
+    # Smallest polygons first, so the tightest budgets are placed first.
     annotated: list[tuple[dict, "torch.Tensor", float]] = []
     for det in (detections or []):
         polys = (det.get("mask") or {}).get("polygons") if isinstance(det.get("mask"), dict) else None
@@ -7631,14 +5163,8 @@ def _aug_apply_block_occlusion(
     )
     zap_mask = torch.zeros((H, W), device=img.device, dtype=img.dtype)
 
-    # Placement pass - one rectangle per polygon, smallest first.
-    # Cross-polygon cap enforcement happens in a single batched
-    # post-pass below (was previously an N² inner loop with a
-    # `.item()` sync on every iteration, which is what was
-    # hanging the request for big detection sets).
     for i, (det, poly_mask, _area) in enumerate(annotated):
-        # Coverage already inside this polygon from earlier (smaller)
-        # blocks → reduces what we still owe.
+        # Earlier blocks count toward this polygon's budget.
         current = float((zap_mask * poly_mask).sum().item())
         target_i = pct * _area
         budget_i = target_i - current
@@ -7667,24 +5193,14 @@ def _aug_apply_block_occlusion(
         if ax2 <= ax or ay2 <= ay:
             continue
 
-        # Add the rectangle directly to zap_mask, clipped to THIS
-        # polygon. The post-pass below trims any other polygon that
-        # ends up over its cap from the cumulative zap.
+        # Clipped to this polygon. The pass below trims any polygon over its cap.
         zap_mask[ay:ay2, ax:ax2] = torch.maximum(
             zap_mask[ay:ay2, ax:ax2],
             poly_mask[ay:ay2, ax:ax2],
         )
 
-    # Post-pass - enforce per-polygon caps in one vectorised sweep.
-    # Counts every polygon at once, identifies the ones over budget,
-    # randomly trims excess pixels from each over-budget polygon's
-    # zap. Inner sampling still needs CPU random indices, but each
-    # polygon only takes one trim step - way fewer syncs than the
-    # old per-detection × per-polygon inner loop.
     counts = (poly_stack * zap_mask.unsqueeze(0)).sum(dim=(1, 2))  # (N,)
     excesses = (counts - targets_t).clamp(min=0)
-    # Bring the over-budget table to CPU once; per-polygon trims
-    # below are CPU-driven.
     excess_list = excesses.tolist()
     for j in range(n):
         ex = excess_list[j]
@@ -7702,10 +5218,7 @@ def _aug_apply_block_occlusion(
     if float(zap_mask.sum().item()) <= 0:
         return img
 
-    # Apply: zero the kept channels under the zap, then lift the
-    # zapped region slightly off pure black so it reads as
-    # "occluded" rather than the segmentation disappearing into the
-    # background.
+    # Occluded pixels are set to 0.04, near black.
     out = img.clone()
     keep = (1.0 - zap_mask)
     for c in range(3):
@@ -7719,17 +5232,14 @@ def _aug_apply_segmentation_outlines(
     sx: float,
     sy: float,
 ) -> "torch.Tensor":
-    """Draw a thin emerald outline around every detection's polygon
-    so the preview shows where the user's segmentation lives. Drawn
-    via PIL (fast for the handful of polygons we have) then merged
-    back onto the torch tensor with a tight alpha blend."""
+    """Draw a thin emerald outline around every detection polygon."""
     _C, H, W = img.shape
     import numpy as _np
     from PIL import Image as _PIL
     from PIL import ImageDraw as _ImageDraw
     canvas = _PIL.new("RGBA", (W, H), (0, 0, 0, 0))
     drawer = _ImageDraw.Draw(canvas)
-    line_w = max(2, int(round(min(W, H) / 320)))  # scales with size
+    line_w = max(2, int(round(min(W, H) / 320)))
     for d in detections or []:
         mask = d.get("mask")
         polys = (mask or {}).get("polygons") if isinstance(mask, dict) else None
@@ -7751,212 +5261,26 @@ def _aug_apply_segmentation_outlines(
     return out.clamp(0.0, 1.0)
 
 
-def _aug_apply_object_overlay(
-    img: "torch.Tensor",
-    overlay_path: "Path",
-    scale: float,
-    detections: list[dict],
-    sx: float,
-    sy: float,
-    seed: int,
-    occupied: "torch.Tensor | None" = None,
-) -> "tuple[torch.Tensor, torch.Tensor | None]":
-    """Composite a previously-segmented transparent PNG onto the
-    working image. The overlay is resized so its longest edge is
-    `scale × longest_edge(img)`; placement is constrained so the
-    overlay's silhouette never covers more than 50% of any existing
-    detection polygon.
-
-    Anchor search is vectorised - K candidates are gathered into a
-    single (N, K, oh, ow) window stack via advanced indexing on
-    GPU, overlaps computed in one tensor op, the best (zero-breach
-    or min-breach) anchor picked. Previously each anchor sliced +
-    summed inside a Python loop with per-iteration .item() syncs,
-    which is what made big overlays take ~10s.
-
-    img: [3, H, W] in [0,1] on some device. Returns (img, occupied)
-    where `occupied` is an alpha-coverage accumulator (H, W) so a
-    subsequent overlay can account for it when sizing each
-    polygon's remaining headroom."""
-    _C, H, W = img.shape
-    if scale <= 0:
-        return img, occupied
-    try:
-        with PILImage.open(overlay_path) as op:
-            overlay_pil = op.convert("RGBA")
-    except Exception:
-        return img, occupied
-    longest = max(W, H)
-    target_long = max(8, int(round(longest * float(scale))))
-    ow, oh = overlay_pil.size
-    if ow <= 0 or oh <= 0:
-        return img, occupied
-    overlay_long = max(ow, oh)
-    if overlay_long > 0:
-        s = target_long / float(overlay_long)
-        new_w = max(2, int(round(ow * s)))
-        new_h = max(2, int(round(oh * s)))
-        overlay_pil = overlay_pil.resize((new_w, new_h), PILImage.LANCZOS)
-    ow, oh = overlay_pil.size
-    if ow > W or oh > H:
-        # Overlay larger than the canvas - clamp to canvas and pin
-        # to origin (no anchor search possible).
-        ow = min(ow, W)
-        oh = min(oh, H)
-
-    # Tensorise overlay: RGB + alpha.
-    import numpy as _np
-    arr = _np.asarray(overlay_pil, dtype=_np.float32) / 255.0  # H,W,4
-    device = img.device
-    overlay_rgb = torch.from_numpy(arr[..., :3]).permute(2, 0, 1).contiguous().to(device)
-    overlay_alpha = torch.from_numpy(arr[..., 3:4]).permute(2, 0, 1).contiguous().to(device)
-    if overlay_rgb.shape[1] != oh or overlay_rgb.shape[2] != ow:
-        overlay_rgb = overlay_rgb[:, :oh, :ow]
-        overlay_alpha = overlay_alpha[:, :oh, :ow]
-
-    # Stack per-detection masks into one (N, H, W) tensor up-front.
-    # Each polygon's cap is 50% of its pixel area, minus what
-    # earlier overlays in the same batch have already taken from
-    # that polygon (so cumulative coverage stays ≤ 50%).
-    poly_masks: list["torch.Tensor"] = []
-    poly_caps: list[float] = []
-    for d in (detections or []):
-        polys = (d.get("mask") or {}).get("polygons") if isinstance(d.get("mask"), dict) else None
-        if not polys:
-            continue
-        m = _rasterise_polygons_to_mask([d], H, W, sx, sy, device)
-        a = float(m.sum().item())
-        if a < 4:
-            continue
-        cap = 0.5 * a
-        if occupied is not None:
-            cap -= float((occupied * m).sum().item())
-        if cap < 1.0:
-            # No room left under this polygon - but we still need to
-            # include it in the constraint set so we don't allow ANY
-            # new alpha here.
-            cap = 0.0
-        poly_masks.append(m)
-        poly_caps.append(cap)
-
-    g = torch.Generator(device="cpu").manual_seed(seed ^ 0x0BE7)
-    max_x = max(0, W - ow)
-    max_y = max(0, H - oh)
-
-    if max_x <= 0 and max_y <= 0:
-        ax, ay = 0, 0
-    elif not poly_masks:
-        # No constraints - pick a random anchor in one shot.
-        ax = int(torch.randint(0, max(1, max_x + 1), (1,), generator=g).item())
-        ay = int(torch.randint(0, max(1, max_y + 1), (1,), generator=g).item())
-    else:
-        poly_stack = torch.stack(poly_masks, dim=0)
-        caps_t = torch.tensor(poly_caps, device=device, dtype=img.dtype)
-        N = poly_stack.shape[0]
-
-        # Memory-bounded K: keep the (N, K, oh, ow) gather under
-        # ~96 MB. Otherwise drop K accordingly. Worst case K = 4 so
-        # we still get SOME search.
-        per_window_bytes = oh * ow * 4
-        K = min(16, max(4, int(96_000_000 / max(1, N * per_window_bytes))))
-
-        ax_list = torch.randint(0, max(1, max_x + 1), (K,), generator=g).tolist()
-        ay_list = torch.randint(0, max(1, max_y + 1), (K,), generator=g).tolist()
-
-        # Build (K, oh, ow) coordinate grids that index into
-        # poly_stack. Long dtype required for advanced indexing.
-        ay_t = torch.tensor(ay_list, device=device, dtype=torch.long).view(K, 1, 1)
-        ax_t = torch.tensor(ax_list, device=device, dtype=torch.long).view(K, 1, 1)
-        y_off = torch.arange(oh, device=device, dtype=torch.long).view(1, oh, 1)
-        x_off = torch.arange(ow, device=device, dtype=torch.long).view(1, 1, ow)
-        y_idx = (ay_t + y_off).expand(K, oh, ow)
-        x_idx = (ax_t + x_off).expand(K, oh, ow)
-
-        # poly_stack[:, y_idx, x_idx] broadcasts to (N, K, oh, ow).
-        # Single gather; no Python-level per-anchor loop.
-        windows = poly_stack[:, y_idx, x_idx]
-        alpha_2d = overlay_alpha[0]  # (oh, ow)
-        overlaps = (windows * alpha_2d).sum(dim=(2, 3))  # (N, K)
-        breaches = (overlaps - caps_t.unsqueeze(1)).clamp(min=0)  # (N, K)
-        total_breach = breaches.sum(dim=0)  # (K,)
-
-        valid = total_breach < 0.5
-        if bool(valid.any().item()):
-            # First zero-breach anchor wins.
-            k_pick = int(valid.nonzero(as_tuple=False)[0].item())
-        else:
-            k_pick = int(total_breach.argmin().item())
-        ax = ax_list[k_pick]
-        ay = ay_list[k_pick]
-
-    ax2 = min(W, ax + ow)
-    ay2 = min(H, ay + oh)
-    rx2 = ax2 - ax
-    ry2 = ay2 - ay
-    if rx2 <= 0 or ry2 <= 0:
-        return img, occupied
-
-    out = img.clone()
-    a = overlay_alpha[:, :ry2, :rx2]
-    rgb = overlay_rgb[:, :ry2, :rx2]
-    out[:, ay:ay2, ax:ax2] = out[:, ay:ay2, ax:ax2] * (1.0 - a) + rgb * a
-    # Update / start the alpha-occupancy accumulator so a subsequent
-    # overlay's anchor search can subtract the area we just took
-    # from each polygon's remaining headroom.
-    if occupied is None:
-        occupied_new = torch.zeros((H, W), device=img.device, dtype=img.dtype)
-    else:
-        occupied_new = occupied
-    region = occupied_new[ay:ay2, ax:ax2]
-    occupied_new[ay:ay2, ax:ax2] = torch.maximum(region, a[0])
-    return out.clamp(0.0, 1.0), occupied_new
-
-
-# ─── Object-overlay augmentation ─────────────────────────────────
-# User uploads an image + a text label; SAM3 segments the object,
-# we cut the foreground onto a transparent PNG and stash it under
-# <project>/augment_overlays/<uuid>.png. The augment preview
-# endpoint then composites this overlay onto a random dataset
-# image, with a constraint that the overlay's silhouette never
-# covers more than 50% of any existing detection polygon.
-
-
-def _overlays_dir(project_id: str) -> "Path":
-    return project_dir(project_id) / "augment_overlays"
-
-
 def _backgrounds_dir(project_id: str) -> "Path":
     return project_dir(project_id) / "augment_backgrounds"
 
 
-@app.post(
-    "/api/v2/projects/{project_id}/augment/background/upload",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.post("/api/v2/projects/{project_id}/augment/background/upload")
 async def v2_augment_background_upload(
     project_id: str,
     image: UploadFile = File(...),
 ):
-    """Persist an uploaded background image under
-    augment_backgrounds/<uuid>.jpg. No segmentation - backgrounds
-    are used whole, just resized to the target canvas at preview
-    time."""
+    """Store a background image as augment_backgrounds/<uuid>.jpg; it is used whole."""
     if not project_dir(project_id).exists():
-        raise HTTPException(404, "project not found")
-    raw = await image.read()
+        raise HTTPException(404, "dataset not found")
+    raw = await _read_upload(image)
     if not raw:
         raise HTTPException(400, "empty image upload")
-    # NSFW gate - backgrounds get composited into the augmentations
-    # pipeline, so they need the same content-safety screen the
-    # main /imports/raw endpoint applies.
-    _enforce_nsfw_or_451(raw, label="v2-augment-background-upload")
     try:
         src = _open_upright(raw)
     except Exception as e:
         raise HTTPException(400, f"could not decode image: {e}")
-    # Cap stored size at long edge 1280 so we don't ship a 24 MP
-    # raw upload to disk every time. The kernel re-resizes to the
-    # working canvas anyway.
+    # Stored at most 1280 px on the long edge.
     W, H = src.size
     longest = max(W, H)
     if longest > 1280:
@@ -7970,10 +5294,7 @@ async def v2_augment_background_upload(
     return {"background_id": bg_id, "width": src.size[0], "height": src.size[1]}
 
 
-@app.get(
-    "/api/v2/projects/{project_id}/augment/backgrounds/{background_id}",
-    dependencies=[Depends(require_project_read_access)],
-)
+@app.get("/api/v2/projects/{project_id}/augment/backgrounds/{background_id}")
 async def v2_augment_background_get(project_id: str, background_id: str):
     safe = "".join(c for c in background_id if c.isalnum())
     if not safe:
@@ -7984,10 +5305,7 @@ async def v2_augment_background_get(project_id: str, background_id: str):
     return await _serve_cached_image(project_id, "augment_backgrounds", f"{safe}.jpg", path)
 
 
-@app.delete(
-    "/api/v2/projects/{project_id}/augment/backgrounds/{background_id}",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.delete("/api/v2/projects/{project_id}/augment/backgrounds/{background_id}")
 async def v2_augment_background_delete(project_id: str, background_id: str):
     safe = "".join(c for c in background_id if c.isalnum())
     if not safe:
@@ -8001,9 +5319,7 @@ async def v2_augment_background_delete(project_id: str, background_id: str):
     return {"ok": True}
 
 
-# GPU-resident LRU cache of resized background tensors. Keyed by
-# (path, target_H, target_W, device-str). Bounded so we don't leak
-# VRAM if a user uploads many backgrounds.
+# LRU of resized background tensors on the device, keyed by (path, H, W, device).
 from collections import OrderedDict as _BG_OD
 
 _BG_TENSOR_CACHE: "_BG_OD[tuple[str, int, int, str], torch.Tensor]" = _BG_OD()
@@ -8013,10 +5329,7 @@ _BG_TENSOR_CACHE_MAX = 16
 def _load_background_resized_gpu(
     path: "Path", H: int, W: int, device: "torch.device",
 ) -> "torch.Tensor | None":
-    """Returns a (3, H, W) tensor of the background image on the
-    target device, cached for repeat calls. Image decoded once on
-    CPU; resize runs on GPU via F.interpolate so a full bake costs
-    a few ms after the cache warms up."""
+    """A cached (3, H, W) tensor of the background on `device`, or None."""
     key = (str(path), int(H), int(W), str(device))
     hit = _BG_TENSOR_CACHE.get(key)
     if hit is not None:
@@ -8047,15 +5360,7 @@ def _aug_apply_background_randomisation(
     sy: float,
     seed: int,
 ) -> "torch.Tensor":
-    """Replace pixels OUTSIDE the union of detection polygons with
-    a randomly-chosen background image (picked by `seed`). Pixels
-    inside polygons stay as-is so the user's segmented objects sit
-    untouched on top of the new scene.
-
-    GPU path: background is decoded once on CPU, transferred to
-    GPU, resized via F.interpolate, then cached so subsequent
-    previews skip the disk + transfer cost. The composite itself
-    is a single (3, H, W) tensor blend on-device."""
+    """Replace pixels outside the detection polygons with a background chosen by `seed`."""
     if not background_paths:
         return img
     _C, H, W = img.shape
@@ -8071,114 +5376,8 @@ def _aug_apply_background_randomisation(
     return (img * m + bg_t * (1.0 - m)).clamp(0.0, 1.0)
 
 
-@app.post(
-    "/api/v2/projects/{project_id}/augment/object_overlay/segment",
-    dependencies=[Depends(require_project_owner)],
-)
-async def v2_augment_object_overlay_segment(
-    project_id: str,
-    image: UploadFile = File(...),
-    label: str = Form(...),
-):
-    """Run SAM3 on the uploaded image with the supplied label, cut
-    the highest-scoring mask out as a transparent PNG, store under
-    augment_overlays/<uuid>.png and return its handle."""
-    if not project_dir(project_id).exists():
-        raise HTTPException(404, "project not found")
-    charlie = state.get("charlie")
-    if charlie is None:
-        raise HTTPException(503, "SAM3 not loaded")
-    clean_label = (label or "").strip()
-    if not clean_label:
-        raise HTTPException(400, "label must be non-empty")
-
-    raw = await image.read()
-    if not raw:
-        raise HTTPException(400, "empty image upload")
-    # NSFW gate for object overlay uploads (matches /imports/raw +
-    # /augment/background/upload). The user pastes a cut-out from
-    # an arbitrary photo into the dataset; same content-safety
-    # screen applies.
-    _enforce_nsfw_or_451(raw, label="v2-augment-object-overlay-segment")
-    try:
-        src = ImageOps.exif_transpose(PILImage.open(io.BytesIO(raw))).convert("RGBA")
-    except Exception as e:
-        raise HTTPException(400, f"could not decode image: {e}")
-
-    loop = asyncio.get_running_loop()
-
-    def _run() -> tuple[bytes, int, int]:
-        # SAM3 expects RGB.
-        rgb = src.convert("RGB")
-        try:
-            detections, _timings = charlie.segment_labels(rgb, [clean_label], include_crops=False)
-        except Exception as exc:
-            raise RuntimeError(f"SAM3 failed: {exc}") from exc
-        if not detections:
-            raise RuntimeError("no detections")
-        # Pick the highest-scoring detection that has a polygon.
-        scored = [
-            d for d in detections
-            if isinstance(d.get("mask"), dict) and (d["mask"].get("polygons") or [])
-        ]
-        if not scored:
-            raise RuntimeError("no segmentation found")
-        scored.sort(key=lambda d: float(d.get("score") or 0.0), reverse=True)
-        best = scored[0]
-        polys = best["mask"]["polygons"]
-        # Rasterise polygons → alpha. Tight crop to the bbox so we
-        # don't store the original's whitespace.
-        W, H = rgb.size
-        from PIL import ImageDraw as _ImageDraw
-        alpha = PILImage.new("L", (W, H), 0)
-        drawer = _ImageDraw.Draw(alpha)
-        for poly in polys:
-            if not poly or len(poly) < 3:
-                continue
-            drawer.polygon([(float(x), float(y)) for (x, y) in poly], fill=255)
-        # Apply alpha to the original RGBA, then crop to the alpha
-        # bbox (saves bytes + keeps the centre near the image
-        # centre for downstream placement).
-        rgba = src.copy()
-        rgba.putalpha(alpha)
-        bbox = alpha.getbbox()
-        if bbox:
-            rgba = rgba.crop(bbox)
-        else:
-            raise RuntimeError("empty mask")
-        buf = io.BytesIO()
-        rgba.save(buf, format="PNG", optimize=False)
-        return buf.getvalue(), rgba.size[0], rgba.size[1]
-
-    try:
-        async with state["gpu_lock"]:
-            data, ow, oh = await loop.run_in_executor(None, _run)
-    except Exception as exc:
-        raise HTTPException(500, f"object overlay segmentation failed: {exc}")
-
-    # Persist. UUID4 hex used as the filename → also the overlay_id
-    # the FE references in subsequent preview requests.
-    overlay_id = _uuid.uuid4().hex
-    out_dir = _overlays_dir(project_id)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{overlay_id}.png"
-    out_path.write_bytes(data)
-    return {
-        "overlay_id": overlay_id,
-        "width": ow,
-        "height": oh,
-        "label": clean_label,
-    }
-
-
-# ─── Batch augmentation generation ──────────────────────────────
-# Apply the augmentation config to every dataset image, producing
-# N copies per image. Run as a background job through the
-# existing JobManager so the FE can poll progress + cancel like
-# any other batch task. Outputs live under
-# <project>/augmentations/<import_id>/<idx>.jpg and are SEPARATE
-# from the dataset itself - they're surfaced through the per-tile
-# Augmentations viewer but don't enter the labelling pipeline.
+# Batch augmentation: N copies per image under
+# <project>/augmentations/<import_id>/, outside the dataset and labelling.
 
 
 def _augmentations_dir(project_id: str, import_id: str = "") -> "Path":
@@ -8186,112 +5385,8 @@ def _augmentations_dir(project_id: str, import_id: str = "") -> "Path":
     return root / import_id if import_id else root
 
 
-def _maybe_auto_augment_after_edit(project_id: str, import_id: str | None = None) -> None:
-    """Schedule a fresh augment_generate for `project_id` IF:
-      • the project has a persisted augmentationConfig (i.e. the user
-        has clicked Update on the Augmentations tab at least once)
-      • perImageMode isn't "off"
-      • no augment_generate job is already running/queued for the
-        project (the imports PUT endpoint fires per box drag, so
-        this guard stops us queuing dozens of overlapping jobs while
-        the user is mid-edit)
-
-    When `import_id` is supplied the regen is scoped to that one
-    image - wiping + re-running only its augmentation dir - so a
-    single bbox tweak doesn't fan out into a re-augment of the
-    whole project. Callers that genuinely want a project-wide
-    regen pass `import_id=None`.
-    """
-    try:
-        # copy=False - read-only check of augmentationConfig + owner.
-        # Called from PUT /imports/{id}, hot on every box drag, used
-        # to pay a 300-500ms deepcopy on big projects.
-        manifest = load_manifest(project_id, copy=False) or {}
-        cfg = manifest.get("augmentationConfig") or {}
-        per_image_mode = str(cfg.get("perImageMode") or "")
-        config_dict = cfg.get("config") or {}
-        if not config_dict or not per_image_mode:
-            return
-        if per_image_mode in ("off", "0"):
-            return
-        # In-flight guard - don't pile up generate jobs while one's
-        # already running. Once the active one drains, the next edit
-        # will queue a fresh one.
-        for j in state["jobs"].jobs.values():
-            if j.project != project_id:
-                continue
-            if j.kind == "augment_generate" and j.status in ("running", "queued"):
-                return
-        # Wipe the affected images' augmentation dirs so the new run
-        # starts from a clean slate. Scoped to a single import when
-        # the caller supplied one - leaving every other image's
-        # augmentations untouched.
-        try:
-            aug_root = _augmentations_dir(project_id)
-            if import_id:
-                target_dir = aug_root / import_id
-                if target_dir.exists():
-                    import shutil as _shutil
-                    _shutil.rmtree(target_dir)
-            elif aug_root.exists():
-                import shutil as _shutil
-                _shutil.rmtree(aug_root)
-        except Exception as e:
-            print(f"[auto-augment-after-edit] wipe failed for {project_id}: {e}")
-        try:
-            # copy=False + cache_by_ref - we mutate-then-save the
-            # same dict we just read, no concurrent writer in the
-            # hot path.
-            m_aug = load_manifest(project_id, copy=False) or {}
-            mutated = False
-            for entry in (m_aug.get("imports") or []):
-                if import_id and entry.get("id") != import_id:
-                    continue
-                if entry.get("n_augmentations"):
-                    entry["n_augmentations"] = 0
-                    mutated = True
-            if mutated:
-                save_manifest(project_id, m_aug, cache_by_ref=True)
-        except Exception as e:
-            print(f"[auto-augment-after-edit] reset counters failed for {project_id}: {e}")
-        try:
-            # Attribute the regen to the project owner so the terminal
-            # feed shows the user's handle, not @system. Fire-and-
-            # forget hook fired from /imports PUT - we don't have a
-            # session here, so the manifest's owner is the best
-            # available signal.
-            owner = (
-                manifest.get("owner")
-                or manifest.get("createdBy")
-                or "system"
-            )
-            params: dict = {"perImageMode": per_image_mode, "config": config_dict}
-            n_imgs = len(manifest.get("imports") or [])
-            if import_id:
-                params["targetImportIds"] = [import_id]
-                n_imgs = 1
-            state["jobs"].schedule(
-                "augment_generate",
-                project_id,
-                params,
-                owner,
-                n_images=n_imgs,
-            )
-            state["jobs"].start_worker()
-            print(f"[auto-augment-after-edit] scheduled for {project_id}{' (id=' + import_id + ')' if import_id else ''}")
-        except Exception as e:
-            print(f"[auto-augment-after-edit] schedule failed for {project_id}: {e}")
-    except Exception as e:
-        print(f"[auto-augment-after-edit] {project_id} failed: {e}")
-
-
-# ─── Whole-image embeddings (dataset-stats feature) ─────────────
-# Each imported image gets a DINOv2 whole-image embedding stored as
-# a raw float32 .bin sidecar under <project>/image_embeddings/. The
-# /dataset-stats endpoint folds them into a PCA projection + near-
-# duplicate flags + a 0-100 health score. Embeddings are computed
-# fire-and-forget on /imports/raw, and the stats endpoint backfills
-# anything missing on demand.
+# Whole-image DINOv2 embeddings for dataset stats: raw float32 .bin files
+# under <project>/image_embeddings/, computed after upload and backfilled on demand.
 
 def _image_embeddings_dir(project_id: str) -> "Path":
     return project_dir(project_id) / "image_embeddings"
@@ -8303,10 +5398,8 @@ def _image_embedding_path(project_id: str, import_id: str) -> "Path":
 
 
 def _compute_and_store_image_embedding(project_id: str, import_id: str, raw_bytes: bytes) -> bool:
-    """Embed one imported image and write the resulting float32 vector
-    to its sidecar. Returns True when bytes landed on disk. No-op
-    when DINOv2 isn't loaded yet - the stats endpoint retries on
-    demand if the sidecar is missing."""
+    """Embed one image and write its float32 vector. True when written;
+    False when DINOv2 is not loaded."""
     try:
         import v2_dinov2 as _v2d
         if not _v2d.is_loaded():
@@ -8318,8 +5411,7 @@ def _compute_and_store_image_embedding(project_id: str, import_id: str, raw_byte
         out_dir = _image_embeddings_dir(project_id)
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = _image_embedding_path(project_id, import_id)
-        # Write atomically - write to temp + rename so a half-baked
-        # file never gets read by a concurrent stats request.
+        # Atomic, so a concurrent reader never sees a partial file.
         tmp = store.tmp_path(out_path)
         tmp.write_bytes(vec.astype("float32", copy=False).tobytes())
         store.replace(tmp, out_path)
@@ -8330,9 +5422,7 @@ def _compute_and_store_image_embedding(project_id: str, import_id: str, raw_byte
 
 
 def _load_image_embedding(project_id: str, import_id: str) -> "np.ndarray | None":
-    """Read an import's embedding sidecar back into a (D,) float32
-    numpy array. Returns None when the file's missing or unreadable -
-    the caller treats missing == needs backfill."""
+    """An import's embedding as a (D,) float32 array, or None when missing or unreadable."""
     p = _image_embedding_path(project_id, import_id)
     if not p.exists():
         return None
@@ -8347,10 +5437,7 @@ def _load_image_embedding(project_id: str, import_id: str) -> "np.ndarray | None
 
 
 def _backfill_missing_embeddings(project_id: str, imports: list[dict], limit: int = 32) -> int:
-    """Compute embeddings for up to `limit` imports that don't yet
-    have a sidecar. Called from the stats endpoint when the user
-    opens the card on a project whose embeddings predate this
-    feature. Returns the count actually written."""
+    """Embed up to `limit` imports that have none; returns how many were written."""
     proj = project_dir(project_id)
     n = 0
     for imp in imports:
@@ -8376,26 +5463,16 @@ def _backfill_missing_embeddings(project_id: str, imports: list[dict], limit: in
 
 
 def _pca_project_2d(vectors: "np.ndarray") -> "list[list[float]]":
-    """PCA → first two principal components for the 2-D variation
-    plot. Vectors are L2-normalised on disk so we centre and SVD
-    directly. Returns a list of [x, y] floats matching the input
-    row order. Falls back to zeros on degenerate inputs (< 2 rows,
-    NaNs, etc.)."""
+    """[x, y] on the first two principal components per row, each axis
+    scaled to [-1, 1]. Zeros for fewer than 2 rows or on failure."""
     import numpy as _np
     if vectors is None or len(vectors) < 2:
         return [[0.0, 0.0]] * (0 if vectors is None else len(vectors))
     try:
         X = vectors.astype(_np.float32, copy=False)
         X = X - X.mean(axis=0, keepdims=True)
-        # Thin SVD - full_matrices=False so we get just the
-        # min(N, D) singular values without paying for the full
-        # right-singular-vector matrix.
         U, S, Vt = _np.linalg.svd(X, full_matrices=False)
-        # Project onto first 2 PCs and scale to a [-1, 1]-ish range
-        # so the FE can render without computing extents itself.
         pc = U[:, :2] * S[:2]
-        # Normalise per-axis so the scatter fills the plot regardless
-        # of feature variance. Guard against zero-variance axes.
         max_abs = _np.maximum(_np.abs(pc).max(axis=0), 1e-6)
         norm = pc / max_abs
         return [[float(x), float(y)] for x, y in norm]
@@ -8405,21 +5482,14 @@ def _pca_project_2d(vectors: "np.ndarray") -> "list[list[float]]":
 
 
 def _near_duplicate_pairs(vectors: "np.ndarray", ids: list[str], threshold: float = 0.95) -> list[tuple[str, str, float]]:
-    """Pairs of import IDs whose cosine similarity exceeds `threshold`.
-    Vectors are already L2-normalised so cosine == dot product.
-    Limits the count to avoid blowing up on extreme duplicate clusters
-    (a 100-image set with all duplicates would otherwise return ~5000
-    pairs)."""
-    import numpy as _np
+    """Up to 200 pairs of import IDs with cosine similarity at least
+    `threshold`. The vectors are L2-normalised, so cosine is the dot product."""
     pairs: list[tuple[str, str, float]] = []
     if vectors is None or len(vectors) < 2:
         return pairs
     try:
-        # Full pairwise cosine matrix is fine up to a few thousand
-        # images (1000² × 4 bytes = 4 MB).
         sims = vectors @ vectors.T
         n = len(vectors)
-        # Walk the upper triangle.
         for i in range(n):
             row = sims[i]
             for j in range(i + 1, n):
@@ -8435,36 +5505,19 @@ def _near_duplicate_pairs(vectors: "np.ndarray", ids: list[str], threshold: floa
 
 
 def _compute_dataset_stats_v2(project_id: str, lite: bool = False) -> dict:
-    """Build the dataset-stats payload for /api/v2/projects/{id}/dataset-stats.
+    """Dataset-stats payload. lite skips the embeddings, PCA, near-duplicate
+    pass and the uniqueness factor.
 
-    Two modes:
-      - lite=False (default): counts + label distribution + per-image
-        embedding load + PCA + near-duplicate detection + 4-factor health
-        blend. Used by the dataset stats card's full expand state.
-      - lite=True: counts + label distribution + per-image augmentation
-        dir scan, but skips the embedding load, PCA solve, near-duplicate
-        pass and uniqueness sub-score. ~10-100× faster on big projects.
-        The FE fetches this first to paint the summary row, then upgrades
-        to the full payload in the background.
-
-    Health score is a 0-100 blend of four sub-scores in non-lite:
-      - Label balance  : 1 - normalised stddev of per-label counts
-      - Coverage       : % imports with at least one detection
-      - Confidence     : 1 - (unsure detections / total detections)
-      - Uniqueness     : 1 - (images flagged near-dup / total imports)
-    Lite drops the uniqueness sub-score (which needs embeddings) and
-    re-weights the remaining three to 1/3 each so the badge still has
-    a meaningful number while the full payload is loading.
+    Health is 0..100 from factors in [0, 1]:
+      balance     1 - coefficient of variation of per-label counts
+      coverage    imports with a detection or marked background / imports
+      confidence  1 - unsure detections / detections
+      uniqueness  1 - near-duplicate images / imports
     """
     import numpy as _np
-    # Read-only pass over the manifest; skip the deepcopy. The lite
-    # branch (which is what runs on every project open) walks imports
-    # to tally counts, so this is the hottest read path for big
-    # projects.
+    # Read only, so copy=False.
     manifest = load_manifest(project_id, False) or {}
     imports = manifest.get("imports") or []
-    # Label distribution across the dataset's CURRENT annotation state
-    # (editedBoxes wins when present, otherwise kept detections).
     label_counts: dict[str, int] = {}
     n_detections = 0
     n_unsure = 0
@@ -8472,11 +5525,8 @@ def _compute_dataset_stats_v2(project_id: str, lite: bool = False) -> dict:
     n_background = 0
     aug_count = 0
     for imp in imports:
-        # An explicit empty editedBoxes (user cleared all boxes, with
-        # editedBoxesSet) means zero boxes - don't fall back to the auto
-        # detections, or the counts + label distribution resurrect the
-        # deleted boxes. An empty editedBoxes WITHOUT the flag is a legacy
-        # upload seed and still falls back.
+        # Edited boxes win, an explicit empty edit included; an empty list
+        # without editedBoxesSet falls back to the detections.
         edited = imp.get("editedBoxes")
         if isinstance(edited, list) and (edited or imp.get("editedBoxesSet")):
             dets = edited
@@ -8487,18 +5537,11 @@ def _compute_dataset_stats_v2(project_id: str, lite: bool = False) -> dict:
         if dets:
             n_with_dets += 1
         elif imp.get("background"):
-            n_background += 1  # checked, with nothing in it: annotated too
+            n_background += 1  # checked and empty: counts as annotated
         for d in dets:
             if not isinstance(d, dict):
                 continue
-            # Cover both naming conventions + both detection sources.
-            # editedBoxes carry `label`; auto detections carry
-            # `pred_label` (or `gd_label` while the resolver hasn't
-            # committed). The FE-converted camelCase variants land
-            # here too if a future codepath persists them by
-            # mistake. Take the first non-empty string in priority
-            # order so we don't miss a label that's only set on one
-            # of the fallbacks.
+            # The first non-empty label key.
             lab = (
                 str(d.get("label") or "").strip()
                 or str(d.get("predLabel") or "").strip()
@@ -8516,10 +5559,6 @@ def _compute_dataset_stats_v2(project_id: str, lite: bool = False) -> dict:
     embed_ids: list[str] = []
     embed_vecs: list[_np.ndarray] = []
     if not lite:
-        # Backfill missing embeddings (cheap if everything's already on
-        # disk, ~30 ms/image when DINOv2 needs to fill a gap). Skipped
-        # in lite mode - the variation plot + uniqueness signal don't
-        # apply there.
         _backfill_missing_embeddings(project_id, imports, limit=32)
 
         for imp in imports:
@@ -8539,9 +5578,7 @@ def _compute_dataset_stats_v2(project_id: str, lite: bool = False) -> dict:
         mat = _np.stack(embed_vecs, axis=0)
         proj = _pca_project_2d(mat)
         coord_by_id = dict(zip(embed_ids, proj))
-        # Deterministic RNG keyed by project id so augmentation
-        # scatter is stable across re-fetches (no jitter on every
-        # refresh) but varies between projects.
+        # Jitter seeded per project.
         rng = _np.random.default_rng(abs(hash(project_id)) & 0xFFFFFFFF)
         for imp in imports:
             iid = imp.get("id")
@@ -8570,18 +5607,8 @@ def _compute_dataset_stats_v2(project_id: str, lite: bool = False) -> dict:
                 "label": primary_lab,
                 "n_detections": len(kept),
             })
-            # Augmentations: each generated copy gets a point at the
-            # source image's PCA coord with a small Gaussian offset
-            # so they cluster softly around the parent. Cheaper than
-            # embedding every augmentation JPEG (would scale poorly)
-            # and visually accurate - augmentations sit near their
-            # source in feature space by construction.
-            #
-            # Source of truth is the augmentations directory on disk
-            # rather than the manifest's n_augmentations counter,
-            # because the counter can lag (job partially completed,
-            # crash mid-run, or a manual file drop). Scan the dir
-            # and emit one point per JPEG/PNG found.
+            # One point per augmentation file, jittered around its source.
+            # The directory is read because n_augmentations can lag.
             aug_files: list[str] = []
             try:
                 aug_subdir = _augmentations_dir(project_id, iid)
@@ -8603,10 +5630,7 @@ def _compute_dataset_stats_v2(project_id: str, lite: bool = False) -> dict:
                         "label": primary_lab,
                     })
         dup_pairs = _near_duplicate_pairs(mat, embed_ids, threshold=0.95)
-        # Filter out pairs that the user has explicitly ignored via the
-        # dedupe review modal - once they confirm "these aren't
-        # duplicates", we stop counting them and stop reporting them
-        # to the stats card.
+        # Pairs with an ignored member are not counted.
         ignored = set(manifest.get("ignored_near_dups") or [])
         for a, b, _ in dup_pairs:
             if a in ignored or b in ignored:
@@ -8615,9 +5639,7 @@ def _compute_dataset_stats_v2(project_id: str, lite: bool = False) -> dict:
             near_dup_ids.add(b)
 
     total_imports = len(imports)
-    # Health sub-scores - each in [0, 1]. Coverage handles the empty-
-    # dataset case (zero divisions) by returning a neutral 1.0 so the
-    # score isn't permanently anchored at 0.
+    # An empty dataset scores 1.0 on each factor.
     if total_imports == 0:
         score_coverage = 1.0
         score_balance = 1.0
@@ -8628,26 +5650,16 @@ def _compute_dataset_stats_v2(project_id: str, lite: bool = False) -> dict:
         if label_counts:
             counts = _np.array(list(label_counts.values()), dtype=_np.float32)
             if counts.sum() > 0 and len(counts) > 1:
-                # Coefficient of variation (stddev / mean) clamped to [0,1].
+                # Coefficient of variation, clamped to [0, 1].
                 cv = float(counts.std() / max(counts.mean(), 1e-6))
                 score_balance = max(0.0, 1.0 - min(cv, 1.0))
             else:
-                # One label or no labels - trivially balanced.
                 score_balance = 1.0
         else:
-            score_balance = 0.5  # no labels yet, neutral
+            score_balance = 0.5  # no labels yet
         score_confidence = 1.0 - (n_unsure / max(n_detections, 1))
         score_uniqueness = 1.0 - (len(near_dup_ids) / max(total_imports, 1))
-    # Weighted blend → 0..100. Uniqueness carries the heaviest
-    # contribution (40 %) because a dataset packed with near-
-    # duplicate images is the single biggest health-risk: the model
-    # learns the duplicate's particular framing rather than the
-    # underlying concept. Coverage / balance / confidence each carry
-    # 20 % so a well-labelled, balanced dataset still rates well
-    # without near-perfect uniqueness. In lite mode the uniqueness
-    # signal isn't available (no embeddings) so we redistribute its
-    # weight across the remaining three sub-scores - the badge is
-    # still meaningful while the FE waits for the full payload.
+    # Lite has no uniqueness factor and weighs the other three equally.
     if lite:
         health = int(round(
             score_balance * 33.34
@@ -8695,27 +5707,11 @@ def _compute_dataset_stats_v2(project_id: str, lite: bool = False) -> dict:
     }
 
 
-@app.get(
-    "/api/v2/projects/{project_id}/dataset-stats",
-    response_class=ORJSONResponse,
-    dependencies=[Depends(require_project_read_access)],
-)
+@app.get("/api/v2/projects/{project_id}/dataset-stats", response_class=FastJSONResponse)
 async def v2_dataset_stats(project_id: str, lite: bool = False):
-    """Aggregate dataset metrics + 2-D variation plot + near-duplicate
-    flags + 0-100 health score. Used by the project page's stats
-    card.
-
-    `lite=true` skips the embedding load + PCA solve + near-duplicate
-    pass. Counts, label distribution and a 3-factor health score
-    return in milliseconds; the FE fetches the full payload after the
-    summary row has painted. The full call's embeddings are read
-    from disk sidecars, with backfill for any missing - sub-second for
-    typical dataset sizes but multi-second on a 900-image first-touch.
-
-    Wrapped in asyncio.to_thread so the FastAPI event loop stays
-    responsive while either mode's sync work runs."""
+    """Dataset counts, labels, variation plot and health score; lite=true skips the embeddings."""
     if not project_dir(project_id).exists():
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     disk_mtime = _manifest_disk_mtime(project_id)
     name = "dataset-stats-lite" if lite else "dataset-stats"
     cached, fresh = _payload_cache_get_swr(project_id, name, disk_mtime)
@@ -8727,13 +5723,7 @@ async def v2_dataset_stats(project_id: str, lite: bool = False):
             lambda: _persist_dataset_stats(project_id, lite),
         ))
         return cached
-    # No in-memory cache. Try the on-disk sidecar so cold starts /
-    # process restarts don't pay the recompute cost. Allow-stale: if
-    # the sidecar exists at all, serve it immediately and kick the
-    # recompute in the background. The user sees the previous batch's
-    # numbers while the new ones bake. Without this the first request
-    # after every manifest write paid the full 2 s compute and the FE
-    # had to wait through the spinner.
+    # Else the on-disk sidecar, served even when stale while a rebuild runs.
     disk_payload, fresh = await asyncio.to_thread(
         _read_dataset_stats_sidecar, project_id, lite, disk_mtime,
     )
@@ -8751,9 +5741,7 @@ async def v2_dataset_stats(project_id: str, lite: bool = False):
 
 
 def _stats_sidecar_path(project_id: str, lite: bool) -> Path:
-    """Where the precomputed dataset-stats payload lives. Separate
-    files for the lite + full variants so they invalidate independently
-    of each other."""
+    """Stored dataset-stats payload; lite and full have separate files."""
     name = "dataset_stats_lite.json" if lite else "dataset_stats.json"
     return project_dir(project_id) / name
 
@@ -8761,10 +5749,7 @@ def _stats_sidecar_path(project_id: str, lite: bool) -> Path:
 def _read_dataset_stats_sidecar(
     project_id: str, lite: bool, manifest_mtime: float
 ) -> tuple[dict | None, bool]:
-    """Return (payload, fresh). The payload comes back regardless of
-    freshness so the caller can serve a stale snapshot immediately
-    and kick a background recompute - better than making the user
-    wait several seconds for the first request after a manifest write."""
+    """(payload, fresh). A stale payload is still returned."""
     p = _stats_sidecar_path(project_id, lite)
     if not p.exists():
         return None, False
@@ -8779,31 +5764,18 @@ def _read_dataset_stats_sidecar(
 
 
 def _persist_dataset_stats(project_id: str, lite: bool) -> dict:
-    """Compute the stats payload + write it to disk so the next process
-    start / cold cache hit serves instantly from the sidecar. Errors on
-    the write side don't bubble - the in-memory cache still has the
-    payload, and the next request will retry the disk write."""
+    """Compute the stats payload and write its sidecar. A failed write is logged, not raised."""
+    stamp = _manifest_mtime_ns(project_id)
     payload = _compute_dataset_stats_v2(project_id, lite)
     try:
-        p = _stats_sidecar_path(project_id, lite)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        # Write atomically - temp file + rename so a crash mid-write
-        # can't leave half a stats file on disk that the next read
-        # would then parse-fail on.
-        tmp = store.tmp_path(p)
-        if _orjson is not None:
-            tmp.write_bytes(_orjson.dumps(payload))
-        else:
-            tmp.write_text(json.dumps(payload))
-        store.replace(tmp, p)
+        _write_sidecar(_stats_sidecar_path(project_id, lite), payload, stamp)
     except Exception as e:
         print(f"[stats-sidecar] write failed for {project_id}: {e}")
     return payload
 
 
 def _resolve_n_copies(per_image_mode: str, g: "torch.Generator") -> int:
-    """Map the FE perImage state (off / 1 / 2 / 3 / random) to a
-    concrete copy count for one image."""
+    """Copies for one image: off, a count up to 8, or random 1..3."""
     if per_image_mode in ("off", "0"):
         return 0
     if per_image_mode == "random":
@@ -8814,14 +5786,10 @@ def _resolve_n_copies(per_image_mode: str, g: "torch.Generator") -> int:
         return 1
 
 
-def _aug_should_apply(frequency: str, copy_idx: int, total: int, g: "torch.Generator") -> bool:
-    """`all` → every copy gets the aug; `random` → roughly half.
-    Driven through the generator so reruns are reproducible."""
-    if total <= 0:
-        return False
+def _aug_should_apply(frequency: str, g: "torch.Generator") -> bool:
+    """Whether a copy gets the augmentation: always for "all", about half for "random"."""
     if frequency == "all":
         return True
-    # random - flip a coin per copy
     return bool(torch.rand(1, generator=g).item() > 0.5)
 
 
@@ -8830,7 +5798,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
     saving each generated copy as a JPEG under augmentations/."""
     proj = project_dir(job.project)
     if not proj.exists():
-        raise RuntimeError("project not found")
+        raise RuntimeError("dataset not found")
     manifest = load_manifest(job.project) or {}
     imports = manifest.get("imports") or []
     if not imports:
@@ -8838,19 +5806,15 @@ async def _run_augment_generate_job(job, emit, cancel_event):
     cfg = (job.params or {}).get("config") or {}
     per_image_mode = str((job.params or {}).get("perImageMode") or "1")
     if per_image_mode in ("off", "0"):
-        raise RuntimeError("perImage is off - nothing to generate")
+        raise RuntimeError("augmentations per image is off; nothing to generate")
 
-    # Optional scope filter. The auto-augment hooks pass a list of
-    # import_ids so a regen triggered by labelling 1 image doesn't
-    # re-augment the other 940. Empty list means "nothing to do" so
-    # we exit cleanly rather than falling through to all imports
-    # (which is what the user explicitly didn't want here).
+    # targetImportIds limits the run; an empty list does nothing.
     raw_targets = (job.params or {}).get("targetImportIds")
     if raw_targets is not None:
         target_set = {str(t) for t in raw_targets if t}
         if not target_set:
             await emit("progress", {"index": 0, "total": 0, "image": "", "phase": "augmenting"})
-            print(f"[augment_generate] {job.project}: empty target list - nothing to augment")
+            print(f"[augment_generate] {job.project}: no images to augment")
             return
         imports = [imp for imp in imports if imp.get("id") in target_set]
         if not imports:
@@ -8866,7 +5830,6 @@ async def _run_augment_generate_job(job, emit, cancel_event):
     occ = cfg.get("occlusion") or {}
     dist = cfg.get("distortion") or {}
 
-    # Snap each augmentation's enabled state + frequency + params.
     cam_enabled = bool(cam.get("enabled"))
     cam_freq = str(cam.get("frequency") or "all")
     cam_params = {
@@ -8875,8 +5838,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
         "cd": float(cam.get("colourDistortion") or 0),
         "ca": float(cam.get("chromaticAberration") or 0),
         "bd": float(cam.get("bitDepth") or 0),
-        # Newer dials - same 0..10 scale. Older configs that
-        # predate these keys default to 0 (identity).
+        # A missing key is 0, the identity.
         "ld": float(cam.get("lensDistortion") or 0),
         "px": float(cam.get("pixelation") or 0),
         "lr": float(cam.get("lowResolution") or 0),
@@ -8885,8 +5847,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
     occ_random_block = (occ.get("randomBlock") or {})
     occ_block_enabled = bool(occ.get("enabled")) and bool(occ_random_block.get("enabled"))
     occ_block_freq = str(occ_random_block.get("frequency") or "all")
-    # Clamp to 40% - matches the slider cap; older saved configs that
-    # carried higher values get pulled down to the new ceiling.
+    # The slider's 40% cap.
     occ_block_size = max(0.0, min(40.0, float(occ_random_block.get("size") or 0)))
 
     dist_pw = (dist.get("perspectiveWarp") or {})
@@ -8897,9 +5858,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
     dist_pw_strength = float(dist_pw.get("strength") or 0)
     dist_sr_enabled = bool(dist.get("enabled")) and bool(dist_sr.get("enabled"))
     dist_sr_freq = str(dist_sr.get("frequency") or "all")
-    # Scale range clamped to 0.7..1.3 - matches the slider bounds and
-    # pulls older saved configs back into the new band before they
-    # drive the augmentation kernel.
+    # The slider's 0.7..1.3 scale range.
     dist_sr = {
         "smin": max(0.7, min(1.3, float(dist_sr.get("scaleMin") or 1.0))),
         "smax": max(0.7, min(1.3, float(dist_sr.get("scaleMax") or 1.0))),
@@ -8928,14 +5887,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
 
     job.n_images = len(imports)
     device = _aug_device()
-    # Estimated total augmentations the run will produce, used to
-    # drive the FE progress bar by augmentations-saved rather than
-    # images-processed. Per-image counts come from _resolve_n_copies:
-    #   "1"/"2"/"3" → exact, so total is precise
-    #   "random"    → 1-3 inclusive, so the average ~2 is a good
-    #                 estimate (we cap the displayed index at the
-    #                 total so a slight under-estimate doesn't push
-    #                 the progress past 100 %).
+    # Expected copies, for the progress total; random counts as 2.
     def _estimate_per_image() -> int:
         m = (per_image_mode or "").strip().lower()
         if m == "random":
@@ -8945,11 +5897,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
         except (TypeError, ValueError):
             return 1
     estimated_total_augmentations = len(imports) * _estimate_per_image()
-    # Warm CUDA in the augment thread BEFORE the loop starts so the
-    # first image doesn't pay the context-init cost. Also re-confirm
-    # the device choice - if torch.cuda.is_available() lied at module-
-    # load time (cuda lazily initialising), this is our chance to
-    # catch it and at least surface the fact in the logs.
+    # Initialise the device in the augment thread before the loop.
     def _warm_cuda_in_thread():
         try:
             if device.type == "cuda":
@@ -8965,13 +5913,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
         await loop_for_warm.run_in_executor(_AUG_EXECUTOR, _warm_cuda_in_thread)
     except Exception:
         pass
-    # Surface progress with index=0/total up-front so the FE's poll
-    # sees the total immediately and shows the bar at 0/N rather
-    # than stuck on "starting…" until the first image completes (on
-    # a 941-image dataset that's a 1-2 s wait the user can see).
-    # `total` is the ESTIMATED augmentation count, not the image
-    # count - the user's progress card must always read in
-    # augmentations, never falling back to images.
+    # total counts augmentations, not images.
     job.progress = {
         "index": 0,
         "total": estimated_total_augmentations,
@@ -8979,14 +5921,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
         "phase": "augmenting",
     }
 
-    # SYNCHRONOUS per-image body. Lifted out of the for-loop and
-    # called via asyncio.to_thread so the event loop stays free
-    # while torch + PIL + JPEG-save are running. Without this the
-    # runner monopolised the loop for the full duration of every
-    # image (~0.5-2 s of dense compute) - every other handler
-    # (image fetches, /api/projects poll, click-to-detect) was
-    # queued behind it. The user reported "the server completely
-    # blocks while augmenting".
+    # Synchronous; runs off the event loop.
     def _augment_one_image(i: int, imp: dict) -> int:
         import_id = imp.get("id")
         filename = imp.get("filename")
@@ -8994,7 +5929,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
             return 0
         src_path = proj / "images" / filename
         if not src_path.exists():
-            print(f"[augment_generate] src missing for {filename} ({import_id}) - skipping")
+            print(f"[augment_generate] src missing for {filename} ({import_id}), skipped")
             return 0
         out_dir = aug_root / import_id
         if out_dir.exists():
@@ -9015,10 +5950,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
                 im = ImageOps.exif_transpose(im).convert("RGB")
                 src_W, src_H = im.size
                 longest = max(src_W, src_H)
-                # Resize on the way in so the working tensor never
-                # exceeds 1024 px longest edge - matches the upload
-                # ceiling so we don't bloat the dataset with an
-                # augmentation that's bigger than its source.
+                # Worked at most 1024 px on the long edge.
                 if longest > 1024:
                     scale = 1024.0 / longest
                     im = im.resize((int(src_W * scale), int(src_H * scale)), PILImage.LANCZOS)
@@ -9031,15 +5963,14 @@ async def _run_augment_generate_job(job, emit, cancel_event):
         except Exception as e:
             print(f"[augment_generate] load failed for {filename}: {e}")
             return 0
-        # Respect an explicit "user cleared all boxes" (editedBoxes == []
-        # with editedBoxesSet) instead of falling through to the original
-        # auto-detections, which would resurrect the deleted boxes into
-        # the augmented copies + export.
+        # Edited boxes once edited (an explicit empty edit means none), else
+        # the detections the labeller did not reject, as exports read them.
         edited = imp.get("editedBoxes")
         if isinstance(edited, list) and (edited or imp.get("editedBoxesSet")):
             dets = edited
         else:
-            dets = imp.get("detections") or []
+            dets = [d for d in imp.get("detections") or []
+                    if not (isinstance(d, dict) and d.get("rejected"))]
         prepared_dets: list[dict] = []
         for d in dets:
             if not isinstance(d, dict):
@@ -9058,9 +5989,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
                     ]
                     if len(scaled) >= 3:
                         polys_work.append(scaled)
-            # Every box shape the dataset holds: hand-drawn and imported
-            # boxes are x0/y0/x1/y1, auto-labels `box`. Reading only the
-            # latter shipped edited images' copies with no labels at all.
+            # Hand-drawn and imported boxes are x0/y0/x1/y1; auto labels use `box`.
             xyxy = _box_xyxy(d)
             box_work: list[float] = []
             if xyxy is not None:
@@ -9080,20 +6009,19 @@ async def _run_augment_generate_job(job, emit, cancel_event):
                 try:
                     out = base
                     cur_matrix: "list[list[float]] | None" = None
-                    # The camera's lens distortion bends the picture after
-                    # the matrices above: the annotations follow it too.
+                    # Lens distortion applies after the matrices; annotations follow it.
                     lens: "tuple[int, int, float] | None" = None
-                    if dom_bg_enabled and bg_paths and dets and _aug_should_apply(dom_bg_freq, k, n_copies, g_k):
+                    if dom_bg_enabled and bg_paths and dets and _aug_should_apply(dom_bg_freq, g_k):
                         out = _aug_apply_background_randomisation(out, dets, bg_paths, sx, sy, seed_k)
-                    if occ_block_enabled and dets and _aug_should_apply(occ_block_freq, k, n_copies, g_k):
+                    if occ_block_enabled and dets and _aug_should_apply(occ_block_freq, g_k):
                         out = _aug_apply_block_occlusion(out, dets, occ_block_size, sx, sy, seed_k)
-                    if dist_pw_enabled and _aug_should_apply(dist_pw_freq, k, n_copies, g_k):
+                    if dist_pw_enabled and _aug_should_apply(dist_pw_freq, g_k):
                         pairs = _perspective_corner_pairs(dist_pw_strength, work_W, work_H, seed_k)
                         if pairs is not None:
                             H_mat = _solve_homography(*pairs)
                             cur_matrix = H_mat if cur_matrix is None else _matmul_3x3(H_mat, cur_matrix)
                         out = _aug_apply_perspective_warp(out, dist_pw_strength, seed_k)
-                    if dist_sr_enabled and _aug_should_apply(dist_sr_freq, k, n_copies, g_k):
+                    if dist_sr_enabled and _aug_should_apply(dist_sr_freq, g_k):
                         sr_params = _scale_rotation_sample_params(
                             dist_sr["smin"], dist_sr["smax"], dist_sr["rmin"], dist_sr["rmax"], seed_k,
                         )
@@ -9102,11 +6030,11 @@ async def _run_augment_generate_job(job, emit, cancel_event):
                             SR_mat = _scale_rotation_matrix(s_val, r_val, work_W, work_H)
                             cur_matrix = SR_mat if cur_matrix is None else _matmul_3x3(SR_mat, cur_matrix)
                         out = _aug_apply_scale_rotation(out, dist_sr["smin"], dist_sr["smax"], dist_sr["rmin"], dist_sr["rmax"], seed_k)
-                    if dist_hs_enabled and _aug_should_apply(dist_hs_freq, k, n_copies, g_k):
+                    if dist_hs_enabled and _aug_should_apply(dist_hs_freq, g_k):
                         out = _aug_apply_hue_shift(out, dist_hs_strength, seed_k)
-                    if dom_lt_enabled and _aug_should_apply(dom_lt_freq, k, n_copies, g_k):
+                    if dom_lt_enabled and _aug_should_apply(dom_lt_freq, g_k):
                         out = _aug_apply_lighting(out, dom_lt_strength, seed_k)
-                    if cam_enabled and _aug_should_apply(cam_freq, k, n_copies, g_k):
+                    if cam_enabled and _aug_should_apply(cam_freq, g_k):
                         out = _aug_apply(
                             out,
                             cam_params["mb"], cam_params["ns"], cam_params["cd"],
@@ -9121,8 +6049,7 @@ async def _run_augment_generate_job(job, emit, cancel_event):
                             lens = (work_W, work_H, _lens_k1(cam_params["ld"]))
                     copy_annos: list[dict] = []
                     for det in prepared_dets:
-                        # Clipped to the picture: a warp can carry part of
-                        # an object, or all of it, out of the frame.
+                        # Clipped: a warp can move an object partly or wholly out of frame.
                         warped_polys = [q for q in (_clip_poly_to(p, work_W, work_H)
                                                     for p in _apply_matrix_to_polys(det["polys"], cur_matrix, lens)) if q]
                         moved = _apply_matrix_to_box(det["box"], cur_matrix, lens) if det["box"] else None
@@ -9141,19 +6068,11 @@ async def _run_augment_generate_job(job, emit, cancel_event):
                     anno_per_copy[f"{k:02d}.jpg"] = copy_annos
                     out_np = (out.clamp(0.0, 1.0) * 255.0 + 0.5).byte().permute(1, 2, 0).cpu().numpy()
                     out_path = out_dir / f"{k:02d}.jpg"
-                    # Encode → check file size → re-encode at lower
-                    # quality if we're over the 500 KB budget. Mirrors
-                    # the FE's resizeForUpload ladder so augmentations
-                    # never balloon past the same cap source uploads
-                    # are held to. The 1024 px resize above means most
-                    # images already land well under 500 KB at
-                    # quality=85; the ladder only kicks in on busy
-                    # scenes where the entropy is high enough to
-                    # need it.
+                    # Lower JPEG quality until the file is at most 500 KB.
                     out_im = PILImage.fromarray(out_np, mode="RGB")
                     target_bytes = 500 * 1024
                     quality_ladder = (85, 72, 60, 48, 36, 28)
-                    saved_ok = False
+                    # The quality-28 file stays even when over the target.
                     for q in quality_ladder:
                         out_im.save(
                             out_path, format="JPEG", quality=q,
@@ -9161,18 +6080,9 @@ async def _run_augment_generate_job(job, emit, cancel_event):
                         )
                         try:
                             if out_path.stat().st_size <= target_bytes:
-                                saved_ok = True
                                 break
                         except OSError:
-                            saved_ok = True
                             break
-                    # If we exhausted the ladder and still oversize,
-                    # last attempt sits on disk at quality=28 - the
-                    # cap is a target, not a hard wall, so we don't
-                    # drop the augmentation entirely just because it's
-                    # 520 KB.
-                    if not saved_ok:
-                        pass
                     saved_count += 1
                 except Exception as e:
                     print(f"[augment_generate] copy {k} for {filename} ({import_id}) failed: {e}")
@@ -9181,13 +6091,10 @@ async def _run_augment_generate_job(job, emit, cancel_event):
                 "width": int(work_W),
                 "height": int(work_H),
                 "copies": anno_per_copy,
+                "source": aug_source.source_boxes(imp),
             }).encode("utf-8"))
         except Exception as e:
             print(f"[augment_generate] annotations.json write for {import_id} failed: {e}")
-        # Surface progress on the job object so the FE's
-        # /augment/job/active poll picks it up - assigning here means
-        # the counter updates in the same tick the thread finishes,
-        # no extra await round-trip needed.
         job.progress = {
             "index": i + 1,
             "total": len(imports),
@@ -9196,24 +6103,14 @@ async def _run_augment_generate_job(job, emit, cancel_event):
         }
         return saved_count
 
-    # Manifest writes are batched - load+rewrite of a multi-MB
-    # manifest 941 times was the real reason the runner was slow.
-    # Per-image we just stash {id: saved_count} in this dict; every
-    # 25 images (and on completion) we flush all stashed updates in
-    # one manifest read/write.
+    # n_augmentations updates, flushed every FLUSH_EVERY images and at the end.
     n_aug_updates: dict[str, int] = {}
     FLUSH_EVERY = 25
-    # Running total of augmentations saved so far. Drives the FE
-    # progress bar - user asked for the counter to track per-
-    # augmentation rather than per-image since a single image can
-    # produce 1-3 augmented copies.
+    # Augmentations saved so far, the progress index.
     saved_total = 0
 
     def _flush_n_aug_updates_sync() -> None:
-        # Sync inner - caller holds the per-project manifest write
-        # lock so this read-modify-write can't race a concurrent
-        # label_charlie save (now that multiple runners can be in
-        # flight at once).
+        # The caller holds the project's write lock.
         if not n_aug_updates:
             return
         try:
@@ -9238,47 +6135,23 @@ async def _run_augment_generate_job(job, emit, cancel_event):
     for i, imp in enumerate(imports):
         if cancel_event.is_set():
             break
-        # Per-image body runs on the dedicated _AUG_EXECUTOR thread
-        # (one worker, persistent for the process lifetime). CUDA
-        # context + caching allocator stay warm across iterations
-        # instead of being re-initialised by a different worker each
-        # time. Event loop is free for other handlers throughout.
-        #
-        # state["gpu_lock"] is the same asyncio.Lock every
-        # interactive GPU endpoint (segment_box, click-to-detect,
-        # classify_box, …) already holds while it works. Acquiring
-        # it PER IMAGE rather than for the whole job means a click-
-        # to-detect or add-box request from any other user / tab
-        # slides in between augment images - at most one image's
-        # latency (~0.5-2 s) of wait instead of the full run.
+        # The GPU lock is taken per image, so interactive requests run between images.
         async with state["gpu_lock"]:
             saved = await loop.run_in_executor(_AUG_EXECUTOR, _augment_one_image, i, imp)
         iid = imp.get("id")
         if iid:
             n_aug_updates[iid] = saved
         saved_total += saved
-        # Overwrite the index/total set inside _augment_one_image so
-        # the FE sees augmentation count, not image count.
+        # Counted in augmentations, not images.
         job.progress = {
             "index": min(saved_total, estimated_total_augmentations),
             "total": max(saved_total, estimated_total_augmentations),
             "image": imp.get("filename"),
             "phase": "augmenting",
         }
-        # Batch flush every FLUSH_EVERY images so the FE's dataset
-        # gallery picks up the per-tile augmentation icon
-        # progressively, but we don't pay the multi-MB manifest
-        # rewrite cost on every single image.
         if (i + 1) % FLUSH_EVERY == 0:
             await _flush_n_aug_updates()
-        try:
-            filename = imp.get("filename")
-            await emit("progress", {"i": i + 1, "n": len(imports), "image": filename})
-        except Exception:
-            pass
         await asyncio.sleep(0)
-    # Final flush so any tail-end updates (e.g. images 925-941 when
-    # FLUSH_EVERY=25 lands on 925) land before the job finishes.
     if n_aug_updates:
         await _flush_n_aug_updates()
 
@@ -9288,8 +6161,8 @@ class AugmentGenerateIn(BaseModel):
     config: dict = {}
 
 
-# Jobs that rewrite a dataset's labels. Two at once (or a rename during
-# one) overwrote each other: each flushes from its own snapshot.
+# Jobs that rewrite a dataset's labels. Each flushes from its own snapshot,
+# so two at once, or a rename during one, would overwrite each other.
 _LABEL_WRITERS = ("label_charlie", "label_model", "purge_label")
 
 
@@ -9309,30 +6182,24 @@ def _augment_job_active(project_id: str) -> bool:
                and j.status in ("queued", "running") for j in state["jobs"].jobs.values())
 
 
-@app.post(
-    "/api/v2/projects/{project_id}/augment/generate",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.post("/api/v2/projects/{project_id}/augment/generate")
 async def v2_augment_generate(project_id: str, payload: AugmentGenerateIn):
     if not project_dir(project_id).exists():
-        raise HTTPException(404, "project not found")
-    # Clearing or regenerating wipes the folder a running generation is
-    # still writing into; its copies would come back after the clear.
+        raise HTTPException(404, "dataset not found")
+    # Clearing or regenerating wipes the folder a running generation writes into,
+    # and the copies a training run reads every epoch.
     if _augment_job_active(project_id):
         raise HTTPException(409, "augmentations are being generated; wait for that run or cancel it")
+    if _train_job_active(project_id):
+        raise HTTPException(409, "a training run is using this dataset's augmentations; change them when it finishes")
     manifest = load_manifest(project_id) or {}
     imports = manifest.get("imports") or []
     if not imports:
         raise HTTPException(400, "no dataset images to augment")
-    # perImageMode "off" is the explicit clear path: wipe all
-    # augmentations + reset n_augmentations, persist the config,
-    # then skip scheduling a generate job. Lets the user "drop
-    # everything" without needing to flip per-image to a count and
-    # back. Returns job_id: null so the FE knows no job kicked off.
+    # perImageMode off only clears; no job is scheduled and job_id is None.
     clear_only = payload.perImageMode in ("off", "0")
 
-    # Persist the config + perImageMode to the manifest so the
-    # AugmentationsCard can restore the user's settings on revisit.
+    # Saved so the UI can restore the settings.
     cfg_to_save = {
         "perImageMode": str(payload.perImageMode),
         "config": payload.config or {},
@@ -9345,16 +6212,10 @@ async def v2_augment_generate(project_id: str, payload: AugmentGenerateIn):
             m["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             save_manifest(project_id, m)
     except Exception:
-        # Not fatal - the job still runs with the payload's config.
+        # The job runs with the payload's config regardless.
         pass
 
-    # Wipe any prior augmentation outputs so the user always sees
-    # exactly the set produced by the current settings (the Update
-    # button is a "delete & regenerate" action, not "append"). Reset
-    # every import's n_augmentations to 0 in the same write so the
-    # gallery icon doesn't keep showing for tiles the new run may
-    # skip (load error, no detections + only detection-dependent
-    # augmentations enabled, etc.).
+    # Earlier outputs are removed and n_augmentations reset.
     aug_root = _augmentations_dir(project_id)
     if aug_root.exists():
         try:
@@ -9377,61 +6238,41 @@ async def v2_augment_generate(project_id: str, payload: AugmentGenerateIn):
         print(f"[augment_generate] reset n_augmentations failed: {e}")
 
     if clear_only:
-        # No job to schedule. Manifest is already wiped + reset
-        # above; FE polls /overview and sees n_augmentations: 0.
-        # Invalidate the payload caches + sidecars so the very next
-        # /overview + /dataset-stats fetch from the FE reads from
-        # the post-wipe truth instead of serving stale SWR while
-        # the background rebuild lands.
         _invalidate_project_payloads(project_id)
         return {"job_id": None, "cleared": True}
 
     job = state["jobs"].schedule(
         "augment_generate", project_id,
         {"perImageMode": str(payload.perImageMode), "config": payload.config or {}},
-        "system",
         n_images=len(imports),
     )
     state["jobs"].start_worker()
     return {"job_id": job.id}
 
 
-@app.get(
-    "/api/v2/projects/{project_id}/augment/config",
-    dependencies=[Depends(require_project_read_access)],
-)
+@app.get("/api/v2/projects/{project_id}/augment/config")
 async def v2_augment_get_config(project_id: str):
-    """Return the augmentation config last persisted by Update. Empty
-    dict when nothing's saved yet so the FE can default-fill its
-    state. No auth gate beyond project existence - config is non-
-    sensitive and matches the visibility of the rest of /overview."""
+    """The saved augmentation config, or {}."""
     if not project_dir(project_id).exists():
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     manifest = load_manifest(project_id) or {}
     return manifest.get("augmentationConfig") or {}
 
 
-@app.get(
-    "/api/v2/projects/{project_id}/augment/job/active",
-    dependencies=[Depends(require_project_read_access)],
-)
+@app.get("/api/v2/projects/{project_id}/augment/job/active")
 async def v2_augment_active_job(project_id: str):
     """Active augment_generate job for this project, or null."""
     if not project_dir(project_id).exists():
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     for j in state["jobs"].jobs.values():
         if j.project == project_id and j.kind == "augment_generate" and j.status in ("running", "queued"):
             return j.to_public()
     return None
 
 
-@app.get(
-    "/api/v2/projects/{project_id}/augmentations/{import_id}",
-    dependencies=[Depends(require_project_read_access)],
-)
+@app.get("/api/v2/projects/{project_id}/augmentations/{import_id}")
 async def v2_augment_list(project_id: str, import_id: str):
-    """List the generated augmentation filenames for one dataset
-    import. Empty list when nothing's been generated yet."""
+    """Augmentation filenames for one import."""
     if not project_dir(project_id).exists():
         raise HTTPException(404)
     safe = "".join(c for c in import_id if c.isalnum())
@@ -9446,13 +6287,9 @@ async def v2_augment_list(project_id: str, import_id: str):
     return {"items": items}
 
 
-@app.get(
-    "/api/v2/projects/{project_id}/augmentations/{import_id}/annotations",
-    dependencies=[Depends(require_project_read_access)],
-)
+@app.get("/api/v2/projects/{project_id}/augmentations/{import_id}/annotations")
 async def v2_augment_annotations(project_id: str, import_id: str):
-    """Per-import warped polygon JSON written by augment_generate.
-    Empty when no augmentations exist for the import yet."""
+    """The import's annotations.json from augment_generate, or an empty one."""
     if not project_dir(project_id).exists():
         raise HTTPException(404)
     safe_id = "".join(c for c in import_id if c.isalnum())
@@ -9468,15 +6305,11 @@ async def v2_augment_annotations(project_id: str, import_id: str):
         return {"width": 0, "height": 0, "copies": {}}
 
 
-@app.get(
-    "/api/v2/projects/{project_id}/augmentations/{import_id}/{filename}",
-    dependencies=[Depends(require_project_read_access)],
-)
+@app.get("/api/v2/projects/{project_id}/augmentations/{import_id}/{filename}")
 async def v2_augment_serve(project_id: str, import_id: str, filename: str):
     if not project_dir(project_id).exists():
         raise HTTPException(404)
     safe_id = "".join(c for c in import_id if c.isalnum())
-    # Filename sanitised - alphanumeric, dot, dash, underscore.
     safe_fn = "".join(c for c in filename if c.isalnum() or c in "._-")
     if not safe_id or not safe_fn:
         raise HTTPException(400)
@@ -9491,17 +6324,14 @@ async def v2_augment_serve(project_id: str, import_id: str, filename: str):
     return await _serve_cached_image(project_id, f"augmentations/{safe_id}", safe_fn, path)
 
 
-@app.delete(
-    "/api/v2/projects/{project_id}/augmentations/{import_id}/{filename}",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.delete("/api/v2/projects/{project_id}/augmentations/{import_id}/{filename}")
 async def v2_augment_delete(project_id: str, import_id: str, filename: str):
-    """Delete one generated augmentation JPEG and prune its entry
-    from the per-import annotations.json. Decrements the import's
-    n_augmentations so the dataset gallery icon hides when the last
-    copy is removed. Idempotent - re-deleting a missing file 200s."""
+    """Delete one augmentation and its annotations entry, updating
+    n_augmentations. Deleting a missing file succeeds."""
     if not project_dir(project_id).exists():
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
+    if _train_job_active(project_id):
+        raise HTTPException(409, "a training run is using this dataset's augmentations; change them when it finishes")
     safe_id = "".join(c for c in import_id if c.isalnum())
     safe_fn = "".join(c for c in filename if c.isalnum() or c in "._-")
     if not safe_id or not safe_fn:
@@ -9518,8 +6348,6 @@ async def v2_augment_delete(project_id: str, import_id: str, filename: str):
         except Exception as e:
             print(f"[augment_delete] unlink failed {path}: {e}")
 
-    # Drop the corresponding entry from annotations.json so the FE
-    # hover overlay stops referencing a file that no longer exists.
     anno_path = aug_dir / "annotations.json"
     if anno_path.exists():
         try:
@@ -9534,10 +6362,7 @@ async def v2_augment_delete(project_id: str, import_id: str, filename: str):
         except Exception as e:
             print(f"[augment_delete] annotations prune failed {anno_path}: {e}")
 
-    # Count remaining augmentations on disk and update the manifest
-    # so the dataset gallery icon reflects the new total. We count
-    # actual JPEGs (not annotations.json) so a stale annotations
-    # file can't keep the icon alive.
+    # Counted from the image files on disk.
     remaining = 0
     if aug_dir.exists():
         for f in aug_dir.iterdir():
@@ -9557,32 +6382,12 @@ async def v2_augment_delete(project_id: str, import_id: str, filename: str):
     return {"ok": True, "remaining": remaining}
 
 
-@app.get(
-    "/api/v2/projects/{project_id}/augment/overlays/{overlay_id}",
-    dependencies=[Depends(require_project_read_access)],
-)
-async def v2_augment_overlay_get(project_id: str, overlay_id: str):
-    """Serve a previously-segmented overlay PNG for FE preview /
-    drag-around UIs. Path-traversal guarded."""
-    safe = "".join(c for c in overlay_id if c.isalnum())
-    if not safe:
-        raise HTTPException(400, "bad overlay id")
-    path = _overlays_dir(project_id) / f"{safe}.png"
-    if not path.exists():
-        raise HTTPException(404, "overlay not found")
-    return await _serve_cached_image(project_id, "augment_overlays", f"{safe}.png", path)
-
-
-@app.post(
-    "/api/v2/projects/{project_id}/augment/preview",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.post("/api/v2/projects/{project_id}/augment/preview")
 async def v2_augment_preview(project_id: str, payload: AugmentPreviewIn):
-    """Render a single image through the camera/sensor augmentation
-    chain and return JPEG bytes. Pure compute - nothing persisted."""
+    """Render one image through the augmentation chain as a JPEG; nothing is stored."""
     proj = project_dir(project_id)
     if not proj.exists():
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     src = (payload.source or "").lower()
     if src not in ("reference", "import"):
         raise HTTPException(400, "source must be 'reference' or 'import'")
@@ -9595,9 +6400,7 @@ async def v2_augment_preview(project_id: str, payload: AugmentPreviewIn):
     if not target.exists():
         raise HTTPException(404, "image not found")
 
-    # Clamp slider values defensively; the FE should already keep
-    # them in 0..10 but a malformed request shouldn't crash the
-    # kernel.
+    # Dials clamped to 0..10.
     def _c(v: float) -> float:
         try:
             return max(0.0, min(10.0, float(v)))
@@ -9624,49 +6427,14 @@ async def v2_augment_preview(project_id: str, payload: AugmentPreviewIn):
     except (TypeError, ValueError):
         sr_smin = sr_smax = 1.0
         sr_rmin = sr_rmax = 0.0
-    # Block size is a percentage of segmentation coverage (0..40),
-    # not a 0..10 strength like the other dials, so it has its own
-    # clamp range. Capped at 40 because anything above starts
-    # obscuring more object than is useful for training.
+    # Block size is a coverage percentage, 0..40.
     try:
         bs = max(0.0, min(40.0, float(payload.block_size)))
     except (TypeError, ValueError):
         bs = 0.0
     show_outlines = bool(payload.show_outlines)
-    # Object overlay (fraction 0..1; 0 = off). Requires source =
-    # "import" since references don't carry detections to constrain
-    # placement against.
-    try:
-        overlay_scale = max(0.0, min(1.0, float(payload.overlay_scale)))
-    except (TypeError, ValueError):
-        overlay_scale = 0.0
-    # Build the list of overlay paths to composite. Accepts both
-    # the new overlay_ids list and the legacy single overlay_id.
-    overlay_paths: list["Path"] = []
-    if overlay_scale > 0 and src == "import":
-        raw_ids: list[str] = []
-        if payload.overlay_ids:
-            raw_ids.extend([x for x in payload.overlay_ids if isinstance(x, str)])
-        if payload.overlay_id:
-            raw_ids.append(payload.overlay_id)
-        seen: set[str] = set()
-        for oid in raw_ids:
-            oid = (oid or "").strip()
-            if not oid or oid in seen:
-                continue
-            safe = "".join(c for c in oid if c.isalnum())
-            if not safe:
-                continue
-            cand = _overlays_dir(project_id) / f"{safe}.png"
-            if cand.exists():
-                overlay_paths.append(cand)
-                seen.add(oid)
-            # Cap at 3 overlays to match the FE slot count.
-            if len(overlay_paths) >= 3:
-                break
 
-    # Background randomisation paths. Only honoured for source =
-    # "import" (refs don't carry detections to define foreground).
+    # Imports only: the detections define the foreground.
     background_paths: list["Path"] = []
     if src == "import" and payload.background_ids:
         for bid in payload.background_ids:
@@ -9680,28 +6448,14 @@ async def v2_augment_preview(project_id: str, payload: AugmentPreviewIn):
                 background_paths.append(cand)
     seed = int(payload.seed) if payload.seed is not None else 1234
 
-    # Detections for the named import - loaded whenever the
-    # request touches a feature that needs the polygon set.
-    # Previously this was gated on bs > 0 / show_outlines only,
-    # which meant a background-only preview (no occlusion, no
-    # outlines) couldn't build the foreground mask and the
-    # background composite silently fell through to the original
-    # image.
-    needs_detections = (
-        bs > 0
-        or show_outlines
-        or bool(payload.background_ids)
-        or bool(payload.overlay_ids)
-        or bool(payload.overlay_id)
-    )
+    # Loaded whenever a feature needs the polygons.
+    needs_detections = bs > 0 or show_outlines or bool(payload.background_ids)
     detections: list[dict] = []
     if src == "import" and needs_detections:
         manifest = load_manifest(project_id) or {}
         for imp in (manifest.get("imports") or []):
             if imp.get("filename") == payload.filename:
-                # Honour an explicit "cleared all boxes" (editedBoxes == []
-                # with editedBoxesSet) instead of resurrecting the auto
-                # detections into the augmentation preview.
+                # An explicit empty edit means no boxes.
                 edited = imp.get("editedBoxes")
                 if isinstance(edited, list) and (edited or imp.get("editedBoxesSet")):
                     detections = edited
@@ -9709,8 +6463,6 @@ async def v2_augment_preview(project_id: str, payload: AugmentPreviewIn):
                     detections = imp.get("detections") or []
                 break
 
-    # Run the whole pipeline off the request thread so the
-    # FastAPI event loop isn't blocked by the GPU work.
     loop = asyncio.get_running_loop()
 
     def _run() -> bytes:
@@ -9718,17 +6470,13 @@ async def v2_augment_preview(project_id: str, payload: AugmentPreviewIn):
         with PILImage.open(target) as im:
             im = ImageOps.exif_transpose(im).convert("RGB")
             src_W, src_H = im.size
-            # Cap the working size so the kernel is cheap; long edge
-            # 720 px is plenty for a preview pane and keeps render
-            # under ~30 ms on a modest GPU.
+            # Rendered at most 720 px on the long edge.
             longest = max(src_W, src_H)
             if longest > 720:
                 scale = 720.0 / longest
                 im = im.resize((int(src_W * scale), int(src_H * scale)), PILImage.LANCZOS)
         work_W, work_H = im.size
-        # Pixel-space scale for detection coordinates - they live in
-        # the SOURCE image's coordinate system; we shrink them to the
-        # working preview size.
+        # Detections are in source pixels.
         sx = work_W / float(src_W) if src_W > 0 else 1.0
         sy = work_H / float(src_H) if src_H > 0 else 1.0
 
@@ -9736,46 +6484,24 @@ async def v2_augment_preview(project_id: str, payload: AugmentPreviewIn):
         import numpy as _np
         arr = _np.asarray(im, dtype=_np.float32) / 255.0  # HWC
         t = torch.from_numpy(arr).permute(2, 0, 1).contiguous().to(device)
-        # Wrap the whole GPU pipeline in no_grad - block occlusion,
-        # overlays, and outline rendering all create tensors that
-        # otherwise carry an autograd graph for nothing. ~10–30 ms
-        # saved on big detection sets.
         with torch.no_grad():
-            # Pipeline order - every step builds on the previous so a
-            # later distortion can't misalign with a polygon mask
-            # baked in earlier. Detection-dependent ops (background
-            # swap, block occlusion, object overlay, outlines) run
-            # FIRST while the canvas is still in original
-            # coordinates; geometric warps then deform the composite;
-            # colour shifts + the sensor chain land on top.
+            # Detection-based steps run first, in source coordinates; the
+            # warps, colour and the sensor chain follow.
             out = t
             if background_paths and detections:
                 out = _aug_apply_background_randomisation(out, detections, background_paths, sx, sy, seed)
             if bs > 0 and detections:
                 out = _aug_apply_block_occlusion(out, detections, bs, sx, sy, seed)
-            if overlay_paths and overlay_scale > 0:
-                occupied: "torch.Tensor | None" = None
-                for k, op_path in enumerate(overlay_paths):
-                    out, occupied = _aug_apply_object_overlay(
-                        out, op_path, overlay_scale, detections, sx, sy,
-                        seed ^ (0xAB1 * (k + 1)), occupied,
-                    )
             if show_outlines and detections:
                 out = _aug_apply_segmentation_outlines(out, detections, sx, sy)
-            # Geometric warps deform the composite. Polygon-based
-            # ops happened above so we don't have to re-warp masks.
             if pw > 0:
                 out = _aug_apply_perspective_warp(out, pw, seed)
             if not (sr_smin == 1.0 and sr_smax == 1.0 and sr_rmin == 0.0 and sr_rmax == 0.0):
                 out = _aug_apply_scale_rotation(out, sr_smin, sr_smax, sr_rmin, sr_rmax, seed)
-            # Colour shifts - applied on the warped composite so
-            # they land on the deformed geometry.
             if hu > 0:
                 out = _aug_apply_hue_shift(out, hu, seed)
             if lt > 0:
                 out = _aug_apply_lighting(out, lt, seed)
-            # Sensor chain - final step, the camera "captures" the
-            # scene that's already been edited above.
             out = _aug_apply(
                 out, mb, ns, cd, ca, bd, seed,
                 lens_distortion=ld,
@@ -9798,33 +6524,19 @@ async def v2_augment_preview(project_id: str, payload: AugmentPreviewIn):
     )
 
 
-@app.get(
-    "/api/v2/projects/{project_id}/imports/{import_id}/labelled_preview",
-    dependencies=[Depends(require_project_read_access)],
-)
+@app.get("/api/v2/projects/{project_id}/imports/{import_id}/labelled_preview")
 async def v2_serve_labelled_preview(project_id: str, import_id: str):
-    """Lazy-rendered annotated preview for a single import. ~600 px
-    on the long edge, JPEG, dim+blur background with the segmented
-    objects bright + per-label colour-tinted. Cached to disk under
-    `imports/<id>__lp_v1.jpg` so repeat reads are pure file serves.
-
-    Render-on-first-request keeps /imports/process snappy - we don't
-    block the user's drop-zone progress indicator on a PIL render
-    that the FE can pull lazily once it scrolls into view.
-    """
+    """Annotated preview of one import, about 600 px on the long edge,
+    rendered on first request and cached on disk."""
     proj = project_dir(project_id)
     if not proj.exists():
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     cached_path = _labelled_preview_path(project_id, import_id)
 
-    # Fast path - preview already on disk.
     if cached_path.exists():
         return await _serve_cached_image(project_id, "imports", cached_path.name, cached_path)
 
-    # O(1) lookup via the import index - avoids a full manifest deepcopy
-    # (200-500 ms on large projects) and an O(n) linear scan. Ensures
-    # the cache is warm first so the index is populated; copy=False is
-    # safe because we only read fields here, never mutate.
+    # Loading warms the cache; the import index then gives the entry.
     await asyncio.to_thread(load_manifest, project_id, False)
     with _MANIFEST_CACHE_LOCK:
         imp = _MANIFEST_IMPORT_INDEX.get(project_id, {}).get(import_id)
@@ -9837,80 +6549,52 @@ async def v2_serve_labelled_preview(project_id: str, import_id: str):
     if not src_path.exists():
         raise HTTPException(404, "source image missing on disk")
 
-    # Tags come from the manifest; read with copy=False (index warm after
-    # the to_thread call above, so this is just a dict lookup).
     with _MANIFEST_CACHE_LOCK:
         _cached_m = _MANIFEST_CACHE.get(project_id) or {}
     project_labels = list(_cached_m.get("tags") or [])
 
-    # Edited boxes (with masks) win over the raw GD detections - that
-    # mirrors what the user sees in the gallery thumb (kept boxes
-    # only). Falls back to detections when no edits have been made.
+    # Edited boxes win over detections.
     det_source = _preview_source(imp, imp.get("detections") or [])
 
     loop = asyncio.get_running_loop()
 
-    def _render() -> bytes:
+    def _render() -> None:
         with PILImage.open(src_path) as im:
             im = ImageOps.exif_transpose(im).convert("RGB")
             preview = _render_labelled_preview(im, det_source, project_labels)
         cached_path.parent.mkdir(parents=True, exist_ok=True)
-        # Write to a temp file then rename so concurrent requests
-        # never read a half-written JPEG. The suffix is unique per
-        # call (pid + uuid) so two parallel first-renders for the
-        # same import don't both write to the same tmp path and
-        # interleave bytes.
+        # A unique temp file, then a rename, so no reader sees a partial JPEG.
         tmp = cached_path.with_suffix(_unique_tmp_suffix())
         preview.save(tmp, format="JPEG", quality=72, optimize=True, progressive=True)
         store.replace(tmp, cached_path)
-        return cached_path.read_bytes()
 
-    # Per-(project, import) lock: only one render at a time, others
-    # wait and pick up the freshly-baked file. Without this, parallel
-    # first-requests both PIL-render the same image, double the GPU/CPU
-    # cost, and one's rename can clobber the other half-written.
+    # One render per import at a time; waiters reuse the result.
     lock = _thumb_render_lock(project_id, f"labelled_preview:{import_id}")
     async with lock:
-        # Re-check after acquiring - the previous holder may have
-        # done the render already.
         if cached_path.exists():
             return await _serve_cached_image(project_id, "imports", cached_path.name, cached_path)
         try:
             await loop.run_in_executor(None, _render)
         except Exception as e:
             print(f"[labelled-preview] render failed for {project_id}/{import_id}: {e}")
-            # Render failed - fall back to the original full-size image
-            # so the gallery isn't broken, just slower for this one entry.
+            # The original is served if rendering fails.
             return await _serve_cached_image(project_id, "imports", fn, src_path)
 
     return await _serve_cached_image(project_id, "imports", cached_path.name, cached_path)
 
 
-# A user-uploaded dataset cover (distinct from a cover picked from an existing
-# import/reference). Stored under a reserved local filename + R2 key and flagged
-# on the manifest with `cover_uploaded: true`, which short-circuits the
-# cover-thumb + summary logic so it survives image deletes (the cover-rescue
-# passes only touch `manifest["cover"]`, never this flag).
+# File name of an uploaded cover, marked by the manifest flag cover_uploaded.
+# Cover replacement on image deletes changes only manifest["cover"].
 UPLOADED_COVER_SENTINEL = "cover_upload.jpg"
 
 
-def _project_uploaded_cover_key(project_id: str) -> str:
-    return f"projects/{project_id}/cover_upload.jpg"
-
-
-@app.post(
-    "/api/projects/{project_id}/cover_upload",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.post("/api/projects/{project_id}/cover_upload")
 async def upload_project_cover(project_id: str, file: UploadFile = File(...)):
-    """Upload a custom cover image for a dataset. Re-encoded to a capped JPEG,
-    stored locally (so cover_thumb renders from it) + in R2 (durable), and
-    flagged on the manifest as an uploaded cover so it isn't treated as one of
-    the dataset's images and never gets rescued away on image deletes."""
+    """Upload a dataset cover, stored as a JPEG of at most 1600 px and flagged cover_uploaded."""
     proj = project_dir(project_id)
     if not proj.exists():
-        raise HTTPException(404, "project not found")
-    raw = await file.read()
+        raise HTTPException(404, "dataset not found")
+    raw = await _read_upload(file, "cover")
     if not raw:
         raise HTTPException(400, "empty file")
     try:
@@ -9929,26 +6613,18 @@ async def upload_project_cover(project_id: str, file: UploadFile = File(...)):
     except Exception:
         raise HTTPException(400, "could not read image")
     jpeg = buf.getvalue()
-    # Local source for cover_thumb's render path.
     try:
         (proj / UPLOADED_COVER_SENTINEL).write_bytes(jpeg)
     except Exception as e:
         print(f"[cover-upload] local write failed for {project_id}: {e}")
         raise HTTPException(500, "could not store cover")
-    # Durable copy in R2 so the cover survives a disk reset (cover_thumb
-    # restores it on read if the local file is gone).
-    if R2 is not None:
-        try:
-            R2.put_bytes(_project_uploaded_cover_key(project_id), jpeg, "image/jpeg")
-        except Exception as e:
-            print(f"[cover-upload] R2 put failed for {project_id}: {e}")
     write_lock = await _manifest_write_lock(project_id)
     async with write_lock:
         manifest = load_manifest(project_id)
         if not manifest:
-            raise HTTPException(404, "manifest not found")
+            raise HTTPException(404, "dataset not found")
         manifest["cover_uploaded"] = True
-        manifest["cover_blurhash"] = None  # re-derived (or skipped) on next read
+        manifest["cover_blurhash"] = None  # re-derived on next read
         manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         save_manifest(project_id, manifest)
     _invalidate_project_payloads(project_id)
@@ -9956,12 +6632,8 @@ async def upload_project_cover(project_id: str, file: UploadFile = File(...)):
 
 
 def _upscale_cover_if_small(im, floor: int):
-    """Enlarge a small cover so a full-width hero (or a retina card) never
-    browser-upscales a tiny source into a blocky mess. Cheap, CPU-only: LANCZOS
-    resample up to `floor` on the longest edge + a light unsharp mask to restore
-    crispness. It does NOT invent detail (that needs ML super-resolution) - it
-    just makes a small image read clean as a background behind a scrim/title.
-    No-op when the image already meets `floor`. Returns the (possibly new) image."""
+    """Enlarge a cover under `floor` px on the long edge, with LANCZOS and a
+    light unsharp mask. Returns the image."""
     from PIL import ImageFilter
     w, h = im.size
     longest = max(w, h)
@@ -9969,44 +6641,48 @@ def _upscale_cover_if_small(im, floor: int):
         return im
     scale = floor / float(longest)
     im = im.resize((max(1, round(w * scale)), max(1, round(h * scale))), PILImage.LANCZOS)
-    # Mild sharpening to counter the softness Lanczos enlargement introduces.
     return im.filter(ImageFilter.UnsharpMask(radius=1.2, percent=80, threshold=2))
 
 
-@app.get(
-    "/api/projects/{project_id}/cover_thumb",
-    dependencies=[Depends(require_project_read_access)],
-)
-async def serve_cover_thumb(project_id: str, w: int = 480, ai: int = 0):
-    """Lazy-rendered ~480 px thumbnail of the project cover. Used by
-    the workspace + community card grids so the first paint is small
-    bytes, not a full-resolution upload. Cached to
-    `<project>/cover_thumb_v1.jpg` and re-rendered when the source
-    cover file's mtime changes (cover swap, re-upload).
+def _cover_source(proj: Path, cover: str) -> Path | None:
+    """The cover's file: references/ first, then images/."""
+    return next((p for p in (proj / "references" / cover, proj / "images" / cover) if p.is_file()), None)
 
-    Works for both V1 (cover lives in imports/) and V2 (cover lives
-    in references/, occasionally imports/) projects - the cached
-    filename keeps the project_id only so a cover swap blows the same
-    cache entry away regardless of source subdir.
-    """
+
+async def _repair_missing_cover(project_id: str) -> str | None:
+    """Point a cover whose file is gone at an image, else a reference, that
+    exists on disk; returns the cover, or None when there is no picture."""
+    lock = await _manifest_write_lock(project_id)
+    async with lock:
+        m = load_manifest(project_id)
+        if not m:
+            return None
+        proj = project_dir(project_id)
+        cover = m.get("cover")
+        if cover and _cover_source(proj, cover):
+            return cover
+        names = [e.get("filename") for key in ("imports", "references") for e in m.get(key) or []
+                 if isinstance(e, dict) and e.get("filename") and e["filename"] == Path(e["filename"]).name]
+        new = next((n for n in names if _cover_source(proj, n)), None)
+        m["cover"] = new
+        m["cover_blurhash"] = None
+        save_manifest(project_id, m)
+        return new
+
+
+@app.get("/api/projects/{project_id}/cover_thumb")
+async def serve_cover_thumb(project_id: str, w: int = 480):
+    """Cover thumbnail `w` px on the long edge, 240..1600, cached on disk."""
     proj = project_dir(project_id)
     if not proj.exists():
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     manifest = load_manifest(project_id)
     if not manifest:
-        raise HTTPException(404, "manifest not found")
+        raise HTTPException(404, "dataset not found")
 
-    # Uploaded cover takes precedence over any picked import/reference and is
-    # served from its reserved local file (restored from R2 if the disk copy
-    # was lost).
+    # An uploaded cover wins.
     if manifest.get("cover_uploaded"):
         src_path = proj / UPLOADED_COVER_SENTINEL
-        if not src_path.exists() and R2 is not None:
-            try:
-                data = R2.get_bytes(_project_uploaded_cover_key(project_id))
-                src_path.write_bytes(data)
-            except Exception as e:
-                print(f"[cover-thumb] R2 restore failed for {project_id}: {e}")
         if not src_path.exists():
             raise HTTPException(404, "uploaded cover missing")
         cover = UPLOADED_COVER_SENTINEL
@@ -10017,47 +6693,26 @@ async def serve_cover_thumb(project_id: str, w: int = 480, ai: int = 0):
         if cover != Path(cover).name or cover in (".", ".."):
             raise HTTPException(404, "project has no cover")
 
-        # Try references first (V2), fall back to imports (V1 + early-V2
-        # cover-from-import flow). The first existing path wins.
-        candidates: list[Path] = [
-            proj / "references" / cover,
-            proj / "images" / cover,
-        ]
-        src_path = next((p for p in candidates if p.exists()), None)
+        src_path = _cover_source(proj, cover)
         if src_path is None:
-            raise HTTPException(404, "cover file missing on disk")
+            # A cover whose picture is gone moves to a picture that exists.
+            cover = await _repair_missing_cover(project_id)
+            src_path = _cover_source(proj, cover) if cover else None
+            if src_path is None:
+                raise HTTPException(404, "cover file missing on disk")
 
-    # Cache filename is keyed by an 8-char hash of the source filename
-    # so a cover swap (dedupe deleted the old cover and rescued in a
-    # different image, the user manually picked a new one, etc.) lands
-    # on a FRESH cache slot instead of trying to mtime-compare against
-    # the previous cover's bake. Without this key, the old thumb could
-    # serve indefinitely if its mtime happened to be later than the
-    # new src's mtime - which is exactly how the "cover went white
-    # after viewing a project" bug surfaced.
-    # Target longest-edge size. Cards request the default ~480 px; the dataset
-    # hero requests a larger variant (e.g. 1280) so the full-width banner stays
-    # crisp. Clamped so a crafted `w` can't trigger a giant render.
+    # Cards use 480 px; the dataset hero asks for more.
     target = max(240, min(1600, int(w or 480)))
-    # AI super-resolution (Real-ESRGAN on the GPU) for the hero, so a small cover
-    # gains real detail rather than a soft Lanczos enlarge. Only meaningful when
-    # enlarging; cached separately so the AI + plain variants don't clobber.
-    use_ai = bool(ai)
-    ai_tag = "_ai" if use_ai else ""
-    import hashlib
     name_hash = hashlib.sha1(cover.encode("utf-8")).hexdigest()[:8]
-    # Target (and AI flag) are part of the cache key so the 480 px card thumb,
-    # the 1280 px hero variant and the AI variant cache to separate files
-    # instead of clobbering each other.
-    cached_path = proj / f"cover_thumb_v2_{name_hash}_{target}{ai_tag}.jpg"
+    # Keyed by the cover's name and the size, so each size and each new cover
+    # gets its own file.
+    cached_path = proj / f"cover_thumb_v2_{name_hash}_{target}.jpg"
     try:
         src_mtime = src_path.stat().st_mtime
     except OSError:
         src_mtime = 0.0
 
-    # Re-render when the cached thumb is missing or older than the
-    # source - covers the cover re-upload case (same filename, fresher
-    # bytes).
+    # Re-rendered when missing or older than the source.
     needs_render = True
     if cached_path.exists():
         try:
@@ -10078,36 +6733,15 @@ async def serve_cover_thumb(project_id: str, w: int = 480, ai: int = 0):
                 if longest > target:
                     scale = target / longest
                     im = im.resize((int(W * scale), int(H * scale)), PILImage.LANCZOS)
-                elif use_ai and longest < target:
-                    # GPU super-resolution: real detail for the full-width hero
-                    # instead of a soft enlarge. Falls back to the Lanczos floor
-                    # on any failure (no GPU / weights / load error).
-                    try:
-                        import upscale as _ai_upscale
-                        im = _ai_upscale.upscale_to(im, target)
-                    except Exception as e:
-                        print(f"[cover-thumb] AI upscale failed for {project_id}: {e}; using Lanczos", flush=True)
-                        im = _upscale_cover_if_small(im, target)
                 else:
-                    # Source at/below target: floor small covers up to the target
-                    # (Lanczos + light sharpen) so the hero/card never browser-
-                    # upscales a tiny image. No-op at the exact size.
                     im = _upscale_cover_if_small(im, target)
             tmp = cached_path.with_suffix(_unique_tmp_suffix())
             im.save(tmp, format="JPEG", quality=78, optimize=True, progressive=True)
             store.replace(tmp, cached_path)
 
-        # Per-project render lock so two parallel first-requests don't
-        # both PIL-render the same cover and stomp on each other's
-        # tmp file. The lock also serialises within a single worker -
-        # the second request just waits for the first's bake to land,
-        # then reads the cached file. Across workers the same project
-        # could still double-render once at startup, but tmp suffixes
-        # are now unique so the renames don't corrupt each other.
-        lock = _thumb_render_lock(project_id, f"cover_thumb_{target}{ai_tag}")
+        # One render per variant at a time; waiters reuse the result.
+        lock = _thumb_render_lock(project_id, f"cover_thumb_{target}")
         async with lock:
-            # Re-check after acquiring the lock; another waiter may
-            # have completed the render in the meantime.
             try:
                 cached_mtime = cached_path.stat().st_mtime if cached_path.exists() else 0.0
             except OSError:
@@ -10117,41 +6751,10 @@ async def serve_cover_thumb(project_id: str, w: int = 480, ai: int = 0):
                     await loop.run_in_executor(None, _render)
                 except Exception as e:
                     print(f"[cover-thumb] render failed for {project_id}: {e}")
-                    # Fall back to the original cover so the card still
-                    # renders, just at the original size.
+                    # The original cover is served if rendering fails.
                     return await _serve_cached_image(project_id, src_path.parent.name, cover, src_path)
 
     return await _serve_cached_image(project_id, "cover_thumb", cached_path.name, cached_path)
-
-
-def _load_reference_image_pil(raw: bytes, project_id: str, filename: str):
-    """Decode a reference image for the V2 reference editor. Prefer the
-    uploaded bytes (new, unsaved references); otherwise load the saved file
-    from disk by project_id + filename. Existing projects can't always
-    re-upload the CDN-hosted bytes from the browser (the 'stale reference
-    image' 400), so the disk fallback keeps click-to-detect / segment /
-    classify working on saved references. Path-traversal guarded like
-    v2_serve_reference."""
-    if raw:
-        try:
-            return _open_upright(raw)
-        except Exception as e:
-            raise HTTPException(400, f"could not decode image: {e}")
-    fn = (filename or "").strip()
-    if project_id and fn:
-        refs_root = (project_dir(project_id) / "references").resolve()
-        target = (refs_root / fn).resolve()
-        try:
-            target.relative_to(refs_root)
-        except ValueError:
-            raise HTTPException(403, "forbidden")
-        if not target.exists():
-            raise HTTPException(404, f"reference image not found: {fn}")
-        try:
-            return _open_upright(target)
-        except Exception as e:
-            raise HTTPException(400, f"could not decode reference image: {e}")
-    raise HTTPException(400, "no image bytes and no project_id/filename to load from disk")
 
 
 @app.post("/api/v2/references/embed_crops")
@@ -10160,26 +6763,12 @@ async def v2_embed_crops(
     boxes: str = Form(...),
     return_crop: bool = Form(False),
 ):
-    """Crop each box from `image` and embed each crop with DINOv2-base
-    (matches `detect_and_crop.py` in the repo root). Embeddings are
-    computed in a single batched forward pass - typical 5–20× speedup
-    vs encoding one box at a time.
-
-    Request: multipart with the image file + a JSON list of
-    `[x0, y0, x1, y1]` boxes in pixel coords. `return_crop=true` to
-    also receive a base64 JPEG of each crop (default off - the V2
-    reference flow doesn't display crops anymore, so encoding them
-    is wasted CPU + bandwidth).
-
-    Response: `{ crops: [{ index, box, embedding: float[D], crop_jpg_b64? }] }`
-    where D is the active DINOv2 model's hidden size (1024 for large,
-    768 for base - see v2_dinov2.EMBEDDING_DIM).
-    """
+    """Embed each box crop with DINOv2. `boxes` is a JSON list of [x0, y0, x1, y1] in pixels."""
     import base64
     import v2_dinov2
 
     if not v2_dinov2.is_loaded():
-        raise HTTPException(503, "DINOv2-base not loaded yet (still warming up)")
+        raise HTTPException(503, "the image encoder is still loading; try again shortly")
 
     try:
         bbs = json.loads(boxes)
@@ -10188,7 +6777,7 @@ async def v2_embed_crops(
     except Exception as e:
         raise HTTPException(400, f"invalid boxes payload: {e}")
 
-    raw = await image.read()
+    raw = await _read_upload(image)
     if not raw:
         raise HTTPException(400, "empty image upload")
     try:
@@ -10200,9 +6789,6 @@ async def v2_embed_crops(
     loop = asyncio.get_running_loop()
 
     def _run():
-        # First pass: validate boxes + crop, collecting both the raw
-        # crops (for optional JPEG return) and the squared crops (for
-        # the model). Skipped boxes get logged but not embedded.
         kept_indices: list[int] = []
         kept_xyxy: list[tuple[int, int, int, int]] = []
         kept_crops: list[PILImage.Image] = []
@@ -10210,14 +6796,14 @@ async def v2_embed_crops(
         for i, bb in enumerate(bbs):
             try:
                 if not (isinstance(bb, list) and len(bb) == 4):
-                    print(f"[v2-embed] box {i} skipped - not a 4-tuple: {bb!r}")
+                    print(f"[v2-embed] box {i} skipped, not a 4-tuple: {bb!r}")
                     continue
                 x0 = max(0, int(round(float(bb[0]))))
                 y0 = max(0, int(round(float(bb[1]))))
                 x1 = min(W, int(round(float(bb[2]))))
                 y1 = min(H, int(round(float(bb[3]))))
                 if x1 - x0 < 4 or y1 - y0 < 4:
-                    print(f"[v2-embed] box {i} skipped - too small after clip: {bb!r} → ({x0},{y0},{x1},{y1}) on {W}x{H}")
+                    print(f"[v2-embed] box {i} skipped, too small after clipping: {bb!r} -> ({x0},{y0},{x1},{y1}) on {W}x{H}")
                     continue
                 crop = image_pil.crop((x0, y0, x1, y1))
                 square = v2_dinov2.center_square_crop(crop)
@@ -10228,7 +6814,6 @@ async def v2_embed_crops(
             except Exception as e:
                 print(f"[v2-embed] box {i} crop failed: {e}")
 
-        # Single batched forward pass for ALL boxes in this image.
         vecs = v2_dinov2.encode_images_batch(kept_squares) if kept_squares else None
 
         results: list[dict] = []
@@ -10237,9 +6822,7 @@ async def v2_embed_crops(
                 "index": i,
                 "box": list(xyxy),
                 "embedding": [round(float(x), 6) for x in vecs[k].tolist()] if vecs is not None else [],
-                # Stamp the version so callers can persist it next to
-                # the embedding - centroid-build invalidates anything
-                # that doesn't match the current EMBED_VERSION.
+                # The centroid build re-encodes any other EMBED_VERSION.
                 "embed_version": v2_dinov2.EMBED_VERSION,
             }
             if return_crop:
@@ -10251,10 +6834,7 @@ async def v2_embed_crops(
         return results
 
     try:
-        # Interactive priority - embed_crops is fired by the
-        # references editor when the user drops in fresh boxes.
-        # Holding behind a background job would feel like the
-        # editor froze.
+        # The references editor waits on this call.
         async with state["gpu_lock"].interactive():
             crops = await loop.run_in_executor(None, _run)
     except Exception as exc:
@@ -10265,87 +6845,36 @@ async def v2_embed_crops(
     return {"width": W, "height": H, "crops": crops}
 
 
-# ─── V2 reference-centroid helpers ─────────────────────────────────────────────
-# The imports endpoint needs to decide each detection's final label
-# by comparing its DINOv2-base embedding against per-label centroids
-# of the project's reference images. These helpers load embeddings
-# from the manifest, lazily backfill any references that pre-date
-# embedding storage, and expose the centroids as a {label: vec} map.
+# Reference centroids: per-label embeddings of the reference boxes, which
+# detections are compared against to pick their label.
 
-# Cached result of _v2_load_or_backfill_reference_embeddings, keyed
-# by project_id. Value: (manifest_mtime, siglip_active, by_label_dino,
-# by_label_siglip). The function is on the hot path for every
-# interactive endpoint (click-to-detect, add-box,
-# segment_and_classify_box) and the labelling job's setup; on big
-# projects the iterate-all-refs + per-call deepcopy was the dominant
-# source of latency (200-500ms per call). Hit conditions are strict
-# (disk mtime + SigLIP loaded-state both match), so any real change
-# busts the cache.
-_V2_REFS_CACHE: dict[str, tuple[float, bool, dict, dict]] = {}
+# project_id -> (manifest_mtime, by_label_dino).
+_V2_REFS_CACHE: dict[str, tuple[float, dict]] = {}
 _V2_REFS_CACHE_LOCK = __import__("threading").Lock()
 
 
-def _v2_load_or_backfill_reference_embeddings(project_id: str) -> tuple[dict, dict, bool]:
-    """Walk the project's references and gather (label, embedding)
-    pairs for every annotated box, for BOTH encoders (DINOv2 and
-    SigLIP2). References missing an embedding for either encoder
-    (or carrying a stale-version one) get re-encoded inline; the
-    manifest is rewritten so the next call is a pure read.
-
-    Returns:
-        (by_label_dino, by_label_siglip, dirty)
-
-        by_label_dino   - {label_lower: list[np.ndarray]} of DINOv2 vecs
-        by_label_siglip - {label_lower: list[np.ndarray]} of SigLIP vecs
-                          (empty dict if SigLIP isn't loaded / disabled)
-        dirty           - whether the manifest was rewritten
-
-    Each detection ends up with up to two stored embeddings:
-      - "embedding" + "embed_version" (DINOv2 - legacy field name)
-      - "siglip_embedding" + "siglip_version" (SigLIP2)
-    so the resolver can score against either independently.
-    """
+def _v2_load_or_backfill_reference_embeddings(project_id: str) -> dict:
+    """Per-label DINOv2 embeddings of every reference box, {label_lower:
+    [np.ndarray]}, re-encoding missing or stale ones and saving them to the
+    manifest."""
     import numpy as _np
     import v2_dinov2 as _v2d
-    import v2_siglip as _v2s
-    # Steady-state fast path: the function's full body iterates every
-    # reference's every detection on every call, which on a 1000-image
-    # project with hundreds of refs was the dominant cost for click-
-    # to-detect / add-box. Cache the result by manifest mtime - any
-    # write to the manifest bumps mtime via save_manifest, busting the
-    # cache automatically. Siglip loaded-state is part of the key so
-    # the cache also self-recovers when the encoder warms up mid-
-    # session.
     disk_mtime = _manifest_disk_mtime(project_id)
-    siglip_active = _v2s.is_loaded()
     if disk_mtime > 0:
         with _V2_REFS_CACHE_LOCK:
             cached = _V2_REFS_CACHE.get(project_id)
-            if cached is not None:
-                cached_mtime, cached_siglip, cached_dino, cached_siglip_dict = cached
-                if cached_mtime == disk_mtime and cached_siglip == siglip_active:
-                    return cached_dino, cached_siglip_dict, False
-    # Cold path: load + iterate + backfill if needed. copy=False
-    # because we either (a) don't mutate the manifest (steady state),
-    # or (b) mutate and then save_manifest immediately, which re-
-    # seeds the cache with a fresh deepcopy. Saves another 200-500ms
-    # per cold call on the same big manifest.
+            if cached is not None and cached[0] == disk_mtime:
+                return cached[1]
+    # copy=False: the manifest is mutated only right before save_manifest.
     manifest = load_manifest(project_id, copy=False) or {}
     refs = manifest.get("references") or []
     by_label_dino: dict[str, list[_np.ndarray]] = {}
-    by_label_siglip: dict[str, list[_np.ndarray]] = {}
     dirty = False
     proj = project_dir(project_id)
     refs_dir = proj / "references"
 
-    siglip_active = _v2s.is_loaded()
-
-    # First pass: classify each detection as DINOv2-fresh / DINOv2-stale
-    # and SigLIP-fresh / SigLIP-stale. Fresh embeddings go straight
-    # into the by_label dicts. Stale or missing ones are queued for
-    # the backfill pass below - keyed by ref so we only decode each
-    # source image once even when both encoders need a refresh.
-    pending_by_ref: dict[int, list[tuple[int, str, list[float], list | None, bool, bool]]] = {}
+    # Stale or missing embeddings, queued per reference so each image is decoded once.
+    pending_by_ref: dict[int, list[tuple[int, str, list[float], list | None]]] = {}
     for ri, ref in enumerate(refs):
         for di, d in enumerate(ref.get("detections") or []):
             label = (d.get("label") or "").strip()
@@ -10353,7 +6882,6 @@ def _v2_load_or_backfill_reference_embeddings(project_id: str) -> tuple[dict, di
                 continue
             key = label.lower()
 
-            # DINOv2 freshness check.
             d_emb = d.get("embedding")
             d_emb_v = d.get("embed_version")
             d_fresh = (
@@ -10362,23 +6890,6 @@ def _v2_load_or_backfill_reference_embeddings(project_id: str) -> tuple[dict, di
             )
             if d_fresh:
                 by_label_dino.setdefault(key, []).append(_np.asarray(d_emb, dtype=_np.float32))
-
-            # SigLIP freshness check (only relevant when the encoder
-            # is loaded - otherwise we treat it as "fresh" so we
-            # don't queue pointless backfill work).
-            if siglip_active:
-                s_emb = d.get("siglip_embedding")
-                s_emb_v = d.get("siglip_version")
-                s_fresh = (
-                    isinstance(s_emb, list) and len(s_emb) > 0
-                    and s_emb_v == _v2s.EMBED_VERSION
-                )
-                if s_fresh:
-                    by_label_siglip.setdefault(key, []).append(_np.asarray(s_emb, dtype=_np.float32))
-            else:
-                s_fresh = True
-
-            if d_fresh and s_fresh:
                 continue
 
             box = d.get("box") or []
@@ -10389,16 +6900,12 @@ def _v2_load_or_backfill_reference_embeddings(project_id: str) -> tuple[dict, di
             if isinstance(m, dict):
                 mask_polys = m.get("polygons")
             pending_by_ref.setdefault(ri, []).append(
-                (di, key, [float(x) for x in box], mask_polys,
-                 not d_fresh, siglip_active and not s_fresh),
+                (di, key, [float(x) for x in box], mask_polys),
             )
 
     if pending_by_ref:
         if not _v2d.is_loaded():
-            # Not loaded yet - skip backfill, work with what we've
-            # already got. The next import after the model finishes
-            # warming will pick these up.
-            print("[v2-centroids] DINOv2 not loaded - backfill deferred")
+            print("[v2-centroids] DINOv2 not loaded; backfill deferred")
         else:
             for ri, items in pending_by_ref.items():
                 ref = refs[ri]
@@ -10415,8 +6922,8 @@ def _v2_load_or_backfill_reference_embeddings(project_id: str) -> tuple[dict, di
                     continue
                 W, H = image_pil.size
                 squares: list[PILImage.Image] = []
-                kept: list[tuple[int, str, bool, bool]] = []
-                for di, key, box, mask_polys, need_dino, need_siglip in items:
+                kept: list[tuple[int, str]] = []
+                for di, key, box, mask_polys in items:
                     x0 = max(0, int(round(box[0])))
                     y0 = max(0, int(round(box[1])))
                     x1 = min(W, int(round(box[2])))
@@ -10425,86 +6932,44 @@ def _v2_load_or_backfill_reference_embeddings(project_id: str) -> tuple[dict, di
                         continue
                     crop = _v2d.inpaint_bbox_crop(image_pil, (x0, y0, x1, y1), mask_polys)
                     squares.append(_v2d.center_square_crop(crop))
-                    kept.append((di, key, need_dino, need_siglip))
+                    kept.append((di, key))
                 if not squares:
                     continue
-                # DINOv2 batched re-encode for any detection that
-                # needed a refresh OR that needed SigLIP only - we
-                # also store the DINOv2 vector unconditionally since
-                # we already have the crop and it's cheap to embed.
                 d_vecs = _v2d.encode_images_batch(squares)
-                # SigLIP: only run when we have any need_siglip
-                # boxes AND the encoder is loaded.
-                s_vecs = None
-                if siglip_active and any(ns for *_, ns in kept):
-                    try:
-                        s_vecs = _v2s.encode_images_batch(squares)
-                    except Exception as e:
-                        print(f"[v2-centroids] siglip backfill failed: {e}")
-                        s_vecs = None
-                for k, (di, key, need_dino, need_siglip) in enumerate(kept):
-                    if need_dino:
-                        v = d_vecs[k]
-                        refs[ri]["detections"][di]["embedding"] = [round(float(x), 6) for x in v.tolist()]
-                        refs[ri]["detections"][di]["embed_version"] = _v2d.EMBED_VERSION
-                        by_label_dino.setdefault(key, []).append(_np.asarray(v, dtype=_np.float32))
-                        dirty = True
-                    if need_siglip and s_vecs is not None and k < s_vecs.shape[0]:
-                        sv = s_vecs[k]
-                        refs[ri]["detections"][di]["siglip_embedding"] = [round(float(x), 6) for x in sv.tolist()]
-                        refs[ri]["detections"][di]["siglip_version"] = _v2s.EMBED_VERSION
-                        by_label_siglip.setdefault(key, []).append(_np.asarray(sv, dtype=_np.float32))
-                        dirty = True
+                for k, (di, key) in enumerate(kept):
+                    v = d_vecs[k]
+                    refs[ri]["detections"][di]["embedding"] = [round(float(x), 6) for x in v.tolist()]
+                    refs[ri]["detections"][di]["embed_version"] = _v2d.EMBED_VERSION
+                    by_label_dino.setdefault(key, []).append(_np.asarray(v, dtype=_np.float32))
+                    dirty = True
                 print(
                     f"[v2-centroids] backfilled {len(kept)} embedding(s) for ref {ref.get('id')} "
-                    f"(dinov{_v2d.EMBED_VERSION}"
-                    + (f" + siglipv{_v2s.EMBED_VERSION}" if s_vecs is not None else "")
-                    + ")"
+                    f"(dinov{_v2d.EMBED_VERSION})"
                 )
 
     if dirty:
         manifest["references"] = refs
         save_manifest(project_id, manifest)
 
-    # Diagnostic: summarise what we ended up with so a "only one
-    # class scored" symptom in the FE popup is traceable to the
-    # actual ref-bucket counts. Also surface any detections that
-    # had blank labels - those are silently skipped above and could
-    # explain a missing class.
     blank_label_count = 0
     for ref in refs:
         for d in ref.get("detections") or []:
             if not (d.get("label") or "").strip():
                 blank_label_count += 1
     counts_dino = {k: len(v) for k, v in by_label_dino.items()}
-    counts_siglip = {k: len(v) for k, v in by_label_siglip.items()}
     print(
-        f"[v2-centroids] project={project_id} dino={counts_dino} siglip={counts_siglip}"
+        f"[v2-centroids] project={project_id} dino={counts_dino}"
         + (f" blank_label_dets={blank_label_count}" if blank_label_count else "")
     )
-    # Seed the cache. After a dirty save the disk mtime is bumped to a
-    # new value; cache against THAT so the next read returns straight
-    # from memory.
+    # The mtime after any save above.
     new_mtime = _manifest_disk_mtime(project_id)
     if new_mtime > 0:
         with _V2_REFS_CACHE_LOCK:
-            _V2_REFS_CACHE[project_id] = (new_mtime, siglip_active, by_label_dino, by_label_siglip)
-    return by_label_dino, by_label_siglip, dirty
+            _V2_REFS_CACHE[project_id] = (new_mtime, by_label_dino)
+    return by_label_dino
 
 
-# ─── V2 patch-level matching ──────────────────────────────────────────────────
-# DINOv2 patch tokens (1369 per crop at 518×518) carry strong
-# locality-aware features that the pooled patch_mean smears together.
-# When V2_PATCH_MATCH=on, the resolver swaps the pooled-cosine
-# scoring for per-patch matching: each query foreground patch finds
-# its nearest match across all reference foreground patches per
-# label, and the per-label score is the top-K mean of those
-# best matches. Discriminative patches (ear-tip texture, fur pattern)
-# vote loudly even when they're a small fraction of the crop.
-#
-# Storage: per-project NPZ at `projects/<id>/v2_patches_v8.npz`
-# keyed by `<ref_id>__<det_idx>__tokens` and `__fg`. Versioned
-# filename so EMBED_VERSION bumps invalidate cleanly.
+# Patch-level matching of detection crops against reference crops.
 
 _PATCH_STORE_VERSION = 8
 _PATCH_TOP_K_QUERY = int(os.environ.get("V2_PATCH_TOP_K", "10"))
@@ -10515,19 +6980,12 @@ def _v2_patch_store_path(project_id: str) -> Path:
 
 
 def _v2_patch_match_enabled() -> bool:
-    # Default ON. Patch-level matching produces materially wider
-    # margins on fine-grained pairs than pooled cosine, so it's the
-    # primary scoring path for the specific resolver. Set
-    # V2_PATCH_MATCH=off explicitly to fall back to pooled scoring
-    # (e.g. for A/B comparison or on hosts where the per-project
-    # NPZ store would be too large).
+    # When off, the specific resolver uses pooled-cosine scoring.
     return os.environ.get("V2_PATCH_MATCH", "on").lower() not in ("0", "off", "false")
 
 
 def _v2_load_patch_store(project_id: str) -> dict[str, "np.ndarray"]:
-    """Load the NPZ patch store for a project. Returns a flat dict
-    of `<ref_id>__<det_idx>__tokens` and `<ref_id>__<det_idx>__fg`
-    arrays. Empty dict when the file doesn't exist yet."""
+    """The project's NPZ patch store as a flat dict, or {} when missing or unreadable."""
     import numpy as _np
     p = _v2_patch_store_path(project_id)
     if not p.exists():
@@ -10541,15 +6999,7 @@ def _v2_load_patch_store(project_id: str) -> dict[str, "np.ndarray"]:
 
 
 def _v2_save_patch_store(project_id: str, store: dict[str, "np.ndarray"]) -> None:
-    """Atomic NPZ rewrite. Per-project so cleanup is just unlink.
-
-    The temp filename ends with `.npz` because np.savez_compressed
-    silently appends `.npz` to any path that doesn't already have
-    that suffix - without this, the written file lives at
-    `<tmp>.npz` while we try to rename `<tmp>` (which doesn't
-    exist), and the FileNotFoundError bubbles up and torpedoes
-    the entire reference loading path.
-    """
+    """Atomic NPZ rewrite. The temp name ends in .npz, or np.savez_compressed would append one."""
     import numpy as _np
     p = _v2_patch_store_path(project_id)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -10560,34 +7010,17 @@ def _v2_save_patch_store(project_id: str, store: dict[str, "np.ndarray"]) -> Non
 
 def _v2_load_or_backfill_patch_tokens(
     project_id: str,
-) -> tuple[dict[str, list[tuple["np.ndarray", "np.ndarray"]]],
-           dict[str, list[tuple["np.ndarray", "np.ndarray"]]]]:
-    """Walk the project's references and gather per-detection patch
-    tokens grouped by label, for BOTH encoders. Detections without
-    a stored patch grid get encoded inline against the same crop
-    the pooled embeddings used. Stores the result back to the
-    per-project NPZ so subsequent calls are pure reads.
-
-    Returns (dino_by_label, siglip_by_label) where each is
-    {label_lower: [(tokens, fg_mask), ...]}.
-
-    Both encoders share the same per-project NPZ; DINOv2 keys are
-    `<ref_id>__<det_idx>__tokens` / `__fg`, SigLIP keys are
-    `<ref_id>__<det_idx>__siglip_tokens` / `__siglip_fg`. Mixed
-    is fine - older NPZs without SigLIP keys backfill SigLIP only
-    on the next call without re-running DINOv2 encoding.
-
-    Returns ({}, {}) when V2_PATCH_MATCH is off or DINOv2 isn't
-    loaded - callers fall back to pooled scoring.
-    """
+) -> dict[str, list[tuple["np.ndarray", "np.ndarray"]]]:
+    """Per-label [(tokens, fg_mask)] DINOv2 patch grids of the reference boxes,
+    encoding and storing missing ones. NPZ keys are `<ref_id>__<det_idx>__`
+    plus tokens or fg. Returns {} when patch matching is off or DINOv2 is not
+    loaded."""
     import numpy as _np
     if not _v2_patch_match_enabled():
-        return {}, {}
+        return {}
     import v2_dinov2 as _v2d
     if not _v2d.is_loaded():
-        return {}, {}
-    import v2_siglip as _v2s
-    siglip_active = _v2s.is_loaded()
+        return {}
 
     manifest = load_manifest(project_id) or {}
     refs = manifest.get("references") or []
@@ -10595,9 +7028,8 @@ def _v2_load_or_backfill_patch_tokens(
     store = _v2_load_patch_store(project_id)
 
     by_label_dino: dict[str, list[tuple[_np.ndarray, _np.ndarray]]] = {}
-    by_label_siglip: dict[str, list[tuple[_np.ndarray, _np.ndarray]]] = {}
-    # (ri, di, label, box, mask_polys, need_dino, need_siglip)
-    pending_by_ref: dict[int, list[tuple[int, str, list[float], list | None, bool, bool]]] = {}
+    # ri -> [(di, label, box, mask_polys)]
+    pending_by_ref: dict[int, list[tuple[int, str, list[float], list | None]]] = {}
 
     for ri, ref in enumerate(refs):
         for di, d in enumerate(ref.get("detections") or []):
@@ -10610,21 +7042,8 @@ def _v2_load_or_backfill_patch_tokens(
 
             d_tokens = store.get(f"{ref_id}__{di}__tokens")
             d_fg = store.get(f"{ref_id}__{di}__fg")
-            d_have = d_tokens is not None and d_fg is not None and d_tokens.shape[0] > 0
-            if d_have:
+            if d_tokens is not None and d_fg is not None and d_tokens.shape[0] > 0:
                 by_label_dino.setdefault(label, []).append((d_tokens, d_fg.astype(bool)))
-
-            s_have = False
-            if siglip_active:
-                s_tokens = store.get(f"{ref_id}__{di}__siglip_tokens")
-                s_fg = store.get(f"{ref_id}__{di}__siglip_fg")
-                s_have = s_tokens is not None and s_fg is not None and s_tokens.shape[0] > 0
-                if s_have:
-                    by_label_siglip.setdefault(label, []).append((s_tokens, s_fg.astype(bool)))
-
-            need_dino = not d_have
-            need_siglip = siglip_active and not s_have
-            if not (need_dino or need_siglip):
                 continue
 
             box = d.get("box") or []
@@ -10635,7 +7054,7 @@ def _v2_load_or_backfill_patch_tokens(
             if isinstance(m, dict):
                 mask_polys = m.get("polygons")
             pending_by_ref.setdefault(ri, []).append(
-                (di, label, [float(x) for x in box], mask_polys, need_dino, need_siglip)
+                (di, label, [float(x) for x in box], mask_polys)
             )
 
     if pending_by_ref:
@@ -10655,31 +7074,21 @@ def _v2_load_or_backfill_patch_tokens(
                 print(f"[v2-patches] open failed {p}: {e}")
                 continue
             W, H = image_pil.size
-            for di, label, box, mask_polys, need_dino, need_siglip in items:
+            for di, label, box, mask_polys in items:
                 x0 = max(0, int(round(box[0])))
                 y0 = max(0, int(round(box[1])))
                 x1 = min(W, int(round(box[2])))
                 y1 = min(H, int(round(box[3])))
                 if x1 - x0 < 4 or y1 - y0 < 4:
                     continue
-                # Same inpainted square for both encoders so the
-                # foreground mask + crop framing match between them.
                 clean = _v2d.inpaint_bbox_crop(image_pil, (x0, y0, x1, y1), mask_polys)
                 square = _v2d.center_square_crop(clean)
-                if need_dino:
-                    tokens, fg = _v2d.encode_image_patches(square)
-                    if tokens.shape[0] > 0:
-                        store[f"{ref_id}__{di}__tokens"] = tokens.astype(_np.float16)
-                        store[f"{ref_id}__{di}__fg"] = fg
-                        by_label_dino.setdefault(label, []).append((tokens, fg))
-                        added += 1
-                if need_siglip:
-                    s_tokens, s_fg = _v2s.encode_image_patches(square)
-                    if s_tokens.shape[0] > 0:
-                        store[f"{ref_id}__{di}__siglip_tokens"] = s_tokens.astype(_np.float16)
-                        store[f"{ref_id}__{di}__siglip_fg"] = s_fg
-                        by_label_siglip.setdefault(label, []).append((s_tokens, s_fg))
-                        added += 1
+                tokens, fg = _v2d.encode_image_patches(square)
+                if tokens.shape[0] > 0:
+                    store[f"{ref_id}__{di}__tokens"] = tokens.astype(_np.float16)
+                    store[f"{ref_id}__{di}__fg"] = fg
+                    by_label_dino.setdefault(label, []).append((tokens, fg))
+                    added += 1
         if added > 0:
             try:
                 _v2_save_patch_store(project_id, store)
@@ -10688,11 +7097,8 @@ def _v2_load_or_backfill_patch_tokens(
                 print(f"[v2-patches] save failed (in-memory result still valid): {e}")
 
     counts_dino = {k: len(v) for k, v in by_label_dino.items()}
-    counts_siglip = {k: len(v) for k, v in by_label_siglip.items()}
-    print(
-        f"[v2-patches] project={project_id} dino={counts_dino} siglip={counts_siglip}"
-    )
-    return by_label_dino, by_label_siglip
+    print(f"[v2-patches] project={project_id} dino={counts_dino}")
+    return by_label_dino
 
 
 def _v2_score_labels_patchwise(
@@ -10702,60 +7108,31 @@ def _v2_score_labels_patchwise(
     *,
     top_k_query: int = _PATCH_TOP_K_QUERY,
 ) -> dict[str, float]:
-    """Patch-level scoring. For each query foreground patch, find its
-    best cosine match across ALL the label's reference foreground
-    patches. The label's score is the mean of the top-K query
-    patches' best matches.
-
-    Why top-K instead of mean-all: most query patches are body /
-    background-ish features that match every label about equally.
-    The discriminative work happens in a small subset (ear tips,
-    fur boundaries, asymmetric features). Top-K aggregation lets
-    those decisive matches dominate without the noise floor of the
-    weak ones diluting the score.
-
-    Args:
-      q_tokens: (P_q, D) - query patches, L2-normalised
-      q_fg:     (P_q,) bool - query foreground mask
-      refs_by_label_patches: {label_lower: [(tokens, fg), ...]}
-      top_k_query: how many of the strongest query-patch best-matches
-                   to mean. Higher = smoother score, lower = more
-                   sensitive to localised cues.
-
-    Returns {label_lower: score}, dot-product cosine similarities
-    in [0, 1] (higher = more similar).
-    """
+    """{label_lower: score}, the mean of the top_k_query best cosine matches of the
+    query foreground patches against the label's reference foreground patches.
+    q_tokens is (P_q, D) and L2-normalised; q_fg is a (P_q,) bool mask."""
     import numpy as _np
 
-    # Filter query to its foreground patches. If none, fall back to
-    # all patches so we don't return an empty dict on a degenerate
-    # SAM mask.
     q = q_tokens[q_fg] if bool(q_fg.any()) else q_tokens
     if q.shape[0] == 0:
         return {}
 
     out: dict[str, float] = {}
     for label, refs in refs_by_label_patches.items():
-        # Concatenate ALL reference foreground patches for this
-        # label into one big (sum_n_fg, D) matrix so the per-query-
-        # patch best-match is a single .max along axis=1.
         ref_chunks: list[_np.ndarray] = []
         for r_tokens, r_fg in refs:
             r_fg_bool = r_fg.astype(bool) if r_fg.dtype != bool else r_fg
             sel = r_tokens[r_fg_bool] if bool(r_fg_bool.any()) else r_tokens
             if sel.shape[0] > 0:
-                # Cast to float32 for the matmul - patch tokens may
-                # be stored as float16 to halve disk.
+                # Stored tokens are float16.
                 ref_chunks.append(sel.astype(_np.float32, copy=False))
         if not ref_chunks:
             continue
         R = _np.concatenate(ref_chunks, axis=0)  # (sum_n_fg_ref, D)
 
-        # Per-query-patch best-match: (P_q, D) @ (D, sum_n_fg_ref)
-        # → (P_q, sum_n_fg_ref) → max over refs → (P_q,).
+        # Best match per query patch, (P_q,).
         sims_per_q = (q.astype(_np.float32, copy=False) @ R.T).max(axis=1)
 
-        # Top-K query aggregation.
         k = min(top_k_query, int(sims_per_q.shape[0]))
         if k <= 0:
             continue
@@ -10763,178 +7140,6 @@ def _v2_score_labels_patchwise(
         out[label] = float(top.mean())
 
     return out
-
-
-# ─── Per-project Fisher reweighting (Level 1 metric adaptation) ──────────────
-# For each project we compute a per-dimension weight vector from
-# the reference embeddings: `w[i] = sqrt(between_var[i] / within_var[i])`
-# where between_var captures how much dim i differs across class
-# centroids and within_var captures how much it varies within the
-# same class. Applied as `e_adapted = e * w / norm(e * w)`, the
-# cosine similarity in the reweighted space puts more weight on
-# dimensions that separate THIS project's classes and less on
-# dimensions that vary uniformly across all of them.
-#
-# Practical effect: the embedding "auto-adapts" to the project's
-# specific classes. Hare/rabbit gets ear-tip-related dims boosted;
-# alpaca/llama gets neck-shape dims boosted. Same idea as classical
-# Fisher LDA but works for the 2-class case (where Fisher LDA
-# collapses to a single 1-D direction and loses most of the
-# original embedding's expressiveness). Diagonal-only - ignores
-# cross-dimension correlations, which is fine because DINOv2 features
-# are roughly decorrelated by training already.
-#
-# Cached in-memory keyed on the ref-set fingerprint so the 4-second
-# poll doesn't recompute. ~5 ms to compute on a typical 10-ref project.
-
-_FISHER_CACHE: dict[str, "np.ndarray"] = {}
-
-
-def _v2_fisher_cache_key(by_label_arr: dict, project_id: str | None = None) -> str:
-    """Fingerprint of a per-label ref stack so we can detect when a
-    project's reference set changed and recompute the Fisher weights.
-    Hashes the per-label sample counts plus the first vector of each
-    label - cheap, sufficient to invalidate when refs are added /
-    removed / re-embedded."""
-    import hashlib
-    h = hashlib.blake2b(digest_size=16)
-    if project_id:
-        h.update(project_id.encode())
-    for label in sorted(by_label_arr.keys()):
-        arr = by_label_arr[label]
-        if arr is None or arr.shape[0] == 0:
-            continue
-        h.update(label.encode())
-        h.update(str(arr.shape).encode())
-        # First row's first 32 floats - captures any re-embedding.
-        h.update(arr[0, :32].tobytes())
-    return h.hexdigest()
-
-
-def _v2_compute_fisher_weights(
-    by_label_arr: dict,
-    *,
-    eps: float = 1e-3,
-    cap: float = 5.0,
-) -> "np.ndarray | None":
-    """Per-dimension Fisher reweighting from per-label reference embeddings.
-
-    Returns a (D,) np.float32 vector of per-dim weights, or None when
-    there's not enough data (need ≥2 classes with ≥2 refs each).
-
-    Diagonal Fisher: w[i] = sqrt(between_i / (within_i + eps)) clamped
-    at `cap` so a single under-determined within-class variance can't
-    blow one dimension's weight out of proportion. Re-normalised so
-    sum(w**2) = D (preserves the embedding's scale; cosine sim values
-    stay roughly in [0, 1]).
-
-    eps stabilises within-class variance estimates from small ref sets.
-    cap=5.0 means the most-discriminative dim can be at most 5× the
-    mean weight.
-    """
-    import numpy as _np
-    labels = [k for k, arr in by_label_arr.items() if arr is not None and arr.shape[0] > 0]
-    if len(labels) < 2:
-        return None
-    # Need at least 2 refs per class for a within-class variance
-    # estimate. Skip projects where any class has only 1 ref.
-    if any(by_label_arr[k].shape[0] < 2 for k in labels):
-        return None
-
-    # Compute per-class mean and overall mean.
-    class_means: dict[str, _np.ndarray] = {k: by_label_arr[k].mean(axis=0) for k in labels}
-    all_arr = _np.concatenate([by_label_arr[k] for k in labels], axis=0)
-    overall_mean = all_arr.mean(axis=0)
-    D = int(all_arr.shape[1])
-    n_total = int(all_arr.shape[0])
-
-    # Per-dim between-class variance: weighted spread of class means
-    # around the overall mean. Higher = dimension separates classes.
-    between = _np.zeros(D, dtype=_np.float64)
-    for k in labels:
-        n_k = int(by_label_arr[k].shape[0])
-        diff = class_means[k] - overall_mean
-        between += n_k * (diff ** 2)
-    between /= max(n_total, 1)
-
-    # Per-dim within-class variance: how much each dim wobbles within
-    # a single class. Higher = noisier dim, lower = stable feature.
-    within = _np.zeros(D, dtype=_np.float64)
-    for k in labels:
-        arr = by_label_arr[k]
-        diff = arr - class_means[k]
-        within += (diff ** 2).sum(axis=0)
-    within /= max(n_total - len(labels), 1)
-
-    # Fisher score per dim: between / (within + eps), then sqrt for
-    # use as a multiplicative weight (since cosine works in linear
-    # space, sqrt-weighting scales each dim's contribution to the
-    # dot product proportionally to its score).
-    score = between / (within + eps)
-    # Clamp so a few dims with effectively-zero within-variance don't
-    # dominate the embedding entirely.
-    score_max = float(score.max())
-    if score_max > 0:
-        score = score / score_max  # normalise to [0, 1]
-    weights = _np.sqrt(score).astype(_np.float32)
-    weights = _np.minimum(weights, cap)
-
-    # Re-normalise so the average weight stays at 1 (preserves the
-    # embedding's overall magnitude after the element-wise multiply,
-    # which keeps cosine sims in their familiar [0, 1] range).
-    mean_w = float(weights.mean())
-    if mean_w < 1e-6:
-        return None
-    weights = weights / mean_w
-    return weights
-
-
-def _v2_get_fisher_weights(
-    by_label_arr: dict,
-    project_id: str | None = None,
-) -> "np.ndarray | None":
-    """Cached wrapper around _v2_compute_fisher_weights. Re-uses the
-    same weights across the 4-second poll cycle and only recomputes
-    when the ref set's fingerprint changes (refs added / removed /
-    re-embedded)."""
-    if not by_label_arr:
-        return None
-    key = _v2_fisher_cache_key(by_label_arr, project_id)
-    cached = _FISHER_CACHE.get(key)
-    if cached is not None:
-        return cached
-    w = _v2_compute_fisher_weights(by_label_arr)
-    if w is not None:
-        # Cap cache size at 256 entries - projects rarely change refs
-        # more than a handful of times so this should never fill up.
-        if len(_FISHER_CACHE) > 256:
-            _FISHER_CACHE.clear()
-        _FISHER_CACHE[key] = w
-    return w
-
-
-def _v2_apply_fisher_to_arr(arr: "np.ndarray", weights: "np.ndarray") -> "np.ndarray":
-    """Element-wise weight + per-row L2 renormalise. Works on (D,) or
-    (N, D). Output stays L2-normalised so cosine sim still equals dot
-    product downstream."""
-    import numpy as _np
-    if arr.ndim == 1:
-        weighted = arr * weights
-        n = float(_np.linalg.norm(weighted))
-        if n < 1e-8:
-            return arr
-        return weighted / n
-    # (N, D)
-    weighted = arr * weights[None, :]
-    norms = _np.linalg.norm(weighted, axis=1, keepdims=True)
-    norms = _np.maximum(norms, 1e-8)
-    return weighted / norms
-
-
-def _v2_apply_fisher_to_refs(by_label_arr: dict, weights: "np.ndarray") -> dict:
-    """Apply Fisher weights to a stacked-refs dict. Returns a new dict
-    with the same keys and (N, D) shape per value."""
-    return {k: _v2_apply_fisher_to_arr(arr, weights) for k, arr in by_label_arr.items()}
 
 
 def _v2_compute_class_thresholds(
@@ -10945,31 +7150,9 @@ def _v2_compute_class_thresholds(
     sigma_mult: float = 3.0,
     fallback: float = 0.40,
 ) -> dict[str, float]:
-    """Per-class accept/reject threshold from the leave-one-out
-    self-score distribution.
-
-    For each label with ≥3 references we compute the LOO cosine of
-    each ref against the centroid of the other refs in its class
-    and set:
-
-        threshold = max(floor, min(cap, mean - sigma_mult * std))
-
-    Notably the cap == the global fallback (0.40). The threshold
-    can only go DOWN from the default, never up - a tightly-
-    clustered class keeps the global 0.40 instead of jumping to
-    0.70+. The first version inverted this and ended up rejecting
-    every legitimate query because the LOO distribution is in-
-    sample optimistic: refs are far closer to their own class's
-    centroid than out-of-sample queries are, so a threshold tuned
-    to the LOO band rejects normal queries that should pass.
-    Loosely-clustered classes (refs span varied poses - "horse":
-    mean ≈ 0.55, std ≈ 0.10) drop the threshold to ~0.25 so the
-    model isn't punishing legitimate variety. That asymmetry -
-    relax for loose, hold the line for tight - is the actual win.
-
-    Classes with <3 refs get `fallback` directly; the LOO
-    distribution isn't reliable from 1-2 samples.
-    """
+    """Per-label accept threshold max(floor, min(cap, mean - sigma_mult * std)) of the
+    leave-one-out self-scores, or `fallback` below 3 references. cap equals
+    fallback, so a threshold can only fall below the default."""
     import numpy as _np
 
     out: dict[str, float] = {}
@@ -10978,15 +7161,12 @@ def _v2_compute_class_thresholds(
             out[key] = fallback
             continue
 
-        # LOO self-scores: (sum_centroid - q) / (n - 1), L2-norm,
-        # dot with q. Vectorised so we don't loop per ref.
         n = int(arr.shape[0])
         total = arr.sum(axis=0)  # (D,)
         loo_centroids = (total - arr) / (n - 1)  # (N, D)
         norms = _np.linalg.norm(loo_centroids, axis=1, keepdims=True)
         norms = _np.maximum(norms, 1e-8)
         loo_centroids = loo_centroids / norms
-        # Dot each ref with its leave-one-out centroid → (N,)
         self_scores = (loo_centroids * arr).sum(axis=1)
 
         mean = float(self_scores.mean())
@@ -10999,38 +7179,11 @@ def _v2_compute_class_thresholds(
 
 
 def _v2_compute_reference_quality(refs: list[dict], by_label_arr: dict) -> dict:
-    """Per-detection reference-quality scores via leave-one-out
-    cross-validation. For each labelled detection we ask:
-
-      * `self_score`  - cosine sim to the centroid of OTHER refs with
-                        the same label. High = this ref looks like the
-                        rest of its class. Low = outlier.
-      * `other_score` - max cosine sim to the centroids of OTHER labels.
-                        High means the ref looks more like a different
-                        class than its assigned one.
-      * `quality`     - `self_score - other_score`. Above ~0.05 is
-                        cleanly separable; near zero or negative means
-                        this ref is hurting the centroid.
-      * `warning`     - short string when the ref is suspicious:
-          - "outlier" when self_score < 0.5 (doesn't even look like
-            its own class).
-          - "looks like other class" when other_score >= self_score
-            (closer to a different class than its assigned one).
-          - "only ref for class" when there's no leave-one-out
-            comparison possible (1 ref per label gives self_score=None).
-
-    Both q-vector and centroids are L2-normalised, so the dot product
-    IS cosine similarity. Uses DINOv2 embeddings (the primary
-    discriminator); SigLIP-based quality is left for a follow-up.
-
-    Returns {ref_id: {detection_idx: {self_score, other_score,
-    other_label, quality, warning}}}. Refs with no labelled
-    detections or no embedding don't appear in the result.
-    """
+    """Leave-one-out quality of each labelled reference detection, from DINOv2
+    embeddings: {ref_id: {detection_idx: {self_score, other_score, other_label,
+    quality, warning}}}. self_score is against the other references of its label."""
     import numpy as _np
 
-    # Pre-compute (sum, count) per label so the leave-one-out
-    # centroid is just (sum - q) / (count - 1). O(N) memory.
     label_sum: dict[str, _np.ndarray] = {}
     label_count: dict[str, int] = {}
     for lab, arr in by_label_arr.items():
@@ -11039,8 +7192,6 @@ def _v2_compute_reference_quality(refs: list[dict], by_label_arr: dict) -> dict:
         label_sum[lab] = arr.sum(axis=0)
         label_count[lab] = int(arr.shape[0])
 
-    # Full centroids (used for the other-class scoring side - those
-    # don't change per detection, so no leave-one-out needed).
     label_centroid: dict[str, _np.ndarray] = {}
     for lab, arr in by_label_arr.items():
         if arr is None or arr.shape[0] == 0:
@@ -11066,7 +7217,6 @@ def _v2_compute_reference_quality(refs: list[dict], by_label_arr: dict) -> dict:
                 continue
             q = _np.asarray(emb, dtype=_np.float32)
 
-            # Leave-one-out self-score.
             self_score: float | None = None
             if label in label_count and label_count[label] > 1:
                 loo_sum = label_sum[label] - q
@@ -11076,7 +7226,6 @@ def _v2_compute_reference_quality(refs: list[dict], by_label_arr: dict) -> dict:
                 if n > 1e-8:
                     self_score = float((loo_centroid / n) @ q)
 
-            # Max sim to OTHER labels' centroids.
             other_score: float | None = None
             other_label: str | None = None
             for ol, oc in label_centroid.items():
@@ -11113,38 +7262,14 @@ def _v2_compute_reference_quality(refs: list[dict], by_label_arr: dict) -> dict:
     return out
 
 
-@app.get(
-    "/api/v2/projects/{project_id}/reference_quality",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.get("/api/v2/projects/{project_id}/reference_quality")
 async def v2_reference_quality(project_id: str):
-    """Surface per-reference quality scores so the UI can flag
-    suspicious entries the user should review. See
-    `_v2_compute_reference_quality` for the scoring rules.
-
-    Returns:
-        {
-          "references": {
-            "<ref_id>": {
-              "<det_idx>": {
-                "self_score": float, "other_score": float,
-                "other_label": str, "quality": float,
-                "warning": "outlier" | "looks like other class"
-                          | "only ref for class" | null
-              }, ...
-            }, ...
-          }
-        }
-
-    Implicitly triggers the centroid backfill (loads embeddings;
-    re-encodes any at older EMBED_VERSION) so the quality scores
-    are always computed against current-version vectors.
-    """
+    """Per-reference quality scores, after re-encoding stale reference embeddings."""
     if not project_dir(project_id).exists():
         raise HTTPException(404)
     try:
         async with state["gpu_lock"]:
-            by_label, _by_label_siglip, _dirty = await asyncio.to_thread(
+            by_label = await asyncio.to_thread(
                 _v2_load_or_backfill_reference_embeddings, project_id)
     except Exception as e:
         print(f"[v2-ref-quality] load failed: {e}")
@@ -11156,46 +7281,12 @@ async def v2_reference_quality(project_id: str):
     return {"references": quality}
 
 
-def _v2_compute_label_centroids(by_label: dict) -> dict[str, list[float]]:
-    """Mean-pool per-label embeddings then L2-normalise so cosine ==
-    dot product downstream. Returns {label_lower: vec_list}.
-
-    NOTE: superseded by `_v2_score_labels_knn` for the actual resolve
-    path - the resolver no longer reduces a label's references to a
-    single centroid because that loses multimodal structure (e.g. a
-    "horse standing" label with side-view AND front-view references
-    has its centroid land between the two clusters and underscores
-    queries that match either one cleanly). Kept around in case any
-    debugging tool wants the legacy centroid view of the data."""
-    import numpy as _np
-    out: dict[str, list[float]] = {}
-    for key, vecs in by_label.items():
-        if not vecs:
-            continue
-        m = _np.mean(_np.stack(vecs, axis=0), axis=0)
-        n = float(_np.linalg.norm(m))
-        if n < 1e-8:
-            continue
-        out[key] = (m / n).astype(_np.float32).tolist()
-    return out
-
-
-# Top-K nearest-neighbour scoring is the V2 default. For each label
-# we score the query against every reference embedding and average
-# the K highest dot products. This handles multimodal label
-# distributions - references that cluster into 2-3 visually distinct
-# modes (different poses, angles, scales) - without forcing a single
-# averaged centroid that sits between modes.
-#
-# Fewer than K references → all of them are used (equivalent to
-# centroid matching at N=1, mean-of-2 at N=2, etc.).
+# kNN scoring averages a label's K closest references, or all of them when it has fewer.
 KNN_TOP_K = 3
 
 
 def _v2_stack_refs(by_label: dict) -> dict[str, "np.ndarray"]:
-    """Pre-stack per-label reference embeddings into (N, D) arrays
-    so the resolver can score detections without restacking on every
-    call."""
+    """Stack each label's reference embeddings into an (N, D) float32 array."""
     import numpy as _np
     out: dict[str, _np.ndarray] = {}
     for key, vecs in by_label.items():
@@ -11207,46 +7298,7 @@ def _v2_stack_refs(by_label: dict) -> dict[str, "np.ndarray"]:
     return out
 
 
-def _v2_score_labels_knn(
-    q: "np.ndarray",
-    refs_by_label_arr: dict,
-    k: int = KNN_TOP_K,
-) -> dict[str, float]:
-    """Top-K kNN scoring across labels. Returns {label_key: score}
-    where score is the mean of the K highest cosine sims between q
-    and that label's references. Both q and the references are
-    L2-normalised in v2_dinov2.encode_*, so the dot product `refs @ q`
-    here IS cosine similarity - no extra normalisation needed.
-
-    Cosine is the right metric for high-dim DINOv2 embeddings (1024d
-    here) - L2 distance suffers from the curse of dimensionality
-    (all points become roughly equidistant) but cosine just measures
-    angle, which is what we care about for L2-normalised features.
-
-    Superseded by `_v2_score_labels_knn_weighted` below for the
-    actual resolve path. Kept as the simple-mean baseline for quick
-    A/B comparison via env var.
-    """
-    import numpy as _np
-    sims: dict[str, float] = {}
-    for key, refs in refs_by_label_arr.items():
-        if refs is None or refs.shape[0] == 0:
-            continue
-        all_sims = refs @ q  # (N,)
-        kk = min(k, int(all_sims.shape[0]))
-        if kk <= 0:
-            continue
-        # np.partition is O(N) for finding the top-K (no full sort).
-        top = _np.partition(all_sims, -kk)[-kk:]
-        sims[key] = float(top.mean())
-    return sims
-
-
-# Tiny floor on cosine distance so the inverse-distance weight stays
-# finite when a query is essentially identical to a reference. 1e-3
-# means a perfect match (sim=1.0, d=0) gets capped at weight=1000 -
-# more than enough to dominate over vague matches without blowing up
-# the arithmetic on rounding noise.
+# Floor on cosine distance, capping a reference's weight at 1000.
 _KNN_DIST_EPS = 1e-3
 
 
@@ -11255,19 +7307,8 @@ def _v2_score_labels_knn_weighted(
     refs_by_label_arr: dict,
     k: int = KNN_TOP_K,
 ) -> dict[str, float]:
-    """Per-label weighted top-K kNN. Returns {label_key: score} where
-    score is the weighted mean of the top-K cosine sims for that
-    label, weighted by inverse cosine distance (1 / max(1 - sim, eps)).
-
-    The 1/d weighting lets a single very-close reference dominate
-    over several vague matches: top-3 of [0.85, 0.50, 0.40] gives
-    weighted mean ≈ 0.71 vs simple mean 0.58. Across labels, the
-    closest-single-reference label wins, which is typically the
-    right answer for fine-grained pairs (one perfect hare beats
-    two so-so rabbits).
-
-    Both q and refs are L2-normalised, so dot product is cosine.
-    """
+    """{label_key: mean of the k highest cosine similarities, each weighted by
+    1 / max(1 - sim, eps)}. q and the references are L2-normalised."""
     import numpy as _np
     sims: dict[str, float] = {}
     eps = _KNN_DIST_EPS
@@ -11285,587 +7326,30 @@ def _v2_score_labels_knn_weighted(
     return sims
 
 
-def _v2_filename_labels(filename: str | None, project_labels: list[str]) -> set[str]:
-    """Return the lowercased project labels whose tokens appear as a
-    contiguous subsequence in the filename. Both filename and label
-    are tokenised on non-alphanumeric so "high vis vest" matches
-    "horse_high-vis-vest_05.jpg" and "stop sign" matches
-    "stop_sign_intersection.png" but not "stopwatch.jpg".
-    """
-    if not filename or not project_labels:
-        return set()
-    import re as _re
-    base = _re.sub(r"\.[A-Za-z0-9]+$", "", str(filename))
-    fname_tokens = _re.findall(r"[a-z0-9]+", base.lower())
-    if not fname_tokens:
-        return set()
-    matched: set[str] = set()
-    for label in project_labels:
-        label_norm = str(label).strip().lower()
-        if not label_norm:
-            continue
-        label_tokens = _re.findall(r"[a-z0-9]+", label_norm)
-        if not label_tokens:
-            continue
-        L = len(label_tokens)
-        for i in range(len(fname_tokens) - L + 1):
-            if fname_tokens[i:i + L] == label_tokens:
-                matched.add(label_norm)
-                break
-    return matched
-
-
-# Margin tolerance for the filename tiebreak. When the gap between
-# the top two label sims is smaller than this, the filename's
-# explicit mention of one of them gets to nudge that label up by an
-# equal amount - enough for a fence-tied second-place to leapfrog
-# first place, but small enough that confident decisions are
-# untouched.
-FILENAME_HINT_TOLERANCE = 0.05
-
-
-def _v2_apply_filename_hint(
-    sims: dict[str, float],
-    filename_labels: set[str],
-    *,
-    tolerance: float = FILENAME_HINT_TOLERANCE,
-) -> dict[str, float]:
-    """Conditionally bias label sims toward labels mentioned in the
-    image filename. Returns a NEW dict (caller-friendly).
-
-    Only fires when:
-      - at least one filename-mentioned label is in the sims dict
-      - the top-1 / top-2 margin is less than ``tolerance`` (the "on
-        the fence" condition the user asked for; ignores cases where
-        the embedding is already confident)
-
-    On a hit, every filename-mentioned label gets +``tolerance`` so a
-    second-place tied label can leapfrog. Filename labels not in sims
-    (e.g., user named the file with a label that isn't in the project
-    label set) are ignored.
-    """
-    if not filename_labels or not sims:
-        return sims
-    if len(sims) < 2:
-        return sims
-    relevant = filename_labels & set(sims.keys())
-    if not relevant:
-        return sims
-    sorted_vals = sorted(sims.values(), reverse=True)
-    margin = sorted_vals[0] - sorted_vals[1]
-    if margin >= tolerance:
-        return sims
-    return {k: v + (tolerance if k in relevant else 0.0) for k, v in sims.items()}
-
-
-def _v2_score_labels_centroid(
-    q: "np.ndarray",
-    refs_by_label_arr: dict,
-) -> dict[str, float]:
-    """Centroid scoring: reduce each label's references to a single
-    L2-normalised mean, then dot the query against it. Sharper
-    contrast than kNN for unimodal label distributions (general
-    datasets - PPE, vehicles, signage) where every reference for a
-    label looks visually similar; the centroid acts as a denoiser
-    and produces a clear peak-vs-valley between the right label and
-    the wrong ones. Used for general datasets while kNN serves the
-    multimodal specific-dataset case."""
-    import numpy as _np
-    sims: dict[str, float] = {}
-    for key, refs in refs_by_label_arr.items():
-        if refs is None or refs.shape[0] == 0:
-            continue
-        c = refs.mean(axis=0)
-        n = float(_np.linalg.norm(c))
-        if n < 1e-8:
-            continue
-        c = c / n
-        sims[key] = float(c @ q)
-    return sims
-
-
-def _v2_resolve_label(
-    embedding: list[float],
-    gd_label: str | None,
-    refs_by_label: dict,
-    label_display: dict[str, str],
-    *,
-    score_mode: str = "centroid",
-    filename_labels: set[str] | None = None,
-    gd_score: float | None = None,
-    # VLM is informational by default; only consulted on ambiguous
-    # cases as a tiebreaker / corroborating signal for relabels.
-    # Plain VLM "votes" are NOT aggregated into the decision - the
-    # model has been observed picking visually salient occluders
-    # over the actual labeled object often enough that we treat its
-    # output as a discriminator, not a primary vote.
-    vlm_label: str | None = None,
-    vlm_score: float | None = None,
-    # Reject thresholds.
-    reject_gd_threshold: float = 0.15,
-    reject_embed_threshold: float = 0.4,
-    # Rescue: low-confidence GD with very-high embed -> accept w/ embed.
-    gd_low_embed_rescue_min: float = 0.6,
-    # Strong-embedding override (rule 0): embed sim ≥ this trumps
-    # GD when GD itself is uncertain (< gd_moderate_min). Below the
-    # very-strong threshold (rule 0c), so a moderately-confident GD
-    # still gets a chance to defend its label via the VLM tiebreak.
-    embed_strong_min: float = 0.7,
-    # Very-strong embedding override (rule 0c): embed sim ≥ this
-    # wins outright over any GD score, no checks, no VLM. Treated
-    # as overwhelming visual evidence.
-    embed_very_strong_min: float = 0.8,
-    # GD-confident lock (rule 0b): GD scoring at or above this
-    # threshold is decisive on its own - accept GD's label outright
-    # with no VLM, no embed checks. Catches the "person wearing
-    # high-vis vest" case where embed confidently picks vest from
-    # the contaminated centroid but GD correctly identified the
-    # person at 0.5.
-    gd_confident_min: float = 0.50,
-    # GD-moderate lock (rule 0b'): GD in [gd_moderate_min,
-    # gd_confident_min) is accepted ONLY when VLM corroborates
-    # GD's label. The soft-accept zone - GD alone isn't decisive
-    # but a VLM second opinion locks it in.
-    gd_moderate_min: float = 0.40,
-    # Confusion reject ceiling (rule 0d): when GD is above the
-    # moderate floor AND embed's nearest centroid is a DIFFERENT
-    # label with sim below this threshold, neither signal is
-    # firmly committed to its pick. The crop is confusing, so
-    # reject rather than commit to GD's label.
-    confusion_embed_max: float = 0.50,
-    # Combined-low reject.
-    combined_reject_gd_max: float = 0.25,
-    combined_reject_embed_max: float = 0.48,
-    # Relabel rule (stricter than the previous "best_sim > gd_sim").
-    # All four must hold:
-    #   1. best_sim >= relabel_class_min (absolute floor, per-class
-    #      knob exposed for future tuning - 0.5 default for now)
-    #   2. embed_margin >= relabel_embed_margin (top1 - top2 >= 0.05
-    #      so two near-equal centroids don't trigger a flip)
-    #   3. best_sim - sim_for_gd_label >= relabel_gd_embed_margin
-    #      (top1 must clearly beat GD's centroid by 0.05)
-    #   4. gd_score < relabel_gd_low_max  OR  vlm corroborates
-    #      (either GD itself wasn't confident, or the VLM agrees
-    #      with the embedding's pick - pure embedding override
-    #      isn't allowed when GD is strong AND VLM disagrees.)
-    # relabel_gd_low_max aligns with ambiguous_gd_max (0.30) - any
-    # GD score below the ambiguity threshold is by definition not
-    # confident enough to block an embed override. Margins were
-    # halved (0.08→0.05 and 0.10→0.05) after a high-vis at embed
-    # 0.603 failed to relabel - face_mask's centroid sim sat close
-    # enough to high_vis that the older 0.10 gap couldn't open up.
-    relabel_class_min: float = 0.5,
-    relabel_embed_margin: float = 0.05,
-    relabel_gd_embed_margin: float = 0.05,
-    relabel_gd_low_max: float = 0.30,
-    # Ambiguity flags (display-only). Used by the popup to mark
-    # detections worth eyeballing, and as the gate for VLM
-    # tiebreaker between GD's label and embed's nearest centroid
-    # when the strict relabel rule above didn't fire.
-    ambiguous_gd_max: float = 0.30,
-    ambiguous_embed_margin_min: float = 0.08,
-) -> dict:
-    """Apply the V2 relabel/reject rules for one detection.
-
-    Decision tree (first match wins; see param docstrings for the
-    exact thresholds):
-
-      0c. Very-strong embed override: embed nearest sim ≥
-         embed_very_strong_min (0.80) - accept embed outright,
-         beats even a confident GD.
-      0d. Confusion reject: gd_score ≥ gd_moderate_min (0.40) AND
-         embed-nearest is a DIFFERENT label with sim <
-         confusion_embed_max (0.50). Neither signal is firmly
-         committed; reject rather than commit to GD's pick.
-      0b. GD-confident lock: gd_score ≥ gd_confident_min (0.50) -
-         accept GD's label outright. No VLM, no embed checks.
-      0b'. GD-moderate lock: gd_score in [gd_moderate_min (0.40),
-         gd_confident_min (0.50)) AND VLM agrees with GD - accept
-         GD. The soft zone where GD alone isn't decisive.
-      0a. Three-way disagreement reject: GD, embed-nearest, and VLM
-         each picked a different label AND gd_score is below
-         gd_moderate_min (0.40) - no signal corroborates any other
-         and GD couldn't defend itself, so reject rather than
-         coin-flip. A moderately-confident GD is allowed to keep
-         its label even with full disagreement (PPE-wearing
-         people: each signal locks onto a different visible item).
-      0. Strong-embed override: embed nearest sim ≥ embed_strong_min
-         (default 0.7) AND GD < gd_moderate_min (0.40) - trust the
-         embedding when GD couldn't defend its own label. Defers
-         when GD sits in the moderate zone so rule 0b' gets a shot.
-      1. Rescue: gd very low + embedding very confident → accept
-         with embed's label.
-      2. GD-only reject: gd very low and embedding couldn't rescue.
-      3. Combined-low reject: both gd and embed lukewarm.
-      4. Strict relabel: embed clears class floor, has clear margin
-         over second-best AND over GD's centroid, AND either GD
-         was uncertain OR the VLM corroborates embed's pick.
-         (This is the only path that overrides GD's label.)
-      5. Embed-low reject: final-label centroid sim < 0.40.
-      6. VLM tiebreaker: when the case is ambiguous (low gd, or
-         gd != embed_best, or top1-top2 margin < 0.08) AND VLM
-         picks one of {gd_label, embed_nearest_label} that isn't
-         the current pred_label, switch to the VLM-picked option.
-         VLM responses outside those two candidates are recorded
-         on the response but DO NOT override pred_label.
-      7. Otherwise accept with current pred_label.
-    """
-    import numpy as _np
-
-    # Score per label: centroid for general (sharp peak/valley
-    # contrast), kNN for specific (handles multimodal references).
-    sims: dict[str, float] = {}
-    if embedding and refs_by_label:
-        q = _np.asarray(embedding, dtype=_np.float32)
-        if score_mode == "knn":
-            sims = _v2_score_labels_knn(q, refs_by_label)
-        else:
-            sims = _v2_score_labels_centroid(q, refs_by_label)
-
-    # Filename hint: when the user named the image with one of the
-    # project labels and the top-2 sims are within tolerance, bias
-    # toward the filename label. Easy free signal.
-    if filename_labels:
-        sims = _v2_apply_filename_hint(sims, filename_labels)
-
-    sorted_sims_desc = sorted(sims.values(), reverse=True)
-    # Margin is top1 - top2. With <2 labels in sims (e.g. only one
-    # label has references uploaded yet) there's no second-best to
-    # subtract from, so the margin is undefined - return 0.0 rather
-    # than the top1 sim itself, which was misleading the FE into
-    # rendering a single sim's value as if it were the margin.
-    embed_margin = (
-        sorted_sims_desc[0] - sorted_sims_desc[1]
-        if len(sorted_sims_desc) >= 2 else
-        0.0
-    )
-    best_key = max(sims, key=sims.get) if sims else None
-    best_sim = sims[best_key] if best_key else None
-
-    # Normalised lookups for label comparisons.
-    gd_key = (gd_label or "").strip().lower() if gd_label else None
-    vlm_key = (vlm_label or "").strip().lower() if vlm_label else None
-    gd_sim = sims.get(gd_key) if gd_key else None
-
-    # Default plan: keep GD's label.
-    pred_label = gd_label
-    pred_source: str | None = "gd" if gd_label else None
-    pred_key = gd_key
-
-    # Ambiguity flag - exposed on the response and used to gate the
-    # VLM tiebreaker.
-    ambiguous = False
-    if gd_score is not None and gd_score < ambiguous_gd_max:
-        ambiguous = True
-    if gd_key and best_key and best_key != gd_key:
-        ambiguous = True
-    if embed_margin < ambiguous_embed_margin_min:
-        ambiguous = True
-
-    def _make(reject_reason: str | None, *, rejected: bool, vlm_action: str | None = None) -> dict:
-        final_sim = sims.get(pred_key) if pred_key else None
-        return {
-            "pred_label": pred_label,
-            "pred_source": pred_source,
-            "embed_nearest_label": label_display.get(best_key, best_key) if best_key else None,
-            "embed_nearest_sim": round(float(best_sim), 4) if best_sim is not None else None,
-            "embed_sim_for_label": round(float(final_sim), 4) if final_sim is not None else None,
-            "embed_margin": round(float(embed_margin), 4),
-            "rejected": rejected,
-            "reject_reason": reject_reason,
-            "ambiguous": ambiguous,
-            "vlm_action": vlm_action,
-            "sims": {label_display.get(k, k): round(float(v), 4) for k, v in sims.items()},
-        }
-
-    # Rule 0c: very-strong embed override. embed_very_strong_min
-    # (default 0.80) wins outright over any GD score, no VLM, no
-    # margin checks. Treated as overwhelming visual evidence.
-    if (
-        best_key is not None and best_sim is not None
-        and best_sim >= embed_very_strong_min
-    ):
-        if best_key != gd_key:
-            pred_key = best_key
-            pred_label = label_display.get(best_key, best_key)
-            pred_source = "embed-strong"
-        ambiguous = False
-        return _make(None, rejected=False)
-
-    # Rule 0d: confusion reject. GD scored above gd_moderate_min
-    # (0.40) but embed picked a DIFFERENT label and even its best
-    # centroid sim is below confusion_embed_max (0.50). Neither
-    # signal is firmly committed - GD recognised something at
-    # moderate confidence, embed couldn't match it cleanly to any
-    # of the project's labels. Better to reject than commit.
-    if (
-        gd_score is not None and gd_score >= gd_moderate_min
-        and gd_key is not None
-        and best_key is not None and best_sim is not None
-        and best_key != gd_key
-        and best_sim < confusion_embed_max
-    ):
-        return _make("confusion", rejected=True, vlm_action="confusion-reject")
-
-    # Rule 0b: GD-confident lock. gd_score ≥ gd_confident_min
-    # (default 0.50) - accept GD's label outright. No VLM, no embed
-    # checks. Catches the "person wearing high-vis vest" case where
-    # embed confidently picks vest from a contaminated centroid but
-    # GD correctly identified the person at 0.5+.
-    if (
-        gd_score is not None and gd_score >= gd_confident_min
-        and gd_label
-    ):
-        ambiguous = False
-        return _make(None, rejected=False)
-
-    # Rule 0b': GD-moderate lock with VLM agreement. gd_score in
-    # [gd_moderate_min, gd_confident_min) is the soft-accept zone -
-    # GD alone isn't decisive, but a VLM second opinion locks it in.
-    # Won't fire on the preliminary resolve (no VLM yet) so the box
-    # stays ambiguous and the lazy-VLM gate calls Qwen-VL; the
-    # second pass then evaluates this rule with vlm_label populated.
-    if (
-        gd_score is not None
-        and gd_moderate_min <= gd_score < gd_confident_min
-        and gd_key is not None and vlm_key is not None
-        and vlm_key == gd_key
-    ):
-        ambiguous = False
-        return _make(None, rejected=False, vlm_action="confirm")
-
-    # No embedding info - fall back to GD-only gating.
-    if not sims:
-        rejected_gd = gd_score is not None and gd_score < reject_gd_threshold
-        return _make("gd" if rejected_gd else None, rejected=rejected_gd)
-
-    # Rule 0a: three-way disagreement reject. When GD, the nearest
-    # centroid, AND the VLM each picked a DIFFERENT label, no signal
-    # has corroborating support - committing to any one is a coin
-    # flip. Reject outright.
-    #
-    # Gated to gd_score < gd_moderate_min (0.40): a moderately
-    # confident GD is plausibly right even when embed and VLM each
-    # pick a different label, because for PPE-wearing people each
-    # signal often locks onto a different item visible in the same
-    # bbox (vest, helmet, mask, glove) while GD correctly
-    # identifies the broader subject (person). Only reject as 3-way
-    # disagreement when GD itself didn't clear the moderate floor.
-    if (
-        gd_key and best_key and vlm_key
-        and len({gd_key, best_key, vlm_key}) == 3
-        and (gd_score is None or gd_score < gd_moderate_min)
-    ):
-        return _make("disagree", rejected=True, vlm_action="three-way-disagree")
-
-    # Rule 0: strong-embed override (between embed_strong_min and
-    # embed_very_strong_min). Fires when (a) GD already agrees, or
-    # (b) GD is uncertain (< gd_moderate_min). When GD sits in the
-    # moderate zone we DEFER - leave ambiguous=True so the lazy-VLM
-    # gate runs and rule 0b' on the second pass can lock GD's call
-    # if VLM corroborates.
-    if best_key is not None and best_sim is not None and best_sim >= embed_strong_min:
-        if best_key == gd_key:
-            ambiguous = False
-            return _make(None, rejected=False)
-        if gd_score is None or gd_score < gd_moderate_min:
-            pred_key = best_key
-            pred_label = label_display.get(best_key, best_key)
-            pred_source = "embed-strong"
-            ambiguous = False
-            return _make(None, rejected=False)
-        # else: defer to VLM-aware rules below.
-
-    # Rule 1: rescue - gd very low + very confident embedding.
-    if (
-        gd_score is not None and gd_score < reject_gd_threshold
-        and best_key is not None and best_sim is not None
-        and best_sim >= gd_low_embed_rescue_min
-    ):
-        pred_key = best_key
-        pred_label = label_display.get(best_key, best_key)
-        pred_source = "embed"
-        return _make(None, rejected=False)
-
-    # Rule 2: gd very low, no rescue.
-    if gd_score is not None and gd_score < reject_gd_threshold:
-        return _make("gd", rejected=True)
-
-    # Rule 3: combined low.
-    if (
-        gd_score is not None and gd_score < combined_reject_gd_max
-        and best_sim is not None and best_sim < combined_reject_embed_max
-    ):
-        return _make("combined", rejected=True)
-
-    # Rule 4: strict relabel. All conditions must hold for the
-    # embedding to override GD's label. Pure "best_sim > gd_sim" is
-    # NOT enough - the margins guard against near-equal-centroid
-    # flips, and the VLM-or-low-GD clause requires external
-    # corroboration when GD itself was confident.
-    #
-    # Hard block: when VLM corroborates GD's label, that GD+VLM
-    # consensus overrides any embed-driven relabel attempt - even
-    # if gd_score is below relabel_gd_low_max. Without this block
-    # the resolver would happily flip a "gd glove + vlm glove"
-    # detection to embed's "safety helmet" pick just because gd
-    # came in at 0.22 (under 0.25) and the embed margins held up.
-    vlm_corroborates_embed = (
-        vlm_key is not None and best_key is not None and vlm_key == best_key
-    )
-    vlm_corroborates_gd = (
-        vlm_key is not None and gd_key is not None and vlm_key == gd_key
-    )
-    can_relabel = (
-        best_key is not None and best_sim is not None
-        and best_key != gd_key
-        and best_sim >= relabel_class_min
-        and embed_margin >= relabel_embed_margin
-        and (gd_sim is None or (best_sim - gd_sim) >= relabel_gd_embed_margin)
-        and (
-            (gd_score is not None and gd_score < relabel_gd_low_max)
-            or vlm_corroborates_embed
-        )
-        and not vlm_corroborates_gd
-    )
-    relabel_action: str | None = None
-    if can_relabel:
-        pred_key = best_key
-        pred_label = label_display.get(best_key, best_key)
-        pred_source = "embed-vlm" if vlm_corroborates_embed else "embed"
-        relabel_action = "relabel"
-
-    # Rule 5: embed reject for the chosen label.
-    final_sim = sims.get(pred_key) if pred_key else None
-    if final_sim is not None and final_sim < reject_embed_threshold:
-        return _make("embed", rejected=True, vlm_action=relabel_action)
-
-    # Rule 6: VLM tiebreaker on still-ambiguous cases. VLM only
-    # tiebreaks BETWEEN gd's label and embed's nearest label -
-    # picking a third unrelated label is treated as "VLM disagrees,
-    # noted but ignored".
-    vlm_action = relabel_action
-    if (
-        ambiguous
-        and not can_relabel  # didn't already trust embedding
-        and vlm_key is not None
-        and pred_key is not None
-    ):
-        candidate_keys = {gd_key, best_key} - {None, ""}
-        if vlm_key in candidate_keys and vlm_key != pred_key:
-            # VLM picks the OTHER candidate -> switch.
-            pred_key = vlm_key
-            pred_label = label_display.get(vlm_key, vlm_key)
-            pred_source = "vlm"
-            vlm_action = "tiebreak"
-            # Re-check the embed reject for the newly chosen label.
-            final_sim = sims.get(pred_key) if pred_key else None
-            if final_sim is not None and final_sim < reject_embed_threshold:
-                return _make("embed", rejected=True, vlm_action=vlm_action)
-        elif vlm_key in candidate_keys and vlm_key == pred_key:
-            vlm_action = "confirm"
-        else:
-            vlm_action = "disagree"
-
-    return _make(None, rejected=False, vlm_action=vlm_action)
-
-
 def _v2_resolve_label_specific(
     embedding: list[float],
     gd_label: str | None,
     refs_by_label: dict,
     label_display: dict[str, str],
     *,
-    score_mode: str = "knn",
-    filename_labels: set[str] | None = None,
-    gd_score: float | None = None,
-    relabel_threshold: float = 0.5,
     reject_embed_threshold: float = 0.4,
-    reject_gd_threshold: float = 0.15,
-    gd_low_embed_rescue_min: float = 0.6,
-    combined_reject_gd_max: float = 0.25,
-    combined_reject_embed_max: float = 0.48,
-    # SigLIP2 ensemble inputs. When both query embedding and refs
-    # are supplied, the resolver scores against each encoder
-    # independently and combines the per-label sims as a weighted
-    # mean (V2_SIGLIP_WEIGHT, default 0.4). DINOv2 stays the
-    # primary signal because foreground-only patch_mean at 518×518
-    # already does well on visual structure; SigLIP's contribution
-    # is the text-aligned semantic prior.
-    embedding_siglip: list[float] | None = None,
-    refs_by_label_siglip: dict | None = None,
-    siglip_weight: float = float(os.environ.get("V2_SIGLIP_WEIGHT", "0.4")),
-    # Per-class accept thresholds derived from each class's leave-
-    # one-out self-score distribution (mean - 3σ, capped at the
-    # global default 0.40). When supplied, the embed-low reject in
-    # rule 5 uses the predicted class's threshold instead of the
-    # flat `reject_embed_threshold`. Computed by
-    # `_v2_compute_class_thresholds` at the call site so the resolver
-    # itself stays stateless.
+    # From _v2_compute_class_thresholds; replaces reject_embed_threshold per label.
     class_thresholds: dict[str, float] | None = None,
-    # Patch-level matching inputs. When V2_PATCH_MATCH=on AND the
-    # query patches + per-label reference patch grids are supplied,
-    # the resolver swaps the pooled-cosine scoring for per-patch
-    # top-K matching. Captures local distinguishing features (ear
-    # texture, asymmetric markings) that the patch_mean smears.
-    # DINOv2 and SigLIP patches are scored independently and
-    # combined the same way the pooled cosines are (siglip_weight).
+    # Patch grids. A label's patch score replaces its pooled cosine.
     query_patch_tokens: "np.ndarray | None" = None,
     query_patch_fg: "np.ndarray | None" = None,
     refs_by_label_patches: dict | None = None,
-    query_patch_tokens_siglip: "np.ndarray | None" = None,
-    query_patch_fg_siglip: "np.ndarray | None" = None,
-    refs_by_label_patches_siglip: dict | None = None,
-    # Margin below which the resolver flags a kept detection as
-    # ambiguous (top1 - top2 within this band). Defaults to the env
-    # `V2_AMBIGUOUS_MARGIN` (0.005) so V2's behaviour stays unchanged;
-    # call sites that want a different threshold (e.g. Charlie's
-    # specific path uses 0.013 because SAM3-derived crops sit in a
-    # noisier sim distribution) can pass this explicitly.
+    # Top-two margin below which a kept detection is flagged ambiguous;
+    # defaults to V2_AMBIGUOUS_MARGIN.
     ambiguous_margin: float | None = None,
 ) -> dict:
-    """Embed-priority resolver for SPECIFIC datasets.
-
-    Specific datasets (hare vs rabbit; horse standing vs lying; chess
-    pieces; plate countries) are fine-grained variants of one base
-    concept. GD's open-vocabulary detector can't reliably tell them
-    apart from the prompt - its score barely moves between sibling
-    labels, AND it carries a strong pretraining bias toward whichever
-    label is more common in its training data (rabbits >> hares,
-    cats >> servals, etc). The user's reference embeddings are the
-    SOLE label discriminator. GD's score is used only to gate "is
-    this even a real detection" rejects; its label string is ignored.
-
-    Previously the resolver would defer to GD when the embedding
-    margin was small ("tie-break"). That's been removed: the user
-    found GD's pretraining prior was always wrong on the cases where
-    embedding margins are thin, so any GD intervention hurts more
-    than it helps. The reference embeddings always win - even
-    razor-thin margins.
-
-    Decision tree (first match wins):
-      1. No reference embeddings or empty sims → fall through to
-         the gd_score reject so we don't stamp a random label.
-      2. gd_score < 0.15 AND embed_best ≥ 0.6 → accept with embed
-         (rescue: GD almost missed it but embed is confident).
-      3. gd_score < 0.15 → reject "gd" (no rescue available).
-      4. gd_score < 0.25 AND embed_best < 0.48 → reject "combined"
-         (neither model commits).
-      5. final_sim < 0.4 → reject "embed".
-      6. otherwise → embed_best as the predicted label.
-    """
+    """Resolver for specific datasets: the reference embeddings choose the
+    label; `gd_label`, the segmenter's, stands when there are none."""
     import numpy as _np
 
-    sims: dict[str, float] = {}
     sims_dino: dict[str, float] = {}
-    sims_siglip: dict[str, float] = {}
     sims_patch: dict[str, float] = {}
-    sims_patch_siglip: dict[str, float] = {}
 
-    # Patch-level DINOv2 matching. Replaces the pooled DINOv2 cosine
-    # for any label that has both a query patch grid and reference
-    # patch grids. Labels missing patch refs (mid-backfill) still
-    # fall through to the pooled DINOv2 cosine below.
     use_patch_dino = (
         query_patch_tokens is not None
         and query_patch_fg is not None
@@ -11880,93 +7364,19 @@ def _v2_resolve_label_specific(
             print(f"[v2-resolve-specific] patch (dino) scoring failed: {e}")
             sims_patch = {}
 
-    # Patch-level SigLIP matching. Same idea, parallel encoder.
-    # When available it replaces the pooled SigLIP cosine in the
-    # final combine step below.
-    use_patch_siglip = (
-        query_patch_tokens_siglip is not None
-        and query_patch_fg_siglip is not None
-        and refs_by_label_patches_siglip
-    )
-    if use_patch_siglip:
-        try:
-            sims_patch_siglip = _v2_score_labels_patchwise(
-                query_patch_tokens_siglip, query_patch_fg_siglip, refs_by_label_patches_siglip,
-            )
-        except Exception as e:
-            print(f"[v2-resolve-specific] patch (siglip) scoring failed: {e}")
-            sims_patch_siglip = {}
-
     if embedding and refs_by_label:
         q = _np.asarray(embedding, dtype=_np.float32)
-        if score_mode == "centroid":
-            sims_dino = _v2_score_labels_centroid(q, refs_by_label)
-        else:
-            # Specific datasets: 1/d-weighted top-K kNN. Weighting by
-            # inverse cosine distance lets a single very-close
-            # reference dominate over several vague matches.
-            sims_dino = _v2_score_labels_knn_weighted(q, refs_by_label)
+        sims_dino = _v2_score_labels_knn_weighted(q, refs_by_label)
 
-    # If patch matching produced sims, those replace the pooled
-    # DINOv2 sims label-by-label. Labels missing from patch_sims
-    # still fall back to the pooled value (so a half-backfilled
-    # project doesn't lose entire classes during transition).
+    # Labels without reference patches keep their pooled score.
     if sims_patch:
         merged_dino: dict[str, float] = {}
         for k in set(sims_dino.keys()) | set(sims_patch.keys()):
             merged_dino[k] = sims_patch.get(k, sims_dino.get(k, 0.0))
         sims_dino = merged_dino
-
-    # SigLIP2 second opinion. Independent kNN against the SigLIP
-    # reference set; combined with DINOv2's sims as a weighted mean
-    # per label. Falls back to DINOv2-only when SigLIP isn't loaded
-    # or has no refs for any label. When SigLIP patch tokens are
-    # available, the patch top-K replaces the pooled cosine for
-    # any label that has both - same fallback shape as the DINOv2
-    # patch path above.
-    use_siglip = (
-        (embedding_siglip is not None and refs_by_label_siglip)
-        or sims_patch_siglip
-    ) and 0.0 < siglip_weight < 1.0
-    if use_siglip:
-        if embedding_siglip is not None and refs_by_label_siglip:
-            qs = _np.asarray(embedding_siglip, dtype=_np.float32)
-            if score_mode == "centroid":
-                sims_siglip = _v2_score_labels_centroid(qs, refs_by_label_siglip)
-            else:
-                sims_siglip = _v2_score_labels_knn_weighted(qs, refs_by_label_siglip)
-        if sims_patch_siglip:
-            merged_siglip: dict[str, float] = {}
-            for k in set(sims_siglip.keys()) | set(sims_patch_siglip.keys()):
-                merged_siglip[k] = sims_patch_siglip.get(k, sims_siglip.get(k, 0.0))
-            sims_siglip = merged_siglip
-        # Combine label-by-label. A label only gets a combined score
-        # when both encoders have a sim for it - half-empty pairs
-        # fall back to the encoder that does have data, weighted at
-        # 1.0 so the half-data label isn't artificially dragged toward
-        # zero.
-        all_keys = set(sims_dino.keys()) | set(sims_siglip.keys())
-        for k in all_keys:
-            d_sim = sims_dino.get(k)
-            s_sim = sims_siglip.get(k)
-            if d_sim is not None and s_sim is not None:
-                sims[k] = (1.0 - siglip_weight) * d_sim + siglip_weight * s_sim
-            elif d_sim is not None:
-                sims[k] = d_sim
-            elif s_sim is not None:
-                sims[k] = s_sim
-    else:
-        sims = dict(sims_dino)
-
-    if filename_labels:
-        sims = _v2_apply_filename_hint(sims, filename_labels)
+    sims = dict(sims_dino)
 
     sorted_sims_desc = sorted(sims.values(), reverse=True)
-    # Margin is top1 - top2. With <2 labels in sims (e.g. only one
-    # label has references uploaded yet) there's no second-best to
-    # subtract from, so the margin is undefined - return 0.0 rather
-    # than the top1 sim itself, which was misleading the FE into
-    # rendering a single sim's value as if it were the margin.
     embed_margin = (
         sorted_sims_desc[0] - sorted_sims_desc[1]
         if len(sorted_sims_desc) >= 2 else
@@ -11975,22 +7385,12 @@ def _v2_resolve_label_specific(
     best_key = max(sims, key=sims.get) if sims else None
     best_sim = sims[best_key] if best_key else None
 
-    # Seed the prediction from EMBEDDING'S top label, not GD's.
-    # GD's label is intentionally ignored at the label-choice step -
-    # see the docstring above for why.
+    # The embedding's top label, never the segmenter's.
     pred_key = best_key
     pred_label = label_display.get(best_key, best_key) if best_key else None
     pred_source: str | None = "embed" if best_key else None
 
-    # Margin-driven ambiguity flag for the FE. When the embed top-1
-    # is within `_ambiguous_margin` of the runner-up the decision is
-    # essentially a coin flip and the FE should surface the detection
-    # in the "unsure" tray rather than the verified one. The resolver
-    # itself still commits to embed_best - this is purely a UI signal
-    # so the user can review borderline calls. Threshold tunable via
-    # V2_AMBIGUOUS_MARGIN. Computed inside _make so it can also
-    # respect the rejected flag (rejected detections already get a
-    # red pill - adding "unsure" on top is noisy).
+    # The ambiguous flag only marks a detection for review; the label stands.
     _ambiguous_margin = (
         float(ambiguous_margin)
         if ambiguous_margin is not None
@@ -11999,9 +7399,6 @@ def _v2_resolve_label_specific(
 
     def _make(reject_reason: str | None, *, rejected: bool) -> dict:
         final_sim = sims.get(pred_key) if pred_key else None
-        # Only flag ambiguous on KEPT detections - rejected ones
-        # already get the "rejected" pill in the FE; doubling up
-        # on "unsure" + "rejected" is noisy.
         ambiguous = (
             (not rejected)
             and len(sims) >= 2
@@ -12019,81 +7416,33 @@ def _v2_resolve_label_specific(
             "ambiguous": ambiguous,
             "vlm_action": None,
             "sims": {label_display.get(k, k): round(float(v), 4) for k, v in sims.items()},
-            # Per-encoder breakdown for the popup. Lets the user see
-            # which encoder's signal carried each detection - handy
-            # when DINOv2 and SigLIP disagree on a fine-grained pair.
             "sims_dino": {label_display.get(k, k): round(float(v), 4) for k, v in sims_dino.items()},
-            "sims_siglip": {label_display.get(k, k): round(float(v), 4) for k, v in sims_siglip.items()},
             "sims_patch": {label_display.get(k, k): round(float(v), 4) for k, v in sims_patch.items()},
-            "sims_patch_siglip": {label_display.get(k, k): round(float(v), 4) for k, v in sims_patch_siglip.items()},
-            "siglip_weight": float(siglip_weight) if use_siglip else 0.0,
             "patch_match_used": bool(sims_patch),
-            "patch_match_used_siglip": bool(sims_patch_siglip),
         }
 
     if not sims:
-        rejected_gd = gd_score is not None and gd_score < reject_gd_threshold
-        # Without embed signal we can't pick a label, so fall back to
-        # GD's label here just to surface SOMETHING (it'll be rejected
-        # if gd_score is low). This branch only fires for projects
-        # with no reference embeddings yet.
-        if not rejected_gd and gd_label:
-            pred_key = (gd_label or "").strip().lower()
+        if gd_label:
+            pred_key = gd_label.strip().lower()
             pred_label = gd_label
             pred_source = "gd"
-        return _make("gd" if rejected_gd else None, rejected=rejected_gd)
-
-    # Rule 2: GD-low rescue. GD almost dropped this detection but
-    # embed is confident - keep the box, label it from embed.
-    if (
-        gd_score is not None and gd_score < reject_gd_threshold
-        and best_sim is not None
-        and best_sim >= gd_low_embed_rescue_min
-    ):
         return _make(None, rejected=False)
 
-    # Rule 3: GD very low alone - reject.
-    if gd_score is not None and gd_score < reject_gd_threshold:
-        return _make("gd", rejected=True)
-
-    # Rule 4: combined-low reject.
-    if (
-        gd_score is not None and gd_score < combined_reject_gd_max
-        and best_sim is not None and best_sim < combined_reject_embed_max
-    ):
-        return _make("combined", rejected=True)
-
-    # Rule 5: final-label embed-low reject. The prediction is the
-    # embed top label; reject if its absolute similarity is too low
-    # to be meaningful. (GD tie-break removed - the user found GD's
-    # pretraining prior was always wrong on the cases where embed
-    # margins were thin, so it dragged decisions in the wrong
-    # direction more often than it tied them correctly.)
     final_sim = sims.get(pred_key) if pred_key else None
-    # Per-class threshold beats the global default when one is
-    # available for the predicted class. A tightly-clustered class
-    # ("stop sign", LOO mean 0.85 σ 0.04) raises the bar to ~0.77;
-    # a loosely-clustered one ("horse", mean 0.55 σ 0.10) drops it
-    # to ~0.35 so legitimate variety isn't rejected. Falls back to
-    # `reject_embed_threshold` when class_thresholds is missing or
-    # the class has too few refs for a stable distribution.
     threshold_used = reject_embed_threshold
     if class_thresholds is not None and pred_key is not None:
         threshold_used = class_thresholds.get(pred_key, reject_embed_threshold)
     if final_sim is not None and final_sim < threshold_used:
         return _make("embed", rejected=True)
 
-    # Diagnostic: print the sims so we can see what's actually
-    # driving each decision when the user reports "rabbits look
-    # like hares". One log line per detection - cheap, parsable.
     try:
         sims_str = ", ".join(
             f"{label_display.get(k, k)}={v:.3f}"
             for k, v in sorted(sims.items(), key=lambda kv: -kv[1])
         )
         print(
-            f"[v2-resolve-specific] gd={gd_label!r}({gd_score}) "
-            f"→ pred={pred_label!r} src={pred_source} "
+            f"[v2-resolve-specific] gd={gd_label!r} "
+            f"-> pred={pred_label!r} src={pred_source} "
             f"margin={embed_margin:.3f} thr={threshold_used:.3f} sims=[{sims_str}]"
         )
     except Exception:
@@ -12102,583 +7451,48 @@ def _v2_resolve_label_specific(
     return _make(None, rejected=False)
 
 
-def _v2_apply_containment(
-    detections: list[dict],
-    label_display: dict[str, str],
-    *,
-    containment_min: float = 0.7,
-    size_ratio_max: float = 0.7,
-    reject_embed_threshold: float = 0.4,
-) -> None:
-    """Post-pass that fixes mislabelled containers (mutates in place).
-
-    When a smaller detection is mostly inside a bigger one AND they
-    share a label, the bigger box is suspect. Two distinct patterns,
-    each with a different fix:
-
-    1. **Duplicate detection** - the bigger box is a looser version
-       of the smaller one (same object detected twice). Detected by
-       SIGNAL AGREEMENT: GD's label, embedding-nearest centroid, AND
-       (if it ran) VLM all picked the same label as the smaller's.
-       Action: REJECT the bigger; keep the tighter inner box.
-
-    2. **Compositional mislabel** - the bigger box is genuinely a
-       different object (e.g., a person whose bbox embeds close to
-       the high-vis vest centroid because the centroid is biased).
-       Detected by DISAGREEMENT: at least one of GD / embed-nearest
-       / VLM picked a different label. Action: re-resolve the
-       bigger box to its next-best centroid that ISN'T the smaller's
-       label; reject if no alternative clears the embed floor.
-
-    Different-label pairs are left alone - those are the legitimate
-    "vest inside person" detections we want to keep.
-
-    Containment is computed per-pair as
-    ``(intersection area) / (smaller box area)``; size_ratio_max
-    guards against treating two near-equal boxes as containment.
-    """
-    n = len(detections)
-    fixes: list[str] = []
-    for i in range(n):
-        big = detections[i]
-        if big.get("rejected"):
-            continue
-        big_label = big.get("pred_label")
-        if not big_label:
-            continue
-        big_box = big.get("box") or []
-        if len(big_box) != 4:
-            continue
-        bx0, by0, bx1, by1 = (float(c) for c in big_box)
-        big_area = max((bx1 - bx0) * (by1 - by0), 1.0)
-        # Pre-compute big's per-signal labels for the agreement
-        # check below (stable across the j-loop).
-        big_gd_key = str(big.get("gd_label") or "").strip().lower()
-        big_embed_nearest_key = str(big.get("embed_nearest_label") or "").strip().lower()
-        big_vlm_key = str(big.get("vlm_label") or "").strip().lower()
-        for j in range(n):
-            if i == j:
-                continue
-            small = detections[j]
-            if small.get("rejected"):
-                continue
-            small_label = small.get("pred_label")
-            if not small_label:
-                continue
-            if str(small_label).strip().lower() != str(big_label).strip().lower():
-                continue
-            small_box = small.get("box") or []
-            if len(small_box) != 4:
-                continue
-            sx0, sy0, sx1, sy1 = (float(c) for c in small_box)
-            small_area = max((sx1 - sx0) * (sy1 - sy0), 1.0)
-            if small_area >= big_area * size_ratio_max:
-                continue
-            ix0 = max(sx0, bx0); iy0 = max(sy0, by0)
-            ix1 = min(sx1, bx1); iy1 = min(sy1, by1)
-            if ix1 <= ix0 or iy1 <= iy0:
-                continue
-            inter = (ix1 - ix0) * (iy1 - iy0)
-            containment = inter / small_area
-            if containment < containment_min:
-                continue
-
-            # Agreement check: if every signal that fired on the
-            # bigger box picked the same label as the smaller's, the
-            # pair is the same object detected twice. Two flavours:
-            #   - Duplicate: smaller is the tighter precise crop, the
-            #     bigger pulls in surrounding pixels. Smaller is the
-            #     more confident detection (gd + embed sim higher).
-            #   - Partial occlusion: smaller only annotates a fragment
-            #     of the object (e.g., a hand covers half a vest),
-            #     while the bigger is the correct full annotation.
-            #     Bigger is the more confident one in that case.
-            # Confidence here = gd_score + embed_sim_for_label. We
-            # reject whichever side has the lower combined score.
-            # (`small_key` was never assigned in the SaaS build - a latent
-            # NameError on this path; the intended value is the smaller
-            # box's normalised label, mirroring the sibling NMS pass.)
-            small_key = str(small_label).strip().lower()
-            all_agree = (
-                big_gd_key == small_key
-                and big_embed_nearest_key == small_key
-                and (not big_vlm_key or big_vlm_key == small_key)
-            )
-            if all_agree:
-                big_score = (
-                    float(big.get("gd_score") or 0)
-                    + float(big.get("embed_sim_for_label") or 0)
-                )
-                small_score = (
-                    float(small.get("gd_score") or 0)
-                    + float(small.get("embed_sim_for_label") or 0)
-                )
-                if small_score >= big_score:
-                    # Smaller more confident (or tied) → duplicate case.
-                    big["rejected"] = True
-                    big["reject_reason"] = "containment"
-                    big["pred_label"] = None
-                    big["pred_source"] = "containment"
-                    big["vlm_action"] = "containment-duplicate"
-                    fixes.append(
-                        f"{big_label}→reject(duplicate, conf {big_score:.2f}≤{small_score:.2f})"
-                    )
-                    break
-                # Bigger more confident → partial-occlusion case.
-                small["rejected"] = True
-                small["reject_reason"] = "containment"
-                small["pred_label"] = None
-                small["pred_source"] = "containment"
-                small["vlm_action"] = "containment-partial"
-                fixes.append(
-                    f"{big_label}→reject inner(partial, conf {small_score:.2f}<{big_score:.2f})"
-                )
-                continue
-
-            # Hit. Re-resolve big using sims it already has, but
-            # excluding the small's label as a candidate. embed_sims
-            # is keyed on display-cased labels so we compare lower.
-            small_key = str(small_label).strip().lower()
-            sims = big.get("embed_sims") or {}
-            alt = {
-                k: float(v) for k, v in sims.items()
-                if str(k).strip().lower() != small_key
-            }
-            prev_label = big_label
-            if not alt:
-                big["rejected"] = True
-                big["reject_reason"] = "containment"
-                big["pred_label"] = None
-                big["pred_source"] = "containment"
-                big["vlm_action"] = "containment-reject"
-                fixes.append(f"{prev_label}→reject(no-alt)")
-                break
-            best_alt_disp = max(alt, key=alt.get)
-            best_alt_sim = alt[best_alt_disp]
-            if best_alt_sim >= reject_embed_threshold:
-                big["pred_label"] = best_alt_disp
-                big["pred_source"] = "embed-containment"
-                big["embed_sim_for_label"] = round(float(best_alt_sim), 4)
-                big["vlm_action"] = "containment-relabel"
-                fixes.append(f"{prev_label}→{best_alt_disp}")
-                # Subsequent j's compare against the NEW label.
-                big_label = best_alt_disp
-            else:
-                big["rejected"] = True
-                big["reject_reason"] = "containment"
-                big["pred_label"] = None
-                big["pred_source"] = "containment"
-                big["vlm_action"] = "containment-reject"
-                fixes.append(f"{prev_label}→reject(low-alt {best_alt_sim:.2f})")
-                break
-    if fixes:
-        print(f"[v2-import] containment fixes: {len(fixes)} - {', '.join(fixes)}")
-
-
-def _v2_polygon_components(mask_obj: dict | None, *, secondary_frac: float = 0.10) -> int:
-    """Count meaningful disconnected regions in a SAM mask payload.
-
-    SAM's segmentation pipeline already filters polygons under
-    MIN_CONTOUR_AREA_FRAC (0.5% of box area) - anything that survives
-    is non-trivial. Within that, we treat polygons whose area is
-    below `secondary_frac` of the largest as residual noise that
-    shouldn't count toward the component total. So:
-      - 1 → single connected region (the clean case)
-      - 2+ → there's a second entity in the mask (the case we want
-             to reject in same-label overlap pairs)
-      - 0 → empty / malformed mask
-    """
-    if not isinstance(mask_obj, dict):
-        return 0
-    polys = mask_obj.get("polygons") or []
-    if not polys:
-        return 0
-    areas: list[float] = []
-    for p in polys:
-        if not isinstance(p, list) or len(p) < 3:
-            continue
-        s = 0.0
-        n_pts = len(p)
-        for k in range(n_pts):
-            try:
-                x1, y1 = float(p[k][0]), float(p[k][1])
-                x2, y2 = float(p[(k + 1) % n_pts][0]), float(p[(k + 1) % n_pts][1])
-            except (TypeError, IndexError, ValueError):
-                continue
-            s += x1 * y2 - x2 * y1
-        areas.append(abs(s) / 2.0)
-    if not areas:
-        return 0
-    max_a = max(areas)
-    if max_a <= 0:
-        return 0
-    return sum(1 for a in areas if a >= max_a * secondary_frac)
-
-
-def _v2_apply_same_label_overlap(
-    detections: list[dict],
-    *,
-    overlap_iou_min: float = 0.30,
-    occlusion_separation_min: float = 0.30,
-) -> None:
-    """Same-label overlap pass: prefer the cleaner / more confident peer.
-
-    When two same-label boxes overlap (IoU ≥ overlap_iou_min - set
-    permissively so a small tolerance still triggers), we drop the
-    weaker box. Two-tier discrimination:
-
-    1. Mask quality (primary): if one mask is a single connected
-       region (one closed shape) and the other has a secondary
-       component (a second entity bleeding in), the multi-component
-       box is rejected.
-    2. Confidence (fallback): when mask quality doesn't decide
-       (both single or both multi), reject the box with the lower
-       combined confidence (gd_score + embed_sim_for_label). This
-       catches the user's "person wearing high-vis with a hand
-       covering half" case - the partial annotation lands lower on
-       both signals than the full one.
-
-    Occlusion guard: before either tier runs, we compute the
-    Euclidean distance between the two bbox centres normalised by
-    the average box side length. When that ratio is >=
-    occlusion_separation_min the boxes are at meaningfully
-    different positions despite the bbox overlap - likely separate
-    objects partially occluding each other (a row of people half
-    behind one another) rather than two detections of the same
-    object. Skip rejection in that case.
-
-    Equal-confidence ties leave both alone. Different-label overlaps
-    are out of scope. Runs AFTER `_v2_apply_containment` so
-    containment-rejected boxes don't get reconsidered here.
-    """
-    n = len(detections)
-    fixes: list[str] = []
-    components_cache: dict[int, int] = {}
-
-    def _components_for(idx: int) -> int:
-        if idx not in components_cache:
-            components_cache[idx] = _v2_polygon_components(
-                detections[idx].get("mask")
-            )
-        return components_cache[idx]
-
-    for i in range(n):
-        a = detections[i]
-        if a.get("rejected"):
-            continue
-        a_label = a.get("pred_label")
-        if not a_label:
-            continue
-        a_box = a.get("box") or []
-        if len(a_box) != 4:
-            continue
-        ax0, ay0, ax1, ay1 = (float(c) for c in a_box)
-        a_area = max((ax1 - ax0) * (ay1 - ay0), 1.0)
-        a_label_key = str(a_label).strip().lower()
-        for j in range(i + 1, n):
-            b = detections[j]
-            if b.get("rejected"):
-                continue
-            b_label = b.get("pred_label")
-            if not b_label:
-                continue
-            if str(b_label).strip().lower() != a_label_key:
-                continue
-            b_box = b.get("box") or []
-            if len(b_box) != 4:
-                continue
-            bx0, by0, bx1, by1 = (float(c) for c in b_box)
-            b_area = max((bx1 - bx0) * (by1 - by0), 1.0)
-            ix0 = max(ax0, bx0); iy0 = max(ay0, by0)
-            ix1 = min(ax1, bx1); iy1 = min(ay1, by1)
-            if ix1 <= ix0 or iy1 <= iy0:
-                continue
-            inter = (ix1 - ix0) * (iy1 - iy0)
-            union = a_area + b_area - inter
-            if union <= 0:
-                continue
-            iou = inter / union
-            if iou < overlap_iou_min:
-                continue
-
-            # Occlusion guard: bboxes can overlap heavily when two
-            # distinct objects partially occlude each other (e.g. a
-            # row of people standing half behind one another). Their
-            # bbox centres are at meaningfully different positions
-            # though, so we use the centre-distance / avg-side ratio
-            # as a proxy for "are these the same object or different
-            # objects that just happen to share image space".
-            a_cx = (ax0 + ax1) / 2.0
-            a_cy = (ay0 + ay1) / 2.0
-            b_cx = (bx0 + bx1) / 2.0
-            b_cy = (by0 + by1) / 2.0
-            centre_dist = ((a_cx - b_cx) ** 2 + (a_cy - b_cy) ** 2) ** 0.5
-            avg_side = ((a_area ** 0.5) + (b_area ** 0.5)) / 2.0
-            if avg_side > 0 and (centre_dist / avg_side) >= occlusion_separation_min:
-                continue
-
-            a_n = _components_for(i)
-            b_n = _components_for(j)
-            reject_a = False
-            reject_b = False
-            action: str | None = None
-            note = ""
-            if a_n > 1 and b_n == 1:
-                reject_a = True
-                action = "overlap-multi-mask"
-                note = f"(parts={a_n})→reject vs single-mask peer"
-            elif b_n > 1 and a_n == 1:
-                reject_b = True
-                action = "overlap-multi-mask"
-                note = f"(parts={b_n})→reject vs single-mask peer"
-            else:
-                # Mask quality didn't discriminate (both single or
-                # both multi). Compare combined confidence.
-                a_score = (
-                    float(a.get("gd_score") or 0)
-                    + float(a.get("embed_sim_for_label") or 0)
-                )
-                b_score = (
-                    float(b.get("gd_score") or 0)
-                    + float(b.get("embed_sim_for_label") or 0)
-                )
-                if a_score < b_score:
-                    reject_a = True
-                    action = "overlap-low-conf"
-                    note = f"(conf {a_score:.2f}<{b_score:.2f})→reject vs higher-conf peer"
-                elif b_score < a_score:
-                    reject_b = True
-                    action = "overlap-low-conf"
-                    note = f"(conf {b_score:.2f}<{a_score:.2f})→reject vs higher-conf peer"
-                # else: equal confidence, leave both alone.
-
-            if reject_a:
-                a["rejected"] = True
-                a["reject_reason"] = "overlap"
-                a["pred_label"] = None
-                a["pred_source"] = "overlap"
-                a["vlm_action"] = action
-                fixes.append(f"{a_label}{note}")
-                break  # a is gone; advance i
-            if reject_b:
-                b["rejected"] = True
-                b["reject_reason"] = "overlap"
-                b["pred_label"] = None
-                b["pred_source"] = "overlap"
-                b["vlm_action"] = action
-                fixes.append(f"{b_label}{note}")
-                # don't break: i may pair with another j
-    if fixes:
-        print(f"[v2-import] same-label overlap fixes: {len(fixes)} - {', '.join(fixes)}")
-
-
-# ─── Dataset-type classifier (general vs specific) ───────────────
-# Distinguishes "general" datasets (visually-distinct categories
-# like person/car/pothole - detector dominates the decision) from
-# "specific" datasets (fine-grained variants like hare vs rabbit
-# or horse-standing vs horse-lying - embeddings against per-label
-# centroids do the heavy lifting). Surfaced in the UI so the user
-# knows what the pipeline is leaning on, and useful as a tuning
-# hook for future per-mode threshold profiles.
-
-def _dataset_type_cache_path(project_id: str) -> Path:
-    return project_dir(project_id) / "dataset_type.json"
-
-
-# Bumped whenever the classifier prompt changes meaningfully so that
-# old cached verdicts get re-asked under the new prompt without
-# anyone having to delete dataset_type.json by hand. v4: broadened the
-# SPECIFIC definition to cover material / look-alike-different-object
-# cases (glass vs plastic cup, screw vs threaded standoff).
-_DATASET_TYPE_PROMPT_VERSION = 4
-
-# Reason shown when a project's type was set by hand rather than by the
-# classifier and no more specific reason was recorded.
-_DEFAULT_OVERRIDE_REASON = "Set manually."
-
-
-def _labels_signature(tags: list[str]) -> str:
-    """Stable key used to invalidate the cache when labels change."""
-    return ",".join(sorted({str(t).strip().lower() for t in tags if t and str(t).strip()}))
-
-
-def _read_dataset_type_sidecar(project_id: str) -> dict | None:
-    p = _dataset_type_cache_path(project_id)
-    if not p.exists():
-        return None
+def _dataset_type(project_id: str) -> dict:
+    """Type "specific" when the dataset has reference images, else "general"."""
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else None
-    except Exception as e:
-        print(f"[dataset-type] cache read failed for {project_id}: {e}")
-        return None
-
-
-def _write_dataset_type_sidecar(project_id: str, data: dict) -> None:
-    p = _dataset_type_cache_path(project_id)
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    except Exception as e:
-        print(f"[dataset-type] cache write failed for {project_id}: {e}")
-
-
-def _classify_dataset_type_cached(project_id: str, tags: list[str]) -> dict:
-    """Portable build: no user choice, no external APIs. A dataset is "specific"
-    exactly when it has reference images (the embedding resolver can then
-    use them) and "general" otherwise - labels alone always just work,
-    references are an optional upgrade added any time."""
-    sig = _labels_signature(tags)
-    try:
-        m = load_manifest(project_id, copy=False) or {}
-        has_refs = bool(m.get("references"))
+        has_refs = bool((load_manifest(project_id, copy=False) or {}).get("references"))
     except Exception:
         has_refs = False
     return {
         "type": "specific" if has_refs else "general",
         "reason": "reference images present" if has_refs else "no reference images",
-        "labels_signature": sig,
-        "prompt_version": _DATASET_TYPE_PROMPT_VERSION,
         "source": "auto",
     }
 
 
-def _resolve_dataset_type_cached_only(project_id: str, tags: list[str]) -> dict | None:
-    return _classify_dataset_type_cached(project_id, tags)
-
-
-def _set_dataset_type_override(project_id: str, choice: str, *, source: str, reason: str) -> None:
-    """Persist a sticky dataset-type override into the sidecar. `choice`
-    is "general" or "specific"; `source` is "manual" or "references".
-    Preserves the auto classification fields so picking "auto" later can
-    fall back to them when they're still
-    valid."""
-    data = _read_dataset_type_sidecar(project_id) or {}
-    data["override"] = choice
-    data["override_source"] = source
-    data["override_reason"] = reason
-    _write_dataset_type_sidecar(project_id, data)
-
-
-def _clear_dataset_type_override(project_id: str) -> None:
-    """Drop a sticky override so the type reverts to the auto classifier."""
-    data = _read_dataset_type_sidecar(project_id)
-    if not isinstance(data, dict):
-        return
-    changed = False
-    for k in ("override", "override_source", "override_reason"):
-        if k in data:
-            del data[k]
-            changed = True
-    if changed:
-        _write_dataset_type_sidecar(project_id, data)
-
-
-def _apply_reference_dataset_flip(project_id: str) -> None:
-    """Adding reference images is a strong signal the dataset is
-    SPECIFIC (references only matter when classes look alike). Flip the
-    project to specific via a sticky override - but never stomp a choice
-    the user made by hand, so someone who deliberately set "general" and
-    then uploads a reference keeps their setting."""
-    existing = _read_dataset_type_sidecar(project_id)
-    if isinstance(existing, dict) and existing.get("override_source") == "manual":
-        return
-    _set_dataset_type_override(
-        project_id,
-        "specific",
-        source="references",
-        reason="You added reference images, so this is treated as a specific dataset.",
-    )
-
-
-@app.get(
-    "/api/v2/projects/{project_id}/dataset-type",
-    dependencies=[Depends(require_project_read_access)],
-)
+@app.get("/api/v2/projects/{project_id}/dataset-type")
 async def v2_dataset_type(project_id: str):
-    """Classify the project's label set as general or specific."""
     if not project_dir(project_id).exists():
         raise HTTPException(404)
-    manifest = load_manifest(project_id)
-    tags = manifest.get("tags") or []
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None, _classify_dataset_type_cached, project_id, list(tags),
-    )
+    return await asyncio.to_thread(_dataset_type, project_id)
 
 
-# ── (removed) AI dataset insight ──────────────────────────────────────────────
-# One smart, dataset-specific coaching line for the Overview's Insights section.
-# Built from a COMPACT numeric summary (no images) and cached by a coarse
-# signature caching from the SaaS build; no external calls remain.
-
-@app.get(
-    "/api/v2/projects/{project_id}/access",
-    dependencies=[Depends(require_project_read_access)],
-)
-async def v2_project_access(project_id: str, request: Request, authorization: str = Header(default="")):
-    """The caller's effective access to this dataset: write (edit/label/upload)
-    and manage. Drives the FE's read-only decision so a Project EDITOR can edit
-    a dataset another member created (write comes from Project membership, not
-    just dataset ownership)."""
-    m = load_manifest(project_id, copy=False)
-    if not m:
-        raise HTTPException(404, "project not found")
-    viewer = request_username(request, authorization)
-    acc = containers.dataset_access(m, viewer)
-    return {
-        "writable": bool(acc["writable"]),
-        "manageable": bool(acc["manageable"]),
-        "owner": (m.get("owner") or ""),
-    }
+# Licence details of recent Openverse results by image URL, kept with the
+# imports made from them.
+_OPENVERSE_META: OrderedDict[str, dict] = OrderedDict()
+_OPENVERSE_META_MAX = 5000
+_OPENVERSE_META_KEYS = ("title", "creator", "license", "license_version", "license_url",
+                        "attribution", "foreign_landing_url")
 
 
-class DatasetTypeOverrideIn(BaseModel):
-    # "general" / "specific" pin the type; "auto" clears the override
-    # and hands control back to the classifier.
-    type: str
-
-
-@app.post(
-    "/api/v2/projects/{project_id}/dataset-type",
-    dependencies=[Depends(require_project_owner)],
-)
-async def v2_set_dataset_type(project_id: str, payload: DatasetTypeOverrideIn):
-    """Let the project owner override the general/specific verdict (or
-    reset it to the classifier). The override is sticky and feeds the
-    label pipeline - not just the badge - so centroid-vs-kNN scoring
-    follows the user's choice. Returns the freshly-resolved verdict."""
-    choice = (payload.type or "").strip().lower()
-    if choice not in ("general", "specific", "auto"):
-        raise HTTPException(400, "type must be 'general', 'specific', or 'auto'")
-    manifest = load_manifest(project_id, copy=False)
-    tags = list(manifest.get("tags") or [])
-    if choice == "auto":
-        _clear_dataset_type_override(project_id)
-    else:
-        _set_dataset_type_override(
-            project_id, choice, source="manual", reason=_DEFAULT_OVERRIDE_REASON,
-        )
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None, _classify_dataset_type_cached, project_id, tags,
-    )
-
-
-class DatasetTypePreviewBody(BaseModel):
-    labels: list[str]
+def _remember_openverse(results: list[dict]) -> None:
+    for r in results:
+        url = r.get("url") if isinstance(r, dict) else None
+        if isinstance(url, str) and url:
+            _OPENVERSE_META[url] = {k: r[k] for k in _OPENVERSE_META_KEYS if r.get(k)}
+            _OPENVERSE_META.move_to_end(url)
+    while len(_OPENVERSE_META) > _OPENVERSE_META_MAX:
+        _OPENVERSE_META.popitem(last=False)
 
 
 @app.get("/api/openverse/search")
 async def openverse_search(q: str, count: int = 5, commercial: bool = False):
-    """Search Openverse for `q` and return up to `count` (capped 250)
-    Creative-Commons-licensed image results. Used by the "Don't have
-    images?" panel - small counts (~5) to preview candidates, larger
-    counts (up to 250) when the user has confirmed and is pulling the
-    full corpus.
-
-    `commercial=true` filters to licences that permit commercial use
-    (CC0 / BY / BY-SA / PDM)."""
+    """Up to `count` (max 250) Creative Commons images from Openverse; `commercial`
+    keeps licences that allow commercial use."""
     import openverse
     query = (q or "").strip()
     if not query:
@@ -12692,13 +7506,8 @@ async def openverse_search(q: str, count: int = 5, commercial: bool = False):
     except Exception as e:
         print(f"[openverse] search failed: {e}")
         raise HTTPException(status_code=502, detail=str(e))
-    # Server-side thumbnail validation. The frontend probe is
-    # CORS-limited (canvas reads fail on most providers, and broken
-    # thumbnails sometimes still fire onload), so we add a parallel
-    # HEAD-probe pass here that filters out 404s, HTML error pages,
-    # and tiny placeholder bytes BEFORE the search response leaves
-    # the backend. Runs in a thread pool - typically <2s for a
-    # 50-result page on a healthy network.
+    _remember_openverse(results)
+    # Drops results whose thumbnail is missing, an HTML page or a tiny placeholder.
     try:
         validated = await loop.run_in_executor(
             None, lambda: openverse.validate_thumbnails(results),
@@ -12712,27 +7521,8 @@ async def openverse_search(q: str, count: int = 5, commercial: bool = False):
 
 
 def collect_tags(manifest: dict) -> list[str]:
-    """Union of prompt tags and labels actually present on the
-    project's data. Sources, in order of authority:
-
-      1. manifest['tags'] - the explicit project label list (what
-         the FE label editor writes via PUT /api/projects/{id}).
-      2. V1 editedBoxes (manifest['editedBoxes']) - boxes the user
-         drew/relabelled on V1 imports.
-      3. V2 references' detections - boxes on uploaded reference
-         images with assigned labels (added in the V2 editor).
-      4. V2 imports' detections - labels the resolver picked +
-         user-confirmed boxes on dataset images.
-
-    The 3rd and 4th are recovery paths for older projects that
-    pre-date the FE label-save fix: the FE used to drop
-    rename/add/delete edits without persisting them to
-    manifest['tags'], so old projects' authoritative tags list is
-    sometimes empty even though every reference image has a
-    correct label. Pulling from those detections populates the
-    workspace card's `tags` from the data the user actually
-    labelled.
-    """
+    """manifest['tags'], then any other labels on editedBoxes, reference detections
+    and import detections and edited boxes, lowercased."""
     seen: set[str] = set()
     ordered: list[str] = []
 
@@ -12744,7 +7534,6 @@ def collect_tags(manifest: dict) -> list[str]:
 
     extra_labels: set[str] = set()
 
-    # V1 editedBoxes pass.
     edited = manifest.get("editedBoxes", {}) or {}
     for boxes in edited.values():
         if not isinstance(boxes, list):
@@ -12760,7 +7549,6 @@ def collect_tags(manifest: dict) -> list[str]:
                 if p:
                     extra_labels.add(p)
 
-    # V2 references' detections - recovery path for label-save bug.
     for ref in manifest.get("references", []) or []:
         if not isinstance(ref, dict):
             continue
@@ -12771,7 +7559,6 @@ def collect_tags(manifest: dict) -> list[str]:
             if label and label != "new":
                 extra_labels.add(label)
 
-    # V2 imports' detections - same idea.
     for imp in manifest.get("imports", []) or []:
         if not isinstance(imp, dict):
             continue
@@ -12781,7 +7568,6 @@ def collect_tags(manifest: dict) -> list[str]:
             label = (d.get("label") or "").strip().lower()
             if label and label != "new":
                 extra_labels.add(label)
-        # And user-edited boxes on imports.
         for b in imp.get("editedBoxes", []) or []:
             if not isinstance(b, dict):
                 continue
@@ -12796,72 +7582,57 @@ def collect_tags(manifest: dict) -> list[str]:
     return ordered
 
 
-# Short-lived response cache for /api/projects. Keyed on the request's
-# (owner, viewer, offset, limit) tuple; entries expire after a few
-# seconds so the FE's 4-second poll cycle doesn't redo the entire
-# project-directory walk + manifest load every time. Cache also
-# stat-watches every project's manifest mtime so it self-invalidates
-# the moment any project changes (upload, edit, delete) - no risk of
-# returning stale data to the FE for more than the resolution of the
-# stat sweep.
+# /api/projects responses, fresh for _PROJECTS_RESPONSE_TTL_S seconds, until
+# a listed project's manifest changes on disk, and until the engine saves,
+# creates or deletes any dataset: two saves in one file-time tick leave the
+# mtime as it was, and a new dataset is in no cached response.
 
 _PROJECTS_RESPONSE_CACHE: dict[tuple, dict] = {}
 _PROJECTS_RESPONSE_LOCK = __import__("threading").Lock()
 _PROJECTS_RESPONSE_TTL_S = 2.0
+_PROJECTS_GEN = [0]
+
+
+def _projects_changed() -> None:
+    with _PROJECTS_RESPONSE_LOCK:
+        _PROJECTS_GEN[0] += 1
 
 
 def _projects_response_cache_get(key: tuple) -> object | None:
-    """Return cached response when fresh AND no project's manifest has
-    been written since the cache populated. None on miss / staleness."""
+    """The cached response, or None when missing, expired or a listed manifest changed."""
     import time as _t
     with _PROJECTS_RESPONSE_LOCK:
         entry = _PROJECTS_RESPONSE_CACHE.get(key)
         if entry is None:
             return None
         age = _t.time() - entry["ts"]
-        if age > _PROJECTS_RESPONSE_TTL_S:
+        if age > _PROJECTS_RESPONSE_TTL_S or entry["gen"] != _PROJECTS_GEN[0]:
             return None
-        # mtime sanity check - a manifest write between the cache
-        # populating and now invalidates immediately, regardless of
-        # the TTL. Cheap: stat is microseconds per project.
         for pid, mtime in entry["mtimes"].items():
             if _manifest_disk_mtime(pid) > mtime:
                 return None
         return entry["body"]
 
 
-def _projects_response_cache_put(key: tuple, body: object, mtimes: dict[str, float]) -> None:
+def _projects_response_cache_put(key: tuple, body: object, mtimes: dict[str, float], gen: int) -> None:
+    """Caches a response built from the state at generation `gen`."""
     import time as _t
     with _PROJECTS_RESPONSE_LOCK:
-        # Cap the cache so it doesn't grow unbounded as users hit
-        # different (offset, limit) tuples - most usage is the same
-        # few keys but a hostile caller could blow it up.
         if len(_PROJECTS_RESPONSE_CACHE) > 64:
             _PROJECTS_RESPONSE_CACHE.clear()
         _PROJECTS_RESPONSE_CACHE[key] = {
             "ts": _t.time(),
+            "gen": gen,
             "body": body,
             "mtimes": dict(mtimes),
         }
 
 
-# In-memory cache for cover blurhashes. Keyed by (project_id, cover_filename)
-# so a cover swap on the same project invalidates correctly. Survives until
-# restart; ~30 chars per entry so 10K projects = 300 KB. Computed lazily on
-# first list_projects call that returns each project - no manifest write,
-# no pre-bake step needed.
+# (project_id, "<folder or manifest key>/<filename>") -> blurhash, filled on first use.
 _BLURHASH_CACHE: dict[tuple[str, str], str] = {}
 
 
-# Bounded LRU cache for served image bytes. The FE reloads the same
-# reference / import / cover thumbnails on every project open and
-# every workspace poll; serving from RAM is sub-millisecond vs
-# ~10-50 ms hitting disk through OS page-cache (for cold pages) or
-# even the SSD itself for cold-after-restart files. With this in
-# place a typical project page open feels instant on revisit.
-#
-# Sizing: ~25% of available RAM at startup, capped at 8 GB. Logged
-# at startup alongside the manifest-cache capacity probe.
+# LRU cache of served image bytes.
 
 import collections as _collections
 
@@ -12869,7 +7640,7 @@ import collections as _collections
 _IMAGE_CACHE: "_collections.OrderedDict[tuple[str, str, str], tuple[bytes, str, float]]" = _collections.OrderedDict()
 _IMAGE_CACHE_LOCK = __import__("threading").Lock()
 _IMAGE_CACHE_BYTES = 0
-_IMAGE_CACHE_BUDGET_BYTES = 0  # set at startup by _log_manifest_cache_capacity
+_IMAGE_CACHE_BUDGET_BYTES = 0  # set at startup by _size_image_cache
 
 
 def _set_image_cache_budget(budget_bytes: int) -> None:
@@ -12878,9 +7649,7 @@ def _set_image_cache_budget(budget_bytes: int) -> None:
 
 
 def _image_cache_get(project_id: str, subdir: str, filename: str, disk_mtime: float) -> tuple[bytes, str] | None:
-    """Return (bytes, content_type) on cache hit OR None on miss /
-    stale (mtime later than cached). Promotes the entry to the
-    most-recently-used slot on hit."""
+    """(bytes, content_type), or None when missing or the file's mtime differs."""
     key = (project_id, subdir, filename)
     with _IMAGE_CACHE_LOCK:
         entry = _IMAGE_CACHE.get(key)
@@ -12888,21 +7657,17 @@ def _image_cache_get(project_id: str, subdir: str, filename: str, disk_mtime: fl
             return None
         data, ctype, cached_mtime = entry
         if cached_mtime != disk_mtime:
-            # File was rewritten; drop and miss.
             global _IMAGE_CACHE_BYTES
             _IMAGE_CACHE_BYTES -= len(data)
             del _IMAGE_CACHE[key]
             return None
-        # Promote to MRU end.
         _IMAGE_CACHE.move_to_end(key)
         return data, ctype
 
 
 def _image_cache_put(project_id: str, subdir: str, filename: str, data: bytes, ctype: str, disk_mtime: float) -> None:
-    """Insert into the cache and evict LRU entries until total bytes
-    fit under the budget. Skips entries individually larger than
-    half the budget so a single 500 MB upload can't blow out the
-    whole cache."""
+    """Insert, evicting least recently used entries to fit the budget. Entries over
+    half the budget are not cached."""
     if _IMAGE_CACHE_BUDGET_BYTES <= 0:
         return
     if len(data) > _IMAGE_CACHE_BUDGET_BYTES // 2:
@@ -12910,13 +7675,11 @@ def _image_cache_put(project_id: str, subdir: str, filename: str, data: bytes, c
     key = (project_id, subdir, filename)
     global _IMAGE_CACHE_BYTES
     with _IMAGE_CACHE_LOCK:
-        # Replace existing entry's byte count if present.
         old = _IMAGE_CACHE.pop(key, None)
         if old is not None:
             _IMAGE_CACHE_BYTES -= len(old[0])
         _IMAGE_CACHE[key] = (data, ctype, disk_mtime)
         _IMAGE_CACHE_BYTES += len(data)
-        # Evict from the LRU end until we're under budget.
         while _IMAGE_CACHE_BYTES > _IMAGE_CACHE_BUDGET_BYTES and _IMAGE_CACHE:
             _, evicted = _IMAGE_CACHE.popitem(last=False)
             _IMAGE_CACHE_BYTES -= len(evicted[0])
@@ -12933,24 +7696,7 @@ _CONTENT_TYPE_BY_EXT = {
 
 
 async def _serve_cached_image(project_id: str, subdir: str, filename: str, full_path: "Path"):
-    """Common path for /api/v2/projects/{id}/{subdir}/{filename} and
-    similar V1 endpoints. Returns FastAPI Response with the bytes
-    served from the LRU image cache when warm; falls back to disk
-    read on miss + populates the cache for next time.
-
-    Sets Cache-Control + Last-Modified + ETag so the browser keeps
-    bytes around across navigations. References + imports are
-    content-addressed by UUID/hash filename, so the same URL never
-    changes its bytes - safe to allow long-lived browser caching.
-    The cover-thumb endpoint and labelled-preview endpoint set
-    `immutable` via the ?v=<updatedAt> cachebuster the FE appends,
-    which is fine: the URL changes when the bytes change.
-
-    Cold reads run on the default executor via asyncio.to_thread so
-    a 963-tile gallery first-load doesn't serialise the disk reads on
-    the FastAPI event loop. Cache hits return immediately without
-    touching disk at all.
-    """
+    """Serve an image file through the LRU cache, with ETag and Cache-Control headers."""
     from fastapi.responses import Response, FileResponse
     if not full_path.exists():
         raise HTTPException(404)
@@ -12959,13 +7705,8 @@ async def _serve_cached_image(project_id: str, subdir: str, filename: str, full_
         disk_mtime = st.st_mtime
     except OSError:
         disk_mtime = 0.0
-    # ETag built from mtime + size - cheap, stable, changes on edit.
     etag = f'W/"{int(disk_mtime)}-{st.st_size}"' if disk_mtime else None
     extra_headers = {
-        # 1 hour in shared caches, 1 day in the user's browser.
-        # The bytes ARE keyed by filename (UUID) but we leave a
-        # validation window so a manual on-disk swap recovers
-        # without users having to clear their cache.
         "Cache-Control": "public, max-age=86400, stale-while-revalidate=3600",
     }
     if etag:
@@ -12976,10 +7717,6 @@ async def _serve_cached_image(project_id: str, subdir: str, filename: str, full_
     if hit is not None:
         data, cached_ctype = hit
         return Response(content=data, media_type=cached_ctype or ctype, headers=extra_headers)
-    # Cache miss - read off-loop so concurrent thumbnail loads don't
-    # block each other while one disk read is in flight. The default
-    # executor has multiple threads so dozens of reads can run in
-    # parallel without choking the event loop.
     try:
         data = await asyncio.to_thread(full_path.read_bytes)
     except Exception as e:
@@ -12989,176 +7726,7 @@ async def _serve_cached_image(project_id: str, subdir: str, filename: str, full_
     return Response(content=data, media_type=ctype, headers=extra_headers)
 
 
-# Same hex palette as frontend/app/v2/OnboardLabelsV2.tsx - keeps
-# the labelled-preview tints visually consistent with the chips
-# the user sees in the UI. Order matches LABEL_COLOURS exactly so
-# `colour_for_label` reproduces the FE's index-based assignment.
-_LABEL_RGB: list[tuple[int, int, int]] = [
-    (251, 146, 60),   # orange-400
-    (96, 165, 250),   # blue-400
-    (167, 139, 250),  # violet-400
-    (52, 211, 153),   # emerald-400
-    (244, 114, 182),  # pink-400
-    (250, 204, 21),   # yellow-400
-    (45, 212, 191),   # teal-400
-    (248, 113, 113),  # red-400
-]
-
-
-def _label_rgb(label: str, project_labels: list[str]) -> tuple[int, int, int]:
-    """Pick the RGB tuple a given label should render in. Mirrors
-    `colourForLabel` from OnboardLabelsV2.tsx - labels present in the
-    project's tag list use the index-into-tags slot; unknown labels
-    hash-fall back so they still pick a stable colour."""
-    if not label:
-        return _LABEL_RGB[0]
-    lk = label.strip().lower()
-    for i, t in enumerate(project_labels):
-        if t.strip().lower() == lk:
-            return _LABEL_RGB[i % len(_LABEL_RGB)]
-    h = 0
-    for ch in label:
-        h = (h * 31 + ord(ch)) & 0xFFFFFFFF
-    return _LABEL_RGB[h % len(_LABEL_RGB)]
-
-
-def _vary_label_rgb(
-    base_rgb: tuple[int, int, int],
-    seed: int,
-    *,
-    hue_jitter: float = 0.05,   # ±18° on the 360° wheel
-    sat_jitter: float = 0.10,
-    val_jitter: float = 0.12,
-) -> tuple[int, int, int]:
-    """Deterministically jitter a base RGB colour in HSV space so
-    multiple objects sharing the same label render with subtly
-    different shades. The seed drives all three jitter axes through
-    independent splash values so the same detection always picks the
-    same shade across re-renders.
-
-    Defaults stay small enough that the user still reads the family
-    colour at a glance - a hare next to another hare looks like
-    "two hares", not "two random objects".
-    """
-    import colorsys
-    r, g, b = base_rgb
-    h, s, v = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
-    # Three independent splashes from one seed via Knuth-multiplicative
-    # hashing. & 0xFFFFFFFF keeps the constants in 32-bit space so the
-    # output is the same across machines.
-    s_int = seed & 0xFFFFFFFF
-    rnd_h = (((s_int * 2654435761) & 0xFFFFFFFF) / 0xFFFFFFFF) * 2.0 - 1.0
-    rnd_s = (((s_int * 40503) & 0xFFFFFFFF) / 0xFFFFFFFF) * 2.0 - 1.0
-    rnd_v = (((s_int * 2246822519) & 0xFFFFFFFF) / 0xFFFFFFFF) * 2.0 - 1.0
-    h = (h + rnd_h * hue_jitter) % 1.0
-    s = max(0.0, min(1.0, s + rnd_s * sat_jitter))
-    v = max(0.0, min(1.0, v + rnd_v * val_jitter))
-    nr, ng, nb = colorsys.hsv_to_rgb(h, s, v)
-    return (int(nr * 255), int(ng * 255), int(nb * 255))
-
-
-def _polygon_area(polygon: list) -> float:
-    """Shoelace area of a polygon given as a list of (x, y) pairs.
-    Returns absolute area in pixel². Returns 0 for polygons with
-    fewer than 3 vertices."""
-    n = len(polygon)
-    if n < 3:
-        return 0.0
-    s = 0.0
-    for i in range(n):
-        x0, y0 = polygon[i][0], polygon[i][1]
-        x1, y1 = polygon[(i + 1) % n][0], polygon[(i + 1) % n][1]
-        s += float(x0) * float(y1) - float(x1) * float(y0)
-    return abs(s) * 0.5
-
-
-def _detection_polygon_area(d: dict) -> float:
-    """Total mask area of a detection in pixel², summed across all
-    polygon contours (handles holes / disjoint pieces consistently
-    with the union mask we draw downstream)."""
-    m = d.get("mask")
-    if not isinstance(m, dict):
-        return 0.0
-    total = 0.0
-    for poly in (m.get("polygons") or []):
-        total += _polygon_area(poly)
-    return total
-
-
-def _size_ranked_rgb(rank: int, total: int) -> tuple[int, int, int]:
-    """Pick an RGB tuple from a warm→cool ramp keyed on size rank.
-
-    rank=0 is the largest detection, rank=total-1 the smallest. Hue
-    sweeps orange (30°) → red (0°/360°) → magenta (310°) → purple
-    (270°) → blue (230°), so a five-detection image reads as a clean
-    "big-and-warm to small-and-cool" gradient. Larger detections also
-    render slightly darker so the eye locks onto them as the primary
-    subject; smaller ones get lighter to stay readable against the
-    dimmed background.
-
-    A single-detection image just renders dark orange (the "primary"
-    end of the ramp) so a one-off looks the same as the largest of a
-    multi-detection image."""
-    import colorsys
-    if total <= 1:
-        h, s, v = 30.0 / 360.0, 0.95, 0.65
-    else:
-        t = rank / (total - 1)              # 0..1, large→small
-        h_deg = (30.0 - t * 160.0) % 360.0  # 30 → 230 going via 0
-        h = h_deg / 360.0
-        s = 0.95 - t * 0.15                 # 0.95 → 0.80
-        v = 0.62 + t * 0.23                 # 0.62 (darker) → 0.85
-    r, g, b = colorsys.hsv_to_rgb(h, s, v)
-    return (int(r * 255), int(g * 255), int(b * 255))
-
-
-def _random_rgb_from_seed(seed: int) -> tuple[int, int, int]:
-    """Pick a saturated, value-high RGB tuple from a seed integer.
-    Used by the labelled preview to give each segmentation a distinct
-    instance colour, irrespective of label - the colour is just a
-    visual separator, not a class indicator. Deterministic for a
-    given seed so re-renders match (no flicker between cached and
-    fresh previews)."""
-    import colorsys
-    s_int = seed & 0xFFFFFFFF
-    h = (((s_int * 2654435761) & 0xFFFFFFFF) / 0xFFFFFFFF)            # full 0..1
-    s = 0.65 + (((s_int * 40503) & 0xFFFFFFFF) / 0xFFFFFFFF) * 0.30    # 0.65..0.95
-    v = 0.75 + (((s_int * 2246822519) & 0xFFFFFFFF) / 0xFFFFFFFF) * 0.20  # 0.75..0.95
-    r, g, b = colorsys.hsv_to_rgb(h, s, v)
-    return (int(r * 255), int(g * 255), int(b * 255))
-
-
-def _detection_seed(d: dict, idx: int) -> int:
-    """Stable per-detection integer used to seed the per-object
-    colour jitter. Combines the detection's index with a fingerprint
-    of its first polygon point + box corner so a re-ordering of the
-    detections array doesn't completely shuffle every object's
-    colour, but two distinct detections in the same image always
-    pick distinct seeds."""
-    seed = (idx + 1) * 2654435761
-    box = d.get("box") or []
-    if isinstance(box, list) and len(box) >= 4:
-        try:
-            seed ^= int(round(float(box[0]))) * 73856093
-            seed ^= int(round(float(box[1]))) * 19349663
-        except (TypeError, ValueError):
-            pass
-    m = d.get("mask")
-    if isinstance(m, dict):
-        polys = m.get("polygons") or []
-        if polys and len(polys[0]) > 0:
-            try:
-                p = polys[0][0]
-                seed ^= int(round(float(p[0]))) * 83492791
-                seed ^= int(round(float(p[1]))) * 1099511628211
-            except (TypeError, ValueError, IndexError):
-                pass
-    return seed & 0xFFFFFFFF
-
-
-# Label palette mirrored from app/v2/OnboardLabelsV2.tsx so the
-# backend's labelled-preview tint + the FE's chip render share one
-# palette. Same hex values in the same order, parsed once at import.
+# Must match the palette in ui/app/v2/labelColours.ts, in order.
 _LABEL_PALETTE_HEX = [
     "#fb923c",  # orange-400
     "#60a5fa",  # blue-400
@@ -13182,10 +7750,7 @@ _LABEL_PALETTE_RGB: list[tuple[int, int, int]] = [
 
 
 def _label_hash_js(s: str) -> int:
-    """Reproduce the FE's `_hash` (BoxEditor / OnboardLabelsV2)
-    so canonical → palette-slot maps to the same colour on both
-    sides. The `| 0` in the JS version forces signed-32-bit
-    truncation; we emulate that with mask + branch."""
+    """The UI's signed 32-bit string hash, `_hash` in BoxEditor and labelColours."""
     h = 0
     for ch in s:
         h = (h * 31 + ord(ch)) & 0xFFFFFFFF
@@ -13197,10 +7762,8 @@ def _label_hash_js(s: str) -> int:
 def _build_label_colour_map(
     all_labels: list[str],
 ) -> dict[str, tuple[int, int, int]]:
-    """Project-scoped palette assignment with collision resolution.
-    Mirrors the FE's `buildProjectLabelColourMap` exactly so a label
-    rendered on the workspace card, the project view, AND the baked
-    labelled-preview JPEG all show the same colour."""
+    """Label -> palette colour, avoiding collisions. Must match the UI's
+    buildProjectLabelColourMap."""
     N = len(_LABEL_PALETTE_RGB)
     taken: set[int] = set()
     out: dict[str, tuple[int, int, int]] = {}
@@ -13243,28 +7806,13 @@ def _render_labelled_preview(
     project_labels: list[str],
     *,
     max_side: int = 600,
-    # Tuned to match the demo's segmented look: a darker, more heavily
-    # blurred + desaturated backdrop so the bright, label-coloured
-    # object cut-outs really pop.
-    bg_dim: float = 0.28,        # 0 = pitch black, 1 = no dim
+    bg_dim: float = 0.28,        # 0 is black, 1 is undimmed
     bg_blur_radius: float = 5.0,
-    bg_desat: float = 0.65,      # 0 = no desaturation, 1 = greyscale
-    tint_strength: float = 0.34, # 0 = no tint, 1 = solid label colour
+    bg_desat: float = 0.65,      # 1 is greyscale
+    tint_strength: float = 0.34, # 1 is solid label colour
 ) -> "PILImage.Image":
-    """Bake a small annotated preview where the segmented objects are
-    bright with a slight label-colour tint and the background is
-    darkened + softly blurred. Returns an RGB PIL image suitable for
-    JPEG encoding.
-
-    Detections without a polygon mask are skipped - there's nothing to
-    composite. Rejected detections are skipped too so the cutouts only
-    reflect labels the user kept.
-
-    Falls back to a plain downsized copy when no kept detection
-    contributes a polygon (e.g. an unlabelled image dropped into the
-    dataset). The FE then still gets a small preview instead of the
-    full-resolution original.
-    """
+    """Downsized RGB preview: kept masked detections bright and tinted by label
+    over a dimmed, blurred background, or the plain downsized image if none."""
     from PIL import ImageDraw, ImageFilter
     W, H = image_pil.size
     longest = max(W, H)
@@ -13285,7 +7833,6 @@ def _render_labelled_preview(
     if not kept:
         return base
 
-    # Union mask used to composite bright foreground over dim bg.
     union_mask = PILImage.new("L", base.size, 0)
     drw = ImageDraw.Draw(union_mask)
     for d in kept:
@@ -13295,17 +7842,8 @@ def _render_labelled_preview(
             pts = [(int(p[0] * scale), int(p[1] * scale)) for p in polygon]
             drw.polygon(pts, fill=255)
 
-    # Darken, lightly desaturate, and softly blur the background so
-    # the eye locks onto the bright cutouts. Desaturate FIRST (mix
-    # toward greyscale) then darken+blur - keeps the colour pull on
-    # the foreground without making the bg feel washed out. The
-    # foreground composite uses the original `base` so the kept
-    # objects stay full-saturation regardless of what we do here.
     bg_layer = base
     if bg_desat > 0:
-        # Convert to luminance, then back to RGB so we can blend.
-        # PIL's "L" → "RGB" gives a true greyscale frame; partial
-        # blend = partial desaturation.
         grey = base.convert("L").convert("RGB")
         bg_layer = PILImage.blend(base, grey, bg_desat)
     black = PILImage.new("RGB", base.size, (0, 0, 0))
@@ -13315,13 +7853,6 @@ def _render_labelled_preview(
     feather = union_mask.filter(ImageFilter.GaussianBlur(radius=1.0))
     composite = PILImage.composite(base, dimmed, feather)
 
-    # Per-detection tint, label-coloured. Each detection picks up
-    # its label's project-palette colour so the baked preview
-    # matches the chips the user sees on the workspace card +
-    # project view. Falls back to a neutral grey when a detection
-    # has no label (rare - pre-resolver / SAM-only crops). Old
-    # cached previews are not re-baked; the new colour scheme only
-    # applies to fresh bakes (cache file path version stays at v3).
     if tint_strength > 0:
         label_colour_map = _build_label_colour_map(project_labels)
         for d in kept:
@@ -13347,30 +7878,21 @@ def _render_labelled_preview(
 
 
 def _labelled_preview_path(project_id: str, import_id: str) -> "Path":
-    """Cache location for the rendered labelled preview. Keyed by
-    import_id so renames / re-uploads of the underlying file don't
-    collide. Versioned filename so future tint / dim tweaks invalidate
-    the whole project's previews on next request."""
+    """Cached labelled preview, by import_id. The _v4 suffix versions the render style."""
     d = project_dir(project_id) / "thumbs"
     d.mkdir(exist_ok=True)
     return d / f"{import_id}__lp_v4.jpg"
 
 
 def _invalidate_labelled_preview(project_id: str, import_id: str) -> None:
-    """Delete the cached labelled preview for one import. Called on
-    PUT (label edits) and DELETE so the next /labelled_preview GET
-    re-renders from the latest detections."""
+    """Delete one import's cached labelled preview. Called on label edits and deletes."""
     try:
         _labelled_preview_path(project_id, import_id).unlink(missing_ok=True)
     except Exception as e:
         print(f"[labelled-preview] invalidate failed for {project_id}/{import_id}: {e}")
 
 
-# Per-(project, kind) lock registry so concurrent first-renders of the
-# same thumb don't stomp on each other's tmp files. asyncio.Lock keyed
-# on (project_id, kind) where kind is e.g. "labelled_preview:<import_id>"
-# or "cover_thumb". Created lazily; lives for the process lifetime
-# (handful of bytes per project, fine).
+# (project_id, kind) -> lock serialising first renders of one thumbnail.
 _THUMB_RENDER_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
 
 
@@ -13384,16 +7906,13 @@ def _thumb_render_lock(project_id: str, kind: str) -> asyncio.Lock:
 
 
 def _unique_tmp_suffix() -> str:
-    """Per-call tmp suffix - pid alone collides when the same worker
-    process fields two simultaneous first-renders of the same thumb,
-    overwriting each other's bytes. _uuid + pid keeps the suffix
-    stable per call AND unique."""
+    """Temp-file suffix unique per call, not only per process."""
     return f".{os.getpid()}.{_uuid.uuid4().hex[:8]}.tmp.jpg"
 
 
 def _preview_source(imp: "dict | None", detections: list) -> list:
-    """What a labelled preview draws: the user's boxes once the image has
-    been edited (an image emptied by hand stays empty), else `detections`."""
+    """Boxes for a labelled preview: the edited boxes once edited, even when
+    empty, else `detections`."""
     edited = (imp or {}).get("editedBoxes")
     if isinstance(edited, list) and (edited or (imp or {}).get("editedBoxesSet")):
         return edited
@@ -13407,17 +7926,9 @@ def _bake_labelled_preview_sync(
     detections: list[dict],
     project_labels: list[str],
 ) -> None:
-    """Render the labelled preview JPEG and persist it to disk. Runs
-    off the request thread (loop.run_in_executor). Never raises -
-    bake failures fall back to the lazy GET path automatically.
-
-    Called eagerly after upload + edit so the first /labelled_preview
-    request is a pure file serve with no per-pixel work - the user's
-    drop-zone progress indicator gets to update at network speed.
-    """
+    """Render and store the labelled preview JPEG. Runs in an executor; never raises."""
     cached_path = _labelled_preview_path(project_id, import_id)
-    # The record as it is now: an image edited by hand (before or during a
-    # labelling run) shows its edits, not the auto boxes just computed.
+    # Boxes edited by hand, even during a labelling run, win over `detections`.
     with _MANIFEST_CACHE_LOCK:
         imp = _MANIFEST_IMPORT_INDEX.get(project_id, {}).get(import_id)
     detections = _preview_source(imp, detections)
@@ -13434,9 +7945,7 @@ def _bake_labelled_preview_sync(
 
 
 def _encode_blurhash_from_path(path: "Path") -> str | None:
-    """Generic blurhash encoder. Reads + thumbnails + encodes any
-    image file at `path`. Returns the ~30-char hash string or None
-    on any failure (missing file, decode error, encode error)."""
+    """Blurhash of the image at `path`, or None on any failure."""
     if not path.exists():
         return None
     try:
@@ -13459,57 +7968,72 @@ def _encode_blurhash_from_path(path: "Path") -> str | None:
         return None
 
 
-def _blurhash_backfill_async(project_id: str, items: list[tuple[str, str]]) -> None:
-    """Encode missing blurhashes off the request thread and persist
-    them back to the manifest. Items is a list of (subdir, filename)
-    tuples - we walk them, encode each via the on-disk path, write
-    results to the in-memory cache and the manifest. Never raises;
-    logs failures so the next read just re-tries.
+# Manifest key -> folder of the files it lists.
+_BLURHASH_FOLDERS = {"references": "references", "imports": "images"}
+_BLURHASH_TASKS: set = set()
+# Datasets with a backfill running.
+_BLURHASH_PROJECTS: set[str] = set()
 
-    Called fire-and-forget from get_project so the GET response
-    isn't blocked on PIL encodes. The next manifest read picks up
-    whatever this loop has finished writing.
-    """
-    if not items:
-        return
-    encoded: list[tuple[str, str, str]] = []  # (subdir, filename, hash)
-    for subdir, fn in items:
+
+def _encode_blurhashes(project_id: str, items: list[tuple[str, str]]) -> list[tuple[str, str, str]]:
+    """Blurhashes of `items`, [(manifest key, filename)], as (key, filename, hash),
+    also put in the cache. Runs in an executor; never raises."""
+    encoded: list[tuple[str, str, str]] = []
+    for key, fn in items:
         try:
-            path = project_dir(project_id) / subdir / fn
+            path = project_dir(project_id) / _BLURHASH_FOLDERS.get(key, key) / fn
             h = _encode_blurhash_from_path(path)
             if h:
-                _BLURHASH_CACHE[(project_id, f"{subdir}/{fn}")] = h
-                encoded.append((subdir, fn, h))
+                _BLURHASH_CACHE[(project_id, f"{key}/{fn}")] = h
+                encoded.append((key, fn, h))
         except Exception as e:
-            print(f"[blurhash-async] encode failed for {project_id}/{subdir}/{fn}: {e}")
-    if not encoded:
-        return
-    # Persist to manifest under the per-project write lock so a
-    # concurrent reference / import POST doesn't get clobbered.
-    # _manifest_write_lock returns an asyncio.Lock - but we're on a
-    # worker thread here. Use the sync lock pattern: load → mutate →
-    # save in a tight critical section, treating concurrent edits
-    # as best-effort (worst case the next backfill round picks up
-    # any drift).
+            print(f"[blurhash] encode failed for {project_id}/{key}/{fn}: {e}")
+    return encoded
+
+
+async def _blurhash_backfill(project_id: str, items: list[tuple[str, str]]) -> None:
+    """Encodes the missing blurhashes of `items` and stores them in the manifest,
+    under its write lock. Never raises."""
     try:
-        manifest = load_manifest(project_id) or {}
-        by_subdir = {"references": "references", "imports": "imports"}
-        for subdir, fn, h in encoded:
-            for entry in manifest.get(by_subdir.get(subdir, subdir)) or []:
-                if isinstance(entry, dict) and entry.get("filename") == fn and not entry.get("blurhash"):
-                    entry["blurhash"] = h
-        save_manifest(project_id, manifest)
-        print(f"[blurhash-async] backfilled {len(encoded)} hash(es) for {project_id}")
+        loop = asyncio.get_running_loop()
+        encoded = await loop.run_in_executor(None, _encode_blurhashes, project_id, items)
+        if not encoded:
+            return
+        lock = await _manifest_write_lock(project_id)
+        async with lock:
+            manifest = load_manifest(project_id)
+            if not manifest:
+                return
+            changed = 0
+            for key, fn, h in encoded:
+                for entry in manifest.get(key) or []:
+                    if isinstance(entry, dict) and entry.get("filename") == fn and not entry.get("blurhash"):
+                        entry["blurhash"] = h
+                        changed += 1
+            if changed:
+                save_manifest(project_id, manifest)
+                print(f"[blurhash] backfilled {changed} hash(es) for {project_id}")
     except Exception as e:
-        print(f"[blurhash-async] persist failed for {project_id}: {e}")
+        print(f"[blurhash] backfill failed for {project_id}: {e}")
+
+
+def _start_blurhash_backfill(loop, project_id: str, items: list[tuple[str, str]]) -> None:
+    """One backfill per dataset at a time; the next read queues what is still missing."""
+    if not items or project_id in _BLURHASH_PROJECTS:
+        return
+    _BLURHASH_PROJECTS.add(project_id)
+    task = loop.create_task(_blurhash_backfill(project_id, items))
+    _BLURHASH_TASKS.add(task)
+
+    def _done(t):
+        _BLURHASH_TASKS.discard(t)
+        _BLURHASH_PROJECTS.discard(project_id)
+
+    task.add_done_callback(_done)
 
 
 def _cached_blurhash(project_id: str, filename: str, subdir: str) -> str | None:
-    """Return a cached blurhash for `<project_id>/<subdir>/<filename>`,
-    encoding it on first miss. Used for references and imports - same
-    cache as the cover hash so a file used as both gets a single
-    encode. Cache key namespaces by subdir so file names that
-    collide between references/ and imports/ don't share entries."""
+    """Blurhash of <project_id>/<subdir>/<filename>, encoded on the first miss."""
     if not filename:
         return None
     key = (project_id, f"{subdir}/{filename}")
@@ -13523,106 +8047,27 @@ def _cached_blurhash(project_id: str, filename: str, subdir: str) -> str | None:
     return h
 
 
-def _compute_cover_blurhash(project_id: str, cover_filename: str, *, is_v2: bool) -> str | None:
-    """Return a 4×3-component BlurHash string for the project's cover.
-
-    BlurHash (https://blurha.sh) packs a 30-ish-char string that the FE
-    decodes into a small color gradient. Renders instantly while the
-    real cover image streams over the network - same trick Wolt /
-    Unsplash use to avoid blank tiles on slow connections.
-
-    Cached in `_BLURHASH_CACHE` so subsequent /api/projects polls don't
-    re-encode. Returns None when the cover file is missing or the
-    encoder fails - caller treats None as "no placeholder, fall back to
-    plain background".
-    """
-    if not cover_filename:
-        return None
-    key = (project_id, cover_filename)
-    cached = _BLURHASH_CACHE.get(key)
-    if cached is not None:
-        return cached
-
-    subdir = "references" if is_v2 else "images"
-    img_path = project_dir(project_id) / subdir / cover_filename
-    if not img_path.exists():
-        return None
-
-    try:
-        import blurhash as _bh
-        from PIL import Image as _PIL
-        with _PIL.open(img_path) as im:
-            im = ImageOps.exif_transpose(im).convert("RGB")
-            # Encode at low resolution - blurhash stretches a few
-            # components into a smooth gradient, so feeding it a
-            # 64-px thumbnail is more than enough and keeps the
-            # encode under ~5 ms per image.
-            im.thumbnail((64, 64))
-            # The PyPI `blurhash` package's `encode` accepts a PIL
-            # image OR a file path and takes (x, y) components as
-            # POSITIONAL args. Earlier code passed them as kwargs,
-            # which the C wrapper rejects with TypeError. Try the
-            # PIL-direct positional call first; fall back to numpy
-            # in case a different blurhash flavour is installed.
-            try:
-                hash_str = _bh.encode(im, 4, 3)
-            except TypeError:
-                import numpy as _np
-                arr = _np.asarray(im, dtype=_np.uint8)
-                try:
-                    hash_str = _bh.encode(arr, 4, 3)
-                except TypeError:
-                    # Last-resort: kwargs (the halcy/blurhash-python
-                    # package). Worst case all three fail and we
-                    # bail to None below.
-                    hash_str = _bh.encode(arr, x_components=4, y_components=3)
-    except Exception as e:
-        print(f"[blurhash] encode failed for {project_id}/{cover_filename}: {e}")
-        return None
-
-    _BLURHASH_CACHE[key] = hash_str
-    return hash_str
+# The name the favouritedBy lists hold for this machine's user.
+LOCAL_USER = "local"
 
 
 @app.get("/api/projects")
 async def list_projects(
-    owner: str | None = None,
-    viewer: str | None = None,
     offset: int = 0,
     limit: int | None = None,
     sort: str | None = None,
     q: str | None = None,
 ):
-    """Pass `?owner=<username>` to scope to a single user's workspaces.
-    Without it, returns every project (community feed). `?viewer=<username>`
-    populates `likedByMe` per project so the heart button knows its state.
-
-    Pagination: pass `?limit=N&offset=K` and the response shape changes
-    from `list[item]` to `{total: int, items: list[item], offset, limit}`
-    - the public projects page uses this so the first 12 cards render
-    instantly while the rest stream in via infinite scroll. Without
-    `limit` the response stays a plain list (back-compat with the
-    workspace's existing 4-second poll).
-
-    Each item carries a `cover_blurhash` string when a cover is set
-    and the cover file is on disk. The FE decodes it client-side
-    into a small colour gradient that fills the card slot
-    immediately, then crossfades the real image in once it loads."""
-    # Response cache check - the FE polls this every 4 s and the
-    # answer rarely changes within that window. The cache also
-    # stat-watches every contributing manifest so an upload / edit
-    # invalidates immediately, keeping staleness within the
-    # cache-fill window (~ms) regardless of TTL.
+    """Dataset cards as a list, or as {total, items, offset, limit} when `limit`
+    is given."""
     q_norm = (q or "").strip().lower()
-    _cache_key = (owner or "", viewer or "", int(offset), -1 if limit is None else int(limit), sort or "", q_norm)
+    _cache_key = (int(offset), -1 if limit is None else int(limit), sort or "", q_norm)
     _cached = _projects_response_cache_get(_cache_key)
     if _cached is not None:
         return _cached
+    # Read before the scan: a save during it leaves the result uncached.
+    _gen = _PROJECTS_GEN[0]
 
-    # Snapshot the JobManager once so we can flag projects with a job
-    # currently queued or running. Used by the frontend to render the
-    # "In progress" badge - independent of whether some images are
-    # already labelled (the "Partial" / "Unlabelled" badges).
     running_projects: set[str] = set()
     try:
         for j in state["jobs"].jobs.values():
@@ -13631,249 +8076,50 @@ async def list_projects(
     except Exception as e:
         print(f"[list_projects] failed to read job state: {e}")
     items = []
-    # Reverse map dataset_id -> {id, name, private} for every Project (container).
-    # Built once up-front so the privacy filter below can treat a dataset as
-    # private when its container is private even if the manifest's own flag
-    # drifted (failed write / legacy data), and so each card can carry a
-    # clickable Project chip. Fails open to {} (chip absent, manifest flag still
-    # enforced) on error.
+    # dataset_id -> the {id, name} of the Project that lists it.
     try:
         _ds_container = containers.dataset_container_index()
     except Exception as e:
         print(f"[list_projects] container index failed: {e}")
         _ds_container = {}
 
-    def _eff_private(ds_id: str, own_private: bool) -> bool:
-        info = _ds_container.get(str(ds_id))
-        return bool(own_private) or (bool(info.get("private")) if info else False)
-
-    # Tracks the on-disk mtime of every manifest we touched while
-    # building this response, so the response cache can later check
-    # those files and invalidate the moment any of them changes.
     cache_mtimes: dict[str, float] = {}
     for _pid in _iter_project_ids():
         manifest_mtime = _manifest_disk_mtime(_pid)
         cache_mtimes[_pid] = manifest_mtime
-        # Fast path: the per-project card sidecar carries all the
-        # static-per-write card fields. Skips the multi-MB manifest
-        # read entirely when it's fresh - the workspace's 4 s poll
-        # used to hit `load_manifest` 33+ times on every tick.
+        # The card sidecar when it is at least as new as the manifest, else the manifest.
         card = _read_workspace_card_sidecar(_pid)
-        if card is not None:
-            try:
-                card_mtime = _workspace_card_sidecar_path(_pid).stat().st_mtime
-            except OSError:
-                card_mtime = 0.0
-            if card_mtime >= manifest_mtime:
-                proj_id = card.get("id") or _pid
-                proj_owner = card.get("owner") or ""
-                if owner is not None and proj_owner != owner:
-                    continue
-                if _eff_private(proj_id, bool(card.get("private"))) and proj_owner and viewer != proj_owner:
-                    continue
-                if owner is None and (card.get("n_images") or 0) <= 0:
-                    continue
-                liked_by = card.get("likedBy") or []
-                fav_by = card.get("favouritedBy") or []
-                items.append({
-                    **{k: v for k, v in card.items() if k not in ("likedBy", "favouritedBy")},
-                    "likes": len(liked_by),
-                    "likedByMe": bool(viewer and viewer in liked_by),
-                    "favourites": len(fav_by),
-                    "favouritedByMe": bool(viewer and viewer in fav_by),
-                    "running": proj_id in running_projects,
-                })
-                continue
-        # Slow path: sidecar missing or stale, fall back to a full
-        # manifest read. Same loop body as before. Kick an async
-        # rebuild so the next request hits the fast path - bulk-
-        # warming via _kick_sidecar_refresh would also write
-        # overview + initial sidecars we don't need here, so do the
-        # workspace-card one directly. Dedup via a per-project guard.
-        _kick_workspace_card_refresh(_pid)
-        # Read-only consumer - skip the deepcopy. The async sidecar
-        # write (kicked above) is the only mutation downstream and it
-        # works from its own load_manifest call.
-        manifest = load_manifest(_pid, copy=False)
-        proj_id = manifest.get("id") or _pid
-        display_name = manifest.get("name") or _pid
-        proj_owner = manifest.get("owner") or manifest.get("createdBy") or ""
-        if owner is not None and proj_owner != owner:
-            continue
-        # Private projects are hidden from anyone except their owner. Owners
-        # still see them in the community feed if they happen to land there.
-        # A dataset in a private Project counts as private even if its own flag
-        # drifted (see _eff_private).
-        if _eff_private(proj_id, bool(manifest.get("private"))) and proj_owner and viewer != proj_owner:
-            continue
-        results = manifest.get("results", []) or []
-        n_labelled = sum(1 for r in results if not r.get("pending"))
-        n_unlabelled = sum(1 for r in results if r.get("pending"))
-        # V2 projects keep dataset images in `imports`, not `results`,
-        # so the workspace card's "Images" count reads zero on V2
-        # without this. For V2 we also derive labelled / unlabelled
-        # from each entry's explicit `labelled` flag (set by the
-        # label_charlie job) - falling back to whether the entry
-        # has any detections for older imports that pre-date the flag.
-        if manifest.get("v2"):
-            v2_imports = manifest.get("imports") or []
-            n_images_v2 = len(v2_imports)
-            n_labelled = sum(1 for e in v2_imports if _import_is_labelled(e))
-            n_unlabelled = max(0, n_images_v2 - n_labelled)
-        else:
-            n_images_v2 = None
-        cover = manifest.get("cover")
-        v2_refs = manifest.get("references") or []
-        v2_imps = manifest.get("imports") or []
-        cover_subdir: str | None = None
-        if cover:
-            # Identify which subdir the manifest's stored cover came
-            # from so we know where to look for blurhash + serve.
-            if any(r.get("filename") == cover for r in v2_refs):
-                cover_subdir = "references"
-            elif any(i.get("filename") == cover for i in v2_imps):
-                cover_subdir = "images"
-            elif any(r.get("image") == cover for r in results):
-                cover_subdir = "images"  # V1 stores under imports/
-            else:
-                cover = None  # cover refs a file that no longer exists
-        if not cover:
-            # Pick a random cover so each card stays varied / fresh
-            # rather than always showing the first uploaded image.
-            # Seed the random pick on `proj_id` so the same project
-            # gets the SAME cover across calls (and across pagination
-            # pages) - without that, the workspace card thumbnail
-            # would shuffle every 4 s poll and look broken.
-            #
-            # Priority: V2 references first (the user's curated set);
-            # fall through to V2 imports (dataset images), then V1
-            # results, then None.
-            import random as _rnd
-            seed = _rnd.Random(proj_id)
-            ref_files = [r.get("filename") for r in v2_refs if r.get("filename")]
-            imp_files = [i.get("filename") for i in v2_imps if i.get("filename")]
-            v1_files = [r.get("image") for r in results if r.get("image")]
-            if ref_files:
-                cover = seed.choice(ref_files)
-                cover_subdir = "references"
-            elif imp_files:
-                cover = seed.choice(imp_files)
-                cover_subdir = "images"
-            elif v1_files:
-                cover = seed.choice(v1_files)
-                cover_subdir = "images"
-            else:
-                cover = None
-                cover_subdir = None
-        # Empty-project filter for the PUBLIC feed only. The FE used
-        # to drop these client-side which made `total` lie ("Showing
-        # 5 of 10" when the other 5 are filtered-out blanks). Apply
-        # at the source so the count matches what users actually
-        # see. Owner-scoped queries (workspace) keep showing empty
-        # projects so the user can keep working on them.
-        n_images_resolved = n_images_v2 if n_images_v2 is not None else len(results)
-        if owner is None and n_images_resolved <= 0:
-            continue
-        liked_by = manifest.get("likedBy") or []
-        fav_by = manifest.get("favouritedBy") or []
+        try:
+            card_mtime = _workspace_card_sidecar_path(_pid).stat().st_mtime if card else 0.0
+        except OSError:
+            card_mtime = 0.0
+        if card is None or card_mtime < manifest_mtime:
+            _kick_workspace_card_refresh(_pid)
+            # copy=False: read only.
+            card = _build_workspace_card_payload(_pid, load_manifest(_pid, copy=False))
         items.append({
-            "id": proj_id,
-            "name": display_name,
-            "owner": proj_owner,
-            "createdAt": manifest.get("createdAt"),
-            "updatedAt": manifest.get("updatedAt"),
-            "n_images": n_images_resolved,
-            "n_labelled": n_labelled,
-            "n_unlabelled": n_unlabelled,
-            "n_references": len(v2_refs) if manifest.get("v2") else 0,
-            "tags": collect_tags(manifest),
-            # Display alias map (canonical_lower → renamed display)
-            # - surfaced so the workspace + public cards can render
-            # a label rename instantly without each one having to
-            # fetch the full manifest. Empty dict if the user hasn't
-            # renamed any labels yet.
-            "label_aliases": dict(manifest.get("label_aliases") or {}),
-            # Per-label colour overrides - surfaced on the list so the
-            # workspace + public cards can paint chips in the user's
-            # chosen colours without each card fetching the full
-            # manifest. Empty dict when no overrides set.
-            "labelColours": dict(manifest.get("labelColours") or {}),
-            "thumbnail": cover,
-            "hasModel": bool(manifest.get("hasModel", False)),
-            "createdBy": proj_owner,
-            "likes": len(liked_by),
-            "likedByMe": bool(viewer and viewer in liked_by),
-            "favourites": len(fav_by),
-            "favouritedByMe": bool(viewer and viewer in fav_by),
-            "certified": bool(manifest.get("certified", False)),
-            "private": bool(manifest.get("private", False)),
-            "derived": ({"parentProjectId": (manifest.get("derived") or {}).get("parentProjectId"),
-                         "parentName": (manifest.get("derived") or {}).get("parentName")}
-                        if manifest.get("derived") else None),
-            "running": proj_id in running_projects,
-            # Surfaced so the workspace can dispatch to the V2 page
-            # for V2 projects without having to fetch each manifest.
-            "v2": bool(manifest.get("v2", False)),
-            # Cover blurhash filled in below so we only encode for
-            # the slice the caller actually pages into. Default null.
-            "cover_blurhash": None,
-            # Internal: which subdir under projects/<id>/ the cover
-            # lives in. Used by the blurhash backfill loop below;
-            # popped before sending to the FE.
-            "_cover_subdir": cover_subdir,
-            # Backend-canonical dataset health so the FE doesn't
-            # have to compute it from labels + refs (which were
-            # both arriving asynchronously and producing a
-            # "Bad → Okay → Good" flicker on first paint).
-            "dataset_health": _compute_dataset_health(manifest),
+            **{k: card[k] for k in _CARD_KEYS if k in card},
+            "favouritedByMe": LOCAL_USER in (card.get("favouritedBy") or []),
+            "running": (card.get("id") or _pid) in running_projects,
         })
-    # Attach each dataset's Project (container) so the workspace card can render
-    # a clickable Project chip (index built once before the loop). None when the
-    # dataset is not in any project.
     for it in items:
         info = _ds_container.get(str(it.get("id")))
         it["container"] = {"id": info["id"], "name": info["name"]} if info else None
 
-    # Search filter - applied before sort + pagination so `total`
-    # reflects matching count and infinite-scroll pages stay stable.
-    # Matches as a case-insensitive substring across name, owner /
-    # createdBy, raw tags, and the renamed display values from
-    # label_aliases. Keeps the search server-side so it covers every
-    # project, not just the page the FE has loaded.
+    # Filtered before sorting and paging, so `total` counts the matches.
     if q_norm:
         def _matches(it: dict) -> bool:
-            haystack: list[str] = []
-            for key in ("name", "owner", "createdBy"):
-                v = it.get(key)
-                if v:
-                    haystack.append(str(v).lower())
-            for t in (it.get("tags") or []):
-                if t:
-                    haystack.append(str(t).lower())
-            for disp in (it.get("label_aliases") or {}).values():
-                if disp:
-                    haystack.append(str(disp).lower())
-            return any(q_norm in h for h in haystack)
+            haystack = [it.get("name"), *(it.get("tags") or []),
+                        *(it.get("label_aliases") or {}).values()]
+            return any(q_norm in str(h).lower() for h in haystack if h)
         items = [it for it in items if _matches(it)]
 
-    # Sort modes - server-side so pagination boundaries stay stable
-    # as the user scrolls. Python's sort is stable, so we layer the
-    # sorts: first by the primary criterion, then a final pass that
-    # pins viewer's favourites to the head. Without server-side
-    # sorting the FE would re-sort each fetched page on top of the
-    # cumulative list, shuffling later-page projects (more likes,
-    # higher trending score) up into earlier slots.
-    sort_mode = (sort or "trending").strip().lower()
-    if sort_mode in ("most_liked", "most-liked", "likes"):
-        items.sort(key=lambda x: (x.get("likes") or 0), reverse=True)
-    elif sort_mode == "newest":
+    # Layered stable sorts; favourites come first.
+    if (sort or "").strip().lower() == "newest":
         items.sort(key=lambda x: x.get("createdAt") or "", reverse=True)
     else:
-        # Trending: likes desc with updatedAt as tiebreaker.
         items.sort(key=lambda x: x.get("updatedAt") or "", reverse=True)
-        items.sort(key=lambda x: (x.get("likes") or 0), reverse=True)
-    if viewer:
-        items.sort(key=lambda x: 0 if x.get("favouritedByMe") else 1)
+    items.sort(key=lambda x: 0 if x.get("favouritedByMe") else 1)
 
     total = len(items)
     paginate = limit is not None and limit > 0
@@ -13884,110 +8130,48 @@ async def list_projects(
     else:
         page = items
 
-    # Encode blurhash only for the slice the caller is about to render.
-    # 5-10 ms per project on first encode, then cached in
-    # _BLURHASH_CACHE for the rest of the process lifetime - so the
-    # 4-second workspace poll only pays the encode cost once per
-    # cover-image change.
     for it in page:
         cover = it.get("thumbnail")
-        subdir = it.get("_cover_subdir")
+        subdir = it.pop("_cover_subdir", None)
         if cover and subdir:
             try:
                 it["cover_blurhash"] = _cached_blurhash(it["id"], cover, subdir)
             except Exception as e:
                 print(f"[list_projects] blurhash skipped for {it['id']}: {e}")
-    # Strip internal-only fields before serialising - _cover_subdir
-    # was just to route the blurhash lookup, FE doesn't need it.
-    for it in page:
-        it.pop("_cover_subdir", None)
 
     if paginate:
         body = {"total": total, "items": page, "offset": off, "limit": lim}
     else:
         body = page
-    # Stash for the next caller - TTL plus mtime watch keeps it
-    # both fast and correct.
-    _projects_response_cache_put(_cache_key, body, cache_mtimes)
+    _projects_response_cache_put(_cache_key, body, cache_mtimes, _gen)
     return body
 
 
-class CreateProjectIn(BaseModel):
-    name: str
-    owner: str | None = None
+# Projects: containers of datasets.
+
+# The Project fields the UI reads; a project.json written by another version can hold more.
+_CONTAINER_KEYS = ("id", "name", "cover", "coverLuma", "cover_updated", "dataset_ids", "created", "updated")
 
 
-@app.post("/api/projects")
-async def create_project(payload: CreateProjectIn, user: str = Depends(current_user)):
-    """Mint a fresh UUID for the project's identity (folder name + R2 prefix).
-    The user-supplied name is stored in the manifest as a freeform display
-    label - duplicate names across users (or even within one user) are fine.
-    Owner is forced to the authenticated user - clients can't spoof the
-    `owner` field by sending someone else's username in the payload."""
-    from profanity import assert_clean
-
-    display_name = (payload.name or "").strip() or "Untitled project"
-    assert_clean(display_name, field="project name")
-    project_id = _uuid.uuid4().hex
-    while store.dataset_exists(project_id):
-        project_id = _uuid.uuid4().hex
-    save_manifest(
-        project_id,
-        empty_manifest(display_name, owner=user, project_id=project_id),
-    )
-    return {"id": project_id, "name": display_name}
-
-
-# ============================================================================
-# Project containers (teams). A "Project" (UI term) is a CONTAINER of datasets
-# + members (gd/containers.py). Routes here are the CRUD + membership + dataset-
-# membership surface. Access: read = member-or-public, manage = container owner.
-# Member-add emails are sent FRONTEND-side (the backend has no user-email store;
-# emails live in the NextAuth Postgres). add_event() rows feed the Phase-2
-# activity feed and always record the acting user (originator, not owner).
-# ============================================================================
-
-def _cascade_container_privacy(container: dict) -> None:
-    """Push the container's privacy onto every dataset in it (datasets in a
-    Project can't have a different privacy to the Project)."""
-    priv = bool(container.get("private"))
-    for did in (container.get("dataset_ids") or []):
-        m = load_manifest(did)
-        if m and bool(m.get("private")) != priv:
-            m["private"] = priv
-            save_manifest(did, m)
-
-
-def _cascade_container_max_input(container: dict) -> None:
-    """Push the container's max input image size onto every dataset in it so the
-    upload resize uses the Project's ceiling (read off the dataset manifest)."""
-    size = containers.clamp_max_input(container.get("max_input_size"))
-    for did in (container.get("dataset_ids") or []):
-        m = load_manifest(did)
-        if m and int(m.get("max_input_size") or 0) != size:
-            m["max_input_size"] = size
-            save_manifest(did, m)
+def _container_payload(c: dict) -> dict:
+    return {k: c[k] for k in _CONTAINER_KEYS if k in c}
 
 
 def _container_card(c: dict) -> dict:
-    """Compact shape for the workspace grid: cover, owner, last-updated, count."""
+    """Compact shape for the workspace grid: cover, last-updated, count."""
     return {
         "id": c.get("id"),
         "name": c.get("name"),
-        "owner": c.get("owner"),
-        "private": bool(c.get("private")),
         "cover": c.get("cover"),
-        "max_input_size": containers.clamp_max_input(c.get("max_input_size")),
         "n_datasets": len(c.get("dataset_ids") or []),
-        "n_members": len(c.get("members") or []),
         "updated": c.get("updated"),
+        "cover_updated": c.get("cover_updated"),
         "created": c.get("created"),
     }
 
 
-def _container_detail(c: dict, username: str | None) -> dict:
-    """Full Project page payload: members, datasets, my role. Models + activity
-    are layered on in Phase 2/3."""
+def _container_detail(c: dict) -> dict:
+    """Project page payload: the container and its datasets."""
     datasets = []
     for did in (c.get("dataset_ids") or []):
         m = load_manifest(did, copy=False) or {}
@@ -13995,144 +8179,90 @@ def _container_detail(c: dict, username: str | None) -> dict:
             "id": did,
             "name": m.get("name") or did,
             "cover": m.get("cover"),
-            "private": bool(m.get("private")),
             "n_images": len(m.get("imports") or m.get("results") or []),
-            "hasModel": bool((m.get("model") or {}).get("weights")),
-            "updated": m.get("updated"),
-            # Creator handle - drives the FE's per-dataset delete permissions
-            # (only the creator can destroy; the Project owner can detach).
-            "owner": (m.get("owner") or ""),
-            # True when this dataset is a derived (cropped child) of another, so
-            # the Project page can mark it with the derived branch icon.
+            "hasModel": bool(m.get("hasModel")),
+            "updated": m.get("updatedAt"),
             "derived": bool(m.get("derived")),
         })
-    return {
-        **c,
-        "my_role": containers.member_role(c, username or ""),
-        "datasets": datasets,
-    }
+    return {**_container_payload(c), "datasets": datasets}
 
 
 class ContainerCreateIn(BaseModel):
     name: str
-    private: bool = True
 
 
 @app.post("/api/containers")
-async def container_create(payload: ContainerCreateIn, user: str = Depends(current_user)):
-    from profanity import assert_clean
+async def container_create(payload: ContainerCreateIn):
     name = (payload.name or "").strip() or "Untitled project"
-    assert_clean(name, field="project name")
-    c = containers.create_container(name, owner=user, private=bool(payload.private))
-    add_event("container_create", container=c["id"], actor=user, name=name)
-    return c
+    c = containers.create_container(name)
+    add_event("container_create", container=c["id"], name=name)
+    return _container_payload(c)
 
 
 @app.get("/api/containers")
-async def container_list(user: str = Depends(current_user)):
-    cards = [_container_card(c) for c in containers.list_containers_for_user(user)]
-    cards.sort(key=lambda c: (c.get("updated") or ""), reverse=True)
-    return {"containers": cards}
-
-
-# Declared BEFORE /api/containers/{container_id} so the static "public" segment
-# isn't captured as a container id.
-@app.get("/api/containers/public")
-async def container_list_public():
-    """Public (non-private) Projects for the Community carousel. No auth, since
-    the Community feed is viewable by anyone. Only Projects with at least one
-    dataset are returned so the carousel has nothing empty in it."""
-    cards = [_container_card(c) for c in containers.list_public_containers()]
-    cards = [c for c in cards if (c.get("n_datasets") or 0) > 0]
+async def container_list():
+    cards = [_container_card(c) for c in containers.list_containers()]
     cards.sort(key=lambda c: (c.get("updated") or ""), reverse=True)
     return {"containers": cards}
 
 
 @app.get("/api/containers/{container_id}")
-async def container_get(container_id: str, request: Request, authorization: str = Header(default="")):
+async def container_get(container_id: str):
     c = containers.load_container(container_id)
     if not c:
         raise HTTPException(404, "project not found")
-    username = request_username(request, authorization)
-    if not containers.can_read(c, username):
-        # 404 (not 403) so a private container's existence can't be probed.
-        raise HTTPException(404, "project not found")
-    # Lazy-backfill the cover's bottom-band luminance for covers uploaded before
-    # we started storing it, so the Project page can pick a black/white title
-    # from the actual image (not just the theme). Computed once; doesn't bump
-    # `updated` so viewing a Project never reorders the workspace.
+    # coverLuma for a cover stored without one; saved without bumping `updated`.
     if c.get("cover") and c.get("coverLuma") is None:
         try:
             from PIL import ImageStat as _ImageStat
-            data = r2_required().get_bytes(_container_cover_key(container_id))
-            with PILImage.open(io.BytesIO(data)) as _im:
+            with PILImage.open(_container_cover_path(container_id)) as _im:
                 _im = _im.convert("RGB")
                 _w, _h = _im.size
                 _band = _im.crop((0, int(_h * 0.5), _w, _h)).convert("L")
                 c["coverLuma"] = round(_ImageStat.Stat(_band).mean[0])
         except Exception as e:
             print(f"[container cover-luma backfill] {container_id}: {e}")
-            c["coverLuma"] = 0  # mark done so we don't retry on every request
+            c["coverLuma"] = 0  # not retried
         try:
             containers.save_container(c, bump_updated=False)
         except Exception:
             pass
-    return _container_detail(c, username)
+    return _container_detail(c)
 
 
 class ContainerPatchIn(BaseModel):
     name: str | None = None
-    private: bool | None = None
     cover: str | None = None
-    max_input_size: int | None = None
 
 
 @app.patch("/api/containers/{container_id}")
-async def container_patch(container_id: str, payload: ContainerPatchIn, user: str = Depends(current_user)):
+async def container_patch(container_id: str, payload: ContainerPatchIn):
     c = containers.load_container(container_id)
     if not c:
         raise HTTPException(404, "project not found")
-    if not containers.can_manage(c, user):
-        raise HTTPException(403, "requires owner")
     if payload.name is not None:
-        from profanity import assert_clean
-        nm = (payload.name or "").strip() or "Untitled project"
-        assert_clean(nm, field="project name")
-        c["name"] = nm[:120]
+        c["name"] = ((payload.name or "").strip() or "Untitled project")[:120]
     if payload.cover is not None:
         c["cover"] = payload.cover or None
         c["cover_updated"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    if payload.private is not None and bool(payload.private) != bool(c.get("private")):
-        c["private"] = bool(payload.private)
-        _cascade_container_privacy(c)  # datasets inherit the new privacy
-        add_event("container_privacy", container=container_id, actor=user, private=bool(payload.private))
-    if payload.max_input_size is not None:
-        new_size = containers.clamp_max_input(payload.max_input_size)
-        if new_size != int(c.get("max_input_size") or containers.MAX_INPUT_DEFAULT):
-            c["max_input_size"] = new_size
-            _cascade_container_max_input(c)  # datasets inherit the new ceiling
-            add_event("container_max_input", container=container_id, actor=user, max_input_size=new_size)
     containers.save_container(c)
-    return c
+    return _container_payload(c)
 
 
 @app.delete("/api/containers/{container_id}")
-async def container_delete(container_id: str, user: str = Depends(current_user)):
+async def container_delete(container_id: str):
     c = containers.load_container(container_id)
     if not c:
         raise HTTPException(404, "project not found")
-    if not containers.can_manage(c, user):
-        raise HTTPException(403, "requires owner")
     ids = list(c.get("dataset_ids") or [])
     if any(_dataset_job_active(did) for did in ids):
         raise HTTPException(409, "a job is running on one of this project's datasets")
-    # Move the dataset folders out first: if one cannot move (a file in
-    # use), nothing is detached and the project stays as it was.
+    # The dataset folders move out first; if one cannot, nothing is detached.
     try:
         containers.delete_container(container_id)
     except OSError as e:
         raise HTTPException(409, f"{e}; close it and try again")
-    # Detach datasets (they survive as standalone) rather than delete them.
+    # Datasets are detached, not deleted.
     for did in ids:
         lock = await _manifest_write_lock(did)
         async with lock:
@@ -14140,90 +8270,39 @@ async def container_delete(container_id: str, user: str = Depends(current_user))
             if m and (m.get("container_id") or "") == container_id:
                 m["container_id"] = ""
                 save_manifest(did, m)
-    add_event("container_delete", container=container_id, actor=user)
+    add_event("container_delete", container=container_id)
     return {"ok": True}
 
 
-class ContainerMemberIn(BaseModel):
-    username: str
-    role: str = "editor"
-
-
-@app.post("/api/containers/{container_id}/members")
-async def container_add_member(container_id: str, payload: ContainerMemberIn, user: str = Depends(current_user)):
-    c = containers.load_container(container_id)
-    if not c:
-        raise HTTPException(404, "project not found")
-    if not containers.can_manage(c, user):
-        raise HTTPException(403, "requires owner")
-    target = (payload.username or "").strip().lower()
-    if not target:
-        raise HTTPException(400, "username required")
-    role = payload.role if payload.role in containers.ROLES else containers.ROLE_VIEWER
-    containers.set_member(c, target, role)
-    containers.save_container(c)
-    add_event("member_add", container=container_id, actor=user, member=target, role=role)
-    return c
-
-
-@app.delete("/api/containers/{container_id}/members/{username}")
-async def container_remove_member(container_id: str, username: str, user: str = Depends(current_user)):
-    c = containers.load_container(container_id)
-    if not c:
-        raise HTTPException(404, "project not found")
-    if not containers.can_manage(c, user):
-        raise HTTPException(403, "requires owner")
-    containers.remove_member(c, username)
-    containers.save_container(c)
-    add_event("member_remove", container=container_id, actor=user, member=(username or "").strip().lower())
-    return c
-
-
 @app.post("/api/containers/{container_id}/datasets/{dataset_id}")
-async def container_add_dataset(container_id: str, dataset_id: str, user: str = Depends(current_user)):
+async def container_add_dataset(container_id: str, dataset_id: str):
     c = containers.load_container(container_id)
     if not c:
         raise HTTPException(404, "project not found")
-    # Any editor (or owner) of the Project can add a dataset - but only one they
-    # own (you can't pull someone else's dataset into a Project).
-    if not containers.can_write(c, user):
-        raise HTTPException(403, "requires editor")
     m = load_manifest(dataset_id)
     if not m:
         raise HTTPException(404, "dataset not found")
-    if (m.get("owner") or "").strip().lower() != user.lower():
-        raise HTTPException(403, "not your dataset")
     lock = await _manifest_write_lock(dataset_id)
     async with lock:
         m = load_manifest(dataset_id)
         m["container_id"] = container_id
-        m["private"] = bool(c.get("private"))  # inherit Project privacy
-        m["max_input_size"] = containers.clamp_max_input(c.get("max_input_size"))  # inherit Project ceiling
         save_manifest(dataset_id, m)
-        # Keep the workspace tree mirroring the logical nesting: the dataset
-        # folder physically moves into the project's folder (cosmetic only -
-        # identity lives in the JSONs). Not while a job holds its paths.
+        # The folder moves into the Project's folder, unless a job holds its paths.
         if not _dataset_job_active(dataset_id):
             store.move_dataset(dataset_id, container_id)
     if dataset_id not in (c.get("dataset_ids") or []):
         c.setdefault("dataset_ids", []).append(dataset_id)
         containers.save_container(c)
-    add_event("dataset_add", container=container_id, dataset=dataset_id, actor=user)
+    add_event("dataset_add", container=container_id, dataset=dataset_id)
     return {"ok": True}
 
 
 @app.delete("/api/containers/{container_id}/datasets/{dataset_id}")
-async def container_remove_dataset(container_id: str, dataset_id: str, user: str = Depends(current_user)):
+async def container_remove_dataset(container_id: str, dataset_id: str):
     c = containers.load_container(container_id)
     if not c:
         raise HTTPException(404, "project not found")
     m = load_manifest(dataset_id)
-    ds_owner = (m.get("owner") or "").strip().lower() if m else ""
-    # Detach is non-destructive (the dataset survives as standalone), so the
-    # Project owner may remove any dataset to organise the Project, and an editor
-    # may remove their OWN dataset - but an editor can't pull out someone else's.
-    if not (containers.can_manage(c, user) or (ds_owner and ds_owner == (user or "").strip().lower())):
-        raise HTTPException(403, "requires the Project owner or the dataset's creator")
     if m:
         lock = await _manifest_write_lock(dataset_id)
         async with lock:
@@ -14235,30 +8314,21 @@ async def container_remove_dataset(container_id: str, dataset_id: str, user: str
                 store.move_dataset(dataset_id, None)
     c["dataset_ids"] = [d for d in (c.get("dataset_ids") or []) if d != dataset_id]
     containers.save_container(c)
-    add_event("dataset_remove", container=container_id, dataset=dataset_id, actor=user)
+    add_event("dataset_remove", container=container_id, dataset=dataset_id)
     return {"ok": True}
 
 
-def _container_cover_key(container_id: str) -> str:
-    return f"containers/{container_id}/cover.jpg"
+def _container_cover_path(container_id: str) -> Path:
+    return workspace.dir() / "_storage" / "containers" / container_id / "cover.jpg"
 
 
 @app.post("/api/containers/{container_id}/cover")
-async def container_upload_cover(
-    container_id: str,
-    file: UploadFile = File(...),
-    user: str = Depends(current_user),
-):
-    """Upload/replace the Project cover (owner-only). Normalised to JPEG and
-    stored in R2; served by GET .../cover under the container read gate."""
+async def container_upload_cover(container_id: str, file: UploadFile = File(...)):
+    """Set the Project cover, stored as JPEG."""
     c = containers.load_container(container_id)
     if not c:
         raise HTTPException(404, "project not found")
-    if not containers.can_manage(c, user):
-        raise HTTPException(403, "requires owner")
-    data = await file.read()
-    if len(data) > MAX_UPLOAD_BYTES_PER_FILE:
-        raise HTTPException(413, "cover too large")
+    data = await _read_upload(file, "cover")
     try:
         img = PILImage.open(io.BytesIO(data))
         img = ImageOps.exif_transpose(img).convert("RGB")
@@ -14267,13 +8337,8 @@ async def container_upload_cover(
     except Exception:
         raise HTTPException(400, "not an image")
     img.thumbnail((1600, 1600), PILImage.LANCZOS)
-    # Floor small uploads up to a minimum size so the full-width Project hero
-    # never browser-upscales a tiny cover into a blocky mess (cheap Lanczos +
-    # light sharpen; a no-op once the upload is already >= the floor).
     img = _upscale_cover_if_small(img, 1280)
-    # Average luminance (0-255) of the bottom band, where the Project page
-    # renders the title over the cover. The FE uses it to pick a black or white
-    # title (and a matching scrim) that stands out on this particular cover.
+    # Mean luminance, 0-255, of the bottom half, where the title is drawn.
     try:
         from PIL import ImageStat as _ImageStat
         _w, _h = img.size
@@ -14283,102 +8348,40 @@ async def container_upload_cover(
         c["coverLuma"] = 0
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=85)
-    r2_required().put_bytes(_container_cover_key(container_id), buf.getvalue(), "image/jpeg")
+    store._atomic_write(_container_cover_path(container_id), buf.getvalue())
     c["cover"] = "cover.jpg"
-    # Dedicated cover version: the R2 key is fixed (cover.jpg), so the FE can't
-    # tell a re-upload from a cache hit. Bump this only on a cover change so the
-    # Project page busts its cover cache HERE without reloading (flickering) the
-    # hero on every unrelated settings save.
+    # The file name is fixed, so this tells the UI the cover changed.
     c["cover_updated"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     containers.save_container(c)
     return {"cover": "cover.jpg", "coverLuma": c.get("coverLuma", 0), "cover_updated": c["cover_updated"]}
 
 
 @app.get("/api/containers/{container_id}/cover")
-async def container_serve_cover(container_id: str, request: Request, authorization: str = Header(default="")):
-    """Serve the Project cover via an R2 presigned redirect, under the container
-    read gate (public container -> anyone; private -> members; <img> auths via
-    the pk_auth cookie)."""
+async def container_serve_cover(container_id: str):
     c = containers.load_container(container_id)
     if not c:
         raise HTTPException(404, "project not found")
-    if not containers.can_read(c, request_username(request, authorization)):
-        raise HTTPException(404, "project not found")
-    if not c.get("cover"):
+    path = _container_cover_path(container_id)
+    if not c.get("cover") or not path.is_file():
         raise HTTPException(404, "no cover")
-    return _redirect_to_r2(_container_cover_key(container_id))
+    return FileResponse(path, headers={"Cache-Control": "public, max-age=900"})
 
 
 @app.get("/api/containers/{container_id}/activity")
-async def container_activity(container_id: str, request: Request, authorization: str = Header(default=""), limit: int = 100):
-    """Recent activity across all datasets in the Project (uploads, labelling,
-    training, member changes, ...). Read gate = member-or-public."""
+async def container_activity(container_id: str, limit: int = 100):
+    """Recent activity across the Project and its datasets."""
     c = containers.load_container(container_id)
     if not c:
         raise HTTPException(404, "project not found")
-    if not containers.can_read(c, request_username(request, authorization)):
-        raise HTTPException(404, "project not found")
-    import audit
     limit = max(1, min(int(limit or 100), 300))
     return {"activity": audit.list_activity(container_id, c.get("dataset_ids") or [], limit=limit)}
 
 
-def _compute_dataset_health(manifest: dict) -> dict:
-    """Backend-canonical dataset health so the FE doesn't have to
-    recompute it from labels + refs after both have loaded - that
-    looked janky because the badge would change from "Bad" to
-    "Okay" to "Good" as data trickled in. Same logic the FE used
-    to run, lifted here so the value lands on first paint.
-    """
-    tags = collect_tags(manifest)
-    refs = manifest.get("references") or []
-    if not tags:
-        return {
-            "level": "bad",
-            "label": "Bad",
-            "reason": "No labels defined - add labels so the model knows what to detect.",
-        }
-    if not refs:
-        return {
-            "level": "okay",
-            "label": "Okay",
-            "reason": "Labels defined but no reference images uploaded yet. Add references to improve detection accuracy.",
-        }
-    n = len(refs)
-    return {
-        "level": "good",
-        "label": "Good",
-        "reason": f"{n} reference image{'' if n == 1 else 's'} uploaded. Annotate at least 5 examples per label in the Label tab to complete the dataset.",
-    }
-
-
-# ─── Lightweight overview / annotations split ────────────────────────────────
-# The single-manifest GET used to bundle metadata + every detection's mask
-# polygon + every detection's 1024-dim DINOv2 + SigLIP embedding. On a
-# moderate project that's a multi-MB JSON payload - devastating over a
-# tunnel or slow link, regardless of how fast the backend renders it.
-#
-# These two endpoints split the response by what the FE actually needs at
-# each phase:
-#
-#   /overview     - render-critical only: project metadata, per-tile
-#                   { id, filename, blurhash, w, h, n_detections,
-#                     label_set }. Loads in tens of milliseconds. Drives
-#                   the gallery placeholder grid + chip rail.
-#   /annotations  - detections + editedBoxes, embeddings stripped (the
-#                   resolver never sends them to the FE - they're for
-#                   server-side scoring only). Pulled lazily after the
-#                   overview has painted.
-#
-# Embeddings stay in the on-disk manifest for the resolver's use. The
-# legacy GET /api/projects/{id} also stays, returning the full manifest,
-# so existing callers (V1 ProjectView, scripts, debug tools) keep working.
+# Split reads: /overview has project metadata and per-tile summaries,
+# /annotations the detections and edited boxes, without embeddings.
 
 def _kick_blurhash_backfill(project_id: str, m: dict) -> None:
-    """Surface in-memory cached blurhashes onto the manifest dict + queue
-    any missing encodes for an off-thread backfill. Shared by /overview,
-    /annotations and the legacy GET so they all benefit from the same
-    cache + persistence path."""
+    """Copy cached blurhashes onto the manifest dict and queue encodes for the rest."""
     needs: list[tuple[str, str]] = []
     for ref in m.get("references") or []:
         if isinstance(ref, dict) and not ref.get("blurhash"):
@@ -14400,30 +8403,22 @@ def _kick_blurhash_backfill(project_id: str, m: dict) -> None:
                 imp["blurhash"] = cached
             else:
                 needs.append(("imports", fn))
-    if needs:
-        # _build_overview_payload runs in asyncio.to_thread (no running loop),
-        # so get_running_loop() raises there. Guard it: an entry missing a
-        # blurhash (e.g. a derived-project crop) must not 500 the overview -
-        # just skip the async backfill when there's no loop to schedule on.
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        if loop is not None:
-            loop.run_in_executor(None, _blurhash_backfill_async, project_id, needs)
+    if not needs:
+        return
+    try:
+        _start_blurhash_backfill(asyncio.get_running_loop(), project_id, needs)
+    except RuntimeError:
+        # A worker thread, as /overview builds in: the event loop runs it.
+        loop = state.get("loop")
+        if loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(_start_blurhash_backfill, loop, project_id, needs)
 
 
 def _sort_imports_desc(entries: list[dict]) -> list[dict]:
-    """Return entries sorted by createdAt DESC, with missing-createdAt
-    entries sinking to the bottom. Matches the FE's
-    compareImportedMediaDesc so the first-batch slice the FE renders
-    is already in final paint order - fixes the "gallery rearranges
-    while loading then settles" flicker on big projects."""
+    """Newest createdAt first, entries without one last, as the UI's
+    compareImportedMediaDesc."""
     def key(e: dict) -> tuple[int, float, str]:
-        # (has_no_ts, -ms_for_desc, id_for_stable_tiebreak).
-        # Python's sorted(..., reverse=False) on this tuple yields:
-        # has_no_ts ascending (0 first), then -ms ascending (= ms
-        # descending), then id ascending.
+        # (has_no_ts, -ms, id)
         raw = e.get("createdAt")
         ms: float | None = None
         if isinstance(raw, (int, float)):
@@ -14446,11 +8441,7 @@ def _sort_imports_desc(entries: list[dict]) -> list[dict]:
 
 
 def _tile_overview(entries: list[dict]) -> list[dict]:
-    """Reduce a list of reference / import dicts down to render-critical
-    metadata only. Detections and editedBoxes drop out entirely; we
-    surface aggregate counts + the unique label set so the gallery thumb
-    can show "5 boxes · hare, rabbit" without pulling the actual
-    geometry."""
+    """Per-tile summaries of references or imports: counts and labels, no geometry."""
     out: list[dict] = []
     for e in entries:
         if not isinstance(e, dict):
@@ -14458,11 +8449,7 @@ def _tile_overview(entries: list[dict]) -> list[dict]:
         dets = e.get("detections") or []
         edited = e.get("editedBoxes") if isinstance(e.get("editedBoxes"), list) else None
         edited_set = bool(e.get("editedBoxesSet"))
-        # editedBoxes wins for the chip count when the user has touched
-        # them - including the explicit empty case (delete-all). Without
-        # the editedBoxesSet branch a user who deletes every box on a
-        # previously auto-labelled tile would still see the auto chips,
-        # which looks like the delete didn't take.
+        # Edited boxes count once edited, even when empty.
         if edited is not None and edited_set:
             counted = edited
             label_pool = [str(b.get("label") or "") for b in edited if isinstance(b, dict)]
@@ -14471,16 +8458,9 @@ def _tile_overview(entries: list[dict]) -> list[dict]:
             label_pool = [str(b.get("label") or "") for b in edited if isinstance(b, dict)]
         else:
             counted = [d for d in dets if isinstance(d, dict) and not d.get("rejected")]
-            # Label priority: vlm_label (post-VLM refinement) > pred_label
-            # (resolver output) > label (legacy field) > gd_label (raw
-            # Grounding DINO label). Without the gd_label fallback,
-            # detections that haven't been through the resolver yet
-            # surface label_set=[] here, which strips the chip rail off
-            # every gallery tile even though the boxes do have labels.
             label_pool = [
                 str(
-                    d.get("vlm_label")
-                    or d.get("pred_label")
+                    d.get("pred_label")
                     or d.get("label")
                     or d.get("gd_label")
                     or ""
@@ -14495,19 +8475,8 @@ def _tile_overview(entries: list[dict]) -> list[dict]:
                 continue
             seen.add(k)
             labels.append(lab)
-        # source carries the origin metadata for URL-imported entries
-        # (kind="openverse", url=...). The FE uses it to filter the
-        # Openverse search results - anything already in the project
-        # gets dropped from the preview so users don't accidentally
-        # re-add. None for drag-dropped entries.
+        # Origin of a URL import, such as kind "openverse" and its url; else None.
         src = e.get("source") if isinstance(e.get("source"), dict) else None
-        # Compact per-label counts. Replaces the FE's per-tile
-        # synthetic-detection allocations (one fake ImportDetection
-        # per detection just to drive the chip rail). At ~25 dets
-        # per image x 9000 images that was a 225k-object pile of
-        # garbage on the heap; the chip rail now reads counts
-        # directly from this dict. label_set kept on the wire for
-        # back-compat with older FE builds.
         label_stats_pool: dict[str, int] = {}
         for lab in label_pool:
             k = lab.strip()
@@ -14524,28 +8493,14 @@ def _tile_overview(entries: list[dict]) -> list[dict]:
             "createdAt": e.get("createdAt"),
             "n_detections": len(counted),
             "label_set": labels,
-            # Per-label count map. FE reads this directly to render
-            # the chip rail with no synthetic detection objects.
             "label_stats": label_stats_pool,
             "has_edits": bool(edited),
             "background": bool(e.get("background")),
             "source": src,
-            # Persisted labelling timestamp (epoch ms). Drives the FE's
-            # labelled_preview cachebuster (?v=). It MUST be persisted +
-            # surfaced here: the FE-only Date.now() it used to set was
-            # lost on cold re-open, so the preview URL fell back to the
-            # bare path and the browser served the stale BLANK preview
-            # cached before the image was labelled - the "segmented
-            # cover vanishes when you reopen the project" bug.
+            # Epoch ms; the labelled preview's cache-buster.
             "labelledAt": e.get("labelledAt"),
-            # Number of augmentation copies persisted for this
-            # entry. Set by the augment_generate job after each
-            # image; the FE gates the per-tile Augmentations icon
-            # on it being > 0.
             "n_augmentations": int(e.get("n_augmentations") or 0),
-            # For a derived ("new labels") crop: the parent's original label,
-            # surfaced so the gallery + viewer can show it as a reference while
-            # the user assigns their own fresh labels. None on normal imports.
+            # A derived crop's label in the parent dataset, else None.
             "derivedLabel": ((e.get("derivedFrom") or {}).get("label") or None)
             if isinstance(e.get("derivedFrom"), dict) else None,
         })
@@ -14554,44 +8509,27 @@ def _tile_overview(entries: list[dict]) -> list[dict]:
 
 _EMBEDDING_FIELDS = (
     "embedding",
-    "siglip_embedding",
-    # Some older code paths persisted the SigLIP embedding under the
-    # reversed name. Cover both so the strip is complete regardless
-    # of which writer ran.
-    "embedding_siglip",
     "embed_version",
+    # Fields of stored detections that the engine does not write.
+    "siglip_embedding",
+    "embedding_siglip",
     "siglip_version",
 )
 
-# Fields that are heavy (mask polygons are the worst - hundreds of
-# (x, y) pairs per detection; base64-encoded crops are ~15 KB each)
-# AND not needed for gallery-tile rendering. /annotations strips
-# these by default; the per-image /annotations/{import_id} endpoint
-# returns them for the viewer + pipeline popup.
+# Left out of the bulk /annotations; /annotations/{import_id} keeps them.
 _HEAVY_DETECTION_FIELDS = (
     "mask",
     "polygons",
-    # Base64-encoded JPEG crop of the detection's bounding region.
-    # Used by the pipeline popup to show "what the model saw" tiles.
-    # ~15 KB per detection - by far the largest contributor to wire
-    # size in /annotations on big projects (a 9000-detection project
-    # was shipping 130 MB of base64 crops alone).
     "crop_jpg_b64",
-    # The per-label sim dicts can each carry one float per project
-    # label - for a 10-label project that's still 10× more bytes per
-    # detection than the predLabel itself. Pipeline popup needs them
-    # but the gallery doesn't.
     "embed_sims",
     "embed_sims_dino",
+    # A field of stored detections that the engine does not write.
     "embed_sims_siglip",
 )
 
 
 def _strip_embedding(d: dict) -> dict:
-    """Return a shallow copy of `d` minus the four embedding fields.
-    Roughly 2× faster than the dict-comprehension form because dict()
-    is a single C-level copy, then we pop the four known keys instead
-    of iterating every field looking for matches."""
+    """Shallow copy of `d` without the _EMBEDDING_FIELDS."""
     slim = dict(d)
     for k in _EMBEDDING_FIELDS:
         slim.pop(k, None)
@@ -14599,10 +8537,7 @@ def _strip_embedding(d: dict) -> dict:
 
 
 def _strip_embedding_and_heavy(d: dict) -> dict:
-    """Same as _strip_embedding but also drops mask polygons + per-
-    label similarity dicts. Used by the bulk /annotations endpoint so
-    its response stays small enough to ship over the wire quickly.
-    Viewer-side /annotations/{import_id} reads the full record."""
+    """_strip_embedding, also without the _HEAVY_DETECTION_FIELDS."""
     slim = dict(d)
     for k in _EMBEDDING_FIELDS:
         slim.pop(k, None)
@@ -14612,10 +8547,7 @@ def _strip_embedding_and_heavy(d: dict) -> dict:
 
 
 def _strip_edited_box(b: dict) -> dict:
-    """editedBoxes carry their own mask polygons (the user-drawn or
-    backend-segmented outline for each box). The gallery doesn't need
-    them - only the viewer does, and the viewer fetches the per-image
-    /annotations/{import_id} which doesn't go through this strip."""
+    """An edited box without its mask polygons."""
     slim = dict(b)
     slim.pop("mask", None)
     slim.pop("polygons", None)
@@ -14623,12 +8555,8 @@ def _strip_edited_box(b: dict) -> dict:
 
 
 def _detection_annotations(entries: list[dict], *, include_edits: bool, include_heavy: bool = False) -> dict[str, dict]:
-    """Strip embeddings out of every detection so the annotations payload
-    is ~10× smaller than the raw manifest. Keeps mask polygons by default
-    (the FE needs them to render box outlines + the labelled-preview
-    overlay) - set include_heavy=False to also strip masks +
-    per-label similarity dicts on detections AND editedBoxes for the
-    bulk gallery-hydration endpoint."""
+    """{entry id: {detections, editedBoxes, timings}} without embeddings; masks
+    and score dicts only with include_heavy."""
     strip = _strip_embedding if include_heavy else _strip_embedding_and_heavy
     out: dict[str, dict] = {}
     for e in entries:
@@ -14645,12 +8573,7 @@ def _detection_annotations(entries: list[dict], *, include_edits: bool, include_
         rec: dict = {"detections": slim_dets}
         if include_edits:
             edited = e.get("editedBoxes")
-            # Only surface editedBoxes once the user has actually
-            # touched them. Older imports were seeded with an empty
-            # editedBoxes:[] at upload time which the FE then mistook
-            # for "user has zero boxes" and used to mask out the auto
-            # detections. The `editedBoxesSet` flag (written by the
-            # PUT /imports/{id} handler) is the authoritative signal.
+            # Without editedBoxesSet, an empty editedBoxes means unedited.
             if isinstance(edited, list) and e.get("editedBoxesSet"):
                 rec["editedBoxes"] = (
                     edited if include_heavy
@@ -14669,36 +8592,16 @@ def _build_overview_payload(
     imports_limit: int | None = None,
     imports_offset: int = 0,
 ) -> dict:
-    """Sync overview-builder. Runs inside asyncio.to_thread so the
-    JSON load + deepcopy + dataset-health computation doesn't pin the
-    FastAPI event loop when a labelling job is also in flight.
-
-    `imports_limit` slices the imports list before _tile_overview
-    iterates - the per-tile reduction (n_detections + label_set) is
-    the dominant cost on a 963-image project (~600 ms). With a limit
-    of 20 the slice cost drops to ~12 ms, so the FE can paint the
-    first viewport almost instantly and fetch the rest in the
-    background. `imports_total` is always set so the FE knows how
-    many follow-up batches it needs."""
+    """The /overview payload, run in a worker thread. imports_limit and
+    imports_offset page the import tiles; imports_total counts them all."""
     _kick_blurhash_backfill(project_id, m)
-    # Sort by createdAt DESC so the first-batch slice matches the FE's
-    # gallery order. Without this the FE shows the first 100 manifest-
-    # order entries, then re-sorts when the remainder lands -
-    # producing the visible "rearrange then settle" flicker the user
-    # reported. With the sort moved here every slice is already in
-    # final paint order.
     all_imports = _sort_imports_desc(m.get("imports") or [])
     if imports_limit is not None:
         sliced_imports = all_imports[imports_offset : imports_offset + imports_limit]
     else:
         sliced_imports = all_imports
-    # Project-level snapshot of the labels the last label_charlie job
-    # ran with. Used by the FE's freshLabels heuristic to distinguish
-    # "this tag was searched but never matched" from "this tag was
-    # added after the last run." Backfill with current tags when the
-    # field is missing AND at least one import is labelled, so legacy
-    # projects don't trip the force_relabel false positive on the very
-    # first click after this code ships.
+    # Labels of the last labelling run; the current tags when that is not
+    # recorded but an image is labelled.
     labels_last_run = m.get("labelsLastRun")
     if labels_last_run is None:
         has_labelled = any(
@@ -14710,59 +8613,27 @@ def _build_overview_payload(
     return {
         "id": m.get("id") or project_id,
         "name": m.get("name"),
-        "prompt": m.get("prompt"),
         "tags": m.get("tags") or [],
         "labelsLastRun": labels_last_run,
         "settingsLastRun": m.get("settingsLastRun"),
         "label_aliases": m.get("label_aliases") or {},
         "labelColours": m.get("labelColours") or {},
-        # Per-image verdicts from the fast-review modal (good/bad/
-        # unsure). Surfaced here so the V2 project page can hydrate
-        # the verdict filter + review state on first paint without a
-        # separate full-manifest round-trip.
+        # import id -> "good", "bad" or "unsure".
         "verdicts": m.get("verdicts") or {},
         "cover": m.get("cover"),
+        "cover_uploaded": bool(m.get("cover_uploaded")),
         "cover_blurhash": m.get("cover_blurhash"),
         "v2": bool(m.get("v2")),
         "createdAt": m.get("createdAt"),
         "updatedAt": m.get("updatedAt"),
-        "thresholds": m.get("thresholds"),
-        "vlm_action": m.get("vlm_action"),
-        "synonyms_enabled": m.get("synonyms_enabled"),
-        "private": m.get("private"),
-        # Max upload long-edge (px). The FE caps client-side resize to this, so
-        # it MUST reach the FE or 4K-Project datasets silently fall back to the
-        # 1500 default and uploads get downscaled. Inherited from the Project.
-        "max_input_size": containers.clamp_max_input(m.get("max_input_size")),
-        # Cached general/specific verdict (LLM-free resolve) so the hero badge
-        # paints in the same frame as the rest of /overview instead of popping
-        # in 100-1000 ms later after a separate /dataset-type round-trip. Null
-        # when a classification could not be derived locally - the FE then
-        # falls back to its own /dataset-type fetch.
-        "dataset_type": _resolve_dataset_type_cached_only(
-            project_id, list(m.get("tags") or [])
-        ),
-        # Derived ("child") link: present only on cropped child projects so the
-        # FE can show a derived badge + a link back to the parent.
+        "dataset_type": _dataset_type(project_id),
         "derived": m.get("derived") or None,
         "hasModel": m.get("hasModel"),
-        # Owner / createdBy let the FE drop the slow legacy
-        # /api/projects/{id} round-trip it used to make on mount just
-        # to populate the project-meta cache with these fields.
-        "owner": m.get("owner"),
-        "createdBy": m.get("createdBy"),
-        "dataset_health": _compute_dataset_health(m),
         "references": _tile_overview(m.get("references") or []),
         "imports": _tile_overview(sliced_imports),
         "imports_total": len(all_imports),
         "imports_offset": imports_offset,
-        # Pre-computed gallery-filter chip counts. Scans the FULL
-        # imports list (not just the sliced page) so the FE doesn't
-        # have to wait for all batches to land before the ALL / GOOD /
-        # BAD / UNLABELLED chips show their final numbers. Mirrors
-        # the same logic the FE's per-item iteration uses (see
-        # DatasetGallery's filterCounts useMemo) so the values match
-        # the moment the imports list catches up.
+        # Over all imports; must match filterCounts in the UI's DatasetGallery.
         "filter_counts": _compute_filter_counts(
             all_imports, m.get("verdicts") or {},
         ),
@@ -14772,17 +8643,14 @@ def _build_overview_payload(
 def _compute_filter_counts(
     all_imports: list[dict], verdicts: dict,
 ) -> dict[str, int]:
-    """Authoritative chip counts across the full imports list. The
-    FE will display these directly so the chips read their final
-    values on first paint instead of climbing 20 → 100 → N as the
-    imports list streams in batches."""
+    """Gallery filter counts over all imports."""
     counts = {"all": 0, "unlabelled": 0, "unrated": 0, "good": 0, "bad": 0, "unsure": 0}
     for e in all_imports:
         if not isinstance(e, dict):
             continue
         counts["all"] += 1
         background = bool(e.get("background"))  # done, and nothing to rate
-        has_dets = bool(e.get("detections")) or bool(e.get("editedBoxes"))
+        has_dets = _import_has_labels(e)
         if not has_dets and not background:
             counts["unlabelled"] += 1
         eid = e.get("id")
@@ -14798,75 +8666,32 @@ def _compute_filter_counts(
     return counts
 
 
-@app.get(
-    "/api/v2/projects/{project_id}/initial",
-    response_class=ORJSONResponse,
-    dependencies=[Depends(require_project_read_access)],
-)
+@app.get("/api/v2/projects/{project_id}/initial", response_class=FastJSONResponse)
 async def get_project_initial(
     project_id: str,
     response: Response,
     n: int = _INITIAL_PAYLOAD_LIMIT,
 ):
-    """Single-round-trip first-paint payload - project meta, first-N
-    import tiles (covers + chips + box counts) and the lite stats card
-    data, all in one document.
-
-    Served straight from the on-disk initial_first20.json sidecar that
-    save_manifest's _kick_sidecar_refresh writes after every change.
-    Zero compute, zero manifest parse on the request thread, and only
-    one HTTP round-trip from the FE - so the gallery + chip rail + stats
-    badge all render in one paint instead of three staggered fetches.
-
-    If the sidecar is missing (first-touch / cold deploy) we synthesise
-    it from /overview + /dataset-stats(lite) on the spot and kick a
-    rebuild for next time. `n` slices the imports list before send so a
-    caller asking for 5 doesn't get back 20.
-    """
+    """First-paint payload: project meta, the first `n` import tiles and lite
+    stats, from the initial sidecar when it is current."""
     if not project_dir(project_id).exists():
         raise HTTPException(404)
-    # Bypass the browser's HTTP cache. After a destructive action
-    # (dedupe commit, ignore, manual delete) the FE hits
-    # window.location.reload() - which respects the disk cache by
-    # default, and without this header the browser handed back the
-    # pre-delete /initial response on the very first paint, so the
-    # stats card + gallery rendered with stale numbers until the
-    # /dataset-stats?lite (cache:no-store) follow-up landed and
-    # overwrote them. apiFetch's in-flight dedup is independent of
-    # the HTTP cache so co-fired duplicate /initial calls still
-    # coalesce into one round-trip.
+    # No browser caching: a reload after a delete must not show the old payload.
     response.headers["Cache-Control"] = "no-store, must-revalidate"
     n = max(1, min(int(n), _INITIAL_PAYLOAD_LIMIT))
     side = await asyncio.to_thread(_read_initial_sidecar, project_id)
     if side is not None:
-        # Stale-detection: compare sidecar mtime to manifest mtime. If
-        # the sidecar predates the manifest (or any backend code-path
-        # that rebuilds it), kick an async refresh AND fall through to
-        # the compute path so the FIRST request after a server upgrade
-        # gets fresh data instead of one more stale-snapshot served.
-        # Race-safe: the sidecar can be deleted between the read above and
-        # this stat (concurrent invalidate / refresh), which would raise
-        # FileNotFoundError → unhandled 500. Treat a vanished sidecar as
-        # "fall through to inline compute".
+        # The sidecar can vanish between the read and this stat.
         try:
             sidecar_mtime = _initial_sidecar_path(project_id).stat().st_mtime
         except OSError:
             sidecar_mtime = None
         manifest_mtime = _manifest_disk_mtime(project_id)
         if sidecar_mtime is not None and sidecar_mtime >= manifest_mtime:
-            # Fresh enough - serve it AND kick a background refresh so
-            # any out-of-band changes (label fallback rules, format
-            # tweaks) propagate by the next visit.
             _kick_sidecar_refresh(project_id)
             imps = (side.get("imports") or [])[:n]
             return {**side, "imports": imps}
-        # Stale sidecar - fall through to the inline compute below so
-        # the user doesn't see a one-version-old snapshot.
-    # Cold path: no sidecar on disk yet. Build it inline so the first
-    # visit still gets data, AND kick the async refresh so subsequent
-    # visits hit the fast path. This is the same cost as /overview +
-    # /dataset-stats?lite combined, so we're not regressing - just not
-    # winning until the sidecar lands.
+    # Missing or stale sidecar: built inline.
     _kick_sidecar_refresh(project_id)
     m = await asyncio.to_thread(load_manifest, project_id, False)
     if not m:
@@ -14875,9 +8700,6 @@ async def get_project_initial(
         _build_overview_payload, project_id, m,
         _FAST_OVERVIEW_LIMIT, 0,
     )
-    # Best-effort lite stats - same compute the /dataset-stats?lite=true
-    # endpoint runs. Returns counts + label distribution + 3-factor
-    # health, fast on small projects, sub-second on big ones.
     stats_payload: dict | None
     try:
         stats_payload = await asyncio.to_thread(
@@ -14889,7 +8711,6 @@ async def get_project_initial(
     return {
         "id": overview_payload.get("id"),
         "name": overview_payload.get("name"),
-        "prompt": overview_payload.get("prompt"),
         "tags": overview_payload.get("tags") or [],
         "labelsLastRun": overview_payload.get("labelsLastRun"),
         "settingsLastRun": overview_payload.get("settingsLastRun"),
@@ -14900,16 +8721,8 @@ async def get_project_initial(
         "v2": overview_payload.get("v2"),
         "createdAt": overview_payload.get("createdAt"),
         "updatedAt": overview_payload.get("updatedAt"),
-        "thresholds": overview_payload.get("thresholds"),
-        "vlm_action": overview_payload.get("vlm_action"),
-        "synonyms_enabled": overview_payload.get("synonyms_enabled"),
-        "private": overview_payload.get("private"),
-        "max_input_size": overview_payload.get("max_input_size"),
         "dataset_type": overview_payload.get("dataset_type"),
         "hasModel": overview_payload.get("hasModel"),
-        "owner": overview_payload.get("owner"),
-        "createdBy": overview_payload.get("createdBy"),
-        "dataset_health": overview_payload.get("dataset_health"),
         "references": overview_payload.get("references") or [],
         "imports": (overview_payload.get("imports") or [])[:n],
         "imports_total": overview_payload.get("imports_total") or 0,
@@ -14917,40 +8730,17 @@ async def get_project_initial(
     }
 
 
-@app.get(
-    "/api/v2/projects/{project_id}/overview",
-    response_class=ORJSONResponse,
-    dependencies=[Depends(require_project_read_access)],
-)
+@app.get("/api/v2/projects/{project_id}/overview", response_class=FastJSONResponse)
 async def get_project_overview(
     project_id: str,
     imports_limit: int | None = None,
     imports_offset: int = 0,
 ):
-    """Render-critical project metadata. No detections, no embeddings,
-    no mask polygons. The heavy bits (manifest deepcopy + tile reduction
-    + dataset-health roll-up) run on the default executor so concurrent
-    requests aren't queued behind each other on the event loop when a
-    labelling job is hogging GPU + CPU.
-
-    Reads through the shared cache without deepcopying - _kick_blurhash_backfill
-    writes a missing blurhash back on the cached dict (idempotent), the
-    rest is pure read. Built payloads are cached by manifest mtime so
-    repeat polls inside an unchanged window are sub-millisecond.
-
-    `?imports_limit=20&imports_offset=0` returns just the first 20
-    import tiles instead of the whole gallery. The FE uses this to
-    paint the first viewport in ~50 ms, then fetches the rest in the
-    background. `imports_total` in the response is the unsliced count.
-    """
+    """Project metadata and import tiles, without detections, embeddings or
+    masks. imports_limit and imports_offset page the tiles."""
     if not project_dir(project_id).exists():
         raise HTTPException(404)
-    # Fast path: the FE's first-batch request matches the persisted
-    # sidecar exactly, so we serve it straight from disk - zero
-    # compute, zero manifest parse on the request thread. Allow-stale
-    # because the sidecar gets rebuilt by save_manifest's async hook
-    # after each write; serving the previous batch's numbers for a
-    # second is preferable to making the user wait through a compute.
+    # A first page within _FAST_OVERVIEW_LIMIT comes from the overview sidecar.
     if (
         imports_offset == 0
         and imports_limit is not None
@@ -14958,54 +8748,32 @@ async def get_project_overview(
     ):
         side = await asyncio.to_thread(_read_overview_sidecar, project_id)
         if side is not None:
-            # Re-stat for the freshness check. The sidecar can be deleted
-            # between the read above and this stat (a concurrent
-            # _invalidate_project_payloads / sidecar refresh / label job),
-            # so a raw .stat() races and raises FileNotFoundError → an
-            # unhandled 500 that even drops the CORS header. Treat a
-            # vanished/unreadable sidecar as "can't use the fast path" and
-            # fall through to the inline compute below.
+            # The sidecar can vanish between the read and this stat.
             try:
                 sidecar_mtime = _overview_sidecar_path(project_id).stat().st_mtime
             except OSError:
                 sidecar_mtime = None
             manifest_mtime = _manifest_disk_mtime(project_id)
-            if sidecar_mtime is not None and sidecar_mtime >= manifest_mtime:
-                # Fresh - serve it AND kick an async refresh so
-                # out-of-band changes (label fallback rules, schema
-                # tweaks) land by the next visit.
+            # A sidecar without cover_uploaded is stale.
+            if (sidecar_mtime is not None and sidecar_mtime >= manifest_mtime
+                    and "cover_uploaded" in side):
                 _kick_sidecar_refresh(project_id)
-                # Sidecar holds the full first-100; respect the caller's
-                # limit so a request for 20 doesn't get back 100 entries.
                 imps = (side.get("imports") or [])[:imports_limit]
                 return {**side, "imports": imps, "imports_offset": 0}
-            # Stale - fall through to inline compute so this request
-            # gets fresh data, and kick a refresh for future visits.
             _kick_sidecar_refresh(project_id)
         else:
-            # Sidecar missing - kick a build and fall through to the
-            # synchronous compute below so the FIRST visit still works.
             _kick_sidecar_refresh(project_id)
     disk_mtime = _manifest_disk_mtime(project_id)
-    # Pre-warm the dataset-stats sidecar in the background on every
-    # /overview hit. By the time the FE's DatasetStatsCard fetches
-    # /dataset-stats?lite=true (a few hundred ms after /overview lands)
-    # the sidecar is already on disk and the response is a quick file
-    # read. Only kicks one rebuild per project at a time thanks to the
-    # _PAYLOAD_REVALIDATE_IN_FLIGHT dedupe inside _payload_revalidate.
+    # Warms the lite dataset-stats sidecar, one rebuild per project at a time.
     asyncio.create_task(_payload_revalidate(
         project_id, "dataset-stats-lite",
         lambda: _persist_dataset_stats(project_id, True),
     ))
-    # Cache key folds in the slice so different pages don't share an
-    # entry. A fresh cache hit for the same slice returns instantly.
     cache_name = f"overview:{imports_offset}:{imports_limit}"
     cached, fresh = _payload_cache_get_swr(project_id, cache_name, disk_mtime)
     if cached is not None and fresh:
         return cached
     if cached is not None:
-        # Stale-while-revalidate: serve the previous payload now,
-        # rebuild in the background so the next request is fresh.
         def _build():
             m2 = load_manifest(project_id, False)
             return _build_overview_payload(project_id, m2, imports_limit, imports_offset) if m2 else {}
@@ -15021,256 +8789,12 @@ async def get_project_overview(
     return payload
 
 
-def _build_annotations_payload(m: dict) -> dict:
-    """Bulk gallery-hydration payload - heavy mask polygons + per-label
-    sim dicts are stripped here so the wire size stays manageable on a
-    963-image / 9000-detection project. The viewer fetches the full
-    record per-image via /annotations/{import_id} when the user opens
-    a tile."""
-    return {
-        "references": _detection_annotations(
-            m.get("references") or [], include_edits=False, include_heavy=False,
-        ),
-        "imports": _detection_annotations(
-            m.get("imports") or [], include_edits=True, include_heavy=False,
-        ),
-    }
-
-
-@app.get(
-    "/api/v3/projects/{project_id}/viewport",
-    dependencies=[Depends(require_project_read_access)],
-)
-async def v3_viewport_batch(project_id: str, ids: str = "", request: Request = None):  # type: ignore[assignment]
-    """Batched per-image annotations for a comma-separated list of
-    import ids. Replaces N parallel /annotations/{import_id} calls
-    from the viewer's neighbour-prefetch with a single round-trip -
-    cycling between gallery tiles paints from the cached batch
-    instead of hitting the network per arrow press.
-
-    Returns the same shape /annotations/{import_id} does for each
-    requested id, under `imports[id]`. Unknown ids are simply
-    omitted from the response so the FE can safely request more
-    than exists.
-
-    The endpoint is intentionally simple: full geometry only (no
-    adaptive levels). Adaptive geometry / RDP-simplified polygons
-    are a follow-up; this single batched call already collapses
-    the most expensive part of the viewer's request profile.
-    """
-    if not project_dir(project_id).exists():
-        raise HTTPException(404)
-    raw_ids = [s.strip() for s in (ids or "").split(",") if s.strip()]
-    if not raw_ids:
-        return {"imports": {}}
-    # Cap to keep one bad request from scanning the manifest
-    # repeatedly with a giant id list.
-    if len(raw_ids) > 64:
-        raw_ids = raw_ids[:64]
-    requested = set(raw_ids)
-    await asyncio.to_thread(load_manifest, project_id, False)
-    with _MANIFEST_CACHE_LOCK:
-        idx = _MANIFEST_IMPORT_INDEX.get(project_id, {})
-        entries = {eid: idx[eid] for eid in requested if eid in idx}
-    out: dict[str, dict] = {}
-    for eid, e in entries.items():
-        out[eid] = {
-            "detections": [
-                _strip_embedding(d)
-                for d in (e.get("detections") or [])
-                if isinstance(d, dict)
-            ],
-            "editedBoxes": (
-                e.get("editedBoxes")
-                if isinstance(e.get("editedBoxes"), list) and e.get("editedBoxesSet")
-                else None
-            ),
-            "timings": e.get("timings") if isinstance(e.get("timings"), dict) else None,
-        }
-    payload = {"imports": out}
-    # P6 binary wire: when the client opts in via Accept header,
-    # return the same dict serialized with msgpack instead of JSON.
-    # ~30-50% smaller on mask-heavy responses; parse is faster too
-    # since we skip the string→number coercion. Falls back to ORJSON
-    # when the header isn't present so all existing callers keep
-    # working unchanged.
-    accept = (request.headers.get("accept") or "") if request is not None else ""
-    if "application/msgpack" in accept.lower():
-        try:
-            import msgpack
-            return Response(
-                content=msgpack.packb(payload, use_bin_type=True),
-                media_type="application/msgpack",
-            )
-        except Exception as e:
-            print(f"[v3-viewport] msgpack pack failed, falling back to JSON: {e}")
-    return ORJSONResponse(payload)
-
-
-@app.post(
-    "/api/v3/projects/{project_id}/dedupe-imports",
-    dependencies=[Depends(require_project_owner)],
-)
-async def v3_dedupe_imports(project_id: str, apply: bool = False):
-    """One-shot pass that groups manifest imports by SHA-256 of
-    their on-disk image bytes and within each group keeps the
-    entry most likely to be the user's intended record. The rest
-    are deleted (manifest row + image file + cached labelled
-    preview).
-
-    Default is DRY-RUN: returns the proposed deletions and a
-    summary, no writes. Pass `?apply=1` to actually delete.
-
-    Keeper-selection: highest detection count wins; on tie, the
-    entry whose originalFilename does NOT look like a UUID-named
-    upload-retry fallback (e.g. ``3f6db17ccb...jpg``) wins.
-
-    Built specifically to clean up duplicates created by the
-    upload-retry-without-idempotency-key race the FE fixed
-    elsewhere - that fix prevents future dupes; this scrubber
-    cleans up the ones already on disk.
-    """
-    import hashlib
-    import re
-    proj = project_dir(project_id)
-    if not proj.exists():
-        raise HTTPException(404, "project not found")
-    imports_dir = proj / "images"
-    if not imports_dir.exists():
-        return {"applied": False, "would_delete": 0, "duplicates": []}
-    manifest = await asyncio.to_thread(load_manifest, project_id, True)
-    if not manifest:
-        raise HTTPException(404, "manifest not found")
-    entries = manifest.get("imports") or []
-
-    def _hash_one(entry: dict) -> tuple[str, str | None]:
-        eid = entry.get("id", "")
-        fn = entry.get("filename")
-        if not fn:
-            return eid, None
-        path = imports_dir / fn
-        if not path.exists():
-            return eid, None
-        try:
-            h = hashlib.sha256()
-            with open(path, "rb") as fh:
-                for chunk in iter(lambda: fh.read(1024 * 64), b""):
-                    h.update(chunk)
-            return eid, h.hexdigest()
-        except Exception as e:
-            print(f"[dedupe] hash failed for {fn}: {e}")
-            return eid, None
-
-    hashes: dict[str, str] = {}
-    for entry in entries:
-        eid, hsh = await asyncio.to_thread(_hash_one, entry)
-        if hsh is not None:
-            hashes[eid] = hsh
-
-    groups: dict[str, list[dict]] = {}
-    for entry in entries:
-        eid = entry.get("id", "")
-        hsh = hashes.get(eid)
-        if hsh is None:
-            continue
-        groups.setdefault(hsh, []).append(entry)
-
-    uuid_like = re.compile(r"^[0-9a-f]{32}\.(?:jpg|jpeg|png|webp)$", re.IGNORECASE)
-
-    def _score(entry: dict) -> tuple[int, int]:
-        # Higher wins. Tuple is compared lexicographically.
-        det_count = len(entry.get("detections") or [])
-        orig = entry.get("originalFilename") or entry.get("filename") or ""
-        is_uuid = 1 if uuid_like.match(orig) else 0
-        # det_count desc, then non-UUID-named preferred (so -is_uuid).
-        return (det_count, -is_uuid)
-
-    losers: list[dict] = []
-    losers_ids: set[str] = set()
-    for hsh, group in groups.items():
-        if len(group) < 2:
-            continue
-        sorted_group = sorted(group, key=_score, reverse=True)
-        keeper = sorted_group[0]
-        for entry in sorted_group[1:]:
-            losers_ids.add(entry.get("id", ""))
-            losers.append({
-                "id": entry.get("id"),
-                "filename": entry.get("filename"),
-                "originalFilename": entry.get("originalFilename"),
-                "detection_count": len(entry.get("detections") or []),
-                "kept_id": keeper.get("id"),
-                "kept_filename": keeper.get("filename"),
-                "sha256": hsh,
-            })
-
-    if not apply or not losers:
-        return {
-            "applied": False,
-            "would_delete": len(losers),
-            "duplicates": losers,
-        }
-
-    write_lock = await _manifest_write_lock(project_id)
-    deleted: list[str] = []
-    async with write_lock:
-        manifest = load_manifest(project_id)
-        if not manifest:
-            raise HTTPException(404, "manifest not found")
-        kept: list[dict] = []
-        for imp in (manifest.get("imports") or []):
-            if imp.get("id") in losers_ids:
-                fn = imp.get("filename")
-                if fn:
-                    try:
-                        (imports_dir / fn).unlink(missing_ok=True)
-                    except Exception as e:
-                        print(f"[dedupe] unlink failed {fn}: {e}")
-                _invalidate_labelled_preview(project_id, imp.get("id", ""))
-                deleted.append(imp.get("id"))
-            else:
-                kept.append(imp)
-        manifest["imports"] = kept
-        # Cover-rescue if we deleted the file that was the cover.
-        cover_filename = manifest.get("cover")
-        if cover_filename and not any(
-            imp.get("filename") == cover_filename for imp in kept
-        ) and not any(
-            ref.get("filename") == cover_filename
-            for ref in (manifest.get("references") or [])
-        ):
-            import random as _rnd
-            kept_filenames = [
-                imp.get("filename") for imp in kept if imp.get("filename")
-            ]
-            if kept_filenames:
-                manifest["cover"] = _rnd.choice(kept_filenames)
-                manifest["cover_blurhash"] = None
-        manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        save_manifest(project_id, manifest)
-    return {
-        "applied": True,
-        "count": len(deleted),
-        "deleted": deleted,
-    }
-
-
-@app.get(
-    "/api/v2/projects/{project_id}/annotations/{import_id}",
-    response_class=ORJSONResponse,
-    dependencies=[Depends(require_project_read_access)],
-)
+@app.get("/api/v2/projects/{project_id}/annotations/{import_id}", response_class=FastJSONResponse)
 async def get_project_annotation_for_import(project_id: str, import_id: str):
-    """Full detection record for a single import (mask polygons + per-
-    label sim dicts included). Fetched by the viewer when the user
-    opens a tile - bulk /annotations skips these heavy fields to keep
-    its wire size down. Bypasses the payload cache: per-image data is
-    tiny enough that the cache layer doesn't pay off, and the viewer
-    expects fresh data after any in-flight edit."""
+    """One import's detections with masks and score dicts, but no embeddings."""
     if not project_dir(project_id).exists():
         raise HTTPException(404)
-    # Ensure cache + index are fresh, then do an O(1) id lookup
-    # instead of scanning all imports linearly.
+    # Loaded to refresh the import index.
     await asyncio.to_thread(load_manifest, project_id, False)
     with _MANIFEST_CACHE_LOCK:
         e = _MANIFEST_IMPORT_INDEX.get(project_id, {}).get(import_id)
@@ -15292,15 +8816,13 @@ async def get_project_annotation_for_import(project_id: str, import_id: str):
 
 
 def _build_annotations_payload_scoped(m: dict, scope: str) -> dict:
-    """Same as _build_annotations_payload but lets the caller drop the
-    refs or imports half. `scope=refs` is the gallery's preferred call
-    - the imports' real geometry isn't needed for the chip rail (the
-    placeholder synth from /overview is correct) and the viewer reads
-    the per-image endpoint for full geometry on demand."""
+    """Bulk annotations for scope "all", "refs" or "imports"."""
     out: dict = {}
     if scope in ("all", "refs"):
+        # With their masks: at most REF_MAX_POOL references, and an edit
+        # writes back what the editor holds.
         out["references"] = _detection_annotations(
-            m.get("references") or [], include_edits=False, include_heavy=False,
+            m.get("references") or [], include_edits=False, include_heavy=True,
         )
     else:
         out["references"] = {}
@@ -15313,28 +8835,9 @@ def _build_annotations_payload_scoped(m: dict, scope: str) -> dict:
     return out
 
 
-@app.get(
-    "/api/v2/projects/{project_id}/annotations",
-    response_class=ORJSONResponse,
-    dependencies=[Depends(require_project_read_access)],
-)
+@app.get("/api/v2/projects/{project_id}/annotations", response_class=FastJSONResponse)
 async def get_project_annotations(project_id: str, scope: str = "all"):
-    """Per-image detections + editedBoxes WITHOUT embeddings. Pulled by
-    the FE after the overview has painted; powers the BoxEditor + the
-    pipeline popup. Embeddings are server-side only - the resolver
-    reads them off the on-disk manifest, the FE never sees them.
-
-    `scope=refs` returns ONLY the references' detection geometry - the
-    gallery uses placeholder detections synthesised from /overview's
-    n_detections + label_set, so the bulk imports payload (~270 KB on
-    a 9000-detection project) is dead weight there. The viewer fetches
-    real per-image data through /annotations/{import_id} when the user
-    opens a tile.
-
-    Same off-loop pattern as /overview: the manifest load + per-entry
-    embedding strip is done on the executor so other read endpoints
-    don't queue behind it.
-    """
+    """Detections and edited boxes without embeddings; `scope` "refs" or "imports" returns one half."""
     if not project_dir(project_id).exists():
         raise HTTPException(404)
     scope_norm = scope if scope in ("all", "refs", "imports") else "all"
@@ -15349,8 +8852,6 @@ async def get_project_annotations(project_id: str, scope: str = "all"):
             return _build_annotations_payload_scoped(m2, scope_norm) if m2 else {}
         asyncio.create_task(_payload_revalidate(project_id, cache_key, _build_scoped))
         return cached
-    # Read-only - pass copy=False to skip the manifest deepcopy. The
-    # builder only reads from m to produce a brand-new payload dict.
     m = await asyncio.to_thread(load_manifest, project_id, False)
     if not m:
         return m
@@ -15359,131 +8860,28 @@ async def get_project_annotations(project_id: str, scope: str = "all"):
     return payload
 
 
-@app.get(
-    "/api/projects/{project_id}",
-    dependencies=[Depends(require_project_read_access)],
-)
-async def get_project(project_id: str):
-    if not project_dir(project_id).exists():
-        raise HTTPException(404)
-    m = load_manifest(project_id)
-    if not m:
-        return m
-    # Surface any blurhashes already in the in-memory cache without
-    # re-encoding from disk (which is what made the GET handler slow
-    # - 50 encodes × ~10 ms ≈ 500 ms blocking the response). Cache
-    # hits are O(1); misses fall through and get scheduled for a
-    # background backfill below.
-    needs_backfill: list[tuple[str, str, dict]] = []
-    for ref in m.get("references") or []:
-        if isinstance(ref, dict) and not ref.get("blurhash"):
-            fn = ref.get("filename")
-            if not fn:
-                continue
-            cached = _BLURHASH_CACHE.get((project_id, f"references/{fn}"))
-            if cached:
-                ref["blurhash"] = cached
-            else:
-                needs_backfill.append(("references", fn, ref))
-    for imp in m.get("imports") or []:
-        if isinstance(imp, dict) and not imp.get("blurhash"):
-            fn = imp.get("filename")
-            if not fn:
-                continue
-            cached = _BLURHASH_CACHE.get((project_id, f"imports/{fn}"))
-            if cached:
-                imp["blurhash"] = cached
-            else:
-                needs_backfill.append(("imports", fn, imp))
-
-    # Schedule any missing encodes to run on the executor pool so the
-    # GET response returns IMMEDIATELY with whatever's already cached.
-    # Next manifest read (the user re-opens the project, or a poll
-    # tick) picks up the freshly encoded hashes - meanwhile the FE
-    # falls back to its animated gradient placeholder, no blank tiles.
-    if needs_backfill:
-        loop = asyncio.get_running_loop()
-        loop.run_in_executor(
-            None,
-            _blurhash_backfill_async,
-            project_id,
-            [(subdir, fn) for subdir, fn, _ref in needs_backfill],
-        )
-    # Dataset health lands directly in the response so the FE can
-    # render the badge on first paint without waiting for labels +
-    # refs to both hydrate.
-    m["dataset_health"] = _compute_dataset_health(m)
-    # Resolve the upload size ceiling (inherited from the dataset's Project, or
-    # the default) so the FE always has a concrete value to cap uploads to.
-    m["max_input_size"] = containers.clamp_max_input(m.get("max_input_size"))
-    if m.get("v2"):
-        n_refs = len(m.get("references") or [])
-        n_imps = len(m.get("imports") or [])
-        print(
-            f"[v2-manifest-get] {project_id} → references={n_refs}, "
-            f"imports={n_imps}, cover={m.get('cover')!r}"
-        )
-    return m
-
-
 class UpdateProjectIn(BaseModel):
     tags: list[str] | None = None
-    prompt: str | None = None
-    thresholds: dict[str, float] | None = None
-    vlm_action: str | None = None
-    synonyms_enabled: bool | None = None
     verdicts: dict[str, str] | None = None
     editedBoxes: dict[str, list[dict]] | None = None
     cover: str | None = None
     hasModel: bool | None = None
-    private: bool | None = None
-    # Display-only aliases for canonical labels: {canonical_lower:
-    # display_name}. Backend stores + serves them through; nothing on
-    # the server consumes the alias for scoring / persistence - the
-    # canonical key remains the source of truth on every detection,
-    # ref, and import. Lets the UI rename a label without rewriting
-    # every box. None means "leave existing aliases untouched".
+    # {canonical_lower: display_name}, for display only; None leaves them unchanged.
     label_aliases: dict[str, str] | None = None
-    # Per-label colour overrides, keyed by canonical-lower label →
-    # #rrggbb. Same store-and-forward shape as label_aliases - the
-    # backend doesn't render these, the FE composes them on top of
-    # the stable hash-based palette. None = leave existing untouched.
+    # {canonical_lower: "#rrggbb"}; None leaves them unchanged.
     labelColours: dict[str, str] | None = None
 
 
-@app.put(
-    "/api/projects/{project_id}",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.put("/api/projects/{project_id}")
 async def update_project(project_id: str, payload: UpdateProjectIn):
     if not project_dir(project_id).exists():
         raise HTTPException(404)
-    from profanity import assert_clean
 
     data = payload.model_dump(exclude_none=True)
     if "cover" in payload.model_fields_set and payload.cover is None:
-        data["cover"] = None  # "reset to the default cover": dropped with the Nones before
+        data["cover"] = None  # null resets to the default cover
 
-    # Validate every persisted text input. Tags + box labels feed back
-    # into the model prompt and the user-facing UI, so banned terms
-    # would otherwise leak through both.
-    new_tags = data.get("tags")
-    if isinstance(new_tags, list):
-        for t in new_tags:
-            if isinstance(t, str):
-                assert_clean(t, field="label")
-    new_edited_boxes = data.get("editedBoxes")
-    if isinstance(new_edited_boxes, dict):
-        for boxes in new_edited_boxes.values():
-            if not isinstance(boxes, list):
-                continue
-            for b in boxes:
-                if isinstance(b, dict) and isinstance(b.get("label"), str):
-                    assert_clean(b["label"], field="label")
-
-    # Sanitise label colour overrides: drop anything that isn't a
-    # plain #rrggbb hex string. Keeps the manifest schema tight and
-    # avoids stray HTML / colour functions making it into FE styles.
+    # Only #rrggbb values are kept; "" or "#" clears an override.
     new_label_colours = data.pop("labelColours", None)
     colours: dict[str, str] | None = None
     if isinstance(new_label_colours, dict):
@@ -15493,12 +8891,11 @@ async def update_project(project_id: str, payload: UpdateProjectIn):
                 continue
             vs = v.strip()
             if vs in ("", "#"):
-                colours[k.strip().lower()] = ""  # clears that override
+                colours[k.strip().lower()] = ""
             elif len(vs) == 7 and vs.startswith("#") and all(c in "0123456789abcdefABCDEF" for c in vs[1:]):
                 colours[k.strip().lower()] = "#" + vs[1:].lower()
 
-    # The cover names a picture of this dataset: cover_thumb joins it into
-    # a path, so anything else read files from elsewhere on the disk.
+    # cover_thumb joins the cover into a path, so it must name one of this dataset's pictures.
     cover = data.get("cover")
     if cover:
         proj = project_dir(project_id)
@@ -15506,15 +8903,12 @@ async def update_project(project_id: str, payload: UpdateProjectIn):
                 or not any((proj / sub / cover).is_file() for sub in ("images", "references"))):
             raise HTTPException(400, "cover must be one of this dataset's pictures")
 
-    # Read, merge and save under the dataset's write lock: unlocked, a
-    # save racing an upload or another edit reverted the other one.
-    rebake_images: list[str] = []
+    # Read, merge and save under the write lock, so a concurrent upload or edit is kept.
     lock = await _manifest_write_lock(project_id)
     async with lock:
         manifest = load_manifest(project_id)
         if colours is not None:
-            # Merge into existing rather than replace, so the FE can PUT
-            # only the deltas (e.g. when a user edits a single label).
+            # Merged, so a PUT can carry only the changed labels.
             merged = dict(manifest.get("labelColours") or {})
             for k, v in colours.items():
                 if v:
@@ -15522,285 +8916,20 @@ async def update_project(project_id: str, payload: UpdateProjectIn):
                 else:
                     merged.pop(k, None)
             data["labelColours"] = merged
-
-        # Capture which images had their editedBoxes change so we can re-bake
-        # the preview JPEGs after the manifest is saved. Compare per-image to
-        # avoid re-baking on no-op saves (the FE does a debounced PUT every
-        # ~500ms when other fields change).
-        new_edited = data.get("editedBoxes")
-        if isinstance(new_edited, dict):
-            old_edited = manifest.get("editedBoxes") or {}
-            for img_name, new_boxes in new_edited.items():
-                if old_edited.get(img_name) != new_boxes:
-                    rebake_images.append(img_name)
-
         manifest.update(data)
-        # Picking a dataset image (or reference) as the cover supersedes any
-        # previously-uploaded custom cover, so clear the flag and let the picked
-        # filename drive cover_thumb again.
-        if data.get("cover"):
+        # A picked cover, or a reset, replaces an uploaded one.
+        if "cover" in data:
             manifest["cover_uploaded"] = False
         manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         save_manifest(project_id, manifest)
-    # Drop the SWR payload cache + on-disk sidecars so the very next
-    # /overview read computes from the freshly-saved manifest instead
-    # of serving a pre-PUT snapshot. Without this a fast page refresh
-    # right after a label-colour pick reads the still-cached payload
-    # back (sidecar refresh is debounced 150 ms; the SWR cache holds
-    # the previous mtime), and the user sees their old colour.
+    # The next read must not serve a payload from before this save.
     _invalidate_project_payloads(project_id)
-
-    # Re-bake the preview JPEG for each affected image, off the request
-    # thread so the PUT returns fast. Failures are logged but don't fail
-    # the save - the preview can always be regenerated later.
-    if rebake_images and R2 is not None:
-        loop = asyncio.get_running_loop()
-        loop.run_in_executor(None, _rebake_previews_sync, project_id, rebake_images)
-        # Refresh DINOv2 embeddings for the same set of images so the
-        # similar-label search stays in sync with manual edits. The
-        # incremental refresh skips unchanged boxes, so this is cheap
-        # on label-only edits and only re-encodes when geometry or
-        # mask actually changed.
-        loop.run_in_executor(None, _refresh_embeddings_sync, project_id, rebake_images)
-
     return {"ok": True}
 
 
-def _rebake_previews_sync(project: str, image_names: list[str]) -> None:
-    """Re-render the preview JPEG for each image. Called off the request
-    thread; never raises. Picks up masks from both auto-detections and
-    user-edited boxes so manual segmentations show up immediately."""
-    if R2 is None:
-        return
-    try:
-        manifest = load_manifest(project)
-    except Exception as e:
-        print(f"[rebake] {project}: load_manifest failed: {e}")
-        return
-    edited_all = manifest.get("editedBoxes") or {}
-    results_by_image = {r.get("image"): r for r in (manifest.get("results") or [])}
-
-    for img_name in image_names:
-        try:
-            r = results_by_image.get(img_name)
-            masks: list[dict | None] = []
-            if r:
-                for d in r.get("detections") or []:
-                    if d.get("mask"):
-                        masks.append(d["mask"])
-            for eb in edited_all.get(img_name, []) or []:
-                if eb.get("mask"):
-                    masks.append(eb["mask"])
-
-            data = R2.get_bytes(R2Storage.image_key(project, img_name))
-            image = PILImage.open(io.BytesIO(data))
-            buf = io.BytesIO()
-            from preview import draw_preview as _draw_preview
-            _draw_preview(image.copy(), masks).save(
-                buf, format="JPEG", quality=72, optimize=True, progressive=True,
-            )
-            stem = Path(img_name).stem
-            annotated_name = f"{stem}_annotated.jpg"
-            output_key = R2Storage.output_key(project, annotated_name)
-            R2.put_bytes(output_key, buf.getvalue(), content_type="image/jpeg")
-            _invalidate_url_cache(output_key)
-        except Exception as e:
-            print(f"[rebake] {project}/{img_name} failed: {e}")
-
-
-# ---------------------------------------------------------------------------
-# Per-segmentation embeddings - DINOv2 features for similar-label discovery.
-# ---------------------------------------------------------------------------
-
-def _collect_segmentation_inputs(manifest: dict, *, image_names: set[str] | None = None):
-    """Yield `(image, box_id, label, box_xyxy, polygons)` for every
-    box in the manifest that has a usable mask. Pulls from both
-    `editedBoxes` (manual edits, the user-facing source of truth) and
-    auto detections so freshly-run inference is also covered."""
-    edited_all = manifest.get("editedBoxes") or {}
-    for img_name, boxes in edited_all.items():
-        if image_names is not None and img_name not in image_names:
-            continue
-        if not isinstance(boxes, list):
-            continue
-        for b in boxes:
-            if not isinstance(b, dict):
-                continue
-            mask = b.get("mask") or {}
-            polys = mask.get("polygons") if isinstance(mask, dict) else None
-            if not polys:
-                continue
-            try:
-                box = [float(b.get("x0", 0)), float(b.get("y0", 0)),
-                       float(b.get("x1", 0)), float(b.get("y1", 0))]
-            except Exception:
-                continue
-            yield (
-                str(img_name),
-                str(b.get("id") or ""),
-                (b.get("label") or "").strip(),
-                box,
-                polys,
-            )
-
-    # Don't yield detections for images that already have editedBoxes -
-    # editedBoxes are the user-facing source of truth and the embedding
-    # store would otherwise carry a duplicate row per physical box.
-    images_with_edits = {img for img, boxes in edited_all.items() if boxes}
-    for r in (manifest.get("results") or []):
-        img_name = r.get("image")
-        if not img_name:
-            continue
-        if image_names is not None and img_name not in image_names:
-            continue
-        if img_name in images_with_edits:
-            continue
-        for d in r.get("detections") or []:
-            if not isinstance(d, dict):
-                continue
-            mask = d.get("mask") or {}
-            polys = mask.get("polygons") if isinstance(mask, dict) else None
-            if not polys:
-                continue
-            box = d.get("box_xyxy") or []
-            if len(box) != 4:
-                continue
-            try:
-                box = [float(v) for v in box]
-            except Exception:
-                continue
-            # Use a deterministic synthetic id so re-encoding the same
-            # auto detection updates the existing row instead of
-            # appending a duplicate.
-            box_id = f"auto:{img_name}:{round(box[0],1)}:{round(box[1],1)}:{round(box[2],1)}:{round(box[3],1)}"
-            yield (
-                str(img_name),
-                box_id,
-                (d.get("label") or "").strip().split(" (")[0],
-                box,
-                polys,
-            )
-
-
-def _refresh_embeddings_sync(project_id: str, image_names: list[str] | None = None) -> dict:
-    """Compute / update DINOv2 embeddings for the project. Off the
-    request thread; never raises. When `image_names` is None, walks
-    the entire manifest; otherwise only the listed images.
-
-    Removes embedding rows for boxes that no longer exist."""
-    if not _EMBEDDINGS_ENABLED:
-        return {"computed": 0, "removed": 0, "skipped": "embeddings_disabled"}
-    try:
-        import embeddings as _emb
-        if not _emb.is_loaded():
-            return {"computed": 0, "removed": 0, "skipped": "dinov2_not_loaded"}
-
-        manifest = load_manifest(project_id) or empty_manifest(project_id)
-        proj_dir = project_dir(project_id)
-        target_images = set(image_names) if image_names else None
-
-        # Collect every (box_id, ...) currently present so we can
-        # diff against the saved store afterwards and drop dead rows.
-        present_ids: set[str] = set()
-        targets: list[tuple[str, str, str, list[float], list]] = []
-        for tup in _collect_segmentation_inputs(manifest, image_names=target_images):
-            img_name, box_id, label, box, polys = tup
-            if not box_id:
-                continue
-            present_ids.add(box_id)
-            targets.append(tup)
-
-        # Match against the existing store. Skip rows that match
-        # exactly - same box_id, same label, same box geometry, same
-        # polygon vertex count - so unchanged boxes don't trigger an
-        # encoder pass.
-        existing_arr, existing_meta = _emb.load_store(proj_dir)
-        existing_by_id = {str(m.get("box_id")): (i, m) for i, m in enumerate(existing_meta)}
-
-        rows_to_upsert: list[tuple[dict, "np.ndarray"]] = []
-        # Lazy image loader - one PIL.Image per image, decoded once
-        # even if there are many boxes on it.
-        image_cache: dict[str, "PILImage.Image"] = {}
-
-        from embeddings import ENCODER_VERSION as _ENCODER_VERSION
-
-        for img_name, box_id, label, box, polys in targets:
-            existing = existing_by_id.get(box_id)
-            box_sig = [round(v, 1) for v in box]
-            poly_sig = sum(len(p) for p in polys)
-            if existing is not None:
-                _idx, m = existing
-                same_box = (m.get("box_xyxy") or []) == box_sig
-                same_poly = m.get("poly_count") == poly_sig
-                same_label = m.get("label") == label
-                has_size = "size_frac" in (m or {})
-                # Encoder version gate: when the encode pipeline
-                # changes (e.g. dropping the grey-background mask
-                # isolation in v2), every legacy row needs to be
-                # re-encoded under the new transform - otherwise
-                # similarity search compares apples to oranges.
-                same_encoder = m.get("encoder_version") == _ENCODER_VERSION
-                if same_box and same_poly and same_label and has_size and same_encoder:
-                    continue  # unchanged - skip the encode
-
-            image_pil = image_cache.get(img_name)
-            if image_pil is None:
-                try:
-                    image_pil = _pil_from_r2(project_id, img_name)
-                except Exception as e:
-                    print(f"[embeddings] {project_id}/{img_name} image fetch failed: {e}")
-                    continue
-                image_cache[img_name] = image_pil
-            vec = _emb.encode_segmentation(image_pil, polys, box)
-            if vec is None:
-                continue
-            # Record the box's size relative to the image so the
-            # similarity search can weight by scale as well as
-            # appearance - two genuinely-similar objects at very
-            # different scales used to score below threshold and
-            # never appear; the combined score in find_similar
-            # handles that.
-            iw, ih = image_pil.size
-            box_w = max(1.0, box[2] - box[0])
-            box_h = max(1.0, box[3] - box[1])
-            size_frac = float((box_w * box_h) / max(1.0, float(iw * ih)))
-            rows_to_upsert.append((
-                {
-                    "box_id": box_id,
-                    "image": img_name,
-                    "label": label,
-                    "box_xyxy": box_sig,
-                    "poly_count": poly_sig,
-                    "size_frac": round(size_frac, 6),
-                    "encoder_version": _ENCODER_VERSION,
-                },
-                vec,
-            ))
-
-        if rows_to_upsert:
-            _emb.upsert_rows(proj_dir, rows_to_upsert)
-
-        # Drop rows whose box no longer exists.
-        if target_images is None:
-            stale = [str(m.get("box_id")) for m in existing_meta if str(m.get("box_id")) not in present_ids]
-        else:
-            stale = [
-                str(m.get("box_id"))
-                for m in existing_meta
-                if m.get("image") in target_images and str(m.get("box_id")) not in present_ids
-            ]
-        removed = _emb.remove_rows(proj_dir, stale) if stale else 0
-
-        return {"computed": len(rows_to_upsert), "removed": removed}
-    except Exception as e:
-        print(f"[embeddings] refresh failed for {project_id}: {e}")
-        return {"computed": 0, "removed": 0, "error": str(e)}
-
-
 def _rmtree_retrying(path: Path, attempts: int = 6) -> None:
-    """rmtree that rides out a background writer (a sidecar refresh, a
-    preview bake) dropping a file into the folder while it is removed:
-    Windows then fails with "directory not empty" or "in use"."""
+    """rmtree with retries: a background writer can make it fail on Windows
+    with "directory not empty" or "in use"."""
     for i in range(attempts):
         try:
             shutil.rmtree(path)
@@ -15813,19 +8942,11 @@ def _rmtree_retrying(path: Path, attempts: int = 6) -> None:
             time.sleep(0.2 * (i + 1))
 
 
-@app.delete(
-    "/api/projects/{project_id}",
-    # DESTROY is creator-only: a Project editor (or even the Project owner) can't
-    # permanently delete a dataset someone else made. They can detach it from the
-    # Project via DELETE /api/containers/{id}/datasets/{id} instead.
-    dependencies=[Depends(require_dataset_creator)],
-)
+@app.delete("/api/projects/{project_id}")
 async def delete_project(project_id: str):
     p = project_dir(project_id)
     if not p.exists():
         raise HTTPException(404)
-    # If this dataset lives in a Project (container), drop it from that
-    # container's dataset list so destroying it doesn't leave a dangling id.
     try:
         _m = load_manifest(project_id, copy=False) or {}
         _owning_cid = (_m.get("container_id") or "").strip()
@@ -15836,42 +8957,26 @@ async def delete_project(project_id: str):
                 containers.save_container(_c, bump_updated=False)
     except Exception as e:
         print(f"[delete_project] container prune failed for {project_id}: {e}")
-    # Tombstone the id BEFORE any teardown so a write that races this
-    # delete (a debounced label-metadata autosave, a like/favourite, or
-    # an in-flight job/sidecar flush) can't recreate the folder via
-    # save_manifest after rmtree and resurrect the project.
+    # Tombstoned before teardown, so a racing save_manifest cannot recreate the folder.
     _mark_project_deleted(project_id)
     removed = False
     try:
-        # Cancel any in-flight or queued jobs for this project before nuking
-        # the folder. Without this, a stuck/hung runner that didn't honour the
-        # earlier cancel keeps the job in the JobManager as running/queued -
-        # later /jobs/active probes for this id (or a re-created project that
-        # somehow shares the id) can re-attach to it.
         for j in list(state["jobs"].jobs.values()):
             if j.project != project_id:
                 continue
             if j.status in ("queued", "running"):
                 state["jobs"].cancel(j.id)
-                # Stronger than cancel(): force the status terminal even if the
-                # runner is hung and never checks cancel_event. We never want
-                # a deleted project's job lingering in the listing.
+                # Terminal even if the runner never checks cancel_event.
                 j.status = "cancelled"
                 if j.finished_at is None:
                     j.finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        # Off the event loop: a large dataset takes seconds to remove,
-        # and a blocked loop made the desktop shell think the engine had
-        # died and restart it.
+        # Off the event loop: a blocked loop makes the desktop shell restart the engine.
         await asyncio.to_thread(_rmtree_retrying, p)
         removed = True
         invalidate_manifest_cache(project_id)
-        if R2 is not None:
-            R2.delete_prefix(R2Storage.project_prefix(project_id))
+        store.delete_dataset(project_id)
     except Exception:
-        # If we never removed the folder, lift the tombstone so the
-        # still-present project isn't permanently frozen against writes.
-        # If rmtree already succeeded, keep the tombstone (the project is
-        # gone; we just want to block resurrection) and surface the error.
+        # The tombstone stays only once the folder is gone.
         if not removed:
             _unmark_project_deleted(project_id)
         raise
@@ -15879,39 +8984,20 @@ async def delete_project(project_id: str):
 
 
 class DuplicateProjectIn(BaseModel):
-    # Optional name for the copy; defaults to "Copy of <source name>".
+    # Defaults to "Copy of <source name>".
     name: str | None = None
 
 
-@app.post(
-    "/api/projects/{project_id}/duplicate",
-    # Owner-gated: you duplicate your OWN datasets (the workspace card action).
-    # Same gate as rename/settings - not the stricter creator-only delete gate.
-    dependencies=[Depends(require_project_owner)],
-)
-async def duplicate_project(
-    project_id: str,
-    payload: DuplicateProjectIn | None = None,
-    user: str = Depends(current_user),
-):
-    """Deep-copy a dataset into a brand-new project owned by the caller.
-
-    A project is fully contained in its on-disk folder (manifest.json +
-    imports/ image bytes + references/ + augmentations/ + image_embeddings/
-    + cache sidecars) plus, for legacy V1 datasets, an R2 prefix of image/
-    output bytes. We byte-copy both, then rewrite the new manifest's identity
-    fields. Every filename inside the manifest is relative to those dirs, and
-    per-image/per-reference ids are project-scoped, so nothing else needs
-    rewriting. The copy is a standalone dataset - it does not inherit the
-    source's Project (container) membership or derived-parent linkage."""
+@app.post("/api/projects/{project_id}/duplicate")
+async def duplicate_project(project_id: str, payload: DuplicateProjectIn | None = None):
+    """Copy a dataset into a new dataset outside any Project."""
     src = project_dir(project_id)
     if not src.exists() or not manifest_path(project_id).exists():
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     src_manifest = load_manifest(project_id)
     if not src_manifest:
-        raise HTTPException(404, "no manifest")
+        raise HTTPException(404, "dataset not found")
 
-    # Fresh id; retry on the astronomically unlikely collision / tombstone.
     new_id = _uuid.uuid4().hex
     for _ in range(5):
         if not store.dataset_exists(new_id) and not _is_project_deleted(new_id):
@@ -15921,42 +9007,25 @@ async def duplicate_project(
     name = (payload.name.strip() if (payload and payload.name and payload.name.strip()) else "")
     if not name:
         name = f"Copy of {src_manifest.get('name') or 'dataset'}"
-    from profanity import assert_clean
-    try:
-        assert_clean(name, field="project name")
-    except HTTPException:
-        # A custom name that trips the gate falls back to a safe default
-        # rather than failing the whole (potentially multi-GB) copy.
-        name = f"Copy of {src_manifest.get('name') or 'dataset'}"
 
-    # Reserve the destination folder (copytree requires it not to exist).
+    # Registered but not created: copytree requires dst not to exist.
     dst = store.reserve_dataset_dir(new_id, name)
 
     loop = asyncio.get_running_loop()
 
     def _copy() -> None:
-        # Whole-folder byte copy. On a local SSD this is fast even for a
-        # multi-GB dataset; run off the event loop so concurrent requests
-        # aren't blocked. copytree creates dst (which must not pre-exist).
         shutil.copytree(src, dst)
-        # Drop copied cache sidecars (workspace_card, overview/initial, etc.)
-        # so save_manifest regenerates them for the NEW id instead of
-        # serving the source's cached payloads. The manifest is the only
-        # top-level JSON that is source-of-truth, not a derivable cache.
+        # Every top-level JSON except dataset.json is a cache of the source.
         try:
             for f in dst.glob("*.json"):
                 if f.name != "dataset.json":
                     f.unlink()
         except Exception as e:
             print(f"[duplicate] sidecar cleanup failed for {new_id}: {e}")
-        # (SaaS build also server-side-copied the R2 prefix here; locally the
-        # copytree above already carried every byte.)
 
     try:
         await loop.run_in_executor(None, _copy)
     except Exception as e:
-        # Best-effort cleanup of a half-written copy so a failed duplicate
-        # doesn't leave an orphan folder in the workspace.
         try:
             if dst.exists():
                 shutil.rmtree(dst)
@@ -15965,27 +9034,17 @@ async def duplicate_project(
         print(f"[duplicate] copy failed {project_id} -> {new_id}: {e}")
         raise HTTPException(500, "duplicate failed")
 
-    # Rewrite identity on the copied manifest. Load the freshly-copied one so
-    # we carry every field (tags, imports, references, labelColours, tiling,
-    # settingsLastRun, …) and only override what must change.
     m = load_manifest(new_id) or dict(src_manifest)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     m["id"] = new_id
     m["name"] = name
-    m["owner"] = user
-    m["createdBy"] = user
     m["createdAt"] = now
     m["updatedAt"] = now
-    m["likedBy"] = []
     m["favouritedBy"] = []
-    # Standalone copy - not part of the source's Project, not a derived child.
     m.pop("container_id", None)
     m.pop("derived", None)
     save_manifest(new_id, m)
-    try:
-        add_event("project_duplicate", project=new_id, source=project_id, user=user or "anonymous")
-    except Exception:
-        pass
+    add_event("project_duplicate", project=new_id, source=project_id)
     return {"id": new_id, "name": name}
 
 
@@ -15993,20 +9052,12 @@ class RenameIn(BaseModel):
     name: str
 
 
-@app.post(
-    "/api/projects/{project_id}/rename",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.post("/api/projects/{project_id}/rename")
 async def rename_project(project_id: str, payload: RenameIn):
-    """Update the manifest's display name. The folder + R2 prefix stay
-    addressed by the project's UUID, so renames cost only a manifest write -
-    no R2 moves, no broken links, two users can have the same display name."""
-    from profanity import assert_clean
-
+    """Set the display name in the manifest; the folder is not renamed."""
     new_name = (payload.name or "").strip()
     if not new_name:
         raise HTTPException(400, "name required")
-    assert_clean(new_name, field="project name")
     if not project_dir(project_id).exists():
         raise HTTPException(404)
     lock = await _manifest_write_lock(project_id)
@@ -16018,510 +9069,34 @@ async def rename_project(project_id: str, payload: RenameIn):
     return {"id": project_id, "name": new_name}
 
 
-@app.post(
-    "/api/projects/{project_id}/images",
-    dependencies=[
-        Depends(require_project_owner),
-        # Uploads burn credits (1 credit = 800 uploaded images). Gate
-        # at the request boundary so an over-cap user can't keep
-        # filling their storage column or the NSFW GPU queue.
-    ],
-)
-async def add_images(project_id: str, images: list[UploadFile] = File(...), user: str | None = None):
-    """Two-phase upload: file receive → NSFW gate → R2 put + manifest.
-
-    Phase 1 (`upload` job): per-file dedup + image validation, then stage
-    raw bytes to a temp folder on disk. Fast - no GPU, no R2.
-
-    Phase 2 (`nsfw_check` job): NSFW classifier on each staged file. If it
-    passes, push to R2 + add to manifest as pending. If it fails, log the
-    block + drop the temp file. Surfaces as its own job in the Terminal so
-    operators can see GPU spend on safety checks separately from raw upload.
-    """
-    import hashlib
-
-    r2 = r2_required()
-    proj = project_dir(project_id)
-    if not proj.exists():
-        raise HTTPException(404)
-    if not images:
-        raise HTTPException(400, "no images")
-
-    # Reject obviously-abusive batch shapes (too many files at once).
-    # The per-file size check fires inside the read loop below so we
-    # can reject the FIRST oversize file without buffering the whole
-    # batch into memory.
-    if len(images) > MAX_FILES_PER_UPLOAD_BATCH:
-        raise HTTPException(
-            413,
-            f"too many files in one upload ({len(images)} > {MAX_FILES_PER_UPLOAD_BATCH})",
-        )
-
-    # Read all uploaded bytes upfront - UploadFile streams are tied to the
-    # request lifetime, so we capture them before run_inline kicks off.
-    file_blobs: list[tuple[str, bytes, str | None]] = []
-    for f in images:
-        fn = Path(f.filename or "image").name
-        data = await f.read()
-        if len(data) > MAX_UPLOAD_BYTES_PER_FILE:
-            raise HTTPException(
-                413,
-                f"file too large: {fn} is {len(data)} bytes "
-                f"(max {MAX_UPLOAD_BYTES_PER_FILE})",
-            )
-        file_blobs.append((fn, data, f.content_type))
-
-    pending_dir = proj / "_pending"
-    pending_dir.mkdir(parents=True, exist_ok=True)
-
-    # Records passed from the upload runner to the NSFW runner. Each entry
-    # is (filename, sha, temp_path_on_disk, content_type, size_dict).
-    staged: list[tuple[str, str, Path, str | None, dict]] = []
-    upload_skipped: list[str] = []
-    upload_rejected: list[dict] = []
-
-    async def upload_runner(job, emit, cancel_event):
-        await emit("status", {"phase": "running", "total": len(file_blobs)})
-        loop = asyncio.get_running_loop()
-        manifest = load_manifest(project_id) or empty_manifest(project_id)
-        results = manifest.get("results", []) or []
-        existing_names = {r.get("image") for r in results}
-        existing_hashes: dict[str, str] = {}
-        for r in results:
-            h = r.get("hash")
-            if isinstance(h, str) and h:
-                existing_hashes[h] = r.get("image") or ""
-
-        # The per-file work (SHA, PIL open, disk write) is all synchronous
-        # IO + CPU; do it on a thread so the asyncio loop stays responsive
-        # for everything else the server is serving (heartbeat, project
-        # lookups, the FE's manifest poll, etc.).
-        def stage_one(fn: str, data: bytes, ctype: str | None):
-            if fn in existing_names:
-                return ("skipped", fn)
-            sha = hashlib.sha256(data).hexdigest()
-            if sha in existing_hashes:
-                return ("duplicate", fn, sha, existing_hashes[sha])
-            try:
-                with PILImage.open(io.BytesIO(data)) as img:
-                    size = dict(zip(("width", "height"), _upright_size(img)))
-            except Exception:
-                return ("skipped", fn)
-            tmp_path = pending_dir / fn
-            tmp_path.write_bytes(data)
-            return ("staged", fn, sha, tmp_path, ctype, size)
-
-        for i, (fn, data, ctype) in enumerate(file_blobs, 1):
-            if cancel_event.is_set():
-                break
-            await emit("progress", {"index": i, "total": len(file_blobs), "image": fn})
-            outcome = await loop.run_in_executor(None, stage_one, fn, data, ctype)
-            kind = outcome[0]
-            if kind == "skipped":
-                upload_skipped.append(outcome[1])
-                continue
-            if kind == "duplicate":
-                _, fn_, sha_, dup_of = outcome
-                upload_rejected.append({
-                    "file": fn_, "reason": "duplicate",
-                    "duplicate_of": dup_of,
-                })
-                continue
-            # staged
-            _, fn_, sha_, tmp_path, ctype_, size = outcome
-            staged.append((fn_, sha_, tmp_path, ctype_, size))
-            existing_names.add(fn_)
-            existing_hashes[sha_] = fn_
-            await emit("result", {"index": i, "image": fn_, "staged": True})
-
-        return {"staged": [s[0] for s in staged], "skipped": upload_skipped, "duplicates": upload_rejected}
-
-    upload_summary = await state["jobs"].run_inline(
-        kind="upload",
-        project=project_id,
-        params={"count": len(file_blobs)},
-        user=user or "anonymous",
-        runner=upload_runner,
-        n_images=len(file_blobs),
-    )
-
-    # If nothing made it past stage 1, skip the NSFW phase entirely so we
-    # don't spawn a no-op job in the Terminal.
-    added: list[str] = []
-    nsfw_rejected: list[dict] = []
-
-    if staged:
-        async def nsfw_runner(job, emit, cancel_event):
-            await emit("status", {"phase": "running", "total": len(staged)})
-            loop = asyncio.get_running_loop()
-
-            # Sync per-file work pushed to a worker thread. NSFW classifier
-            # is GPU-bound and R2 PUT is network-bound - both block the
-            # asyncio loop if run inline. We still write the manifest from
-            # the async side to avoid concurrent writers stepping on it.
-            def check_and_upload(fn: str, sha: str, tmp_path: Path, ctype: str | None):
-                try:
-                    score, cls = nsfw_score(state["nsfw"], tmp_path)
-                except Exception as e:
-                    print(f"[nsfw] check failed for {fn}: {e}")
-                    score, cls = 0.0, ""
-                verdict = "BLOCK" if score >= NSFW_THRESHOLD else "ok"
-                print(f"[nsfw] {verdict} {fn} score={score:.3f} class={cls or '-'}")
-                if score >= NSFW_THRESHOLD:
-                    return ("blocked", fn, round(score, 3), cls)
-                data = tmp_path.read_bytes()
-                r2.put_bytes(R2Storage.image_key(project_id, fn), data, content_type=ctype or None)
-                return ("ok", fn, sha)
-
-            for i, (fn, sha, tmp_path, ctype, size) in enumerate(staged, 1):
-                if cancel_event.is_set():
-                    break
-                await emit("progress", {"index": i, "total": len(staged), "image": fn})
-                try:
-                    outcome = await loop.run_in_executor(
-                        None, check_and_upload, fn, sha, tmp_path, ctype,
-                    )
-                    if outcome[0] == "blocked":
-                        _, fn_, score, cls = outcome
-                        nsfw_rejected.append({
-                            "file": fn_, "reason": "nsfw",
-                            "score": score, "class": cls,
-                        })
-                        add_event(
-                            "nsfw_block",
-                            project=project_id, file=fn_,
-                            score=score, classification=cls,
-                            user=job.user,
-                        )
-                        continue
-
-                    _, fn_, sha_ = outcome
-                    manifest = load_manifest(project_id) or empty_manifest(project_id)
-                    results = manifest.get("results", []) or []
-                    new_result = {
-                        "image": fn_,
-                        "annotated": None,
-                        "size": size,
-                        "detections": [],
-                        "pending": True,
-                        "hash": sha_,
-                    }
-                    results.append(new_result)
-                    manifest["results"] = results
-                    # Randomise the project's cover the first time
-                    # an image lands. Subsequent adds keep whatever
-                    # was picked (or the user's manual override).
-                    _ensure_random_cover(manifest)
-                    manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-                    save_manifest(project_id, manifest)
-                    added.append(fn_)
-                    await emit("result", {"index": i, "result": new_result})
-                finally:
-                    # Clean up the temp file no matter what - we don't
-                    # want NSFW-blocked content sitting on disk either.
-                    try:
-                        tmp_path.unlink(missing_ok=True)
-                    except Exception:
-                        pass
-
-            return {"added": added, "rejected": nsfw_rejected}
-
-        await state["jobs"].run_inline(
-            kind="nsfw_check",
-            project=project_id,
-            params={"count": len(staged)},
-            user=user or "anonymous",
-            runner=nsfw_runner,
-            n_images=len(staged),
-        )
-
-    # Wipe any leftover temp files (cancelled job, errored runner) so the
-    # _pending dir doesn't grow unbounded.
-    try:
-        for f in pending_dir.iterdir():
-            try:
-                f.unlink()
-            except Exception:
-                pass
-    except FileNotFoundError:
-        pass
-
-    rejected_combined = upload_rejected + nsfw_rejected
-    return {
-        "added": added,
-        "skipped": upload_skipped,
-        "rejected": rejected_combined,
-    }
+@app.post("/api/projects/{project_id}/favourite")
+async def favourite_project(project_id: str):
+    """Star or unstar the dataset; starred datasets list first."""
+    if not project_dir(project_id).exists():
+        raise HTTPException(404, "dataset not found")
+    lock = await _manifest_write_lock(project_id)
+    async with lock:
+        manifest = load_manifest(project_id)
+        if not manifest:
+            raise HTTPException(404, "dataset not found")
+        fav = [u for u in (manifest.get("favouritedBy") or []) if isinstance(u, str)]
+        fav = [u for u in fav if u != LOCAL_USER] if LOCAL_USER in fav else fav + [LOCAL_USER]
+        manifest["favouritedBy"] = fav
+        save_manifest(project_id, manifest)
+    return {"favouritedByMe": LOCAL_USER in fav}
 
 
-class ImagesFromUrlsRequest(BaseModel):
-    urls: list[str]
-    # The search term that produced these URLs. Used as the filename
-    # prefix so imported images self-document their origin.
-    query: str | None = None
-
-
-@app.post(
-    "/api/projects/{project_id}/images_from_urls",
-    dependencies=[
-        Depends(require_project_owner),
-    ],
-)
-async def add_images_from_urls(project_id: str, body: ImagesFromUrlsRequest, user: str | None = None):
-    """Pull a list of image URLs (typically from an Openverse search)
-    straight into the project. Single-phase, single job - no NSFW gate
-    (these come from a curated CC-licensed source) and no GroundingDINO
-    pre-pass (the user already vetted each thumbnail by hand).
-
-    Per URL: download bytes → validate as PIL-decodable image → SHA
-    dedupe vs the manifest → unique filename → R2 PUT → manifest entry.
-    Returns the same shape as `add_images` (added / skipped / rejected)
-    so the frontend can reuse its post-upload refresh path."""
-    import hashlib
-    import uuid as _uuid
-    import openverse
-    from urllib.parse import urlparse
-
-    r2 = r2_required()
-    proj = project_dir(project_id)
-    if not proj.exists():
-        raise HTTPException(404)
-    raw_urls = [u.strip() for u in (body.urls or []) if isinstance(u, str) and u.strip()]
-    # Cap the URL list so a single request can't queue thousands of
-    # downloads against the backend's bandwidth/disk. 100 is well
-    # above the Openverse panel's typical batch (24 results/page).
-    if len(raw_urls) > 100:
-        raise HTTPException(400, "too many urls, max 100 per request")
-    if not raw_urls:
-        raise HTTPException(400, "no urls")
-    # Dedupe within the batch - Openverse pagination occasionally
-    # surfaces the same URL on multiple pages, and a client-side bug
-    # could double-submit. First-occurrence wins so order is stable.
-    seen_in_batch: set[str] = set()
-    urls: list[str] = []
-    for u in raw_urls:
-        if u not in seen_in_batch:
-            seen_in_batch.add(u)
-            urls.append(u)
-
-    # Slug the search term into a filename-safe prefix. Empty / non-
-    # alphanumeric-only queries fall back to "openverse" so the saved
-    # filenames stay legible.
-    raw_q = (body.query or "").strip().lower()
-    slug = re.sub(r"[^a-z0-9]+", "_", raw_q).strip("_")
-    if not slug:
-        slug = "openverse"
-    # Cap length so a stray giant query doesn't blow past sane filename
-    # limits. R2 keys + manifest entries stay short.
-    slug = slug[:48]
-
-    added: list[str] = []
-    skipped: list[str] = []
-    rejected: list[dict] = []
-
-    async def runner(job, emit, cancel_event):
-        await emit("status", {"phase": "running", "total": len(urls)})
-        loop = asyncio.get_running_loop()
-
-        # Download in parallel (network-bound, low CPU) on the executor
-        # pool so the asyncio loop stays responsive.
-        blobs: list[tuple[bytes | None, str | None]] = await loop.run_in_executor(
-            None, lambda: openverse.download_images_bytes(urls),
-        )
-
-        manifest = load_manifest(project_id) or empty_manifest(project_id)
-        results = manifest.get("results", []) or []
-        existing_names: set[str] = {r.get("image") for r in results if r.get("image")}
-        existing_hashes: dict[str, str] = {}
-        # Set of URLs already imported into this project - driven by
-        # the `source.url` field stamped onto each manifest entry by
-        # this same handler. Lets us reject re-import attempts before
-        # we even hit the network, both for the request-level cache
-        # the user asked for and as a safety net against any client
-        # that double-sends an already-imported list.
-        existing_source_urls: set[str] = set()
-        for r in results:
-            h = r.get("hash")
-            if isinstance(h, str) and h:
-                existing_hashes[h] = r.get("image") or ""
-            src = r.get("source")
-            if isinstance(src, dict):
-                u = src.get("url")
-                if isinstance(u, str) and u:
-                    existing_source_urls.add(u)
-
-        # Pick a unique filename. Format: <query-slug>_<12-hex-uuid>.<ext>
-        # The query slug self-documents what the image came from, the
-        # 12-hex tail (~48 bits of entropy) is collision-proof for any
-        # plausible single-project import scale.
-        def _filename_for(url: str, _sha: str, ctype: str | None) -> str:
-            ext = ""
-            try:
-                path = urlparse(url).path
-                base = Path(path).name
-                if "." in base:
-                    e = base.rsplit(".", 1)[1].lower()
-                    if e in ("jpg", "jpeg", "png", "webp", "gif", "bmp"):
-                        ext = "." + e
-            except Exception:
-                pass
-            if not ext and ctype:
-                # image/jpeg → .jpg, image/png → .png
-                guess = ctype.split(";")[0].strip().lower()
-                mapping = {
-                    "image/jpeg": ".jpg",
-                    "image/jpg": ".jpg",
-                    "image/png": ".png",
-                    "image/webp": ".webp",
-                    "image/gif": ".gif",
-                    "image/bmp": ".bmp",
-                }
-                ext = mapping.get(guess, "")
-            if not ext:
-                ext = ".jpg"
-            # Loop until we land on a non-colliding name. Practically
-            # one shot - 48 bits of entropy means even at 100 imports
-            # the collision odds are sub-billionth - but keep the loop
-            # in case someone retries the same URL set repeatedly.
-            while True:
-                suffix = _uuid.uuid4().hex[:12]
-                fn = f"{slug}_{suffix}{ext}"
-                if fn not in existing_names:
-                    return fn
-
-        for i, (url, (data, ctype)) in enumerate(zip(urls, blobs), 1):
-            if cancel_event.is_set():
-                break
-            await emit("progress", {"index": i, "total": len(urls), "url": url})
-
-            if url in existing_source_urls:
-                rejected.append({"url": url, "reason": "already_imported"})
-                skipped.append(url)
-                await emit("result", {"index": i, "url": url, "ok": False, "reason": "already_imported"})
-                continue
-
-            if data is None:
-                rejected.append({"url": url, "reason": "download_failed"})
-                await emit("result", {"index": i, "url": url, "ok": False, "reason": "download_failed"})
-                continue
-
-            # Validate the bytes are actually a decodable image. Catches
-            # 200-OK HTML error pages that Openverse occasionally serves
-            # when the upstream provider has rotated the URL.
-            try:
-                with PILImage.open(io.BytesIO(data)) as img:
-                    img.verify()
-            except Exception:
-                rejected.append({"url": url, "reason": "not_an_image"})
-                await emit("result", {"index": i, "url": url, "ok": False, "reason": "not_an_image"})
-                continue
-
-            # Reject blank / placeholder / 1×1-pixel images at the
-            # source. Provider URLs sometimes round-trip a tiny stub
-            # or a uniform black tile with a 200 OK - `img.verify()`
-            # passes them, but they're useless to label and clutter
-            # the project. Frontend probe catches most thumbnails;
-            # this catches what the full-resolution URL serves up.
-            try:
-                from image_utils import is_blank_image_bytes
-                blank, reason = is_blank_image_bytes(data)
-            except Exception as e:
-                print(f"[import_urls] blank-image check failed for {url}: {e}")
-                blank, reason = False, None
-            if blank:
-                rejected.append({"url": url, "reason": "blank_image", "detail": reason})
-                await emit("result", {"index": i, "url": url, "ok": False, "reason": "blank_image"})
-                continue
-
-            # Detect + crop a uniform border (Openverse occasionally
-            # serves stock photos with white/black mats around the
-            # actual content). Returns original bytes unchanged when
-            # there's nothing to crop, so the no-border path is just
-            # one decode + one np.median + one variance check.
-            try:
-                from image_utils import maybe_crop_border_bytes
-                data, size = await loop.run_in_executor(
-                    None, lambda: maybe_crop_border_bytes(data, ctype),
-                )
-            except Exception as e:
-                print(f"[import_urls] border-crop failed for {url}: {e}")
-                # Fall back to original bytes + measured size.
-                with PILImage.open(io.BytesIO(data)) as img:
-                    size = dict(zip(("width", "height"), _upright_size(img)))
-
-            sha = hashlib.sha256(data).hexdigest()
-            if sha in existing_hashes:
-                rejected.append({"url": url, "reason": "duplicate", "duplicate_of": existing_hashes[sha]})
-                skipped.append(url)
-                await emit("result", {"index": i, "url": url, "ok": False, "reason": "duplicate"})
-                continue
-
-            fn = _filename_for(url, sha, ctype)
-            try:
-                await loop.run_in_executor(
-                    None,
-                    lambda: r2.put_bytes(R2Storage.image_key(project_id, fn), data, content_type=ctype or None),
-                )
-            except Exception as e:
-                print(f"[import_urls] R2 put failed for {fn}: {e}")
-                rejected.append({"url": url, "reason": "storage_failed"})
-                await emit("result", {"index": i, "url": url, "ok": False, "reason": "storage_failed"})
-                continue
-
-            new_result = {
-                "image": fn,
-                "annotated": None,
-                "size": size,
-                "detections": [],
-                "pending": True,
-                "hash": sha,
-                "source": {"kind": "openverse", "url": url},
-            }
-            results.append(new_result)
-            manifest["results"] = results
-            # Randomise the cover on first image-add. No-op once a
-            # cover has been picked or the user explicitly set one.
-            _ensure_random_cover(manifest)
-            manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            save_manifest(project_id, manifest)
-            existing_names.add(fn)
-            existing_hashes[sha] = fn
-            existing_source_urls.add(url)
-            added.append(fn)
-            await emit("result", {"index": i, "url": url, "ok": True, "image": fn})
-
-        return {"added": added, "skipped": skipped, "rejected": rejected}
-
-    await state["jobs"].run_inline(
-        kind="import_urls",
-        project=project_id,
-        params={"count": len(urls), "source": "openverse"},
-        user=user or "anonymous",
-        runner=runner,
-        n_images=len(urls),
-    )
-
-    return {"added": added, "skipped": skipped, "rejected": rejected}
-
-
-# Every field that can carry a label name on a box/detection record -
-# matches _box_label's resolution order so a rename never leaves a
-# stale synonym behind in a different key.
+# Every box field that can hold a label name.
 _LABEL_KEYS = ("label", "predLabel", "pred_label", "gdLabel", "gd_label", "gd_variant")
 
 
 def _rename_label_fields(manifest: dict, old: str, new: str) -> int:
-    """Rename/merge a label everywhere it appears in one manifest:
-    tags (deduped, so renaming onto an existing label merges), V1
-    results[]/editedBoxes{}, V2 imports[] records, and the
-    labelColours / labelAliases maps. Returns the number of renamed
-    occurrences (tag hit counts as one)."""
+    """Rename a label throughout one manifest, merging into an existing label.
+    Returns the occurrences renamed; the tag list counts once."""
     renamed = 0
     ol = old.strip().lower()
 
-    # Dedupe case-INsensitively: "Feline" + a cat→feline rename must
-    # merge into one tag, not leave "Feline"/"feline" twins that the
-    # case-equal short-circuit would then make unmergeable forever.
+    # Deduped case-insensitively, so a rename onto an existing label merges.
     tags = manifest.get("tags", []) or []
     out_tags: list[str] = []
     seen_lower: set[str] = set()
@@ -16559,9 +9134,7 @@ def _rename_label_fields(manifest: dict, old: str, new: str) -> int:
             continue
         _boxes(imp.get("detections"))
         _boxes(imp.get("editedBoxes"))
-    # Reference crops are the label source of truth for specific-mode
-    # resolving - left un-renamed they'd resurrect the old label on the
-    # next labelling run.
+    # References too, or the next labelling run brings the old label back.
     for ref in manifest.get("references", []) or []:
         if not isinstance(ref, dict):
             continue
@@ -16571,9 +9144,7 @@ def _rename_label_fields(manifest: dict, old: str, new: str) -> int:
             renamed += 1
         _boxes(ref.get("detections"))
 
-    # Colour override + display-alias maps follow the label. An existing
-    # entry for the target label wins (merge keeps the target's look).
-    # NB: the alias map's manifest key is snake_case.
+    # Colour and alias entries move to the new label; an existing entry there wins.
     for map_key in ("labelColours", "label_aliases"):
         m = manifest.get(map_key)
         if not isinstance(m, dict):
@@ -16591,36 +9162,23 @@ class RenameLabelRequest(BaseModel):
     new_label: str
 
 
-@app.post(
-    "/api/projects/{project_id}/labels/rename",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.post("/api/projects/{project_id}/labels/rename")
 async def rename_label(project_id: str, body: RenameLabelRequest):
-    """Rename a label across the entire project. Updates the project's
-    tag list, every detection across all images, and every edited box
-    so the change pulls through to the auto-label prompt, the existing
-    annotated detections, and the user's manual edits in one shot."""
+    """Rename a label throughout the dataset and its augmentations."""
     proj = project_dir(project_id)
     if not proj.exists():
         raise HTTPException(404)
-    from profanity import assert_clean
 
     old = (body.old_label or "").strip()
     new = (body.new_label or "").strip()
     if not old or not new:
         raise HTTPException(400, "old_label and new_label are required")
-    assert_clean(new, field="label")
     if old == new:
-        # Exact same name. (Case-only changes like cat→Cat are real
-        # renames and fall through - they used to be rejected here,
-        # which made fixing a label's casing impossible.)
+        # A change of case is a rename.
         return {"ok": True, "renamed": 0}
 
     if _label_job_active(project_id):
         raise HTTPException(409, "the dataset is being labelled; rename the label when that finishes")
-    # Same write lock as every other whole-manifest mutator: an
-    # unlocked load→rename→save racing a labelling-job flush would
-    # revert the flushed images wholesale.
     lock = await _manifest_write_lock(project_id)
     async with lock:
         manifest = load_manifest(project_id)
@@ -16637,11 +9195,7 @@ async def rename_label(project_id: str, body: RenameLabelRequest):
     return {"ok": True, "renamed": renamed, "tags": manifest.get("tags") or []}
 
 
-# ── Project-level label ontology ─────────────────────────────────────────────
-# A Project (container) usually accumulates the same concepts across its
-# datasets with drifting names ("bolt" / "bolts" / "hex bolt"). These
-# endpoints give one place to see label usage across the whole Project
-# and to rename/merge a label everywhere in one action.
+# Label usage and renames across a Project's datasets.
 
 
 @app.get("/api/containers/{container_id}/labels")
@@ -16689,11 +9243,8 @@ async def container_rename_label(container_id: str, body: RenameLabelRequest):
     new = (body.new_label or "").strip()
     if not old or not new:
         raise HTTPException(400, "old_label and new_label are required")
-    from profanity import assert_clean
-
-    assert_clean(new, field="label")
     if old == new:
-        # Exact same name only - case-only renames are legitimate.
+        # A change of case is a rename.
         return {"ok": True, "renamed": 0, "datasetsTouched": 0}
 
     ds_ids = list(c.get("dataset_ids") or [])
@@ -16714,7 +9265,6 @@ async def container_rename_label(container_id: str, body: RenameLabelRequest):
     total = 0
     touched = 0
     for pid in ds_ids:
-        # Per-dataset write lock, same as the single-dataset endpoint.
         lock = await _manifest_write_lock(pid)
         async with lock:
             n = await asyncio.to_thread(_one, pid)
@@ -16724,76 +9274,9 @@ async def container_rename_label(container_id: str, body: RenameLabelRequest):
     return {"ok": True, "renamed": total, "datasetsTouched": touched}
 
 
-@app.post(
-    "/api/projects/{project_id}/images/{filename}/clear_labels",
-    dependencies=[Depends(require_project_owner)],
-)
-async def clear_image_labels(project_id: str, filename: str):
-    """Reset a single image to its unlabelled state - drops all
-    detections + edited boxes, removes the rendered annotated preview
-    from R2, clears the verdict, and flips pending=True so the image
-    rejoins the auto-label queue. Other images aren't affected."""
-    proj = project_dir(project_id)
-    if not proj.exists():
-        raise HTTPException(404)
-    fn = Path(filename).name
-
-    manifest = load_manifest(project_id)
-    if not manifest:
-        raise HTTPException(404)
-
-    results = manifest.get("results", []) or []
-    target = None
-    for r in results:
-        if r.get("image") == fn:
-            target = r
-            break
-    if target is None:
-        raise HTTPException(404, f"image {fn} not in manifest")
-
-    # Annotated preview - delete the R2 object so the file doesn't
-    # linger orphaned. Best-effort: a stale preview is recoverable
-    # from the manifest reset; a failed delete shouldn't block the
-    # state change.
-    annotated = target.get("annotated")
-    if annotated and R2 is not None:
-        try:
-            R2.delete(R2Storage.output_key(project_id, annotated))
-        except Exception as e:
-            print(f"[clear_labels] failed to delete annotated {annotated}: {e}")
-
-    target["detections"] = []
-    target["annotated"] = None
-    target["pending"] = True
-    # Drop any stored validation/verdict-on-detection data on the
-    # image too - those were tied to the old detections.
-    target.pop("missingObjects", None)
-    target.pop("missingReason", None)
-
-    edited = manifest.get("editedBoxes", {}) or {}
-    if fn in edited:
-        del edited[fn]
-        manifest["editedBoxes"] = edited
-    verdicts = manifest.get("verdicts", {}) or {}
-    if fn in verdicts:
-        del verdicts[fn]
-        manifest["verdicts"] = verdicts
-
-    manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    save_manifest(project_id, manifest)
-    return {"ok": True, "image": fn}
-
-
-@app.post(
-    "/api/v2/projects/{project_id}/clear_all_annotations",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.post("/api/v2/projects/{project_id}/clear_all_annotations")
 async def clear_all_annotations(project_id: str):
-    """Wipe every detection + editedBoxes off every import in the
-    project, drop the labelled-preview JPEGs, flip pending=True so
-    everything re-enters the auto-label queue. Project-level tags /
-    labelColours / label_aliases are preserved - only the per-image
-    annotation data is reset."""
+    """Reset every import to unlabelled and pending; tags, colours and aliases are kept."""
     proj = project_dir(project_id)
     if not proj.exists():
         raise HTTPException(404)
@@ -16824,7 +9307,7 @@ async def clear_all_annotations(project_id: str):
                 except Exception:
                     pass
                 cleared += 1
-        # v1-era project-level dicts keyed by filename - wipe in full.
+        # V1 maps keyed by filename.
         if "editedBoxes" in manifest:
             manifest["editedBoxes"] = {}
         if "verdicts" in manifest:
@@ -16839,110 +9322,34 @@ async def clear_all_annotations(project_id: str):
     return {"ok": True, "cleared": cleared}
 
 
-@app.delete(
-    "/api/projects/{project_id}/images/{filename}",
-    dependencies=[Depends(require_project_owner)],
-)
-async def delete_image(project_id: str, filename: str):
-    proj = project_dir(project_id)
-    if not proj.exists():
-        raise HTTPException(404)
-    fn = Path(filename).name
-
-    if R2 is not None:
-        R2.delete(R2Storage.image_key(project_id, fn))
-        annotated_name = f"{Path(fn).stem}_annotated.jpg"
-        R2.delete(R2Storage.output_key(project_id, annotated_name))
-
-    manifest = load_manifest(project_id)
-    manifest["results"] = [r for r in manifest.get("results", []) or [] if r.get("image") != fn]
-    if "verdicts" in manifest and isinstance(manifest["verdicts"], dict):
-        manifest["verdicts"].pop(fn, None)
-    if "editedBoxes" in manifest and isinstance(manifest["editedBoxes"], dict):
-        manifest["editedBoxes"].pop(fn, None)
-    if manifest.get("cover") == fn:
-        manifest["cover"] = None
-    manifest["updatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    save_manifest(project_id, manifest)
-    return {"ok": True}
-
-
 class ScheduleJobIn(BaseModel):
     project: str
-    kind: str  # "label" | "segment"
-    user: str | None = None
+    kind: str  # label_charlie, purge_label, train_yolox or label_model
     params: dict = {}
 
 
 @app.post("/api/jobs")
-async def schedule_job(
-    payload: ScheduleJobIn,
-    request: Request,
-    user: str = Depends(current_user),
-):
-    """Queue a job. Returns the job id; subscribe to /api/jobs/{id}/events
-    for live progress. Requires WRITE access to the target project - the
-    dataset's own creator, OR (for a dataset in a Project) any editor/owner of
-    that Project, so a Project editor can run auto-labelling / training on a
-    dataset a teammate created."""
+async def schedule_job(payload: ScheduleJobIn):
+    """Queue a job on a dataset; returns its id."""
     if payload.kind not in ("label_charlie", "purge_label", "train_yolox", "label_model"):
         raise HTTPException(400, f"unknown kind: {payload.kind}")
     proj = project_dir(payload.project)
     if not proj.exists():
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     if payload.kind in _LABEL_WRITERS and _label_job_active(payload.project):
         raise HTTPException(409, "this dataset is already being labelled or having a label deleted; "
                                  "wait for that to finish")
-    # copy=False - we only read owner + counts here. Deepcopying a
-    # 30MB manifest just to schedule a job was ~300-500ms of dead
-    # weight before the label_charlie job runner even picks up.
+    # copy=False: read only.
     project_manifest = load_manifest(payload.project, copy=False) or {}
-    proj_owner = (project_manifest.get("owner") or "").strip().lower()
-    # Write access via Project membership (editor+) OR dataset ownership; legacy
-    # unowned + demo ("anonymous") datasets stay open as before.
-    writable = containers.dataset_access(project_manifest, user)["writable"]
-    if not (writable or not proj_owner or proj_owner == "anonymous"):
-        raise HTTPException(403, "not your project")
-    # Credit gate. purge_label is a cleanup operation (removes labels,
-    # doesn't run inference) so it doesn't burn credits and stays open
-    # even when a user is over cap; everything else schedules real GPU
-    # work and must be gated.
-    if payload.kind in ("label", "label_lite", "label_charlie", "segment", "train"):
-        # Run in a thread so the event loop isn't blocked while
-        # _user_usage_counters iterates all project manifests on a
-        # cache miss (can take 2-5s on a multi-project account,
-        # causing the FE "Starting…" state to linger).
-        pass  # credit gate removed (portable build)
+    if not project_manifest:
+        raise HTTPException(404, "dataset not found")
 
     n_images = 0
-    # Reuse `project_manifest` (already loaded copy=False above) for
-    # every n_images count - no second deepcopy of the same dict.
-    if payload.kind == "label":
-        manifest = project_manifest
-        n_images = sum(1 for r in (manifest.get("results", []) or []) if r.get("pending"))
-        if n_images == 0:
-            raise HTTPException(400, "no pending images")
-    elif payload.kind == "label_lite":
-        manifest = project_manifest
-        all_images = [r.get("image") for r in (manifest.get("results", []) or []) if r.get("image")]
-        requested = payload.params.get("images")
-        if requested:
-            n_images = sum(1 for n in all_images if n in set(requested))
-        else:
-            n_images = len(all_images)
-        if n_images == 0:
-            raise HTTPException(400, "no images to process")
-    elif payload.kind == "train":
-        manifest = project_manifest
-        edited = manifest.get("editedBoxes") or {}
-        n_images = sum(1 for v in edited.values() if isinstance(v, list) and v)
-        if n_images == 0:
-            raise HTTPException(400, "no labelled images yet - label some first")
-    elif payload.kind == "label_charlie":
+    if payload.kind == "label_charlie":
         manifest = project_manifest
         force_relabel = bool((payload.params or {}).get("force_relabel"))
-        # The runner's own selection (_run_label_charlie_job): every
-        # image but background ones on a relabel, else the unlabelled.
+        # As _run_label_charlie_job selects: all but background images on a
+        # relabel, else the unlabelled ones.
         n_images = sum(
             1
             for e in (manifest.get("imports") or [])
@@ -16952,7 +9359,7 @@ async def schedule_job(
         if n_images == 0:
             raise HTTPException(
                 400,
-                "no images to process - drop some onto the dataset first"
+                "no images to process: add some to the dataset first"
                 if force_relabel
                 else "no unlabelled images to process",
             )
@@ -16972,17 +9379,19 @@ async def schedule_job(
         )
         if n_images < 2:
             raise HTTPException(
-                400, "training needs at least 2 labelled images - label some first"
+                400, "training needs at least 2 labelled images: label some first"
             )
         if _train_job_active(payload.project):
             raise HTTPException(409, "a training run is already queued or running for this dataset")
+        if _augment_job_active(payload.project):
+            raise HTTPException(409, "augmentations are being generated for this dataset; train when that finishes")
         import train_yolox as _ty
 
         try:
             if any(_run_is_live(rd) for rd in _iter_run_dirs(store.dataset_dir(payload.project))):
                 raise HTTPException(409, "a training run for this dataset is live in another process")
         except KeyError:
-            raise HTTPException(404, "project not found")
+            raise HTTPException(404, "dataset not found")
 
         prm = payload.params or {}
         resume = str(prm.get("resumeRun") or "").strip()
@@ -17025,24 +9434,14 @@ async def schedule_job(
         kind=payload.kind,
         project=payload.project,
         params=payload.params,
-        user=payload.user or "anonymous",
         n_images=n_images,
     )
     return {"jobId": job.id, **job.to_public()}
 
 
-@app.delete(
-    "/api/v2/projects/{project_id}/jobs/{job_id}",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.delete("/api/v2/projects/{project_id}/jobs/{job_id}")
 async def v2_cancel_project_job(project_id: str, job_id: str):
-    """Owner-scoped job cancel. Used by the project page's job-card
-    X button so a user can cancel their own labelling / augment /
-    upload runs without holding the admin terminal token.
-
-    Refuses to cancel a job that belongs to a different project,
-    so a malicious owner-of-A can't cancel jobs-of-B by guessing
-    a job id."""
+    """Cancel a job of this project."""
     job = state["jobs"].jobs.get(job_id)
     if not job:
         raise HTTPException(404, "job not found")
@@ -17053,70 +9452,29 @@ async def v2_cancel_project_job(project_id: str, job_id: str):
     return {"ok": True}
 
 
-@app.get("/api/jobs/{job_id}/events")
-async def job_events(request: Request, job_id: str, authorization: str = Header(default="")):
-    job = state["jobs"].jobs.get(job_id)
-    if not job:
-        raise HTTPException(404)
-    # Access control: this SSE streams detection/result events, so the job's
-    # project must be readable by the caller. EventSource can't set an
-    # Authorization header, so auth rides the pk_auth cookie (read inside
-    # can_read_project_request). Private project + non-owner -> 404 (no oracle).
-    _job_proj = (getattr(job, "project", "") or "")
-    if _job_proj:
-        _m = load_manifest(_job_proj, copy=False)
-        if not can_read_project_request(request, authorization, _m):
-            raise HTTPException(404)
-    queue = await state["jobs"].subscribe(job_id)
-
-    async def gen():
-        try:
-            while True:
-                ev = await queue.get()
-                yield ev
-                if ev["event"] in ("done", "failed", "cancelled", "complete"):
-                    break
-        finally:
-            state["jobs"].unsubscribe(job_id, queue)
-
-    return EventSourceResponse(gen())
-
-
-# Legacy endpoint kept as a thin shim so any old client still works.
-@app.get(
-    "/api/projects/{project_id}/jobs/active",
-    dependencies=[Depends(require_project_read_access)],
-)
+@app.get("/api/projects/{project_id}/jobs/active")
 async def project_active_job(project_id: str):
-    """Return the running or queued job for this project (label/segment), or
-    null. Lets the project view re-attach to a job that's still running after
-    the user navigated away and back."""
+    """The project's running or queued labelling job, or null."""
     proj = project_dir(project_id)
     if not proj.exists():
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     candidates = [
         j for j in state["jobs"].jobs.values()
         if j.project == project_id
-        and j.kind in ("label", "label_charlie", "purge_label", "segment")
+        and j.kind in ("label_charlie", "purge_label")
         and j.status in ("running", "queued")
     ]
     if not candidates:
         return None
     # Prefer running over queued, then most recent.
-    candidates.sort(key=lambda j: (0 if j.status == "running" else 1, j.queued_at), reverse=False)
     candidates.sort(key=lambda j: j.queued_at, reverse=True)
     candidates.sort(key=lambda j: 0 if j.status == "running" else 1)
     return candidates[0].to_public()
 
 
-@app.get(
-    "/api/projects/{project_id}/jobs/{job_id}",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.get("/api/projects/{project_id}/jobs/{job_id}")
 async def get_project_job(project_id: str, job_id: str):
-    """Per-project job status. Returns the same shape as
-    /api/jobs/{job_id} but scoped so a project owner can poll for
-    progress without needing the terminal token."""
+    """Status of a job of this project."""
     job = state["jobs"].jobs.get(job_id)
     if not job:
         raise HTTPException(404, "job not found")
@@ -17125,71 +9483,19 @@ async def get_project_job(project_id: str, job_id: str):
     return job.to_public()
 
 
-@app.delete(
-    "/api/projects/{project_id}/jobs/{job_id}",
-    dependencies=[Depends(require_project_owner)],
-)
-async def cancel_project_job(project_id: str, job_id: str):
-    """Cancel a running or queued job - scoped to this project so the action
-    can't escape into another project's queue."""
-    job = state["jobs"].jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "job not found")
-    if job.project != project_id:
-        raise HTTPException(403, "job does not belong to this project")
-    ok = state["jobs"].cancel(job_id)
-    return {"cancelled": ok, "id": job_id, "status": job.status}
-
-
-@app.get(
-    "/api/projects/{project_id}/originals/{filename}",
-    dependencies=[Depends(require_project_read_access)],
-)
-async def project_original(project_id: str, filename: str):
-    """302 to a short-lived R2 presigned URL - bytes flow browser ↔ R2,
-    backend just serves the redirect header. URL is cached for ~50 min so
-    repeat hits are CPU-free; the response carries Cache-Control so the
-    browser stops asking entirely for 5 min and serves stale up to 55."""
-    fn = Path(filename).name
-    return _redirect_to_r2(R2Storage.image_key(project_id, fn))
-
-
-@app.get(
-    "/api/projects/{project_id}/files/{filename}",
-    dependencies=[Depends(require_project_read_access)],
-)
-async def project_annotated(project_id: str, filename: str):
-    fn = Path(filename).name
-    return _redirect_to_r2(R2Storage.output_key(project_id, fn))
-
-
-# ---- Dataset export -----------------------------------------------------
-# One endpoint, format chosen via query string. Always returns a downloadable
-# response with a sensible filename. Annotations are read from manifest.editedBoxes
-# (the source of truth for labelled state - manual edits + auto detections);
-# detections-only exports would miss the user's corrections.
+# Dataset export.
 
 def _safe_slug(s: str) -> str:
-    """Aggressively strip an arbitrary string down to `[a-zA-Z0-9_-]+`.
-    Used for filenames in Content-Disposition headers, ZIP entry
-    names, and other places where a malicious project / label name
-    could otherwise inject quotes, path separators, or header
-    terminators. The regex replaces every non-ascii-safe character
-    with `-`, so the output is guaranteed to be header-safe."""
+    """Reduce a string to [a-zA-Z0-9_-], for headers, zip entries and filenames."""
     return re.sub(r"[^a-zA-Z0-9_-]+", "-", (s or "export").strip()) or "export"
 
 
 def _image_index(manifest: dict) -> dict[str, dict]:
-    """Unified per-image view across V1 (results[] + top-level editedBoxes)
-    and V2 (imports[] with per-entry width/height/editedBoxes).
-
-    Returns {filename: {"width": W, "height": H, "boxes": [...]}}.
-    For V2 imports we prefer `editedBoxes` when set, falling back to
-    `detections` so projects that haven't had manual edits still
-    export their auto-labels."""
+    """{filename: {width, height, boxes}} over V1 results and V2 imports. A V2
+    import's boxes are its edited boxes once edited, else its unrejected detections."""
     out: dict[str, dict] = {}
 
-    # V1 path: results[] holds dimensions, editedBoxes (top-level) holds boxes.
+    # V1: sizes from results, boxes from the top-level editedBoxes.
     for r in (manifest.get("results") or []):
         img = r.get("image")
         sz = r.get("size") or {}
@@ -17206,7 +9512,6 @@ def _image_index(manifest: dict) -> dict[str, dict]:
         slot = out.setdefault(img_name, {"width": 0, "height": 0, "boxes": []})
         slot["boxes"].extend(b for b in boxes if isinstance(b, dict))
 
-    # V2 path: each import carries its own width/height/editedBoxes/detections.
     for entry in (manifest.get("imports") or []):
         if not isinstance(entry, dict):
             continue
@@ -17214,20 +9519,12 @@ def _image_index(manifest: dict) -> dict[str, dict]:
         if not fname:
             continue
         slot = out.setdefault(fname, {"width": 0, "height": 0, "boxes": []})
-        # Dimensions: prefer the import's own values; only fill in if the
-        # results-derived ones were missing.
         w = int(entry.get("width") or 0)
         h = int(entry.get("height") or 0)
         if w and not slot["width"]:
             slot["width"] = w
         if h and not slot["height"]:
             slot["height"] = h
-        # Boxes: editedBoxes wins when explicitly set (even if empty -
-        # editedBoxesSet=True means "user blanked it deliberately"),
-        # otherwise fall back to auto detections. The detections path
-        # drops anything the resolver flagged `rejected` so confidence-
-        # gate / containment / overlap rejects don't sneak back into
-        # the export (matches every other consumer of /detections).
         edited = entry.get("editedBoxes")
         if isinstance(edited, list) and (entry.get("editedBoxesSet") or edited):
             slot["boxes"].extend(b for b in edited if isinstance(b, dict))
@@ -17243,8 +9540,7 @@ def _image_index(manifest: dict) -> dict[str, dict]:
 
 
 def _project_box_iter(manifest: dict):
-    """Yield (image_filename, (W, H), box_dict) for every labelled box,
-    unified across V1 and V2 manifest shapes."""
+    """Yield (image_filename, (W, H), box) for every box, V1 and V2."""
     idx = _image_index(manifest)
     for img_name, info in idx.items():
         sz = (info["width"], info["height"])
@@ -17257,9 +9553,8 @@ def _image_names_list(manifest: dict) -> list[str]:
     return list(_image_index(manifest).keys())
 
 
-# Box size classification - matches the frontend exactly (BOX_FAIL_PX=12,
-# BOX_WARN_PX=24). Letterbox scaling: same factor on both axes, so the
-# box's worst-side bottleneck is preserved.
+# Shorter box side after letterboxing to the input shape, in px. Must match
+# the UI's BOX_FAIL_PX and BOX_WARN_PX.
 _BOX_FAIL_PX = 12
 _BOX_WARN_PX = 24
 
@@ -17296,8 +9591,7 @@ def _keep_by_size(x0: float, y0: float, x1: float, y1: float,
                   img_w: int, img_h: int,
                   in_w: int, in_h: int,
                   exclude_red: bool, exclude_orange: bool) -> bool:
-    """Apply the user-selected red/orange exclusions to a single box.
-    Mirrors the FE's status colouring under the same letterbox scaling."""
+    """False when the box's size status is excluded: red is "fail", orange "warn"."""
     status = _box_status(_scaled_min_side(x0, y0, x1, y1, img_w, img_h, in_w, in_h))
     if status == "fail" and exclude_red:
         return False
@@ -17306,18 +9600,10 @@ def _keep_by_size(x0: float, y0: float, x1: float, y1: float,
     return True
 
 
-def _iter_augmentations(project_id: str, manifest: dict):
-    """Yield (export_filename, parent_filename, canvas_w, canvas_h, box_dict)
-    for every augmented copy that exists on disk + has annotations.
-
-    Export filename pattern is `aug_<orig_stem>_<k>.jpg` so the trained
-    model sees augmentation lineage at a glance and the user can tell
-    augs apart from originals in the bundle.
-
-    Box dicts are adapted from the per-copy annotation shape (label +
-    polys + box) into the same x0/y0/x1/y1 + label + mask.polygons
-    shape the rest of the export pipeline expects, so the existing
-    builders need no aug-specific branches."""
+def _iter_aug_copies(project_id: str, manifest: dict):
+    """Yield (export_name, parent_filename, canvas_w, canvas_h, import_id,
+    copy_name, path, detections) for each augmentation copy on disk, boxes or
+    none. export_name is aug_<parent_stem>_<k>.jpg."""
     if not manifest:
         return
     aug_root = _augmentations_dir(project_id)
@@ -17335,118 +9621,129 @@ def _iter_augmentations(project_id: str, manifest: dict):
         try:
             data = json.loads(anno_path.read_text())
         except Exception:
+            continue
+        if not aug_source.is_current(data, entry):
             continue
         canvas_w = int(data.get("width") or 0)
         canvas_h = int(data.get("height") or 0)
-        copies = data.get("copies") or {}
         parent_stem = Path(parent).stem
-        for copy_name, dets in copies.items():
-            if not isinstance(dets, list):
+        for copy_name, dets in (data.get("copies") or {}).items():
+            if not isinstance(dets, list) or Path(copy_name).name != copy_name:
                 continue
-            # Strip the `.jpg` and rebuild as `aug_<orig_stem>_<k>.jpg`
-            # - the `k` index is the leading zero-padded number the
-            # generator already chose.
-            k = Path(copy_name).stem
-            export_name = f"aug_{parent_stem}_{k}.jpg"
-            # Confirm the JPEG exists on disk before yielding annotations
-            # that reference it - drops half-written copies.
             jpeg_path = aug_root / import_id / copy_name
-            if not jpeg_path.exists():
+            if not jpeg_path.is_file():
                 continue
-            for det in dets:
-                if not isinstance(det, dict):
+            export_name = f"aug_{parent_stem}_{Path(copy_name).stem}.jpg"
+            yield export_name, parent, canvas_w, canvas_h, import_id, copy_name, jpeg_path, dets
+
+
+def _iter_augmentations(project_id: str, manifest: dict):
+    """Yield (export_name, parent_filename, canvas_w, canvas_h, box, import_id,
+    copy_name) for each box of each augmentation copy on disk; box has x0, y0,
+    x1, y1, label and mask.polygons."""
+    for export_name, parent, canvas_w, canvas_h, import_id, copy_name, _path, dets in _iter_aug_copies(
+        project_id, manifest
+    ):
+        for det in dets:
+            if not isinstance(det, dict):
+                continue
+            box = det.get("box") or []
+            if not (isinstance(box, (list, tuple)) and len(box) == 4):
+                continue
+            if canvas_w > 0 and canvas_h > 0:
+                box = _clip_box_to(box, canvas_w, canvas_h)
+                if box is None:
                     continue
-                box = det.get("box") or []
-                if not (isinstance(box, (list, tuple)) and len(box) == 4):
-                    continue
-                if canvas_w > 0 and canvas_h > 0:
-                    box = _clip_box_to(box, canvas_w, canvas_h)
-                    if box is None:
-                        continue
-                adapted = {
-                    "x0": float(box[0]),
-                    "y0": float(box[1]),
-                    "x1": float(box[2]),
-                    "y1": float(box[3]),
-                    "label": det.get("label") or "",
-                }
-                polys = [p for p in (det.get("polys") or []) if isinstance(p, list)]
-                if polys and canvas_w > 0 and canvas_h > 0:
-                    polys = [q for q in (_clip_poly_to(p, canvas_w, canvas_h) for p in polys) if q]
-                if polys:
-                    adapted["mask"] = {"polygons": polys}
-                yield export_name, parent, canvas_w, canvas_h, adapted, import_id, copy_name
+            adapted = {
+                "x0": float(box[0]),
+                "y0": float(box[1]),
+                "x1": float(box[2]),
+                "y1": float(box[3]),
+                "label": det.get("label") or "",
+            }
+            polys = [p for p in (det.get("polys") or []) if isinstance(p, list)]
+            if polys and canvas_w > 0 and canvas_h > 0:
+                polys = [q for q in (_clip_poly_to(p, canvas_w, canvas_h) for p in polys) if q]
+            if polys:
+                adapted["mask"] = {"polygons": polys}
+            yield export_name, parent, canvas_w, canvas_h, adapted, import_id, copy_name
 
 
 def _aug_files_to_bundle(project_id: str, manifest: dict) -> list[tuple[str, Path]]:
-    """Return [(export_name, source_path)] for every augmented JPEG that has
-    surviving annotations. Used by _add_images_to_zip when augmentations
-    are being shipped alongside originals."""
-    if not manifest:
-        return []
-    aug_root = _augmentations_dir(project_id)
-    if not aug_root.exists():
-        return []
+    """[(export_name, path)] for each augmentation copy on disk."""
     out: list[tuple[str, Path]] = []
     seen: set[str] = set()
-    for entry in (manifest.get("imports") or []):
-        import_id = entry.get("id")
-        parent = entry.get("filename") or ""
-        n_aug = int(entry.get("n_augmentations") or 0)
-        if not import_id or not parent or n_aug <= 0:
-            continue
-        anno_path = aug_root / import_id / "annotations.json"
-        if not anno_path.exists():
-            continue
-        try:
-            data = json.loads(anno_path.read_text())
-        except Exception:
-            continue
-        parent_stem = Path(parent).stem
-        for copy_name in (data.get("copies") or {}).keys():
-            jpeg_path = aug_root / import_id / copy_name
-            if not jpeg_path.exists():
-                continue
-            k = Path(copy_name).stem
-            export_name = f"aug_{parent_stem}_{k}.jpg"
-            if export_name in seen:
-                continue
+    for export_name, _parent, _w, _h, _iid, _cn, path, _dets in _iter_aug_copies(project_id, manifest):
+        if export_name not in seen:
             seen.add(export_name)
-            out.append((export_name, jpeg_path))
+            out.append((export_name, path))
     return out
 
 
 def _build_readme(manifest: dict) -> str:
-    """README written into every export zip. Names the project, who made
-    it, when it was exported, and where PixelKit lives. Kept plain-text
-    so it sits cleanly next to YOLO classes.txt, COCO annotations.json,
-    or VOC ImageSets without surprising any tooling."""
-    name = manifest.get("name") or "Untitled project"
-    owner = manifest.get("owner") or manifest.get("createdBy") or "unknown"
+    """Plain-text README for an export zip."""
+    name = manifest.get("name") or "Untitled dataset"
     now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
     return (
         "PixelKit dataset export\n"
         "=======================\n"
         "\n"
-        f"Project: {name}\n"
-        f"Created by: {owner}\n"
+        f"Dataset: {name}\n"
         f"Exported at: {now_iso} (UTC)\n"
         "\n"
-        "Built with PixelKit - https://pixelkit.ai\n"
+        "Built with PixelKit: https://github.com/ohmlab-ltd/pixelkit\n"
     )
 
 
-def _box_xyxy(b: dict) -> tuple[float, float, float, float] | None:
-    """Extract (x0, y0, x1, y1) from whichever shape the box dict uses.
+def _licence_name(code: str | None, version: str | None) -> str:
+    """A licence name such as "CC BY-SA 4.0" from Openverse's code and version,
+    or "" when the code is unknown."""
+    code = (code or "").strip().lower()
+    if not code:
+        return ""
+    name = {"cc0": "CC0", "pdm": "Public Domain Mark"}.get(code, "CC " + code.upper())
+    return f"{name} {(version or '').strip()}".strip()
 
-    Three flavours need to be supported:
-      • V2 editedBoxes / aug detections: flat x0/y0/x1/y1 floats.
-      • V2 auto detections: a `box` list of four floats. This is the
-        canonical resolver output and was previously missed by export,
-        which is why YOLO/COCO came back with zero labels on any V2
-        import the user hadn't manually edited.
-      • Legacy: `box_xyxy` list of four floats.
-    """
+
+def _build_attributions(manifest: dict, aug_parent_by_export: dict[str, str]) -> str:
+    """ATTRIBUTIONS.txt for the exported images that came from Openverse, or ""."""
+    sources = {e["filename"]: e["source"] for e in manifest.get("imports") or []
+               if isinstance(e, dict) and e.get("filename") and isinstance(e.get("source"), dict)
+               and e["source"].get("kind") == "openverse"}
+    if not sources:
+        return ""
+    copies: dict[str, list[str]] = {}
+    for export_name, parent in aug_parent_by_export.items():
+        if parent in sources:
+            copies.setdefault(parent, []).append(export_name)
+    out = ["Images from Openverse (https://openverse.org) in this export, with their",
+           "creators and licences. Files named aug_<name>_<n>.jpg are copies PixelKit",
+           "changed: rotated, cropped, recoloured, blurred or placed on other backgrounds.",
+           ""]
+    for fn in sorted(sources):
+        src = sources[fn]
+        out.append(fn)
+        if src.get("cropped"):
+            out.append("  A crop of the original picture.")
+        if copies.get(fn):
+            out.append("  Changed copies: " + ", ".join(sorted(copies[fn])))
+        licence = _licence_name(src.get("license"), src.get("license_version"))
+        if src.get("attribution"):
+            out.append("  " + " ".join(str(src["attribution"]).split()))
+        elif licence:
+            out.append(f'  "{src.get("title") or "Untitled"}" by {src.get("creator") or "an unknown creator"}, {licence}')
+        else:
+            out.append("  Licence not recorded: check it on the source page.")
+        if src.get("license_url"):
+            out.append("  Licence: " + str(src["license_url"]))
+        out.append("  Source: " + str(src.get("foreign_landing_url") or src.get("url") or "unknown"))
+        out.append("")
+    return "\n".join(out)
+
+
+def _box_xyxy(b: dict) -> tuple[float, float, float, float] | None:
+    """(x0, y0, x1, y1) from x0/y0/x1/y1 keys, a box_xyxy list or a box list;
+    None when missing or empty."""
     if all(k in b for k in ("x0", "y0", "x1", "y1")):
         x0, y0, x1, y1 = float(b["x0"]), float(b["y0"]), float(b["x1"]), float(b["y1"])
     elif isinstance(b.get("box_xyxy"), (list, tuple)) and len(b["box_xyxy"]) == 4:
@@ -17461,21 +9758,7 @@ def _box_xyxy(b: dict) -> tuple[float, float, float, float] | None:
 
 
 def _box_label(b: dict) -> str:
-    """Resolve a box's label across the naming conventions in play.
-
-    Fallback order, matching what the FE viewer does
-    (predLabel || gdLabel):
-      • `label` - set on editedBoxes and augmentation entries.
-      • `predLabel` / `pred_label` - set on V2 auto detections after
-        the specific-dataset embedding resolver runs.
-      • `gd_label` / `gdLabel` / `gd_variant` - set on V2 auto
-        detections that *don't* go through the resolver (general
-        datasets skip it entirely and trust SAM 3's text-prompt
-        assignment). Missing this fallback was why general-dataset
-        YOLO/COCO exports came back with zero label files even
-        after the box-shape fix landed - every detection had a box,
-        but `_box_label` resolved to "" so the category lookup
-        silently skipped every one."""
+    """The box's first non-empty label field, or ""."""
     for key in (
         "label",
         "predLabel", "pred_label",
@@ -17493,13 +9776,12 @@ def _box_label(b: dict) -> str:
 def _categories(manifest: dict) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
-    # Project tags first so the index is stable across re-exports.
+    # Tags first, so class indices are stable across exports.
     for t in (manifest.get("tags") or []):
         tl = (t or "").strip().lower()
         if tl and tl not in seen:
             seen.add(tl)
             out.append(tl)
-    # Then any extra labels from boxes that aren't in the tag list.
     for _img, _sz, b in _project_box_iter(manifest):
         lbl = _box_label(b).lower()
         if lbl and lbl not in seen:
@@ -17509,35 +9791,17 @@ def _categories(manifest: dict) -> list[str]:
 
 
 def _load_image_bytes(project_id: str, img_name: str) -> bytes | None:
-    """Resolve an original image's bytes. V2 projects keep imports on the
-    local filesystem; V1 projects keep them in R2. Try the cheap local
-    path first and fall back to R2 - silently returns None if neither
-    has the file so the caller can skip the entry."""
-    local_path = project_dir(project_id) / "images" / img_name
-    if local_path.exists():
-        try:
-            return local_path.read_bytes()
-        except Exception as e:
-            print(f"[export] local read failed for {img_name}: {e}")
+    """Original image bytes from images/, or None."""
     try:
-        return r2_required().get_bytes(R2Storage.image_key(project_id, img_name))
+        return (project_dir(project_id) / "images" / img_name).read_bytes()
     except Exception as e:
-        print(f"[export] r2 read failed for {img_name}: {e}")
+        print(f"[export] reading {img_name} failed: {e}")
         return None
 
 
-def _zip_image_entry(zf, arcname: str, data: bytes) -> None:
-    zf.writestr(arcname, data)
-
-
 def _split_for(parent_name: str, train_split: float) -> str:
-    """Stable train/val assignment for an image. Augmentations pass the
-    parent image's filename so every copy of one source lands in the
-    same split - avoids val leakage from augmentations of a train image.
-
-    train_split is the fraction that goes to train; the rest goes to val.
-    sha1(filename)/0xFFFFFFFF gives a uniform [0,1) bucket independent
-    of file order, so re-runs and re-exports place each file the same way."""
+    """Stable "train" or "val" from a sha1 bucket of the file name; train_split is
+    the train fraction. Augmentations pass their parent's name, so share its split."""
     if train_split >= 0.999:
         return "train"
     if train_split <= 0.001:
@@ -17559,10 +9823,7 @@ def _build_coco(
     with_augmentations: bool,
     train_split: float,
 ) -> dict[str, dict]:
-    """Build per-split COCO dicts. Returns {"train": {...}, "val": {...}}
-    (val key omitted when empty so we don't write a stub file). Each
-    image's split is decided by _split_for() on its parent filename so
-    augmentations follow their source image."""
+    """COCO dicts by split, {"train": ..., "val": ...}; val is left out when empty."""
     cats = _categories(manifest)
     cat_index = {c: i + 1 for i, c in enumerate(cats)}  # COCO category ids are 1-indexed
     in_w, in_h = _parse_input_shape(input_shape)
@@ -17629,10 +9890,7 @@ def _build_coco(
         anns_by_split[split].append(ann)
         next_ann_id[split] += 1
 
-    # Register originals first so the image_id-by-name lookup is
-    # populated before annotations are walked. Pulls the unified V1+V2
-    # view so V2 projects (imports[]-based) and V1 projects
-    # (results[]-based) both produce a populated images[] section.
+    # Images are registered before their annotations.
     img_idx = _image_index(manifest)
     for img_name, info in img_idx.items():
         w, h = info["width"], info["height"]
@@ -17640,17 +9898,12 @@ def _build_coco(
             continue
         _register_image(_split_for(img_name, train_split), img_name, w, h)
 
-    # Register augmentations: split by *parent* filename so all copies of
-    # one source land together.
     if with_augmentations:
-        seen_aug: set[str] = set()
-        for export_name, parent, cw, ch, _det, _iid, _cn in _iter_augmentations(project_id, manifest):
-            if export_name in seen_aug:
+        for export_name, parent, cw, ch, *_rest in _iter_aug_copies(project_id, manifest):
+            if export_name in id_by_file or not cw or not ch:
                 continue
-            seen_aug.add(export_name)
             _register_image(_split_for(parent, train_split), export_name, int(cw), int(ch))
 
-    # Now walk annotations and bucket them by their image's pre-decided split.
     for img_name, sz, b in _project_box_iter(manifest):
         W, H = sz
         if not W or not H:
@@ -17664,7 +9917,7 @@ def _build_coco(
     info = {
         "description": manifest.get("name") or "PixelKit export",
         "version": "1.0",
-        "exporter": "pixelkit.ai",
+        "contributor": "PixelKit",
     }
     categories = [
         {"id": i, "name": name, "supercategory": "object"}
@@ -17696,16 +9949,11 @@ def _build_yolo(
     with_augmentations: bool,
     train_split: float,
 ) -> tuple[dict[tuple[str, str], str], list[str]]:
-    """Build YOLO .txt files keyed by (split, txt_name).
+    """YOLO .txt contents keyed by (split, txt_name), one line per box, normalised 0..1:
 
-    When include_segmentations is true and a box carries polygon data
-    the line follows the Ultralytics YOLOv8-seg convention:
-        <class_id> x1 y1 x2 y2 x3 y3 ...   (normalised 0..1)
-    Detection-only lines are the usual:
-        <class_id> cx cy w h               (normalised 0..1)
-
-    Augmentations inherit their parent image's split so val never
-    contains augmented copies of train images."""
+        <class_id> x1 y1 x2 y2 x3 y3 ...   polygon, with include_segmentations
+        <class_id> cx cy w h               box
+    """
     cats = _categories(manifest)
     cat_index = {c: i for i, c in enumerate(cats)}  # YOLO is 0-indexed
     by_image: dict[tuple[str, str], list[str]] = {}
@@ -17735,7 +9983,7 @@ def _build_yolo(
                     if isinstance(pt, (list, tuple)) and len(pt) >= 2:
                         flat.append(f"{float(pt[0]) / img_w:.6f}")
                         flat.append(f"{float(pt[1]) / img_h:.6f}")
-                if len(flat) >= 6:  # need at least three (x,y) pairs
+                if len(flat) >= 6:  # at least three points
                     by_image.setdefault(key, []).append(f"{cls} " + " ".join(flat))
                     emitted = True
         if include_boxes and not emitted:
@@ -17747,14 +9995,11 @@ def _build_yolo(
                 f"{cls} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}"
             )
 
-    # Originals
     for img_name, sz, b in _project_box_iter(manifest):
         W, H = sz
         split = _split_for(img_name, train_split)
         _emit(split, Path(img_name).stem + ".txt", W, H, b)
 
-    # Augmentations follow their parent's split so the val set never sees
-    # an augmented copy of a train image.
     if with_augmentations:
         for export_name, parent, cw, ch, det, _iid, _cn in _iter_augmentations(project_id, manifest):
             split = _split_for(parent, train_split)
@@ -17773,9 +10018,7 @@ def _build_voc_xml(
     exclude_orange: bool,
     input_shape: str,
 ) -> str:
-    """Pascal VOC 2012-style annotation XML. VOC is bbox-only (no polygon
-    spec), so segmentations are silently ignored here - the include_seg
-    toggle on the FE doesn't change VOC output."""
+    """Pascal VOC annotation XML for one image, boxes only."""
     in_w, in_h = _parse_input_shape(input_shape)
     obj_blocks = []
     for b in boxes:
@@ -17818,12 +10061,8 @@ def _build_voc_xml(
     )
 
 
-@app.get(
-    "/api/projects/{project_id}/export",
-    dependencies=[Depends(require_project_read_access)],
-)
-# A plain def on purpose: FastAPI runs it in its threadpool, so zipping a
-# large dataset does not stall every other request.
+@app.get("/api/projects/{project_id}/export")
+# A plain def, so FastAPI runs it in its threadpool and a long zip does not stall other requests.
 def export_project(
     project_id: str,
     format: str,
@@ -17835,39 +10074,12 @@ def export_project(
     input_shape: str = "256x256",
     train_split: float = 0.8,
 ):
-    """Build a downloadable export of the project's labels.
-
-    Supported `format` values: `yolo`, `coco`, `voc`, `cvat` (images 1.1
-    XML), `labelstudio` (task JSON, percent coords), `masks`
-    (class-indexed PNG masks from segmentations). Everything else 400s.
-
-    Box content is gated by `include_boxes` / `include_segmentations`. At
-    least one must be true. VOC is bbox-only so an `include_boxes=false`
-    VOC request 400s.
-
-    Size-class exclusions match the FE's letterbox-scaled minimum-side
-    classifier (< 12 px = red, 12-24 px = orange) computed against
-    `input_shape` (e.g. `320x320`). Red is dropped by default; orange
-    is kept by default.
-
-    `train_split` (0.0..1.0) controls the train/val split. Per-file
-    decision is deterministic (sha1(filename)) so every re-export of
-    the same project places each image in the same set. Augmentations
-    follow their parent image's split.
-
-    Layout per format (training-ready):
-      - YOLO:  images/{train,val}/*.jpg + labels/{train,val}/*.txt + data.yaml
-      - COCO:  annotations/instances_{train,val}.json + images/{train,val}/*.jpg
-      - VOC:   JPEGImages/*.jpg + Annotations/*.xml + ImageSets/Main/{train,val}.txt
-
-    Augmentations on disk are bundled when `include_images=true`,
-    renamed `aug_<orig_stem>_<k>.jpg`. Every archive carries a README.txt
-    with project name, owner and export timestamp."""
+    """Export the dataset as a zip in `format`: yolo, coco, voc, cvat, labelstudio or masks."""
     if not project_dir(project_id).exists():
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     manifest = load_manifest(project_id)
     if not manifest:
-        raise HTTPException(404, "no manifest")
+        raise HTTPException(404, "dataset not found")
 
     if format not in ("yolo", "coco", "voc", "cvat", "labelstudio", "masks"):
         raise HTTPException(400, f"unsupported format: {format}")
@@ -17885,10 +10097,9 @@ def export_project(
     aug_parent_by_export = _aug_parent_lookup(project_id, manifest) if include_images else {}
     with_augs = bool(aug_files)
     readme = _build_readme(manifest)
+    attributions = _build_attributions(manifest, aug_parent_by_export) if include_images else ""
 
     def _write_images(zf, *, train_subdir: str, val_subdir: str) -> None:
-        # Originals - try local disk first (V2 layout), then R2 (V1). Skip
-        # silently if neither has the bytes.
         for img_name in image_names:
             data = _load_image_bytes(project_id, img_name)
             if data is None:
@@ -17896,7 +10107,6 @@ def export_project(
             split = _split_for(img_name, train_split)
             sub = train_subdir if split == "train" else val_subdir
             zf.writestr(f"{sub}/{img_name}" if sub else img_name, data)
-        # Augmentations from local disk under projects/<id>/augmentations/.
         for export_name, src in aug_files:
             try:
                 parent = aug_parent_by_export.get(export_name, export_name)
@@ -17921,6 +10131,8 @@ def export_project(
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
             zf.writestr("README.txt", readme)
+            if attributions:
+                zf.writestr("ATTRIBUTIONS.txt", attributions)
             for split, coco in coco_by_split.items():
                 zf.writestr(f"annotations/instances_{split}.json", json.dumps(coco, indent=2))
             if include_images:
@@ -17946,12 +10158,10 @@ def export_project(
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
             zf.writestr("README.txt", readme)
+            if attributions:
+                zf.writestr("ATTRIBUTIONS.txt", attributions)
             zf.writestr("classes.txt", "\n".join(cats) + "\n")
-            # data.yaml in the Ultralytics shape - `path` is the dataset
-            # root (the zip's contents once extracted), train/val point
-            # at the two image subdirs. The YOLO loader looks for a
-            # parallel labels/ tree by replacing `images/` with `labels/`
-            # in each image path, which matches the layout below.
+            # Ultralytics data.yaml; the loader finds labels/ by replacing images/ in each image path.
             zf.writestr("data.yaml",
                 f"path: .\n"
                 f"train: images/train\n"
@@ -17985,6 +10195,8 @@ def export_project(
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
             zf.writestr("README.txt", readme)
+            if attributions:
+                zf.writestr("ATTRIBUTIONS.txt", attributions)
             if format == "cvat":
                 xml = _build_cvat_xml(
                     rows,
@@ -17995,7 +10207,7 @@ def export_project(
                 )
                 zf.writestr("annotations.xml", xml)
                 if include_images:
-                    # CVAT matches images by bare filename - flat images/.
+                    # Flat: CVAT matches images by bare file name.
                     _write_images(zf, train_subdir="images", val_subdir="images")
             elif format == "labelstudio":
                 tasks = _build_labelstudio(
@@ -18006,19 +10218,26 @@ def export_project(
                 zf.writestr("tasks.json", json.dumps(tasks, indent=2))
                 from xml.sax.saxutils import quoteattr
 
+                label_tags = "".join(f"    <Label value={quoteattr(c)}/>\n" for c in cats)
+                controls = ""
+                if include_boxes:
+                    controls += (
+                        '  <RectangleLabels name="label" toName="image">\n'
+                        + label_tags + "  </RectangleLabels>\n"
+                    )
+                if include_segmentations:
+                    controls += (
+                        '  <PolygonLabels name="polygon" toName="image">\n'
+                        + label_tags + "  </PolygonLabels>\n"
+                    )
                 zf.writestr(
                     "labeling-config.xml",
-                    "<View>\n"
-                    '  <Image name="image" value="$image"/>\n'
-                    '  <RectangleLabels name="label" toName="image">\n'
-                    + "".join(f"    <Label value={quoteattr(c)}/>\n" for c in cats)
-                    + "  </RectangleLabels>\n"
-                    "</View>\n",
+                    '<View>\n  <Image name="image" value="$image"/>\n' + controls + "</View>\n",
                 )
                 if include_images:
                     _write_images(zf, train_subdir="images", val_subdir="images")
             else:  # masks
-                import cv2  # lazy - headless OpenCV, only this format needs it here
+                import cv2
 
                 class_idx = {c: i + 1 for i, c in enumerate(cats)}
                 zf.writestr(
@@ -18026,9 +10245,6 @@ def export_project(
                     "0 background\n"
                     + "".join(f"{i} {name}\n" for name, i in class_idx.items()),
                 )
-                # Every shipped image gets a mask - all-zero (background)
-                # when nothing is annotated - so trainers pairing
-                # images/ with masks/ never hit a missing file.
                 for row in rows:
                     mask = np.zeros((row["height"], row["width"]), dtype=np.uint8)
                     for a in row["anns"]:
@@ -18053,17 +10269,15 @@ def export_project(
             headers={"Content-Disposition": f'attachment; filename="{base}-{format}.zip"'},
         )
 
-    # format == "voc". VOC uses ImageSets/Main/{train,val}.txt to record
-    # the split; all JPEGs sit in JPEGImages/ regardless. Annotation
-    # XMLs sit in Annotations/. Uses the V1+V2 unified image index so
-    # imports[]-only V2 projects emit XMLs (older code only walked
-    # results[]/editedBoxes which V2 doesn't populate at the top level).
+    # format == "voc"
     img_idx = _image_index(manifest)
     train_stems: list[str] = []
     val_stems: list[str] = []
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         zf.writestr("README.txt", readme)
+        if attributions:
+            zf.writestr("ATTRIBUTIONS.txt", attributions)
         for img_name, info in img_idx.items():
             W, H = info["width"], info["height"]
             if not W or not H:
@@ -18079,9 +10293,12 @@ def export_project(
             (train_stems if _split_for(img_name, train_split) == "train" else val_stems).append(stem)
         if with_augs:
             grouped: dict[str, tuple[int, int, str, list[dict]]] = {}
-            for export_name, parent, cw, ch, det, _iid, _cn in _iter_augmentations(project_id, manifest):
-                slot = grouped.setdefault(export_name, (int(cw), int(ch), parent, []))
-                slot[3].append(det)
+            for export_name, parent, cw, ch, *_rest in _iter_aug_copies(project_id, manifest):
+                if cw and ch:
+                    grouped.setdefault(export_name, (int(cw), int(ch), parent, []))
+            for export_name, _parent, _cw, _ch, det, _iid, _cn in _iter_augmentations(project_id, manifest):
+                if export_name in grouped:
+                    grouped[export_name][3].append(det)
             for export_name, (cw, ch, parent, dets) in grouped.items():
                 xml = _build_voc_xml(
                     export_name, cw, ch, dets,
@@ -18095,7 +10312,6 @@ def export_project(
         zf.writestr("ImageSets/Main/train.txt", "\n".join(train_stems) + ("\n" if train_stems else ""))
         zf.writestr("ImageSets/Main/val.txt", "\n".join(val_stems) + ("\n" if val_stems else ""))
         if include_images:
-            # VOC puts every JPEG in a flat JPEGImages/ regardless of split.
             _write_images(zf, train_subdir="JPEGImages", val_subdir="JPEGImages")
     return Response(
         buf.getvalue(),
@@ -18116,10 +10332,8 @@ def _export_rows(
     with_augmentations: bool,
     train_split: float,
 ) -> list[dict]:
-    """Flat per-image rows shared by the CVAT / Label Studio / PNG-mask
-    exporters: [{file, split, width, height, anns: [{label, box, polys}]}].
-    Same filtering rules as the COCO/YOLO builders (size classes, split
-    by parent filename, augmentations follow their source image)."""
+    """Rows for the CVAT, Label Studio and mask exporters:
+    [{file, split, width, height, anns: [{label, box, polys}]}]."""
     in_w, in_h = _parse_input_shape(input_shape)
     rows: dict[str, dict] = {}
 
@@ -18139,12 +10353,8 @@ def _export_rows(
             continue
         _reg(img_name, w, h, _split_for(img_name, train_split))
     if with_augmentations:
-        seen: set[str] = set()
-        for export_name, parent, cw, ch, _det, _iid, _cn in _iter_augmentations(project_id, manifest):
-            if export_name in seen:
-                continue
-            seen.add(export_name)
-            if not cw or not ch:  # dim-less legacy aug records - skip like originals
+        for export_name, parent, cw, ch, *_rest in _iter_aug_copies(project_id, manifest):
+            if export_name in rows or not cw or not ch:
                 continue
             _reg(export_name, cw, ch, _split_for(parent, train_split))
 
@@ -18191,8 +10401,7 @@ def _build_cvat_xml(
     include_boxes: bool,
     include_segmentations: bool,
 ) -> str:
-    """CVAT "images 1.1" annotations.xml. Polygon preferred where a mask
-    exists (and segmentations are enabled); box otherwise."""
+    """CVAT "images 1.1" XML: a polygon where a mask exists and segmentations are on, else a box."""
     import xml.etree.ElementTree as ET
 
     root = ET.Element("annotations")
@@ -18246,9 +10455,8 @@ def _build_labelstudio(
     include_boxes: bool,
     include_segmentations: bool,
 ) -> list[dict]:
-    """Label Studio task list (percent coordinates). Assumes the standard
-    object-detection labeling config with from_name="label" and
-    to_name="image" - documented in the export README."""
+    """Label Studio tasks in percent coordinates: boxes from "label", polygons
+    from "polygon", both on "image"."""
     tasks: list[dict] = []
     for row in rows:
         W, H = row["width"], row["height"]
@@ -18259,7 +10467,7 @@ def _build_labelstudio(
                 for pts in a["polys"]:
                     results.append({
                         "type": "polygonlabels",
-                        "from_name": "label",
+                        "from_name": "polygon",
                         "to_name": "image",
                         "original_width": W,
                         "original_height": H,
@@ -18295,130 +10503,14 @@ def _build_labelstudio(
 
 
 def _aug_parent_lookup(project_id: str, manifest: dict) -> dict[str, str]:
-    """Map each export-name aug back to its parent image filename so the
-    train/val split decider can route it consistently with the rest of
-    its lineage. Built once per request to avoid re-walking the
-    augmentations dir during image bundling."""
-    if not manifest:
-        return {}
+    """{export_name: parent_filename} for each augmentation copy on disk."""
     out: dict[str, str] = {}
-    aug_root = _augmentations_dir(project_id)
-    if not aug_root.exists():
-        return out
-    for entry in (manifest.get("imports") or []):
-        import_id = entry.get("id")
-        parent = entry.get("filename") or ""
-        if not import_id or not parent:
-            continue
-        anno_path = aug_root / import_id / "annotations.json"
-        if not anno_path.exists():
-            continue
-        try:
-            data = json.loads(anno_path.read_text())
-        except Exception:
-            continue
-        parent_stem = Path(parent).stem
-        for copy_name in (data.get("copies") or {}).keys():
-            k = Path(copy_name).stem
-            out[f"aug_{parent_stem}_{k}.jpg"] = parent
+    for export_name, parent, *_rest in _iter_aug_copies(project_id, manifest):
+        out.setdefault(export_name, parent)
     return out
 
 
-# ───────────────────────────────────────────────────────────────────────
-# Pipeline Charlie endpoints - drop-in shape compatible with the V2
-# /api/v2/imports/* routes so the FE can target the new pipeline by
-# changing the URL prefix only. Charlie is SAM3-only for now: no
-# GroundingDINO, no SAM2, no VLM, no DINOv2/SigLIP. Reference flows
-# (/api/v2/references/*) intentionally have no Charlie counterpart -
-# Charlie's resolver pipeline isn't built yet.
-# ───────────────────────────────────────────────────────────────────────
-
-
-@app.post("/api/charlie/imports/process")
-async def charlie_imports_process(
-    image: UploadFile = File(...),
-    labels: str = Form(...),
-    project_id: str = Form(""),
-):
-    """SAM3 promptable concept segmentation on an uploaded image.
-
-    Inputs match V2's /api/v2/imports/process:
-      - image:   the file to process
-      - labels:  JSON array of label strings
-      - project_id: accepted for shape parity, currently unused (no
-                    reference resolver in Charlie yet)
-
-    Response shape mirrors V2's /api/v2/imports/process so the FE can
-    iterate `detections` without restructuring. Per-detection fields
-    that V2 fills via DINOv2/SigLIP/VLM are returned empty/null:
-        embedding=[], embedding_siglip=[], vlm_label=null, vlm_score=null
-
-    Debug info for the pipeline popup goes in `timings` and `pipeline`.
-    """
-    charlie = state.get("charlie")
-    if charlie is None:
-        raise HTTPException(503, "pipeline_charlie not loaded (SAM3 unavailable)")
-
-    try:
-        tag_list = json.loads(labels)
-        if not isinstance(tag_list, list) or not all(isinstance(t, str) for t in tag_list):
-            raise ValueError("labels must be a JSON array of strings")
-    except Exception as e:
-        raise HTTPException(400, f"invalid labels payload: {e}")
-    tags = [t.strip() for t in tag_list if t and t.strip()]
-
-    raw = await image.read()
-    if not raw:
-        raise HTTPException(400, "empty image upload")
-    try:
-        image_pil = _open_upright(raw)
-    except Exception as e:
-        raise HTTPException(400, f"could not decode image: {e}")
-    W, H = image_pil.size
-
-    if not tags:
-        return {
-            "pipeline": "charlie",
-            "width": W, "height": H,
-            "prompt_tags": [],
-            "timings": {"sam3_predict_ms": 0.0, "sam3_post_ms": 0.0,
-                         "encode_crops_ms": 0.0, "total_ms": 0.0},
-            "detections": [],
-        }
-
-    loop = asyncio.get_running_loop()
-
-    def _infer():
-        return charlie.segment_labels(image_pil, tags, include_crops=True)
-
-    try:
-        async with state["gpu_lock"]:
-            detections, timings = await loop.run_in_executor(None, _infer)
-    except Exception as exc:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(500, f"charlie pipeline error: {exc}")
-    finally:
-        import gc as _gc
-        _gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
-            torch.mps.empty_cache()
-
-    print(
-        f"[charlie] /imports/process W={W} H={H} prompts={tags} "
-        f"hits={len(detections)} sam3={timings['sam3_predict_ms']:.0f}ms "
-        f"post={timings['sam3_post_ms']:.0f}ms total={timings['total_ms']:.0f}ms"
-    )
-
-    return {
-        "pipeline": "charlie",
-        "width": W, "height": H,
-        "prompt_tags": tags,
-        "timings": timings,
-        "detections": detections,
-    }
+# Pipeline Charlie import routes.
 
 
 async def _charlie_load_image_pil(
@@ -18428,26 +10520,12 @@ async def _charlie_load_image_pil(
     *,
     endpoint_tag: str,
 ) -> "PILImage.Image":
-    """Resolve the source image bytes for a Charlie interactive
-    endpoint, preferring the on-disk copy when the caller supplied
-    `project_id` + `import_id`. Avoids round-tripping the image
-    through the browser (and the CORS-blocked fetch that was making
-    click-to-detect unreachable from www.pixelkit.ai).
-
-    Raises HTTPException(400) on bad input and HTTPException(404)
-    when the requested import doesn't exist on disk.
-    """
-    # By-id path: load from disk. No browser fetch involved.
+    """The stored import when project_id and import_id are given, else the upload, as upright RGB."""
     if project_id and import_id:
         proj = project_dir(project_id)
         if not proj.exists():
-            raise HTTPException(404, "project not found")
-        # copy=False - we only read filename + scan for one entry.
-        # Deepcopying the full 30MB manifest just to find one ID was
-        # the single biggest per-call hit on big projects (200-500ms
-        # PER click-to-detect / add-box / segment_box / classify_box
-        # call). The manifest cache stays correct because we never
-        # mutate.
+            raise HTTPException(404, "dataset not found")
+        # copy=False: read only.
         manifest = load_manifest(project_id, copy=False) or {}
         imp = next(
             (m for m in (manifest.get("imports") or []) if m.get("id") == import_id),
@@ -18468,16 +10546,15 @@ async def _charlie_load_image_pil(
             print(f"[{endpoint_tag}] 400 disk decode failed for {src_path}: {e}")
             raise HTTPException(400, f"could not decode stored image: {e}")
 
-    # Upload path: legacy / no-project flows.
     if image is None:
         raise HTTPException(
             400,
             "either (project_id + import_id) or an image file must be provided",
         )
-    raw = await image.read()
+    raw = await _read_upload(image)
     if not raw:
         print(
-            f"[{endpoint_tag}] 400 empty upload - filename={image.filename!r} "
+            f"[{endpoint_tag}] 400 empty upload: filename={image.filename!r} "
             f"content_type={image.content_type!r}"
         )
         raise HTTPException(400, "empty image upload")
@@ -18486,224 +10563,49 @@ async def _charlie_load_image_pil(
             return ImageOps.exif_transpose(im).convert("RGB")
     except Exception as e:
         print(
-            f"[{endpoint_tag}] 400 decode failed - "
+            f"[{endpoint_tag}] 400 decode failed: "
             f"filename={image.filename!r} size_bytes={len(raw)} "
             f"head_hex={raw[:16].hex()} err={type(e).__name__}: {e}"
         )
         raise HTTPException(400, f"could not decode image: {e}")
 
 
-async def _detect_point_unified(
-    image_pil,
-    point_xy,
-    *,
-    candidate_labels,
-    project_id,
-    dataset_type_hint=None,
-    allow_sam3=True,
-    allow_reject=False,
-    is_labelled=False,
-    cache_key=None,
-):
-    """One click-to-detect implementation shared by the charlie, demo, and
-    (optionally) v2 endpoints, so every surface behaves identically.
-
-    Flow:
-      STAGE 1  SAM3 text-concept first try, only on unlabelled + SAM3-loaded +
-               candidate-bearing tiles. On a hit it returns SAM3's concept label.
-      STAGE 2  SAM2 point segmentation as the universal floor: it returns a mask
-               under any valid click, so a click never dead-ends. The ONLY
-               legitimate 422 is SAM2 finding no mask (a true-background click).
-      STAGE 3  Label the SAM2 mask. Projects with reference images use the
-               embedding resolver (specific -> knn, general -> centroid); other
-               cases use the VLM to pick from the candidate labels. The VLM is
-               ALWAYS given the mask so the background is suppressed on the crop.
-      STAGE 4  Terminal, never 422: a reject (labelled tiles only), else a
-               best-guess label (first candidate), else label=None.
-
-    Returns the charlie-shaped envelope.
-    """
-    # Portable build: SAM2 is gone - SAM3 is both the concept detector and
-    # the interactive floor. 503 only when nothing is loaded at all.
-    if state.get("charlie") is None and state.get("segmenter") is None:
-        raise HTTPException(503, "segmentation model not loaded")
+async def _detect_point_unified(image_pil, point_xy, *, candidate_labels, cache_key=None):
+    """Click-to-detect with SAM 3 at the point over the candidate labels; 422
+    when it finds nothing."""
+    charlie = state.get("charlie")
+    if charlie is None:
+        raise HTTPException(503, "SAM 3 is not loaded")
     loop = asyncio.get_running_loop()
     W, H = image_pil.size
     px = min(max(float(point_xy[0]), 0.0), float(W - 1))
     py = min(max(float(point_xy[1]), 0.0), float(H - 1))
     labels = [str(t).strip() for t in (candidate_labels or []) if str(t).strip()]
-
-    # STAGE 1 - SAM3 text-concept first try (eligible tiles only).
-    if allow_sam3 and labels and state.get("charlie") is not None and not is_labelled:
-        charlie = state["charlie"]
-
-        def _run_sam3():
-            return charlie.segment_point(image_pil, [px, py], labels, cache_key=cache_key)
-
-        try:
-            async with state["gpu_lock"].interactive():
-                detection, sam3_timings = await loop.run_in_executor(None, _run_sam3)
-        except Exception as exc:  # noqa: BLE001 - any SAM3 failure falls back to SAM2
-            print(f"[detect_point/sam3] error, falling back to SAM2: {exc}")
-            detection, sam3_timings = None, {}
-        if detection is not None:
-            box_xyxy = [float(c) for c in detection["box"]]
-            mask_polys = (
-                detection["mask"]["polygons"]
-                if isinstance(detection.get("mask"), dict) else []
-            )
-            label = detection.get("gd_label") or None
-            score = float(detection["gd_score"]) if detection.get("gd_score") is not None else None
-            return {
-                "pipeline": "charlie", "width": W, "height": H,
-                "timings": {**sam3_timings, "route": "sam3"},
-                "route": "sam3",
-                "box_xyxy": box_xyxy,
-                "mask": {"polygons": mask_polys},
-                "mask_score": score,
-                "label": label, "score": score,
-                "rejected": False, "reject_reason": None,
-            }
-
-    # STAGE 2 - SAM2 floor removed in the portable build. When SAM3 found
-    # nothing above, there is no universal-segmenter fallback: report a
-    # clean miss instead of NameError'ing into a 500.
-    if state.get("segmenter") is None:
+    if not labels:
         raise HTTPException(422, "no mask found at that point")
 
-    def _run_sam2():
-        return segment_point(state, image_pil, [px, py])
+    def _run_sam3():
+        return charlie.segment_point(image_pil, [px, py], labels, cache_key=cache_key)
 
-    t0 = time.perf_counter()
     try:
         async with state["gpu_lock"].interactive():
-            seg = await loop.run_in_executor(None, _run_sam2)
-    except Exception as exc:
-        raise HTTPException(500, f"SAM2 segment failed: {exc}")
-    sam2_ms = (time.perf_counter() - t0) * 1000.0
-    if seg is None:
+            detection, sam3_timings = await loop.run_in_executor(None, _run_sam3)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"click to detect failed: {exc}")
+    if detection is None:
         raise HTTPException(422, "no mask found at that point")
-    sam2_box = [float(c) for c in seg["box_xyxy"]]
-    sam2_polys = seg.get("polygons") or []
-    sam2_score = float(seg["score"]) if seg.get("score") is not None else None
-    base = {
+    score = float(detection["gd_score"]) if detection.get("gd_score") is not None else None
+    return {
         "pipeline": "charlie", "width": W, "height": H,
-        "box_xyxy": sam2_box, "mask": {"polygons": sam2_polys}, "mask_score": sam2_score,
+        "timings": {**sam3_timings, "route": "sam3"},
+        "route": "sam3",
+        "box_xyxy": [float(c) for c in detection["box"]],
+        "mask": {"polygons": (detection["mask"]["polygons"]
+                              if isinstance(detection.get("mask"), dict) else [])},
+        "mask_score": score,
+        "label": detection.get("gd_label") or None, "score": score,
+        "rejected": False, "reject_reason": None,
     }
-
-    def _env(label, score, route, *, rejected=False, reject_reason=None, vlm_ms=0.0):
-        return {
-            **base,
-            "timings": {"sam2_ms": sam2_ms, "vlm_ms": vlm_ms, "total_ms": sam2_ms + vlm_ms, "route": route},
-            "route": route,
-            "label": label, "score": score,
-            "rejected": rejected, "reject_reason": reject_reason,
-        }
-
-    # STAGE 3 - label the SAM2 mask. Load references for the project (if any).
-    refs_by_label_arr = None
-    refs_by_label_siglip_arr = None
-    proj_tags = []
-    label_display = {}
-    refs_present = False
-    if project_id:
-        try:
-            manifest = load_manifest(project_id, copy=False) or {}
-            proj_tags = manifest.get("tags") or []
-            label_display = {str(t).lower().strip(): str(t) for t in proj_tags}
-            by_label, by_label_siglip, _dirty = await loop.run_in_executor(
-                None, _v2_load_or_backfill_reference_embeddings, project_id,
-            )
-            refs_by_label_arr = _v2_stack_refs(by_label)
-            refs_by_label_siglip_arr = _v2_stack_refs(by_label_siglip)
-            refs_present = bool(refs_by_label_arr)
-        except Exception as e:  # noqa: BLE001
-            print(f"[detect_point] reference load failed: {e}")
-            refs_present = False
-
-    embed_reject = False
-
-    # TIER A - reference-embedding resolver (projects with references).
-    if refs_present:
-        try:
-            import v2_dinov2
-            if not v2_dinov2.is_loaded():
-                raise RuntimeError("DINOv2 not loaded")
-            x0 = max(0, int(round(sam2_box[0]))); y0 = max(0, int(round(sam2_box[1])))
-            x1 = min(W, int(round(sam2_box[2]))); y1 = min(H, int(round(sam2_box[3])))
-            if x1 - x0 >= 4 and y1 - y0 >= 4:
-                if dataset_type_hint:
-                    dataset_type = dataset_type_hint
-                else:
-                    try:
-                        dt = _classify_dataset_type_cached(project_id, list(proj_tags))
-                        dataset_type = dt.get("type") if isinstance(dt, dict) else "general"
-                    except Exception:
-                        dataset_type = "general"
-                score_mode = "knn" if dataset_type == "specific" else "centroid"
-
-                def _encode():
-                    import v2_dinov2 as _v2d
-                    import v2_siglip as _v2s
-                    clean = _v2d.inpaint_bbox_crop(image_pil, (x0, y0, x1, y1), sam2_polys)
-                    square = _v2d.center_square_crop(clean)
-                    vecs = _v2d.encode_images_batch([square])
-                    if vecs is None or vecs.shape[0] == 0:
-                        return None, None
-                    e = [round(float(x), 6) for x in vecs[0].tolist()]
-                    es = None
-                    if _v2s.is_loaded():
-                        try:
-                            sv = _v2s.encode_images_batch([square])
-                            if sv is not None and sv.shape[0] > 0:
-                                es = [round(float(x), 6) for x in sv[0].tolist()]
-                        except Exception:
-                            es = None
-                    return e, es
-
-                async with state["gpu_lock"].interactive():
-                    emb, emb_siglip = await loop.run_in_executor(None, _encode)
-                if emb is not None:
-                    class_thresholds = _v2_compute_class_thresholds(refs_by_label_arr)
-                    verdict = _v2_resolve_label_specific(
-                        emb,
-                        None,
-                        refs_by_label_arr,
-                        label_display,
-                        score_mode=score_mode,
-                        gd_score=None,
-                        embedding_siglip=emb_siglip,
-                        refs_by_label_siglip=refs_by_label_siglip_arr or None,
-                        class_thresholds=class_thresholds,
-                    )
-                    if verdict.get("rejected"):
-                        embed_reject = True
-                    elif verdict.get("pred_label"):
-                        return _env(verdict.get("pred_label"), verdict.get("embed_sim_for_label"), "sam2+embed")
-        except Exception as e:  # noqa: BLE001 - embed failure degrades to the VLM
-            print(f"[detect_point] embed resolve failed, falling back to VLM: {e}")
-
-    # TIER B - VLM labeller (always passes the SAM mask so background is suppressed).
-    if labels:
-        v_label = v_score = None
-        t1 = time.perf_counter()
-        try:
-            from vlm_validate import vlm_classify
-            v_label, v_score = await loop.run_in_executor(
-                None, vlm_classify, image_pil, sam2_box, labels, sam2_polys,
-            )
-        except Exception as e:  # noqa: BLE001
-            print(f"[detect_point] vlm_classify failed: {e}")
-        vlm_ms = (time.perf_counter() - t1) * 1000.0
-        if v_label:
-            return _env(v_label, float(v_score) if v_score is not None else None, "sam2+vlm", vlm_ms=vlm_ms)
-
-    # STAGE 4 - terminal (never 422).
-    if allow_reject and embed_reject:
-        return _env(None, None, "sam2+embed", rejected=True, reject_reason="embed")
-    if labels:
-        return _env(labels[0], sam2_score, "sam2+vlm")
-    return _env(None, None, "sam2")
 
 
 @app.post("/api/charlie/imports/detect_point")
@@ -18714,30 +10616,14 @@ async def charlie_imports_detect_point(
     import_id: str = Form(""),
     labels: str = Form(""),
 ):
-    """Click-to-detect with dual pipeline routing.
-
-    - Image has NOT been auto-labelled yet → SAM3 text-prompt path
-      (vision encoded once, then N text-only forward passes). Fast
-      and accurate when the candidate labels match the image content.
-    - Image HAS been auto-labelled → SAM2 (point prompt) + VLM
-      label-classify the crop. The user has already accepted a
-      prior labelling pass, so SAM3 retrying the same text prompts
-      typically just re-finds what's already on the tile; SAM2 gives
-      a fresh mask under the click and the VLM picks the label.
-
-    Falls back to SAM3 for legacy uploads with no project/import
-    context (no manifest entry to check the labelled flag against).
-
-    Returns box_xyxy + mask + label + score, the shape BoxEditor's
-    onPointDetect handler expects.
-    """
+    """Click-to-detect at `point`, with candidate labels from `labels` or the dataset's tags."""
     try:
         pt = json.loads(point)
         if not (isinstance(pt, list) and len(pt) == 2):
             raise ValueError("point must be [x, y]")
         px, py = float(pt[0]), float(pt[1])
     except Exception as e:
-        print(f"[charlie/detect_point] 400 invalid point - raw={point!r} err={e}")
+        print(f"[charlie/detect_point] 400 invalid point: raw={point!r} err={e}")
         raise HTTPException(400, f"invalid point payload: {e}")
 
     candidate_labels: list[str] = []
@@ -18755,19 +10641,6 @@ async def charlie_imports_detect_point(
         except Exception:
             pass
 
-    # Decide the route: SAM3 for never-labelled tiles, SAM2+VLM for
-    # already-labelled ones, by the same test as the dataset's badges.
-    use_sam2_vlm = False
-    if project_id and import_id:
-        try:
-            m_manifest = load_manifest(project_id, copy=False) or {}
-            for entry in (m_manifest.get("imports") or []):
-                if isinstance(entry, dict) and entry.get("id") == import_id:
-                    use_sam2_vlm = _import_has_labels(entry)
-                    break
-        except Exception as e:
-            print(f"[charlie/detect_point] manifest lookup failed, defaulting to SAM3: {e}")
-
     image_pil = await _charlie_load_image_pil(
         image, project_id, import_id, endpoint_tag="charlie/detect_point",
     )
@@ -18775,142 +10648,9 @@ async def charlie_imports_detect_point(
 
     loop = asyncio.get_running_loop()
 
-    # SPECIFIC projects: SAM2 point (label-agnostic mask) + reference
-    # resolver - the same basis as the batch job, and the only click-to-
-    # detect path that labels objects whose word SAM3 can't text-match
-    # (e.g. "orangutan", a made-up label). For these projects the
-    # references are the label source of truth, so we use this regardless
-    # of the labelled/unlabelled routing (which only helps general
-    # projects). Falls through to the SAM3 / VLM logic when there are no
-    # usable references.
-    if project_id and state.get("segmenter") is not None:
-        try:
-            dt = await loop.run_in_executor(
-                None, _classify_dataset_type_cached, project_id, candidate_labels,
-            )
-            is_specific = isinstance(dt, dict) and dt.get("type") == "specific"
-        except Exception as e:
-            print(f"[charlie/detect_point] dataset-type lookup failed: {e}")
-            is_specific = False
-        if is_specific:
-            def _run_ref():
-                seg = segment_point(state, image_pil, [px, py])
-                if seg is None:
-                    return None
-                mp = seg.get("polygons") or []
-                box = [float(c) for c in seg["box_xyxy"]]
-                lbl, sc = _charlie_interactive_ref_label(
-                    image_pil, box, mp, project_id, candidate_labels,
-                )
-                return box, mp, lbl, sc, seg.get("score")
-            t0 = time.perf_counter()
-            try:
-                async with state["gpu_lock"].interactive():
-                    ref_res = await loop.run_in_executor(None, _run_ref)
-            except Exception as exc:
-                print(f"[charlie/detect_point] ref path failed: {exc}")
-                ref_res = None
-            if ref_res is not None and ref_res[2]:
-                box, mp, lbl, sc, mask_score = ref_res
-                ms = (time.perf_counter() - t0) * 1000.0
-                print(
-                    f"[charlie/detect_point/sam2+refs] W={W} H={H} "
-                    f"point=({px:.0f},{py:.0f}) label={lbl!r} ms={ms:.0f}"
-                )
-                return {
-                    "pipeline": "charlie",
-                    "width": W, "height": H,
-                    "timings": {"total_ms": ms, "route": "sam2+refs"},
-                    "box_xyxy": box,
-                    "mask": {"polygons": mp},
-                    "label": lbl,
-                    "score": (sc if sc is not None else mask_score),
-                    "rejected": False,
-                    "reject_reason": None,
-                }
-            # else fall through to the SAM3 / VLM routing below.
-
-    if use_sam2_vlm:
-        # SAM2 point prompt - label-agnostic mask under the click.
-        # Cheap (~80-300ms on GPU), runs inside the interactive gate
-        # so it doesn't queue behind the label-charlie batch job.
-        if state.get("segmenter") is None:
-            print("[charlie/detect_point] SAM2 unavailable; falling through to SAM3")
-            use_sam2_vlm = False
-        else:
-            def _run_sam2():
-                return segment_point(state, image_pil, [px, py])
-            t0 = time.perf_counter()
-            try:
-                async with state["gpu_lock"].interactive():
-                    seg = await loop.run_in_executor(None, _run_sam2)
-            except Exception as exc:
-                print(f"[charlie/detect_point] SAM2 raised: {exc}")
-                raise HTTPException(500, f"SAM2 segment failed: {exc}")
-            sam2_ms = (time.perf_counter() - t0) * 1000.0
-            if seg is None:
-                raise HTTPException(422, "no mask found at that point")
-            sam2_box = [float(c) for c in seg["box_xyxy"]]
-            sam2_mask_polys = seg.get("polygons") or []
-            sam2_score = float(seg.get("score")) if seg.get("score") is not None else None
-
-            # VLM picks a label from the candidates. Remote worker
-            # path (VLM_WORKER_URL) is the fast one; local fallback
-            # is slower but keeps the feature working in dev.
-            vlm_label: str | None = None
-            vlm_score: float | None = None
-            t1 = time.perf_counter()
-            try:
-                from vlm_validate import vlm_classify as _vlm_classify
-            except Exception as e:
-                print(f"[charlie/detect_point] vlm_validate import failed: {e}")
-                _vlm_classify = None
-            if _vlm_classify is not None:
-                try:
-                    v_label, v_score = await loop.run_in_executor(
-                        None,
-                        _vlm_classify,
-                        image_pil, sam2_box, candidate_labels, sam2_mask_polys,
-                    )
-                    vlm_label = v_label
-                    if v_score is not None:
-                        vlm_score = float(v_score)
-                except Exception as e:
-                    print(f"[charlie/detect_point] VLM call raised: {e}")
-            vlm_ms = (time.perf_counter() - t1) * 1000.0
-            # Last-resort label: first candidate, so the user gets a
-            # placed box they can rename in one click rather than a
-            # silent 422.
-            if not vlm_label and candidate_labels:
-                vlm_label = candidate_labels[0]
-            score_out = vlm_score if vlm_score is not None else sam2_score
-            print(
-                f"[charlie/detect_point/sam2+vlm] W={W} H={H} point=({px:.0f},{py:.0f}) "
-                f"label={vlm_label!r} sam2_ms={sam2_ms:.0f} vlm_ms={vlm_ms:.0f}"
-            )
-            return {
-                "pipeline": "charlie",
-                "width": W, "height": H,
-                "timings": {
-                    "sam2_ms": sam2_ms,
-                    "vlm_ms": vlm_ms,
-                    "total_ms": sam2_ms + vlm_ms,
-                    "route": "sam2+vlm",
-                },
-                "box_xyxy": sam2_box,
-                "mask": {"polygons": sam2_mask_polys},
-                "label": vlm_label,
-                "score": score_out,
-                "rejected": False,
-                "reject_reason": None,
-            }
-
-    # SAM3 path: unlabelled tiles, or labelled tiles where SAM2 was
-    # unavailable. (`charlie` was never bound in this handler in the SaaS
-    # build - a latent NameError on this route, fixed here.)
     charlie = state.get("charlie")
     if charlie is None:
-        raise HTTPException(503, "SAM3 not loaded")
+        raise HTTPException(503, "SAM 3 is not loaded")
 
     def _run_sam3():
         return charlie.segment_point(
@@ -18924,21 +10664,10 @@ async def charlie_imports_detect_point(
     except Exception as exc:
         import traceback
         traceback.print_exc()
-        raise HTTPException(500, f"charlie detect_point error: {exc}")
+        raise HTTPException(500, f"click to detect failed: {exc}")
 
     if detection is None:
-        # SAM3 found no concept under the click - fall back to the SAM2
-        # floor (+ reference/VLM label) so the click still places a box
-        # instead of dead-ending with a 422.
-        return await _detect_point_unified(
-            image_pil, [px, py],
-            candidate_labels=candidate_labels,
-            project_id=(project_id or None),
-            dataset_type_hint=None,
-            allow_sam3=False,
-            allow_reject=use_sam2_vlm,
-            is_labelled=use_sam2_vlm,
-        )
+        raise HTTPException(422, "no mask found at that point")
 
     box_xyxy = [float(c) for c in detection["box"]]
     mask_polys = (
@@ -18964,86 +10693,6 @@ async def charlie_imports_detect_point(
     }
 
 
-@app.post("/api/charlie/imports/segment_box")
-async def charlie_imports_segment_box(
-    image: UploadFile | None = File(None),
-    box: str = Form(...),
-    labels: str = Form(""),
-    project_id: str = Form(""),
-    import_id: str = Form(""),
-):
-    """Box-prompted segmentation via SAM3 (portable build; SAM2 removed).
-
-    SAM3's input_boxes channel isn't a true "segment inside this box"
-    prompt, so pipeline_charlie.segment_box runs text-prompted SAM3 per
-    candidate label and picks the detection whose bbox best matches the
-    user's box. Source image is loaded from disk via import_id whenever
-    possible; falls back to an `image` upload for unsaved imports.
-    """
-    charlie = state.get("charlie")
-    if charlie is None:
-        raise HTTPException(503, "SAM3 not loaded - segment_box unavailable")
-    try:
-        coords = json.loads(box)
-        if not (isinstance(coords, list) and len(coords) == 4):
-            raise ValueError("box must be [x0, y0, x1, y1]")
-    except Exception as e:
-        raise HTTPException(400, f"invalid box payload: {e}")
-
-    image_pil = await _charlie_load_image_pil(
-        image, project_id, import_id, endpoint_tag="charlie/segment_box",
-    )
-
-    candidate_labels: list[str] = []
-    try:
-        if labels:
-            parsed = json.loads(labels)
-            if isinstance(parsed, list):
-                candidate_labels = [str(t).strip() for t in parsed if str(t).strip()]
-    except Exception:
-        candidate_labels = []
-    if not candidate_labels and project_id:
-        try:
-            candidate_labels = list(
-                (load_manifest(project_id, copy=False) or {}).get("tags") or []
-            )
-        except Exception:
-            candidate_labels = []
-
-    loop = asyncio.get_running_loop()
-
-    def _infer():
-        t0 = time.perf_counter()
-        detection, _timings = charlie.segment_box(
-            image_pil, [float(c) for c in coords], candidate_labels or None,
-            cache_key=(f"{project_id}:{import_id}" if import_id else None),
-        )
-        ms = (time.perf_counter() - t0) * 1000.0
-        return detection, ms
-
-    try:
-        # Interactive - Charlie pipeline's add-box / drag-box. User
-        # is in the BoxEditor waiting on the mask render.
-        async with state["gpu_lock"].interactive():
-            detection, sam3_ms = await loop.run_in_executor(None, _infer)
-    except Exception as exc:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(500, f"charlie segment_box error: {exc}")
-
-    mask_payload = (detection or {}).get("mask")
-    if not mask_payload:
-        raise HTTPException(422, "no mask found in box")
-
-    return {
-        "pipeline": "charlie",
-        "timings": {"sam3_predict_ms": round(sam3_ms, 1), "total_ms": round(sam3_ms, 1)},
-        "box_xyxy": [float(c) for c in coords],
-        "mask": mask_payload,
-        "mask_score": None,
-    }
-
-
 @app.post("/api/charlie/imports/classify_box")
 async def charlie_imports_classify_box(
     image: UploadFile | None = File(None),
@@ -19052,24 +10701,10 @@ async def charlie_imports_classify_box(
     project_id: str = Form(""),
     import_id: str = Form(""),
 ):
-    """Embedding-based classification of a user-drawn bbox.
-
-    SAM3 box-match mask (best effort) → DINOv2 → reference-centroid
-    resolver → optional VLM tiebreak (specific only) via the same
-    confidence-weighted fusion the labelling job uses. SAM2 removed in
-    the portable build; classification degrades gracefully to a plain
-    box crop when no mask is available.
-
-    Source image is loaded from disk via import_id when available
-    (skips the FE-side fetch entirely); falls back to an `image`
-    upload for unsaved imports.
-
-    Returns {label, score, verdict} - same shape as detect_point
-    so the FE pipeline popup renders the same way.
-    """
+    """Label a drawn box with the reference resolver on a specific dataset, else with SAM3."""
     import v2_dinov2 as _v2d
     if not _v2d.is_loaded():
-        raise HTTPException(503, "DINOv2 not loaded yet")
+        raise HTTPException(503, "the image encoder is still loading; try again shortly")
 
     try:
         coords = json.loads(box)
@@ -19089,7 +10724,7 @@ async def charlie_imports_classify_box(
         return {
             "pipeline": "charlie",
             "label": None, "score": None,
-            "reason": "project_id missing - no reference centroids to resolve against",
+            "reason": "no dataset given, so there are no references to compare with",
         }
 
     image_pil = await _charlie_load_image_pil(
@@ -19099,8 +10734,7 @@ async def charlie_imports_classify_box(
     loop = asyncio.get_running_loop()
     timings: dict[str, float] = {}
 
-    # Best-effort mask for the inpaint crop via SAM3's box matcher.
-    # No mask (SAM3 unloaded / no match) → plain box crop downstream.
+    # A SAM3 mask for the crop; without one the crop is the plain box.
     def _segment():
         t0 = time.perf_counter()
         charlie = state.get("charlie")
@@ -19117,34 +10751,23 @@ async def charlie_imports_classify_box(
         return ((detection or {}).get("mask") or None), ms
 
     try:
-        # Interactive - Charlie pipeline's classify_box (called from
-        # the BoxEditor's relabel + add-box flows).
+        # The box editor waits on this call.
         async with state["gpu_lock"].interactive():
-            mask_payload, sam2_ms = await loop.run_in_executor(None, _segment)
+            mask_payload, mask_ms = await loop.run_in_executor(None, _segment)
     except Exception as exc:
         import traceback
         traceback.print_exc()
         raise HTTPException(500, f"classify_box segment failed: {exc}")
-    timings["sam3_mask_ms"] = round(sam2_ms, 1)
+    timings["sam3_mask_ms"] = round(mask_ms, 1)
 
     mask_polys = (
         mask_payload.get("polygons")
         if isinstance(mask_payload, dict) else None
     )
 
-    # Dataset-type branch: specific → embedding resolver; general →
-    # SAM3 text-prompted classification.
-    try:
-        dt = _classify_dataset_type_cached(project_id, list(candidate_list))
-        dataset_type = (
-            (dt.get("type") or "general")
-            if isinstance(dt, dict) else "general"
-        )
-    except Exception:
-        dataset_type = "general"
+    dataset_type = _dataset_type(project_id)["type"]
     try:
         if dataset_type == "specific":
-            # Same classify_box request - interactive throughout.
             async with state["gpu_lock"].interactive():
                 verdict, embed_timings = await loop.run_in_executor(
                     None,
@@ -19163,21 +10786,11 @@ async def charlie_imports_classify_box(
     except Exception as exc:
         import traceback
         traceback.print_exc()
-        raise HTTPException(500, f"charlie classify_box error: {exc}")
+        raise HTTPException(500, f"labelling the box failed: {exc}")
 
-    # VLM tiebreak on ambiguous detections (specific only - the
-    # resolver only sets `ambiguous` when it was called with the
-    # specific path's threshold).
-    if (
-        verdict
-        and verdict.get("ambiguous")
-        and not verdict.get("rejected")
-    ):
-        verdict, vlm_ms = await _charlie_vlm_tiebreak_async(
-            verdict, image_pil, coords_f, mask_polys, loop,
-        )
-        if vlm_ms is not None:
-            timings["vlm_ms"] = round(vlm_ms, 1)
+    # Only the specific path sets `ambiguous`.
+    if verdict and verdict.get("ambiguous"):
+        _charlie_tiebreak(verdict, verdict["sims"])
 
     timings["total_ms"] = round(
         sum(v for v in timings.values() if isinstance(v, (int, float))), 1,
@@ -19199,25 +10812,10 @@ async def charlie_imports_segment_and_classify_box(
     project_id: str = Form(""),
     import_id: str = Form(""),
 ):
-    """One-shot add-box - pure SAM3.
-
-    Single SAM3 round-trip with cached vision: one vision encode +
-    N text-only forwards (one per candidate label). The label whose
-    text-prompted mask has the highest IoU with the user-drawn box
-    wins. Mirrors the click-to-detect endpoint above and matches the
-    user's "make it as fast as possible, just SAM3" brief.
-
-    Previous flow chained SAM2 (box-prompt mask) → DINOv2 + SigLIP
-    embedding → reference-centroid resolver → optional VLM tiebreak.
-    That's still what the batch labelling job uses; the interactive
-    add-box gesture just needs a label fast.
-
-    Returns box_xyxy, mask, label, score - same shape BoxEditor's
-    onAddBoxDetect handler expects.
-    """
+    """Mask and label for a drawn box: the SAM3 hit over the candidate labels that best matches it."""
     charlie = state.get("charlie")
     if charlie is None:
-        raise HTTPException(503, "SAM3 not loaded - add-box unavailable")
+        raise HTTPException(503, "SAM 3 is not loaded")
 
     try:
         coords = json.loads(box)
@@ -19242,48 +10840,6 @@ async def charlie_imports_segment_and_classify_box(
 
     loop = asyncio.get_running_loop()
 
-    # SPECIFIC projects: SAM2 box-prompt (label-agnostic geometry) + the
-    # reference resolver - same basis as the batch job. This is the only
-    # add-box path that labels a box around an object whose label SAM3
-    # can't text-match (e.g. "orangutan", a made-up label). SAM3's
-    # text-IoU shortcut below (general projects) returns 422 for those.
-    is_specific = False
-    if project_id and state.get("segmenter") is not None:
-        try:
-            dt = await loop.run_in_executor(
-                None, _classify_dataset_type_cached, project_id, candidate_list,
-            )
-            is_specific = isinstance(dt, dict) and dt.get("type") == "specific"
-        except Exception as e:
-            print(f"[charlie/segment_and_classify_box] dataset-type lookup failed: {e}")
-    if is_specific:
-        def _run_ref():
-            masks = segment_boxes(state, image_pil, [coords_f])
-            mp = (masks[0] or {}).get("polygons") if (masks and masks[0]) else None
-            if mp is None:
-                return None
-            lbl, sc = _charlie_interactive_ref_label(
-                image_pil, coords_f, mp, project_id, candidate_list,
-            )
-            return mp, lbl, sc
-        try:
-            async with state["gpu_lock"].interactive():
-                ref_res = await loop.run_in_executor(None, _run_ref)
-        except Exception as exc:
-            print(f"[charlie/segment_and_classify_box] ref path failed: {exc}")
-            ref_res = None
-        if ref_res is not None and ref_res[1]:
-            mp, lbl, sc = ref_res
-            return {
-                "pipeline": "charlie",
-                "timings": {},
-                "box_xyxy": coords_f,
-                "mask": {"polygons": mp or []},
-                "label": lbl,
-                "score": sc,
-            }
-        # else fall through to the SAM3 text-IoU path below.
-
     def _run():
         return charlie.segment_box(image_pil, coords_f, candidate_list)
 
@@ -19293,7 +10849,7 @@ async def charlie_imports_segment_and_classify_box(
     except Exception as exc:
         import traceback
         traceback.print_exc()
-        raise HTTPException(500, f"charlie segment_and_classify_box error: {exc}")
+        raise HTTPException(500, f"labelling the box failed: {exc}")
 
     if detection is None:
         raise HTTPException(422, "no mask found in box")
@@ -19315,18 +10871,72 @@ async def charlie_imports_segment_and_classify_box(
     }
 
 
+@app.post("/api/charlie/imports/segment_box")
+async def charlie_imports_segment_box(
+    image: UploadFile | None = File(None),
+    box: str = Form(...),
+    labels: str = Form(""),
+    project_id: str = Form(""),
+    import_id: str = Form(""),
+):
+    """Mask for a drawn, moved or resized box: the SAM3 hit over the given
+    labels, else the dataset's, that best matches it."""
+    charlie = state.get("charlie")
+    if charlie is None:
+        raise HTTPException(503, "SAM 3 is not loaded")
+    try:
+        coords = json.loads(box)
+        if not (isinstance(coords, list) and len(coords) == 4):
+            raise ValueError("box must be [x0, y0, x1, y1]")
+        coords_f = [float(c) for c in coords]
+    except Exception as e:
+        raise HTTPException(400, f"invalid box payload: {e}")
+    candidate_labels: list[str] = []
+    try:
+        parsed = json.loads(labels) if labels else []
+        if isinstance(parsed, list):
+            candidate_labels = [str(t).strip() for t in parsed if str(t).strip()]
+    except Exception:
+        candidate_labels = []
+    if not candidate_labels and project_id:
+        candidate_labels = [str(t) for t in (load_manifest(project_id, copy=False) or {}).get("tags") or []]
+
+    image_pil = await _charlie_load_image_pil(
+        image, project_id, import_id, endpoint_tag="charlie/segment_box",
+    )
+    loop = asyncio.get_running_loop()
+
+    def _run():
+        return charlie.segment_box(
+            image_pil, coords_f, candidate_labels or None,
+            cache_key=(f"{project_id}:{import_id}" if import_id else None),
+        )
+
+    try:
+        async with state["gpu_lock"].interactive():
+            detection, sam3_timings = await loop.run_in_executor(None, _run)
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500, f"segmenting the box failed: {exc}")
+
+    mask = (detection or {}).get("mask")
+    if not mask:
+        raise HTTPException(422, "no mask found in box")
+    return {
+        "pipeline": "charlie",
+        "timings": sam3_timings,
+        "box_xyxy": coords_f,
+        "mask": mask,
+    }
 
 
-
-# ── Model manager + settings (portable build) ────────────────────────────────
-# Drives the first-run setup: HF token in, weights down, models up.
+# Jobs, model manager and settings.
 
 
 @app.get("/api/jobs/active")
 async def jobs_active():
-    """Lightweight global list of queued/running jobs for the status-bar
-    progress segment - survives page navigation, not process restarts
-    (the queue is in-memory)."""
+    """Queued and running jobs. The queue is in memory, so a restart clears it."""
     jm = state["jobs"]
     out = [
         j.to_public()
@@ -19338,9 +10948,7 @@ async def jobs_active():
 
 @app.get("/api/jobs/{job_id}")
 async def job_get(job_id: str):
-    """One job, any status - the headless CLI polls /active until a job
-    disappears, then needs THIS to learn whether it finished or failed
-    (both vanish from /active identically)."""
+    """One job in any status; the CLI reads it once the job leaves /api/jobs/active."""
     for j in state["jobs"].list(limit=500):
         if j.id == job_id:
             return j.to_public()
@@ -19350,20 +10958,6 @@ async def job_get(job_id: str):
 @app.get("/api/models/status")
 async def models_status():
     return await asyncio.to_thread(models_mgr.status)
-
-
-@app.post("/api/models/{name}/download")
-async def models_download(name: str):
-    if name not in models_mgr.REGISTRY:
-        raise HTTPException(404, f"unknown model: {name}")
-    if name == "sam3" and not models_mgr.hf_token():
-        raise HTTPException(
-            400,
-            "facebook/sam3 is license-gated - set a Hugging Face token first "
-            "(POST /api/settings/hf-token)",
-        )
-    rec = await asyncio.to_thread(models_mgr.start_download, name)
-    return {"model": name, "download": rec}
 
 
 @app.post("/api/models/{name}/load")
@@ -19383,35 +10977,8 @@ async def models_load(name: str):
     return {"ok": True, "loading": name}
 
 
-@app.post("/api/models/{name}/unload")
-async def models_unload(name: str):
-    if name != "sam3":
-        raise HTTPException(400, f"unload not supported for: {name}")
-    # Unloading under a run failed every remaining image silently.
-    if any(j.kind == "label_charlie" and j.status in ("queued", "running")
-           for j in state["jobs"].jobs.values()):
-        raise HTTPException(409, "a labelling run is using SAM 3; unload it when that finishes")
-    import pipeline_charlie
-    async with state["gpu_lock"]:  # after any forward pass in flight
-        pipeline_charlie.clear_sam3()
-        state["charlie"] = None
-    import gc as _gc
-    _gc.collect()
-    if str(state.get("device") or "").startswith("cuda"):
-        torch.cuda.empty_cache()
-    elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
-        torch.mps.empty_cache()
-    return {"ok": True, "unloaded": name}
-
-
 class HfTokenIn(BaseModel):
     token: str
-
-
-@app.get("/api/settings/hf-token")
-async def hf_token_status():
-    """Live validation of the stored token (network call to the hub)."""
-    return await asyncio.to_thread(models_mgr.validate_token)
 
 
 @app.post("/api/settings/hf-token")
@@ -19424,9 +10991,7 @@ async def hf_token_set(payload: HfTokenIn):
         raise HTTPException(400, result.get("detail") or "token rejected by Hugging Face")
     models_mgr.set_hf_token(tok)
     result["configured"] = True
-    # Token in hand: kick the SAM3 pipeline immediately (download if
-    # missing, then load) so labelling lights up without another step.
-    if result.get("sam3Access") and state.get("device") != "cpu":
+    if result.get("sam3Access") and not state.get("sam3_off", True):
         if models_mgr.is_downloaded("sam3"):
             if state.get("charlie") is None:
                 asyncio.create_task(_bg_load_charlie())
@@ -19492,8 +11057,7 @@ class WorkspaceIn(BaseModel):
 
 @app.post("/api/settings/workspace")
 async def set_workspace_path(payload: WorkspaceIn):
-    """Persist a new workspace location. Takes effect on next start -
-    re-pointing a live process would orphan open jobs and caches."""
+    """Save a new workspace location, used from the next start."""
     p = (payload.path or "").strip()
     if not p:
         raise HTTPException(400, "empty path")
@@ -19508,19 +11072,19 @@ class DeviceIn(BaseModel):
 
 @app.post("/api/settings/device")
 async def set_device_preference(payload: DeviceIn):
-    """Persist the compute-device choice (Settings picker). Takes effect on
-    next start - models are loaded onto a device at boot, same restart
-    contract as the workspace setting. PK_DEVICE env still wins at boot."""
+    """Save the compute device, used from the next start; PK_DEVICE overrides it."""
     want = (payload.device or "").strip().lower()
     if want not in ("auto", "cuda", "mps", "cpu") and not re.fullmatch(r"cuda:\d+", want):
         raise HTTPException(400, "device must be one of: auto, cuda, mps, cpu, cuda:<n>")
     import workspace as _ws
-    cfg = _ws.load_config()
-    if want == "auto":
-        cfg.pop("device", None)
-    else:
-        cfg["device"] = want
-    _ws.save_config(cfg)
+
+    def _change(cfg: dict) -> None:
+        if want == "auto":
+            cfg.pop("device", None)
+        else:
+            cfg["device"] = want
+
+    _ws.update_config(_change)
     return {"ok": True, "devicePreference": want, "restartRequired": True}
 
 
@@ -19530,11 +11094,9 @@ class LegacyImportIn(BaseModel):
 
 @app.post("/api/import-legacy")
 async def import_legacy_endpoint(payload: LegacyImportIn):
-    """Convert SaaS-era data (backup zip or old backend dir) into the
-    workspace. Runs import_legacy.py's run() in a worker thread - the
-    desktop menu waits on this request (localhost, no timeout)."""
+    """Import a PixelKit server backup, a folder or zip, with import_legacy.py."""
     raw_path = (payload.path or "").strip()
-    if not raw_path:  # Path("") is "." - the engine's own folder
+    if not raw_path:  # Path("") is ".", the engine's own folder
         raise HTTPException(400, "empty path")
     src = Path(raw_path).expanduser()
     if not src.exists():
@@ -19553,26 +11115,23 @@ async def import_legacy_endpoint(payload: LegacyImportIn):
         await asyncio.to_thread(mod.run, src)
     except HTTPException:
         raise
-    except SystemExit as e:  # the script's "nothing to import here"
+    except SystemExit as e:  # raised when src has nothing to import
         raise HTTPException(400, f"legacy import failed: {e}")
     except Exception as e:  # surfaced verbatim in the desktop dialog
         raise HTTPException(500, f"legacy import failed: {e}")
-    # The id->path index scans once per process; without this the imported
-    # projects/containers stay invisible until an engine restart.
+    # The id->path index scans once per process.
     store.rescan()
     return {"ok": True}
 
 
-# ── Trained models (YOLOX-Nano runs under <dataset>/models/) ─────────────────
+# Trained models: YOLOX runs under <dataset>/models/<model dir>/<run id>/.
 
 _RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
 _FAILURE_FILE_RE = re.compile(r"^[0-9]{2,3}_[A-Za-z0-9_-]{1,64}\.jpg$")
 
 
-# A run whose history.json was refreshed this recently is being trained
-# by SOME process (the trainer heartbeats every 30 s during an epoch),
-# even when this engine has no job for it: the CLI, or a previous
-# engine instance that is still finishing.
+# A run whose history.json is younger than this many seconds is training in some process,
+# this engine or another. The trainer rewrites the file every 30 s.
 _RUN_LIVE_SECONDS = 180
 
 
@@ -19587,18 +11146,13 @@ def _history_is_fresh(hist: dict | None) -> bool:
     return (datetime.now(timezone.utc) - t).total_seconds() < _RUN_LIVE_SECONDS
 
 
-def _run_status(run_dir: Path, rep: dict | None, hist: dict | None, active: bool) -> tuple[str, bool]:
-    """(status, resumable). done / rejected come from report.json; a
-    run without one is training (a job is live for the dataset in this
-    engine, or its history file is still being refreshed by another
-    process), interrupted (checkpoint on disk) or failed."""
+def _run_status(run_dir: Path, rep: dict | None, hist: dict | None) -> tuple[str, bool]:
+    """(status, resumable): done or rejected from report.json, else training while
+    history.json is fresh, else interrupted when a checkpoint exists, else failed."""
     if rep is not None:
         return ("rejected" if rep.get("exportRejected") else "done"), False
     resumable = (run_dir / "ckpt_last.pt").is_file()
     hs = (hist or {}).get("status")
-    # Its own heartbeat decides, not the dataset's job flag: while one
-    # run trains, a crashed sibling still saying "training" is not live.
-    del active
     if hs in ("training", "exporting") and _history_is_fresh(hist):
         return "training", False
     if resumable:
@@ -19607,7 +11161,7 @@ def _run_status(run_dir: Path, rep: dict | None, hist: dict | None, active: bool
 
 
 def _run_is_live(run_dir: Path) -> bool:
-    """True while some process is training this run (see _run_status)."""
+    """True while some process is training this run."""
     if (run_dir / "report.json").is_file():
         return False
     hist = _read_run_json(run_dir / "history.json")
@@ -19617,9 +11171,7 @@ def _run_is_live(run_dir: Path) -> bool:
 
 
 def _read_run_json(path: Path):
-    """A run file, or None. Retries a few times: the trainer replaces
-    history.json atomically, and on Windows the reader can hit the
-    instant of the rename."""
+    """A run's JSON file, or None. Retries: on Windows a read can meet the trainer's replace."""
     for i in range(4):
         try:
             return _json_loads(path.read_bytes())
@@ -19635,12 +11187,12 @@ def _read_run_json(path: Path):
     return None
 
 
-def _run_entry(run_dir: Path, active: bool) -> dict | None:
+def _run_entry(run_dir: Path) -> dict | None:
     rep = _read_run_json(run_dir / "report.json")
     hist = _read_run_json(run_dir / "history.json")
     if rep is None and hist is None:
-        return None  # half-written run from an older engine: hide it
-    status, resumable = _run_status(run_dir, rep, hist, active)
+        return None  # not listed
+    status, resumable = _run_status(run_dir, rep, hist)
     src = rep if rep is not None else (hist or {})
     thr = (rep or {}).get("threshold") or None
     history = (rep or {}).get("history") if rep is not None else (hist or {}).get("history")
@@ -19680,8 +11232,7 @@ def _run_entry(run_dir: Path, active: bool) -> dict | None:
         "failuresCount": len((rep or {}).get("failures") or []),
         "hasPredictions": (run_dir / "predictions.json").is_file(),
         "warningsCount": len((rep or {}).get("warnings") or []),
-        # ST Edge AI verification summary (PK-1.3): present when the
-        # compiler ran, so the card can say "0 SW epochs, 898 kB".
+        # ST Edge AI compiler summary, when the compiler ran.
         "neuron6": {
             k: ((rep or {}).get("neuron6") or {}).get(k)
             for k in ("verified", "available", "error", "reason",
@@ -19689,8 +11240,7 @@ def _run_entry(run_dir: Path, active: bool) -> dict | None:
                       "weightsBytes", "activationsBytes",
                       "poolRemainingBytes", "poolUsedPct")
         },
-        # Live curves for a run in progress; finished runs serve theirs
-        # from the detail endpoint.
+        # Live curves; a finished run's come from the detail endpoint.
         "history": history if rep is None else None,
     }
 
@@ -19707,10 +11257,7 @@ def _iter_run_dirs(d: Path):
                 yield run_dir
 
 
-@app.get(
-    "/api/v2/projects/{project_id}/train/preflight",
-    dependencies=[Depends(require_project_read_access)],
-)
+@app.get("/api/v2/projects/{project_id}/train/preflight")
 async def train_preflight(
     project_id: str,
     imgsz: int = 256,
@@ -19719,13 +11266,11 @@ async def train_preflight(
     augmentations: int = 1,
     evalProject: str = "",
 ):
-    """What training would use and what would go wrong: image counts by
-    split, per-class counts, blockers and warnings. Same loader and
-    checks the trainer runs, so the card can refuse before the job."""
+    """Image and class counts, blockers and warnings for training, from the trainer's checks."""
     import train_yolox as _ty
 
     if not store.dataset_exists(project_id):
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     cfg = _train_cfg_from_params({
         "imgsz": imgsz, "split": split, "size": size,
         "augmentations": bool(augmentations), "evalProject": evalProject,
@@ -19739,42 +11284,33 @@ async def train_preflight(
         return {"ok": False, "blockers": [str(e)], "warnings": [], "classes": [], "images": None}
 
 
-@app.get(
-    "/api/v2/projects/{project_id}/models",
-    dependencies=[Depends(require_project_read_access)],
-)
+@app.get("/api/v2/projects/{project_id}/models")
 async def trained_models_list(project_id: str):
     try:
         d = store.dataset_dir(project_id)
     except KeyError:
-        raise HTTPException(404, "project not found")
-    active = _train_job_active(project_id)
+        raise HTTPException(404, "dataset not found")
     out = []
     for run_dir in sorted(_iter_run_dirs(d), key=lambda p: p.name, reverse=True):
-        entry = _run_entry(run_dir, active)
+        entry = _run_entry(run_dir)
         if entry is not None:
             out.append(entry)
     return {"models": out}
 
 
-@app.get(
-    "/api/v2/projects/{project_id}/models/{run_id}",
-    dependencies=[Depends(require_project_read_access)],
-)
+@app.get("/api/v2/projects/{project_id}/models/{run_id}")
 async def trained_model_detail(project_id: str, run_id: str):
-    """The whole report of one run (curves, threshold sweep, per-class
-    precision/recall, confusion matrix, failure gallery), or the live
-    history of a run in progress."""
+    """One run with its report.json, or with its history.json when it has no report."""
     import train_yolox as _ty
 
     if not _RUN_ID_RE.fullmatch(run_id):
         raise HTTPException(400, "bad run id")
     if not store.dataset_exists(project_id):
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     run_dir = _ty.find_run_dir(project_id, run_id)
     if run_dir is None:
         raise HTTPException(404, "run not found")
-    entry = _run_entry(run_dir, _train_job_active(project_id))
+    entry = _run_entry(run_dir)
     if entry is None:
         raise HTTPException(404, "run not found")
     report = _read_run_json(run_dir / "report.json")
@@ -19782,17 +11318,14 @@ async def trained_model_detail(project_id: str, run_id: str):
     return {**entry, "report": report, "live": history}
 
 
-@app.get(
-    "/api/v2/projects/{project_id}/models/{run_id}/export",
-    dependencies=[Depends(require_project_read_access)],
-)
+@app.get("/api/v2/projects/{project_id}/models/{run_id}/export")
 async def trained_model_export(project_id: str, run_id: str):
     import train_yolox as _ty
 
     if not _RUN_ID_RE.fullmatch(run_id):
         raise HTTPException(400, "bad run id")
     if not store.dataset_exists(project_id):
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     run_dir = _ty.find_run_dir(project_id, run_id)
     z = (run_dir / "export.zip") if run_dir is not None else None
     if z is None or not z.is_file():
@@ -19805,19 +11338,15 @@ async def trained_model_export(project_id: str, run_id: str):
     )
 
 
-@app.get(
-    "/api/v2/projects/{project_id}/models/{run_id}/predictions",
-    dependencies=[Depends(require_project_read_access)],
-)
+@app.get("/api/v2/projects/{project_id}/models/{run_id}/predictions")
 async def trained_model_predictions(project_id: str, run_id: str):
-    """Each val image's truth beside the shipped model's boxes
-    (predictions.json), for the side-by-side view."""
+    """The run's predictions.json: each val image's ground truth and predicted boxes."""
     import train_yolox as _ty
 
     if not _RUN_ID_RE.fullmatch(run_id):
         raise HTTPException(400, "bad run id")
     if not store.dataset_exists(project_id):
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     run_dir = _ty.find_run_dir(project_id, run_id)
     path = (run_dir / "predictions.json") if run_dir is not None else None
     if path is None or not path.is_file():
@@ -19825,17 +11354,14 @@ async def trained_model_predictions(project_id: str, run_id: str):
     return FileResponse(path, media_type="application/json")
 
 
-@app.get(
-    "/api/v2/projects/{project_id}/models/{run_id}/failures/{name}",
-    dependencies=[Depends(require_project_read_access)],
-)
+@app.get("/api/v2/projects/{project_id}/models/{run_id}/failures/{name}")
 async def trained_model_failure_image(project_id: str, run_id: str, name: str):
     import train_yolox as _ty
 
     if not _RUN_ID_RE.fullmatch(run_id) or not _FAILURE_FILE_RE.fullmatch(name):
         raise HTTPException(400, "bad id")
     if not store.dataset_exists(project_id):
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     run_dir = _ty.find_run_dir(project_id, run_id)
     if run_dir is None:
         raise HTTPException(404, "run not found")
@@ -19851,20 +11377,15 @@ async def trained_model_failure_image(project_id: str, run_id: str, name: str):
                         headers={"Cache-Control": "private, max-age=86400"})
 
 
-@app.post(
-    "/api/v2/projects/{project_id}/models/{run_id}/resume",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.post("/api/v2/projects/{project_id}/models/{run_id}/resume")
 async def trained_model_resume(project_id: str, run_id: str, request: Request):
-    """Continue an interrupted run from its last checkpoint: the same
-    train_yolox job with only the run id; the checkpoint carries the
-    run's settings."""
+    """Resume an interrupted run from its checkpoint, which carries the run's settings."""
     import train_yolox as _ty
 
     if not _RUN_ID_RE.fullmatch(run_id):
         raise HTTPException(400, "bad run id")
     if not store.dataset_exists(project_id):
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     body = {}
     try:
         body = await request.json()
@@ -19872,8 +11393,7 @@ async def trained_model_resume(project_id: str, run_id: str, request: Request):
         body = {}
     if not isinstance(body, dict):
         body = {}
-    # No await between these checks and schedule(): two concurrent
-    # resumes must not both pass.
+    # No await from here to schedule(), so two concurrent resumes cannot both pass.
     run_dir = _ty.find_run_dir(project_id, run_id)
     if run_dir is None or not (run_dir / "ckpt_last.pt").is_file():
         raise HTTPException(400, "nothing to resume: that run has no checkpoint")
@@ -19881,26 +11401,21 @@ async def trained_model_resume(project_id: str, run_id: str, request: Request):
         raise HTTPException(409, "that run already finished")
     if _train_job_active(project_id):
         raise HTTPException(409, "a training run is already queued or running for this dataset")
+    if _augment_job_active(project_id):
+        raise HTTPException(409, "augmentations are being generated for this dataset; resume when that finishes")
     if _run_is_live(run_dir):
         raise HTTPException(409, "that run is still training in another process")
     params = {"resumeRun": run_id}
     dev = str((body or {}).get("device") or "").strip()
     if dev:
         params["device"] = dev
-    job = state["jobs"].schedule(
-        kind="train_yolox", project=project_id, params=params,
-        user=str((body or {}).get("user") or "anonymous"), n_images=0,
-    )
+    job = state["jobs"].schedule(kind="train_yolox", project=project_id, params=params, n_images=0)
     return {"jobId": job.id, **job.to_public()}
 
 
-@app.delete(
-    "/api/v2/projects/{project_id}/models/{run_id}",
-    dependencies=[Depends(require_project_owner)],
-)
+@app.delete("/api/v2/projects/{project_id}/models/{run_id}")
 async def trained_model_delete(project_id: str, run_id: str):
-    """Remove a run (its weights, exports, gallery). Refused while a
-    training job is live for the dataset, because it could be that run."""
+    """Delete a run. Refused while a training or model-labelling job for the dataset is live."""
     import shutil
 
     import train_yolox as _ty
@@ -19908,7 +11423,7 @@ async def trained_model_delete(project_id: str, run_id: str):
     if not _RUN_ID_RE.fullmatch(run_id):
         raise HTTPException(400, "bad run id")
     if not store.dataset_exists(project_id):
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     run_dir = _ty.find_run_dir(project_id, run_id)
     if run_dir is None:
         raise HTTPException(404, "run not found")
@@ -19921,22 +11436,17 @@ async def trained_model_delete(project_id: str, run_id: str):
         await asyncio.to_thread(shutil.rmtree, run_dir)
     except OSError as e:
         raise HTTPException(500, f"could not delete the run: {e}")
+    await _sync_has_model(project_id)
     return {"ok": True, "run": run_id}
 
 
-# ── Dataset snapshots ─────────────────────────────────────────────────────────
-# Point-in-time copies of the annotation state (dataset.json + one JSON
-# per image) as zips under <dataset>/snapshots/. Images are immutable
-# originals and are deliberately NOT included - a snapshot is cheap and
-# captures exactly what editing can lose. Restores are guarded by an
-# automatic safety snapshot of the current state.
+# Dataset snapshots: dataset.json and annotations/*.json, without images, as zips in snapshots/.
 
 _SNAP_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
 
 
 def _snapshot_write(d: Path) -> dict:
-    """Zip the dataset's annotation state into snapshots/. Returns meta.
-    Runs on a worker thread (file IO only)."""
+    """Zip the annotation state into snapshots/ and return its meta. Called on a worker thread."""
     dj = d / "dataset.json"
     if not dj.exists():
         raise HTTPException(404, "dataset.json missing")
@@ -19987,7 +11497,7 @@ async def snapshots_list(project_id: str):
     try:
         d = store.dataset_dir(project_id)
     except KeyError:
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     sdir = d / "snapshots"
     out = []
     if sdir.exists():
@@ -20015,9 +11525,8 @@ async def snapshots_create(project_id: str):
     try:
         d = store.dataset_dir(project_id)
     except KeyError:
-        raise HTTPException(404, "project not found")
-    # Under the project write lock so a concurrent flush can't tear the
-    # snapshot between reading dataset.json and the annotation files.
+        raise HTTPException(404, "dataset not found")
+    # The write lock keeps a flush from landing between dataset.json and the annotation files.
     lock = await _manifest_write_lock(project_id)
     async with lock:
         return await asyncio.to_thread(_snapshot_write, d)
@@ -20030,15 +11539,13 @@ async def snapshots_restore(project_id: str, snapshot_id: str):
     try:
         d = store.dataset_dir(project_id)
     except KeyError:
-        raise HTTPException(404, "project not found")
+        raise HTTPException(404, "dataset not found")
     path = d / "snapshots" / f"{snapshot_id}.zip"
     if not path.exists():
         raise HTTPException(404, "snapshot not found")
-    # A running labelling/augment job holds a loaded manifest it will
-    # flush later - restoring underneath it would interleave two
-    # timelines. Refuse instead of corrupting.
+    # A running job holds a loaded manifest that it flushes later.
     if _project_job_active(project_id):
-        raise HTTPException(409, "a job is running on this dataset - wait for it to finish before restoring")
+        raise HTTPException(409, "a job is running on this dataset; restore when it finishes")
 
     def _do() -> dict:
         with zipfile.ZipFile(path) as zf:
@@ -20047,13 +11554,11 @@ async def snapshots_restore(project_id: str, snapshot_id: str):
                 raise HTTPException(400, "corrupt snapshot: no dataset.json")
             new_manifest = zf.read("dataset.json")
             anns = {
-                Path(n).name: zf.read(n)  # basename only - no zip-slip
+                Path(n).name: zf.read(n)  # basename only, against zip-slip
                 for n in names
                 if n.startswith("annotations/") and n.endswith(".json") and n.count("/") == 1
             }
-        # Pictures deleted after the snapshot are gone from disk: their
-        # records would come back as broken tiles, and exports would
-        # list annotations for files they cannot include.
+        # Records of images deleted since the snapshot are dropped.
         m_new = store._loads(new_manifest)
         live = {"imports": d / "images", "references": d / "references"}
         gone: set[str] = set()
@@ -20067,10 +11572,10 @@ async def snapshots_restore(project_id: str, snapshot_id: str):
                     gone.add(str(e["id"]))
             if key in m_new:
                 m_new[key] = kept
+        _replace_missing_cover(m_new)
         if gone:
             anns = {fn: b for fn, b in anns.items() if Path(fn).stem not in gone}
-            new_manifest = store._dumps(m_new)
-        # Current state is snapshotted first so a restore is always undoable.
+        new_manifest = store._dumps(m_new)
         safety = _snapshot_write(d)
         ann_dir = d / "annotations"
         ann_dir.mkdir(exist_ok=True)
@@ -20082,11 +11587,9 @@ async def snapshots_restore(project_id: str, snapshot_id: str):
             store.replace(tmp, ann_dir / fn)
         tmp = store.tmp_path(d / "dataset.json")
         tmp.write_bytes(new_manifest)
-        # dataset.json last: its mtime is the manifest-cache validity
-        # stamp, so the cached copy self-invalidates on the next load.
+        # dataset.json last: its mtime is the manifest cache's validity stamp.
         store.replace(tmp, d / "dataset.json")
-        # The files changed behind store.save()'s digest cache and the
-        # manifest RAM cache - drop both so no writer trusts stale state.
+        # The files changed behind store.save()'s digest cache and the manifest cache.
         store.forget(project_id)
         invalidate_manifest_cache(project_id)
         _invalidate_project_payloads(project_id)
@@ -20096,30 +11599,29 @@ async def snapshots_restore(project_id: str, snapshot_id: str):
         return {"ok": True, "restored": snapshot_id, "safetySnapshot": safety["id"],
                 "dropped": len(gone)}
 
-    # Same write lock every other manifest writer takes: a concurrent
-    # flush between our file swap and its save would otherwise revert
-    # half the restore (and skip rewriting "unchanged" annotations).
     lock = await _manifest_write_lock(project_id)
     async with lock:
         return await asyncio.to_thread(_do)
 
 
 
-# ── Reference-editor interactive tools (portable build: SAM3-backed) ─────────
-# The SaaS build served these with SAM2 (segment) + GroundingDINO (classify).
-# Rewritten as thin wrappers over pipeline_charlie + _detect_point_unified so
-# the reference editor keeps its click/box tools on the SAM3-only stack.
+# Reference editor tools, over pipeline_charlie and _detect_point_unified.
 
 async def _reference_image_pil(
     image: UploadFile | None, project_id: str, filename: str, endpoint: str
 ) -> "PILImage.Image":
     if image is not None:
-        raw = await image.read()
+        raw = await _read_upload(image)
         if raw:
             img = PILImage.open(io.BytesIO(raw))
             return ImageOps.exif_transpose(img).convert("RGB")
-    if project_id and filename and "/" not in filename and ".." not in filename:
-        p = project_dir(project_id) / "references" / filename
+    if project_id and filename:
+        refs_root = (project_dir(project_id) / "references").resolve()
+        p = (refs_root / filename).resolve()
+        try:
+            p.relative_to(refs_root)
+        except ValueError:
+            raise HTTPException(403, "forbidden")
         if p.is_file():
             img = PILImage.open(p)
             return ImageOps.exif_transpose(img).convert("RGB")
@@ -20146,7 +11648,7 @@ async def v2_reference_segment_box(
 ):
     charlie = state.get("charlie")
     if charlie is None:
-        raise HTTPException(503, "SAM3 not loaded")
+        raise HTTPException(503, "SAM 3 is not loaded")
     try:
         coords = [float(c) for c in json.loads(box)]
         assert len(coords) == 4
@@ -20183,7 +11685,7 @@ async def v2_reference_classify_box(
 ):
     charlie = state.get("charlie")
     if charlie is None:
-        raise HTTPException(503, "SAM3 not loaded")
+        raise HTTPException(503, "SAM 3 is not loaded")
     try:
         coords = [float(c) for c in json.loads(box)]
         assert len(coords) == 4
@@ -20224,13 +11726,7 @@ async def v2_reference_detect_point(
     candidate = _parse_labels_json(labels)
     if not candidate and project_id:
         candidate = list((load_manifest(project_id, copy=False) or {}).get("tags") or [])
-    result = await _detect_point_unified(
-        image_pil,
-        pt,
-        candidate_labels=candidate,
-        project_id=project_id or "",
-        allow_sam3=True,
-    )
+    result = await _detect_point_unified(image_pil, pt, candidate_labels=candidate)
     fl = (force_label or "").strip()
     if fl and isinstance(result, dict):
         result["label"] = fl
@@ -20238,11 +11734,7 @@ async def v2_reference_detect_point(
 
 
 
-# ── Static UI serving (portable build) ───────────────────────────────────────
-# The packaged app serves the exported UI (ui/out) from this process, so one
-# port serves everything and the SPA's deep links (/app/<id>) fall back to
-# app.html. Registered LAST so every API route wins first. In dev (`next
-# dev` on :3000) the dir may be absent - the catch-all then 404s harmlessly.
+# The exported UI, ui/out or PIXELKIT_UI_DIR. Registered last, so every API route matches first.
 
 def _ui_dir() -> Path | None:
     env = (os.environ.get("PIXELKIT_UI_DIR") or "").strip()
@@ -20269,8 +11761,8 @@ async def serve_ui(full_path: str):
     html = _UI_DIR / f"{full_path}.html"
     if html.is_file():
         return FileResponse(html)
-    if full_path.split("/", 1)[0] in ("app", "guide"):
-        return FileResponse(_UI_DIR / f"{full_path.split('/', 1)[0]}.html")
+    if full_path.split("/", 1)[0] == "app":
+        return FileResponse(_UI_DIR / "app.html")
     nf = _UI_DIR / "404.html"
     if nf.is_file():
         return FileResponse(nf, status_code=404)

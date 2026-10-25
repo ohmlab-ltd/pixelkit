@@ -3,27 +3,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { apiFetch } from "@/lib/apiFetch";
+import { API_BASE, apiFetch } from "@/lib/apiFetch";
 import { patchProjectMeta } from "../../lib/projectMetaCache";
-import { containsProfanity } from "../profanity";
-import { buildProjectLabelColourMap, LABEL_COLOURS, colourForLabelStable } from "./OnboardLabelsV2";
+import { buildProjectLabelColourMap, LABEL_COLOURS, colourForLabelStable } from "./labelColours";
 
-const API =
-  process.env.NEXT_PUBLIC_API_URL ??
-  (typeof window !== "undefined" && window.location.port === "3000"
-    ? "http://localhost:8001"
-    : "");
-
-// V2-native settings popup. Five sections:
-//   1. Rename             , POST /api/projects/{id}/rename
-//   2. Target input shape , local view state, feeds export size warnings
-//   3. Cover              , PUT /api/projects/{id} {cover}; picks from refs OR imports
-//   4. Label colours      , PUT /api/projects/{id} {labelColours}; live-broadcasts
-//   5. Delete             , DELETE /api/projects/{id} {confirm: <name>}
-//
-// Live propagation: on every successful save we mirror state through
-// the existing window-event channel so the workspace + public cards
-// repaint without waiting for their next poll.
+// Project settings: name, input shape, label colours, cover, snapshots, delete.
 
 type Source = { kind: "reference" | "import"; filename: string; preview: string };
 
@@ -51,9 +35,8 @@ export function ProjectSettingsV2({
   labelColours: Record<string, string>;
   references: { filename: string; preview: string }[];
   imports: { filename: string; preview: string }[];
-  /** Target input shape (e.g. "256x256") - the square tensor size the
-      export flow warns against. Lives in the dataset view's state; the
-      section only renders when the trio of props is provided. */
+  /** Model input size such as "256x256". The section renders only when
+      all three input-shape props are set. */
   inputShape?: string;
   inputShapeOptions?: readonly string[];
   onInputShapeChange?: (next: string) => void;
@@ -68,12 +51,10 @@ export function ProjectSettingsV2({
   const [renameError, setRenameError] = useState<string | null>(null);
 
   const [cover, setCover] = useState<string | null>(null);
-  // True when the dataset is using a user-uploaded cover (vs one picked from an
-  // import/reference). Drives the "current cover" preview + supersedes a grid pick.
+  // The cover is an uploaded image rather than a picked one.
   const [coverUploaded, setCoverUploaded] = useState(false);
   const [coverBusy, setCoverBusy] = useState(false);
-  // Cache-buster so the uploaded-cover preview refreshes after a re-upload
-  // (cover_thumb keeps the same URL across uploads).
+  // Cache-buster: cover_thumb keeps its URL across uploads.
   const [coverBust, setCoverBust] = useState(0);
   const coverFileRef = useRef<HTMLInputElement>(null);
 
@@ -85,14 +66,12 @@ export function ProjectSettingsV2({
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [showDelete, setShowDelete] = useState(false);
 
-  // Hydrate fields the stub doesn't already hold in state. The parent
-  // already owns labelColours / labels / aliases; we just need
-  // cover (a manifest-only field the V2 view doesn't track).
+  // Loads the cover, which the parent does not hold.
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        const r = await apiFetch(`/api/projects/${projectId}`);
+        const r = await apiFetch(`/api/v2/projects/${projectId}/overview?imports_limit=0`);
         if (!r.ok) return;
         const m = await r.json() as {
           cover?: string | null;
@@ -108,7 +87,6 @@ export function ProjectSettingsV2({
     return () => { alive = false; };
   }, [projectId]);
 
-  // Esc closes, same shortcut V1 ProjectSettings ships.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
@@ -128,9 +106,7 @@ export function ProjectSettingsV2({
     [labelAliases],
   );
 
-  // Per-label auto-assigned colour map. Read at render time so the
-  // swatch grid shows what the project would use WITHOUT any
-  // override, that's the colour the "Reset" button restores to.
+  // Colours without overrides, which Reset restores.
   const autoMap = useMemo(
     () => buildProjectLabelColourMap(labels),
     [labels],
@@ -140,9 +116,6 @@ export function ProjectSettingsV2({
     return autoMap.get(k) ?? colourForLabelStable(label);
   };
 
-  // Effective colour for the swatch row: override wins, otherwise
-  // the auto-assigned palette slot. Used both to paint each label
-  // row's main swatch + to highlight the active preset in the grid.
   const effective = (label: string): string => {
     const k = label.trim().toLowerCase();
     return editColours[k] || autoColour(label);
@@ -151,11 +124,6 @@ export function ProjectSettingsV2({
   const rename = async () => {
     const trimmed = newName.trim();
     if (!trimmed || trimmed === projectName) { onClose(); return; }
-    if (containsProfanity(trimmed)) {
-      setRenameError(`"${trimmed}" can't be used as a project name.`);
-      setNewName(projectName);
-      return;
-    }
     setRenaming(true);
     setRenameError(null);
     try {
@@ -173,13 +141,11 @@ export function ProjectSettingsV2({
           else if (body) msg = body;
         } catch { if (body) msg = body; }
         setNewName(projectName);
-        if (/banned term/i.test(msg)) setRenameError(`"${trimmed}" can't be used as a project name.`);
-        else setRenameError(msg);
+        setRenameError(msg);
         return;
       }
       const data = await r.json();
       onRenamed(data.name);
-      // Broadcast so other open tabs / sibling lists patch their state.
       window.dispatchEvent(new CustomEvent("pixelkit-project-meta-changed", {
         detail: { projectId, name: data.name },
       }));
@@ -195,7 +161,7 @@ export function ProjectSettingsV2({
     const prev = cover;
     const prevUploaded = coverUploaded;
     setCover(filename);
-    setCoverUploaded(false); // picking (or resetting) supersedes an uploaded cover
+    setCoverUploaded(false); // a pick or reset replaces an uploaded cover
     setCoverBusy(true);
     try {
       const r = await apiFetch(`/api/projects/${projectId}`, {
@@ -216,8 +182,7 @@ export function ProjectSettingsV2({
     }
   };
 
-  // Upload a custom cover image (POST multipart) and flag the dataset as using
-  // an uploaded cover. Clears any grid selection since the upload wins.
+  // An uploaded cover replaces any picked one.
   const uploadCover = async (files: FileList | null) => {
     const f = files?.[0];
     if (!f || coverBusy) return;
@@ -245,27 +210,17 @@ export function ProjectSettingsV2({
     }
   };
 
-  // Colour save, fires INSTANTLY. The previous version debounced
-  // 350 ms to coalesce rapid clicks; that meant a refresh inside the
-  // debounce window lost the user's pick. Now the PUT goes out on
-  // every change, and an AbortController cancels any in-flight save
-  // when a fresh pick lands so a fast click-through can't end with
-  // an earlier request landing AFTER a later one (write-write race).
-  // Last-saved snapshot drives rollback if a save comes back failed.
+  // Each pick saves at once and aborts any save in flight. A failed save
+  // rolls back to the last saved colours.
   const lastSavedColoursRef = useRef<Record<string, string>>(labelColours ?? {});
   const saveAbortRef = useRef<AbortController | null>(null);
 
   const applyColoursOptimistic = useCallback((next: Record<string, string>) => {
-    // Parent state, drives chips under the heading + the dataset
-    // gallery, plus the cross-window event so any other open
-    // surface (terminal, public feed card) picks up the change.
     onLabelColoursChange(next);
     window.dispatchEvent(new CustomEvent("pixelkit-project-meta-changed", {
       detail: { projectId, labelColours: next },
     }));
-    // Mirror into the persistent meta cache so the NEXT page load
-    // paints with the new colour on the first frame, instead of
-    // flashing the previous value while the /overview fetch lands.
+    // The meta cache gives the next page load the new colours on first paint.
     patchProjectMeta(projectId, { labelColours: next });
   }, [projectId, onLabelColoursChange]);
 
@@ -285,8 +240,7 @@ export function ProjectSettingsV2({
       if (!r.ok) throw new Error(await r.text() || `http ${r.status}`);
       lastSavedColoursRef.current = next;
     } catch (e) {
-      // Aborts from a superseding pick are expected, don't surface
-      // them as errors or roll back valid state.
+      // An abort means a newer pick superseded this save.
       if ((e as { name?: string })?.name === "AbortError") return;
       if (ctl.signal.aborted) return;
       setColoursError(e instanceof Error ? e.message : String(e));
@@ -319,7 +273,7 @@ export function ProjectSettingsV2({
   const deleteProject = async () => {
     if (deleteBusy) return;
     if (deleteConfirm.trim() !== projectName) {
-      setDeleteError("Type the project name exactly to confirm.");
+      setDeleteError("Type the dataset name exactly to confirm.");
       return;
     }
     setDeleteBusy(true);
@@ -349,9 +303,6 @@ export function ProjectSettingsV2({
 
   return createPortal(
     <div
-      // Themable modal backdrop: tints with the active background
-      // so the blur reads as a soft frosted overlay in light mode
-      // instead of the hard black panel that flipped both modes.
       className="fixed inset-0 z-[600] backdrop-blur-md bg-[rgb(var(--background-rgb)/0.78)] flex items-start justify-center overflow-auto p-6"
       role="dialog"
       aria-modal="true"
@@ -362,7 +313,7 @@ export function ProjectSettingsV2({
         onClick={(e) => e.stopPropagation()}
       >
         <header className="flex items-center justify-between px-6 py-4 border-b border-foreground/10">
-          <h2 className="text-[15px] font-medium text-[var(--foreground)]">Project settings</h2>
+          <h2 className="text-[15px] font-medium text-[var(--foreground)]">Dataset settings</h2>
           <button
             type="button"
             onClick={onClose}
@@ -395,8 +346,7 @@ export function ProjectSettingsV2({
           {renameError && <div className="text-xs text-[var(--bad)]">{renameError}</div>}
         </section>
 
-        {/* Target input shape - feeds the export flow's box-size warnings.
-            Session-scoped view state owned by the dataset view. */}
+        {/* Target input shape */}
         {inputShape != null && inputShapeOptions && onInputShapeChange && (
           <section className="px-6 py-5 border-b border-foreground/10 grid gap-3">
             <label className="pk-micro">Target input shape</label>
@@ -422,7 +372,7 @@ export function ProjectSettingsV2({
             <p className="max-w-lg text-[11px] leading-relaxed text-foreground/45">
               The square tensor size your detector will resize images to before
               running. Pick the shape that matches the runtime you&rsquo;re
-              targeting - the editor and export flow use it to flag boxes that
+              targeting. The editor and export use it to flag boxes that
               would shrink below the model&rsquo;s detection floor.
             </p>
           </section>
@@ -454,7 +404,7 @@ export function ProjectSettingsV2({
               })}
             </ul>
             <p className="text-[11px] text-foreground/30">
-              Changes propagate to the dataset gallery, image viewer, workspace card, and public feed without a refresh.
+              Changes show in the dataset gallery, image viewer and workspace card without a refresh.
             </p>
           </section>
         )}
@@ -490,13 +440,12 @@ export function ProjectSettingsV2({
             className="hidden"
             onChange={(e) => uploadCover(e.target.files)}
           />
-          {/* Current uploaded cover preview - sits above the pick-from-images
-              grid so the user can see (and replace) it. */}
+          {/* Uploaded cover */}
           {coverUploaded && (
             <div className="flex items-center gap-3 rounded-md border border-[var(--line)] bg-[var(--panel)] p-2.5">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
-                src={`${API}/api/projects/${projectId}/cover_thumb?v=${coverBust}`}
+                src={`${API_BASE}/api/projects/${projectId}/cover_thumb?v=${coverBust}`}
                 alt="Uploaded cover"
                 className="h-14 w-20 shrink-0 rounded-md object-cover"
               />
@@ -524,11 +473,8 @@ export function ProjectSettingsV2({
                       className={[
                         "relative aspect-square rounded-md overflow-hidden border-2 transition-colors",
                         active ? "border-[var(--foreground)]" : "border-transparent hover:border-foreground/40",
-                        // No cursor-wait: the cursor only repaints on
-                        // the next pointer event, so it'd appear to
-                        // stick until the user moves the mouse, even
-                        // though the PUT lands instantly. opacity is
-                        // enough to signal the in-flight state.
+                        // No cursor-wait: the cursor repaints only on the
+                        // next pointer event.
                         coverBusy ? "opacity-60" : "",
                       ].join(" ")}
                       title={`${s.kind}: ${s.filename}`}
@@ -541,10 +487,6 @@ export function ProjectSettingsV2({
                         loading="lazy"
                         decoding="async"
                       />
-                      {/* Floats over the cover thumbnail, keep the
-                          dark bubble + white text in both themes
-                          since it has to read on arbitrary image
-                          content. */}
                       <div className="absolute top-1 left-1 rounded-full bg-black/70 text-white/90 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5">
                         {s.kind === "import" ? "dataset" : s.kind}
                       </div>
@@ -566,24 +508,20 @@ export function ProjectSettingsV2({
 
         {/* Delete */}
         <section className="px-6 py-5 grid gap-3">
-          <label className="pk-micro">Delete project</label>
+          <label className="pk-micro">Delete dataset</label>
           {!showDelete ? (
             <button
               type="button"
               onClick={() => setShowDelete(true)}
               className="self-start rounded-md border border-[var(--bad)] px-4 py-2 text-sm text-[var(--bad)] transition-colors hover:bg-[var(--bad)] hover:text-[var(--background)]"
             >
-              Delete this project
+              Delete this dataset
             </button>
           ) : (
             <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] p-4 grid gap-3">
               <p className="text-sm text-[var(--bad)]">
-                This permanently deletes the project, every reference, every imported image, and every annotation. You can&rsquo;t undo this.
+                This permanently deletes the dataset, every reference, every imported image, and every annotation. You can&rsquo;t undo this.
               </p>
-              {/* "Type X to confirm", strong red so it stays
-                  legible against the pink delete-card background
-                  in light mode (foreground/55 was washing out on
-                  the tinted bg). */}
               <p className="text-xs text-foreground/65">
                 Type <span className="font-mono font-medium text-[var(--foreground)]">{projectName}</span> to confirm.
               </p>
@@ -608,7 +546,7 @@ export function ProjectSettingsV2({
                   onClick={() => void deleteProject()}
                   className="rounded-md bg-[var(--bad)] px-4 py-1.5 text-sm font-medium text-[var(--background)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
-                  {deleteBusy ? "Deleting…" : "Delete project"}
+                  {deleteBusy ? "Deleting…" : "Delete dataset"}
                 </button>
               </div>
             </div>
@@ -620,11 +558,7 @@ export function ProjectSettingsV2({
   );
 }
 
-// Single row in the label-colour list. Default view shows just the
-// current colour as a small circle on the right; hovering anywhere
-// over the row expands the preset palette + colour picker + reset
-// outwards (right-anchored), then collapses with the same animation
-// when the mouse leaves the chip.
+// Label colour row. Hovering the colour pip or its open rail shows the palette.
 function LabelColourRow({
   displayName,
   effectiveColour,
@@ -640,9 +574,6 @@ function LabelColourRow({
   onPick: (hex: string) => void;
   onReset: () => void;
 }) {
-  // Hover-tracked on the pip+rail wrapper specifically, the row
-  // itself doesn't open the picker, only the colour pip does. Stays
-  // open while the cursor sits anywhere over the expanded rail.
   const [hover, setHover] = useState(false);
   return (
     <li className="flex items-center gap-3 rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-2">
@@ -652,13 +583,8 @@ function LabelColourRow({
         onMouseEnter={() => setHover(true)}
         onMouseLeave={() => setHover(false)}
       >
-        {/* Expanding rail, preset swatches + native picker + reset.
-            Width interpolates via grid-template-columns; the inner
-            row scales out from the pip (transform-origin: right) so
-            the swatches feel like they're emerging from the bubble.
-            overflow-x: clip lets the horizontal clip stay tight while
-            keeping the vertical axis visible so :hover scale on
-            individual swatches isn't sliced off. */}
+        {/* Palette rail. overflow-x: clip leaves scaled swatches visible
+            vertically. */}
         <div
           className="grid items-center"
           style={{
@@ -718,8 +644,7 @@ function LabelColourRow({
             </div>
           </div>
         </div>
-        {/* Current-colour pip, anchor + hover target. Always
-            visible; the rail collapses back into this circle. */}
+        {/* Current colour pip */}
         <span
           aria-hidden
           className="inline-block h-5 w-5 rounded-full shrink-0 border border-foreground/15 ml-1 cursor-pointer"
@@ -730,10 +655,8 @@ function LabelColourRow({
   );
 }
 
-// ── Snapshots ────────────────────────────────────────────────────────
-// Point-in-time copies of the annotation state (labels + boxes/masks,
-// never the images). Restore always writes a safety snapshot of the
-// current state first, so it's a two-click, always-undoable action.
+// Snapshots: copies of labels and annotations, without images. A restore
+// snapshots the current state first.
 
 type Snapshot = { id: string; createdAt: string; sizeBytes: number };
 
@@ -754,7 +677,7 @@ function SnapshotsSection({ projectId }: { projectId: string }) {
       const r = await apiFetch(`/api/v2/projects/${projectId}/snapshots`);
       if (r.ok) setSnaps(((await r.json()) as { snapshots: Snapshot[] }).snapshots);
     } catch {
-      /* engine unreachable - section just shows nothing */
+      /* engine unreachable: the section stays empty */
     }
   }, [projectId]);
   useEffect(() => {
@@ -767,7 +690,7 @@ function SnapshotsSection({ projectId }: { projectId: string }) {
     setNote(null);
     try {
       const r = await apiFetch(`/api/v2/projects/${projectId}/snapshots`, { method: "POST" });
-      if (!r.ok) throw new Error(`snapshot failed (${r.status})`);
+      if (!r.ok) throw new Error(`Snapshot failed (${r.status}).`);
       setNote("Snapshot saved.");
       await refresh();
     } catch (e) {
@@ -791,10 +714,9 @@ function SnapshotsSection({ projectId }: { projectId: string }) {
       const r = await apiFetch(`/api/v2/projects/${projectId}/snapshots/${id}/restore`, {
         method: "POST",
       });
-      if (!r.ok) throw new Error(`restore failed (${r.status})`);
-      setNote("Restored - reloading…");
-      // Annotations changed under every open view; a reload is the
-      // honest way to resync the whole dataset page.
+      if (!r.ok) throw new Error(`Restore failed (${r.status}).`);
+      setNote("Restored. Reloading…");
+      // Annotations changed under every open view, so the page reloads.
       window.setTimeout(() => window.location.reload(), 600);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -821,7 +743,7 @@ function SnapshotsSection({ projectId }: { projectId: string }) {
         </button>
       </div>
       <p className="text-xs text-foreground/50">
-        Labels and annotations only - images aren&rsquo;t duplicated. Restoring
+        Labels and annotations only; images aren&rsquo;t duplicated. Restoring
         snapshots the current state first, so it&rsquo;s always undoable.
       </p>
       {(note || error) && (

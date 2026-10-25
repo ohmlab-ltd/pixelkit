@@ -1,6 +1,4 @@
-"""The GPU gate's hand-over: a long holder (training on the labelling
-device) lets waiting clicks and labelling images use the card between
-its steps, then takes the gate back."""
+"""The GPU gate's hand_over lets waiting work use the GPU between a long holder's steps."""
 import asyncio
 
 

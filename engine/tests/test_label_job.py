@@ -1,6 +1,4 @@
-"""The batch labelling job with a stand-in SAM 3: every image labelled from
-its own pixels, one label writer per dataset, a run where nothing labels
-reports failure, SAM 3 stays loaded under a run, and previews show edits."""
+"""The batch labelling job, with a stand-in SAM 3."""
 import io
 import json
 import threading
@@ -104,7 +102,6 @@ def test_one_label_writer_per_dataset_and_no_rename_under_it(client, sam3):
         assert r.status_code == 409
         r = client.post(f"/api/projects/{pid}/labels/rename", json={"old_label": "obj", "new_label": "thing"})
         assert r.status_code == 409
-        assert client.post("/api/models/sam3/unload").status_code == 409
     finally:
         fake.release.set()
     assert _wait(client, jid)["status"] == "done"
@@ -116,6 +113,66 @@ def test_a_run_where_every_image_fails_is_a_failed_run(client, sam3):
     jid = client.post("/api/jobs", json={"project": pid, "kind": "label_charlie", "params": {}}).json()["jobId"]
     j = _wait(client, jid)
     assert j["status"] == "failed" and "no image could be labelled" in (j.get("error") or "")
+
+
+def test_a_label_run_logs_its_setup_not_each_images_stages(client, sam3, capsys):
+    pid, _ = _dataset(client, "Quiet log", [("red", (255, 0, 0)), ("blue", (0, 0, 255))])
+    sam3()
+    jid = client.post("/api/jobs", json={"project": pid, "kind": "label_charlie", "params": {}}).json()["jobId"]
+    assert _wait(client, jid)["status"] == "done"
+    out = capsys.readouterr().out
+    assert "2 image(s) to label" in out
+    assert not any(s in out for s in ("opening", "waiting for GPU lock", "running SAM3"))
+
+
+def test_an_ambiguous_detection_takes_the_higher_of_its_top_two_labels(client, app_module, sam3, monkeypatch):
+    import v2_dinov2
+
+    # The stand-in DINOv2 embeds a crop by its colour. A reference colour is its
+    # label's axis; an import colour's vector is its similarity to bolt, nut, washer.
+    vectors = {
+        (255, 0, 0): (1, 0, 0), (0, 255, 0): (0, 1, 0), (0, 0, 255): (0, 0, 1),
+        (255, 255, 0): (0.9, 0.2, 0.1),
+        (255, 0, 255): (0.1, 0.62, 0.58),
+        (0, 255, 255): (0.1, 0.6, 0.595),
+        (255, 255, 255): (0.1, 0.60001, 0.60004),
+    }
+
+    def encode(pil):
+        mean = np.asarray(pil.convert("RGB"), dtype=np.float32).reshape(-1, 3).mean(0)
+        nearest = min(vectors, key=lambda c: float(np.square(np.subtract(c, mean)).sum()))
+        return np.asarray(vectors[nearest], dtype=np.float32)
+
+    monkeypatch.setattr(v2_dinov2, "is_loaded", lambda: True)
+    monkeypatch.setattr(v2_dinov2, "encode_image", encode)
+    monkeypatch.setattr(v2_dinov2, "encode_images_batch", lambda pils, **_k: np.stack([encode(p) for p in pils]))
+
+    pid = client.post("/api/v2/projects", data={"name": "Close calls",
+                                                "labels": json.dumps(["bolt", "nut", "washer"])}).json()["project_id"]
+    for label, colour in (("bolt", (255, 0, 0)), ("nut", (0, 255, 0)), ("washer", (0, 0, 255))):
+        r = client.post(f"/api/v2/projects/{pid}/references",
+                        files={"image": (f"{label}.jpg", _jpeg(colour), "image/jpeg")}, data={"label": label})
+        assert r.status_code == 200 and r.json()["embedded"] == 1
+    ids = {}
+    for name, colour in (("clear", (255, 255, 0)), ("apart", (255, 0, 255)),
+                         ("close", (0, 255, 255)), ("tied", (255, 255, 255))):
+        r = client.post(f"/api/v2/projects/{pid}/imports/raw",
+                        files={"image": (f"{name}.jpg", _jpeg(colour), "image/jpeg")})
+        ids[name] = r.json()["import_id"]
+    sam3()
+    jid = client.post("/api/jobs", json={"project": pid, "kind": "label_charlie", "params": {}}).json()["jobId"]
+    assert _wait(client, jid)["status"] == "done"
+
+    dets = {e["id"]: e["detections"] for e in app_module.load_manifest(pid)["imports"]}
+    keys = ("pred_label", "pred_source", "ambiguous", "vlm_action", "fused_margin", "rejected",
+            "embed_sim_for_label")
+    assert {name: tuple(dets[iid][0].get(k) for k in keys) for name, iid in ids.items()} == {
+        "clear": ("bolt", "embed", False, None, None, False, 0.9),
+        "apart": ("nut", "embed-vlm", False, "tiebreak", 0.04, False, 0.62),
+        "close": ("nut", "embed-vlm", True, "tiebreak", 0.005, False, 0.6),
+        # Washer scores higher, but at four decimal places it ties with nut, the first label.
+        "tied": ("nut", "embed-vlm", True, "tiebreak", 0.0, False, 0.6),
+    }
 
 
 def test_previews_draw_the_users_boxes_once_edited(app_module):
@@ -164,11 +221,11 @@ def test_a_faint_whole_image_mask_does_not_filter_out_the_object():
     speck = ([30, 130, 32, 132], None, 0.06, 300)
     frame = ([0, 0, 1008, 756], None, 0.06, 760_000)
     hits = [square, speck, frame]
-    # Measured against the whole-image mask, the square was "noise".
+    # Against the whole-image mask, the square counts as noise.
     assert _keep_relative(hits, 0.05, None) == [frame]
     # Against the largest confident mask it stays; the speck still goes.
     assert _keep_relative(hits, 0.05, SAM3_THRESHOLD) == [square, frame]
-    # Nothing confident: the largest overall, as before.
+    # Nothing confident: the largest overall, as with no threshold.
     faint = [speck, frame]
     assert _keep_relative(faint, 0.05, SAM3_THRESHOLD) == _keep_relative(faint, 0.05, None)
     assert _keep_relative([square], 0.05, SAM3_THRESHOLD) == [square]

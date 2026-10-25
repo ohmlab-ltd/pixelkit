@@ -2,19 +2,18 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ProjectTagsRow } from "./components/ProjectTagsRow";
-import { containsProfanity } from "./profanity";
 import { BlurhashCanvas } from "react-blurhash";
-import { LABEL_COLOURS } from "./v2/OnboardLabelsV2";
-import type { ReferenceImage } from "./v2/OnboardReferencesV2";
-import { WordCloud } from "./v2/WordCloud";
+import { LABEL_COLOURS } from "./v2/labelColours";
+import type { ReferenceImage } from "./v2/ReferenceImageEditor";
+import { WORD_CLOUD_EXIT_MS, WordCloud } from "./v2/WordCloud";
 import { PixelKitLoader } from "./v2/PixelKitLoader";
-import { capture } from "./lib/analytics";
 import { ProjectsSection } from "./ProjectsSection";
 import { ProjectPage } from "./ProjectPage";
 import { CreateDatasetModal } from "./CreateDatasetModal";
-import { apiFetch } from "@/lib/apiFetch";
+import { API_BASE, apiFetch } from "@/lib/apiFetch";
 import { onNewDatasetRequest, requestExplorerRefresh } from "@/lib/appNav";
 import { addDataset } from "@/lib/containers";
+import { splitLabels } from "@/lib/labelInput";
 import { readProjectMetaCache, writeProjectMetaCache, type ProjectMetaCache } from "@/lib/projectMetaCache";
 import {
   collectInput,
@@ -24,13 +23,7 @@ import {
   type ParsedDataset,
 } from "@/lib/datasetImport";
 
-const API =
-  process.env.NEXT_PUBLIC_API_URL ??
-  (typeof window !== "undefined" && window.location.port === "3000"
-    ? "http://localhost:8001"
-    : "");
-
-export type ProjectSummary = {
+type ProjectSummary = {
   id: string;
   name: string;
   createdAt: string | null;
@@ -41,49 +34,23 @@ export type ProjectSummary = {
   tags: string[];
   thumbnail: string | null;
   hasModel: boolean;
-  createdBy: string;
-  likes: number;
-  likedByMe: boolean;
-  favourites: number;
   favouritedByMe: boolean;
-  certified: boolean;
-  private?: boolean;
-  // Set on derived ("child") projects - cropped, one-label-per-image clones of
-  // a parent. Drives the derived badge on the card.
+  // Derived projects: cropped, one-label-per-image copies of a parent.
   derived?: { parentProjectId?: string; parentName?: string } | null;
   running?: boolean;
-  // True for projects created via the V2 onboarding flow, drives the
-  // workspace's V1-vs-V2 dispatch when the user clicks a project card.
-  v2?: boolean;
-  // V2-only count of stored reference images (the list endpoint
-  // returns this for V2 projects; for V1 projects it's always 0).
   n_references?: number;
-  // BlurHash-encoded thumbnail (string ~30 chars) for the cover
-  // image. Decoded client-side via react-blurhash into a colour
-  // gradient placeholder that renders before the real image
-  // streams in. Null when the cover is missing or encode failed.
+  // BlurHash of the cover image, or null.
   cover_blurhash?: string | null;
-  // Display-rename map (canonical_lower → renamed). Applied at
-  // chip render so a label rename inside the project view shows
-  // up on the workspace + public cards immediately instead of
-  // waiting for the user to reopen the project.
+  // Lowercase canonical label -> display label.
   label_aliases?: Record<string, string>;
-  // Per-label colour overrides ({canonical_lower: "#rrggbb"}). Used
-  // by the card's chip row so a colour change in Settings repaints
-  // on every workspace + public surface without a refetch.
+  // Per-label colour overrides, lowercase canonical label -> #rrggbb.
   labelColours?: Record<string, string>;
-  // The Project (container) this dataset belongs to, or null. Drives
-  // the clickable Project chip on the dataset card that jumps to the
-  // Project page.
+  // The Project this dataset belongs to, or null.
   container?: { id: string; name: string } | null;
 };
 
 
-// Shallow-equality check on the fields the Workspace cards actually
-// render. We don't deep-compare the whole structure, bytes-level
-// equality is too strict (e.g. server reorders the tag list) and
-// JSON.stringify on every poll is wasteful. Comparing the visible
-// columns is enough to skip needless re-renders.
+// Compares only the fields the cards render, to skip re-renders on a poll.
 function projectsEqual(a: ProjectSummary[] | null, b: ProjectSummary[]): boolean {
   if (!a || a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
@@ -98,12 +65,7 @@ function projectsEqual(a: ProjectSummary[] | null, b: ProjectSummary[]): boolean
       x.n_labelled !== y.n_labelled ||
       x.n_unlabelled !== y.n_unlabelled ||
       x.hasModel !== y.hasModel ||
-      x.likes !== y.likes ||
-      x.likedByMe !== y.likedByMe ||
-      x.favourites !== y.favourites ||
       x.favouritedByMe !== y.favouritedByMe ||
-      x.certified !== y.certified ||
-      x.private !== y.private ||
       (x.container?.id ?? null) !== (y.container?.id ?? null) ||
       (x.container?.name ?? null) !== (y.container?.name ?? null) ||
       x.running !== y.running
@@ -117,9 +79,8 @@ function projectsEqual(a: ProjectSummary[] | null, b: ProjectSummary[]): boolean
 }
 
 
-// Branch glyph flagging a derived (cropped child) project on the cards -
-// quiet neutral icon tone so it doesn't compete with the status chips.
-export function DerivedBadge({ parentName }: { parentName?: string | null }) {
+// Branch glyph for a derived project.
+function DerivedBadge({ parentName }: { parentName?: string | null }) {
   return (
     <svg
       viewBox="0 0 16 16"
@@ -131,10 +92,10 @@ export function DerivedBadge({ parentName }: { parentName?: string | null }) {
       strokeLinecap="round"
       strokeLinejoin="round"
       className="text-[var(--fg-dim)] shrink-0"
-      aria-label="Derived project"
+      aria-label="Derived dataset"
       role="img"
     >
-      <title>{parentName ? `Derived from ${parentName}` : "Derived project"}</title>
+      <title>{parentName ? `Derived from ${parentName}` : "Derived dataset"}</title>
       <circle cx="4" cy="3.2" r="1.7" />
       <circle cx="4" cy="12.8" r="1.7" />
       <circle cx="12" cy="12.8" r="1.7" />
@@ -143,9 +104,7 @@ export function DerivedBadge({ parentName }: { parentName?: string | null }) {
   );
 }
 
-// Workspace sort modes for the toolbar dropdown. Sorting is purely
-// client-side over the already-loaded list (the server only handles
-// the search `q`), so adding a mode here never needs a backend change.
+// Sorting is client-side. The server handles only the search `q`.
 type SortMode = "updated" | "created" | "name" | "images";
 const SORT_OPTIONS: { key: SortMode; label: string }[] = [
   { key: "updated", label: "Recently updated" },
@@ -154,11 +113,8 @@ const SORT_OPTIONS: { key: SortMode; label: string }[] = [
   { key: "images", label: "Most images" },
 ];
 
-// Status chip set for a project card (Labelled / Partial / Unlabelled
-// / In progress, plus Model). Rendered as neutral hairline chips with
-// a small colour dot - tone comes from the dot only, never the chip
-// surface, so the cards stay flat in both themes.
-export function projectStatusBadges(
+// Status chips for a project card.
+function projectStatusBadges(
   project: ProjectSummary,
 ): { label: string; dot: string }[] {
   const nImages = project.n_images ?? 0;
@@ -183,31 +139,6 @@ export function projectStatusBadges(
   return badges;
 }
 
-// Compact "2h ago" / "3d ago" relative timestamp for the card footer.
-// Falls back to an empty string for a missing / unparseable date so
-// the footer just omits the line rather than printing "NaN".
-export function timeAgo(iso: string | null | undefined): string {
-  if (!iso) return "";
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return "";
-  const secs = Math.max(0, Math.round((Date.now() - t) / 1000));
-  if (secs < 60) return "just now";
-  const mins = Math.round(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.round(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.round(hrs / 24);
-  if (days < 7) return `${days}d ago`;
-  const weeks = Math.round(days / 7);
-  if (weeks < 5) return `${weeks}w ago`;
-  const months = Math.round(days / 30);
-  if (months < 12) return `${months}mo ago`;
-  return `${Math.round(days / 365)}y ago`;
-}
-
-// Small custom dropdown for the workspace sort control (button +
-// click-away backdrop + menu), consistent with the rest of the app's
-// pill menus and themes cleanly.
 function SortMenu({
   value,
   onChange,
@@ -290,114 +221,60 @@ function SortMenu({
 export function HomeView({
   onOpen,
   onV2Begin,
-  username,
-  loggedIn = true,
 }: {
-  onOpen: (name: string, owner?: string, displayName?: string, v2?: boolean, fromProjectId?: string) => void;
-  /** Optional V2 entry point. Fired once the user has finished the
-      inline V2 flow (name + labels). The parent mounts the
-      post-onboarding view from this callback. When the prop is
-      undefined the V2 button stays hidden and only the V1 path is
-      reachable. References are always empty at creation time - they
-      can be added later from the dataset view. */
-  onV2Begin?: (
+  onOpen: (id: string, displayName?: string, fromProjectId?: string) => void;
+  /** Fires when onboarding finishes. */
+  onV2Begin: (
     name: string,
     labels: string[],
     references: ReferenceImage[],
     projectId: string | null,
-    /** "onboarding" → the user is arriving straight out of the
-     *  create flow; HomeView's "Opening project…" overlay is still
-     *  on screen, so the project view should suppress its own
-     *  full-screen mount loader.
-     *  null → normal load, project view uses its default loader. */
+    /** "onboarding": straight from the create flow, so the project view skips its own loader. */
     firstLoad?: "onboarding" | null,
   ) => void;
-  username: string;
-  loggedIn?: boolean;
 }) {
-  // Hydrate from localStorage on mount so coming back from a
-  // project view paints the workspace cards (cover photos, names,
-  // counts) on the first frame instead of flashing the loading
-  // spinner. The /api/projects fetch still runs in refresh() and
-  // overwrites with fresh data when it resolves, but the cached
-  // copy carries the user through the fetch latency.
-  const [projects, setProjects] = useState<ProjectSummary[] | null>(() => {
-    if (typeof window === "undefined") return null;
-    try {
-      const raw = window.localStorage.getItem("pixelkit_workspace_projects_v1");
-      if (!raw) return null;
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? (parsed as ProjectSummary[]) : null;
-    } catch {
-      return null;
-    }
-  });
-  // Pagination state, matches the public projects page pattern.
-  // Initial mount fetches one page; sentinel-driven infinite scroll
-  // pulls more. `total` is the canonical project count from the
-  // backend so we can render blurred placeholders for the slots
-  // that haven't paginated in yet.
+  // Null on the first render, as in the static prerender; then the
+  // localStorage copy until refresh() returns.
+  const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
+  // Infinite scroll. `total` is the server's project count, for placeholders.
   const WORKSPACE_PAGE_SIZE = 12;
   const [total, setTotal] = useState<number | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
-  // Live mirror of projects.length so the 4-second poll's refresh
-  // closure always queries the CURRENT pagination cursor instead of
-  // the stale one it captured at creation. Without this the poll
-  // refetched limit=WORKSPACE_PAGE_SIZE forever and clobbered any
-  // paginated entries, which made the workspace flicker every 4 s
-  // when the user had scrolled past the first page.
+  // projects.length for the 4 s poll, whose closure would see a stale value.
   const projectsLenRef = useRef<number>(0);
-  const [creating, setCreating] = useState(false);
-  const [newName, setNewName] = useState("");
-  // Projects the user has just deleted. We strip these from any
-  // /api/projects refresh response until the backend stops listing
-  // them, without this, a refresh that races the delete (R2 cleanup,
-  // shutil.rmtree latency) re-introduces the project card and lets
-  // the user click delete again, which then 404s.
+  // Deleted projects, hidden from refreshes until the server stops listing them.
   const pendingDeleteIdsRef = useRef<Set<string>>(new Set());
-  // Track projects whose favourite toggle is mid-flight. The poll
-  // would otherwise clobber the optimistic state with the (still
-  // un-favourited) server response if the 4 s refresh happens to land
-  // inside the favourite POST's request/response window.
+  // Favourite toggles in flight, kept over a poll that lands before the POST returns.
   const pendingFavouriteIdsRef = useRef<Map<string, boolean>>(new Map());
   const [searchQuery, setSearchQuery] = useState("");
-  // Debounced + ref'd copy of the search query, read by refresh()
-  // and loadMoreWorkspacePage() so they send the latest `q` without
-  // re-binding via deps (refresh is also driven by a setInterval).
+  // Debounced search query. The ref is read by refresh(), which a setInterval also runs.
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const queryRef = useRef("");
-  // Workspace toolbar: tab filter (all vs starred) + sort mode. Both
-  // are client-side over the already-fetched list, so they never
-  // touch the server search (`q`) path or the pagination logic.
+  // Client-side filter and sort.
   const [tab, setTab] = useState<"all" | "starred">("all");
   const [sortMode, setSortMode] = useState<SortMode>("updated");
   const [error, setError] = useState<string | null>(null);
-  // When set, the workspace is replaced by the one-page Project (container) view.
+  // Set: the Project view shows in place of the workspace.
   const [projectViewId, setProjectViewId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ProjectSummary | null>(null);
-  // Id of the dataset currently being duplicated (a few seconds for big
-  // datasets) - disables the card's Duplicate action so it can't double-fire.
+  // Dataset being duplicated. Its Duplicate action is disabled meanwhile.
   const [duplicatingId, setDuplicatingId] = useState<string | null>(null);
 
-  // Deep-link Projects via `?project=<id>` so each Project has a unique,
-  // shareable URL. Read it on mount + on browser back/forward; ProjectPage's
-  // getContainer 404s for non-members, so private Projects stay protected
-  // exactly like private datasets.
+  // ?project=<id> opens that Project.
   useEffect(() => {
-    if (!loggedIn || typeof window === "undefined") return;
+    if (typeof window === "undefined") return;
     const fromUrl = () => new URLSearchParams(window.location.search).get("project");
     const initial = fromUrl();
     if (initial) setProjectViewId(initial);
     const onPop = () => setProjectViewId(fromUrl() || null);
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loggedIn]);
+  }, []);
 
-  // Keep the URL in sync when a Project is opened/closed so it's copy-shareable.
+  // Keeps ?project= in step with the open Project.
   useEffect(() => {
-    if (!loggedIn || typeof window === "undefined") return;
+    if (typeof window === "undefined") return;
     const params = new URLSearchParams(window.location.search);
     const current = params.get("project");
     if (projectViewId) {
@@ -410,89 +287,54 @@ export function HomeView({
       const qs = params.toString();
       window.history.replaceState(null, "", qs ? `${window.location.pathname}?${qs}` : window.location.pathname);
     }
-  }, [projectViewId, loggedIn]);
+  }, [projectViewId]);
 
-  // V2 inline onboarding. The V2 button opens its own naming form
-  // (visually identical to V1) so V1's `creating` flow stays untouched
-  // and either path is a one-click revert. After Enter on the name
-  // field the workspace title swaps to the project name in-place, the
-  // subtitle becomes the V2 prompt, search + add buttons fade out, the
-  // page locks scroll, and the labels stage renders in the same
-  // vertical band underneath. "creating" is the brief loader shown
-  // while the backend creates the dataset before it opens.
+  // Onboarding. "creating" shows a loader while the server creates the dataset.
   type V2Stage = "idle" | "name" | "labels" | "creating" | "import";
   const [v2Stage, setV2Stage] = useState<V2Stage>("idle");
   const [v2Name, setV2Name] = useState("");
   const [v2Labels, setV2Labels] = useState<string[]>([]);
-  // Random colour chosen for each label the moment it's added in the
-  // onboarding chip strip. Persisted to the project's manifest at
-  // creation time (see v2EnsureProject) so the chips stay the colours
-  // the user previewed during onboarding.
+  // Random colour per label, saved with the project by v2EnsureProject.
   const [v2LabelColours, setV2LabelColours] = useState<Record<string, string>>({});
   const [v2Input, setV2Input] = useState("");
-  // ID of the V2 project, created eagerly when the user enters the
-  // references stage. Lets each upload POST directly to
-  // /api/v2/projects/{id}/references, single round-trip, server
-  // runs GD+SAM + saves bytes + embeds in one shot. Without this
-  // we'd hit /references/process (no save) then /references (save
-  // + embed) per image, GPU twice for the same bytes.
+  // Set once v2EnsureProject has created the project.
   const [v2ProjectId, setV2ProjectId] = useState<string | null>(null);
   const v2ProjectIdRef = useRef<string | null>(null);
-  // ── Import-a-labelled-dataset flow ──────────────────────────────────
-  // The "import" stage reuses v2Name + v2EnsureProject + onV2Begin, but
-  // derives its labels from the dataset instead of the chip input. State:
-  // the parsed dataset (folder/zip → VOC items + classes), the chosen max
-  // image size (null = preserve full resolution), and parse/upload progress.
+  // Import of a labelled dataset. Its classes replace the typed labels.
   const [v2ImportParsing, setV2ImportParsing] = useState(false);
   const [v2ImportParseProgress, setV2ImportParseProgress] = useState<{ done: number; total: number } | null>(null);
   const [v2ImportParsed, setV2ImportParsed] = useState<ParsedDataset | null>(null);
   const [v2ImportBusy, setV2ImportBusy] = useState(false);
   const [v2ImportProgress, setV2ImportProgress] = useState<{ done: number; total: number } | null>(null);
-  // Mirrors v2ImportBusy for the v2Reset/ESC closures (which capture a stale
-  // state value) so cancel can't delete the project mid-upload.
+  // v2ImportBusy for the v2Reset and Esc closures, which see a stale value.
   const v2ImportBusyRef = useRef(false);
-  // When the V2 onboarding was started from a Project page, the container id is
-  // parked here so v2HandOff can add the freshly-created dataset to it.
+  // Set while v2HandOff creates the dataset and opens it.
+  const v2HandOffBusyRef = useRef(false);
+  // Project that the new dataset joins, when onboarding started from a Project page.
   const pendingContainerRef = useRef<string | null>(null);
-  // Reactive mirror of the parked container so the labels stage can offer a
-  // Back/Cancel that returns to the project it was launched from (a ref alone
-  // can't drive the render).
+  // State copy of pendingContainerRef, for the labels stage's Back button.
   const [v2ReturnProjectId, setV2ReturnProjectId] = useState<string | null>(null);
-  // Workspace "+ Add Dataset" now collects the name via the same popup the
-  // Project page uses (CreateDatasetModal) instead of an inline bar, then jumps
-  // straight to the labels stage.
+  // Workspace "+ Add Dataset" asks for the name in CreateDatasetModal.
   const [showWorkspaceCreate, setShowWorkspaceCreate] = useState(false);
   useEffect(() => { v2ProjectIdRef.current = v2ProjectId; }, [v2ProjectId]);
 
-  // Desktop shell: the Explorer side bar's "+" button fires a
-  // new-dataset request on the appNav bus. React exactly like the
-  // workspace toolbar's "+ Add Dataset" button - workspace-scoped
-  // (never attached to a Project), same CreateDatasetModal entry.
-  // If onboarding is already underway the request is a no-op rather
-  // than a cancel, "+" should never destroy in-progress work.
+  // The desktop Explorer's "+" acts as "+ Add Dataset". Ignored during onboarding.
   useEffect(() => {
     return onNewDatasetRequest(() => {
       if (v2Stage !== "idle") return;
       pendingContainerRef.current = null;
       setV2ReturnProjectId(null);
       setProjectViewId(null);
-      if (creating) setCreating(false);
-      if (onV2Begin) setShowWorkspaceCreate(true);
-      else setCreating(true);
+      setShowWorkspaceCreate(true);
     });
-  }, [creating, v2Stage, onV2Begin]);
+  }, [v2Stage]);
 
   const v2InputRef = useRef<HTMLInputElement | null>(null);
 
-  // Stages that take over the workspace surface. While active the
-  // search/add buttons fade out and the projects grid is hidden; the
-  // page stays scrollable and the footer remains in flow so the
-  // surface doesn't feel isolated.
+  // Stages that replace the projects grid.
   const v2Active = v2Stage === "labels" || v2Stage === "creating" || v2Stage === "import";
 
-  // Ambient word-cloud overlay is only shown during the labels stage.
-  // We keep it mounted briefly after the user leaves the stage so the
-  // exit fade-out can play before the DOM nodes are removed.
+  // The word cloud stays mounted after the labels stage for its fade-out.
   const v2WordCloudShouldShow = v2Stage === "labels";
   const [v2WordCloudMounted, setV2WordCloudMounted] = useState(false);
   useEffect(() => {
@@ -501,28 +343,26 @@ export function HomeView({
       return;
     }
     if (!v2WordCloudMounted) return;
-    // Match the longest transition in <WordCloud> (640 ms) plus a
-    // little headroom so every word has cleared before we unmount.
-    const t = window.setTimeout(() => setV2WordCloudMounted(false), 750);
+    // Once the last word has faded out.
+    const t = window.setTimeout(() => setV2WordCloudMounted(false), WORD_CLOUD_EXIT_MS + 100);
     return () => window.clearTimeout(t);
   }, [v2WordCloudShouldShow, v2WordCloudMounted]);
 
-  // "Created today" stamp shown beside the creator under the project
-  // title. The project doesn't exist on the backend yet (we only
-  // create it once onboarding finishes) so the display date is
-  // simply the moment the user opened the V2 flow.
-  const v2DateLabel = useMemo(
-    () =>
+  // Today's date, set as onboarding starts: the project is not created until
+  // it finishes, and the first render must match the static prerender.
+  const [v2DateLabel, setV2DateLabel] = useState("");
+  useEffect(() => {
+    if (!v2Active) return;
+    setV2DateLabel(
       new Intl.DateTimeFormat("en-GB", {
         day: "numeric",
         month: "long",
         year: "numeric",
       }).format(new Date()),
-    [],
-  );
+    );
+  }, [v2Active]);
 
-  // Esc closes whichever V2 stage is active and returns the page to
-  // its normal layout. Mirrors how the V1 Cancel button feels.
+  // Esc cancels onboarding.
   useEffect(() => {
     if (v2Stage === "idle") return;
     const onKey = (e: KeyboardEvent) => {
@@ -546,7 +386,6 @@ export function HomeView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [v2Stage, v2Labels.length]);
 
-  // Auto-focus the chip input when the labels stage opens.
   useEffect(() => {
     if (v2Stage !== "labels") return;
     const t = window.setTimeout(() => v2InputRef.current?.focus(), 320);
@@ -554,19 +393,12 @@ export function HomeView({
   }, [v2Stage]);
 
   const v2Reset = () => {
-    // An in-flight import is mid-upload to a real project; ignore cancel/ESC
-    // until it finishes (the Cancel button is disabled too) so we never
-    // delete the project out from under the upload.
-    if (v2ImportBusyRef.current) return;
-    // Cancelling clears any parked Project so the next normal create doesn't
-    // get attached to it.
+    // No cancel during an import upload, which would delete its project, or
+    // during a hand-off, which would open the dataset anyway.
+    if (v2ImportBusyRef.current || v2HandOffBusyRef.current) return;
     pendingContainerRef.current = null;
     setV2ReturnProjectId(null);
-    // Capture the eagerly-created project ID before we wipe local
-    // state so we can DELETE it on the backend. Cancelling out of
-    // the onboarding flow should NOT leave an orphaned project
-    // sitting in the workspace, that was the previous behaviour
-    // (it relied on a fictitious "orphan projects are cheap" claim).
+    // A cancelled onboarding deletes its project.
     const cancelledProjectId = v2ProjectIdRef.current;
     setV2Stage("idle");
     setV2Name("");
@@ -580,11 +412,7 @@ export function HomeView({
     setV2ImportParseProgress(null);
     setV2ImportProgress(null);
     if (cancelledProjectId) {
-      // Fire-and-forget. The user's already on the next screen by
-      // the time the DELETE round-trip lands; surfacing an error
-      // here would be more confusing than the silent failure of
-      // leaving an extra row in the workspace list (which the next
-      // poll picks up anyway if the delete didn't go through).
+      // Fire and forget. A failed delete leaves the project listed.
       apiFetch(`/api/projects/${cancelledProjectId}`, { method: "DELETE" })
         .catch((e) => console.warn("[v2 cancel] project delete failed:", e));
     }
@@ -594,40 +422,29 @@ export function HomeView({
     const nm = (nameArg ?? v2Name).trim();
     if (!nm) return;
     setError(null);
-    if (containsProfanity(nm)) {
-      setError(`"${nm}" can't be used as a project name.`);
-      return;
-    }
-    // When the name came from elsewhere (e.g. the in-project create flow), make
-    // sure it's in state for the rest of the onboarding (v2HandOff reads it).
+    // A name passed in goes into state, where v2HandOff reads it.
     if (nameArg !== undefined) setV2Name(nm);
     setV2Stage("labels");
   };
 
+  // Pasted text arrives without key events, so commas and newlines split it here.
   const v2AddLabel = (raw: string) => {
-    const next = raw.trim().replace(/[,.]+$/g, "").trim();
-    if (!next) return;
-    if (v2Labels.some((l) => l.toLowerCase() === next.toLowerCase())) {
-      setV2Input("");
-      return;
-    }
-    // Client-side profanity guard. Mirrors the backend assert_clean
-    // gate so the user sees an inline error instead of a 400 from
-    // /api/v2/projects when they click Continue.
-    const bad = containsProfanity(next);
-    if (bad) {
-      setError(`"${next}" can't be used as a label.`);
-      return;
+    const parts = splitLabels(raw);
+    if (parts.length === 0) return;
+    const labels = [...v2Labels];
+    const colours = { ...v2LabelColours };
+    for (const next of parts) {
+      if (labels.some((l) => l.toLowerCase() === next.toLowerCase())) continue;
+      // A random unused colour, or any colour once all are used.
+      const taken = new Set(Object.values(colours));
+      const free = LABEL_COLOURS.filter((c) => !taken.has(c));
+      const pool = free.length > 0 ? free : LABEL_COLOURS;
+      colours[next.toLowerCase()] = pool[Math.floor(Math.random() * pool.length)];
+      labels.push(next);
     }
     setError(null);
-    // Random palette pick without repeating any currently-used colour.
-    // Falls back to a random pick once the palette is saturated.
-    const taken = new Set(Object.values(v2LabelColours));
-    const free = LABEL_COLOURS.filter((c) => !taken.has(c));
-    const pool = free.length > 0 ? free : LABEL_COLOURS;
-    const colour = pool[Math.floor(Math.random() * pool.length)];
-    setV2Labels([...v2Labels, next]);
-    setV2LabelColours((m) => ({ ...m, [next.toLowerCase()]: colour }));
+    setV2Labels(labels);
+    setV2LabelColours(colours);
     setV2Input("");
   };
 
@@ -645,9 +462,7 @@ export function HomeView({
     }
   };
 
-  // Create the V2 project on the backend and stash its ID.
-  // Idempotent: returns the existing ID if we've already created
-  // one in this onboarding session (e.g. the import path).
+  // Creates the project once per onboarding. Returns its id, or null on failure.
   const v2EnsureProject = async (
     name: string,
     labels: string[],
@@ -657,22 +472,15 @@ export function HomeView({
       const fd = new FormData();
       fd.append("name", name.trim() || "Untitled");
       fd.append("labels", JSON.stringify(labels));
-      // Colours captured during the labels stage so the project view
-      // keeps the swatches the user previewed in onboarding.
       fd.append("label_colours", JSON.stringify(v2LabelColours));
-      fd.append("owner", username || "anonymous");
       const r = await apiFetch(`/api/v2/projects`, { method: "POST", body: fd });
       if (!r.ok) throw new Error(`http ${r.status}`);
       const data = (await r.json()) as { project_id: string };
       const pid = data.project_id;
       setV2ProjectId(pid);
       v2ProjectIdRef.current = pid;
-      // The Explorer tree polls its listing on a 10 s cycle - nudge it
-      // now so the fresh dataset appears immediately.
+      // The Explorer otherwise polls every 10 s.
       requestExplorerRefresh();
-      capture("project_create", { labels: labels.length });
-      // eslint-disable-next-line no-console
-      console.log("[v2 ensure-project] created:", pid);
       return pid;
     } catch (e) {
       console.error("[v2 ensure-project]", e);
@@ -680,10 +488,7 @@ export function HomeView({
     }
   };
 
-  // ── Import a labelled dataset ────────────────────────────────────────
-  // Switch from the labels stage into the import stage. The project name is
-  // already set (create modal → v2BeginLabels); the dataset's class list
-  // replaces the typed labels.
+  // Import a labelled dataset
   const v2BeginImport = () => {
     setError(null);
     setV2ImportParsed(null);
@@ -692,7 +497,7 @@ export function HomeView({
     setV2Stage("import");
   };
 
-  // Parse a picked folder/zip into a dataset preview (no upload yet).
+  // Parses a picked folder or zip for preview, without uploading.
   const v2PickDataset = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
     setError(null);
@@ -704,7 +509,7 @@ export function HomeView({
       const zip = arr.length === 1 && /\.zip$/i.test(arr[0].name) ? arr[0] : null;
       if (zip && zip.size > ZIP_SOFT_LIMIT_BYTES) {
         throw new Error(
-          "That .zip is very large - unzipping it in the browser may run out of memory. Use the folder picker for big datasets.",
+          "That .zip is very large. Unzipping it here may run out of memory, so use Choose folder for big datasets.",
         );
       }
       const collected = await collectInput(arr);
@@ -720,8 +525,7 @@ export function HomeView({
     }
   };
 
-  // Create the project (labels = the dataset's classes) and stream the
-  // images + their boxes up via the batched ingest endpoint, then open it.
+  // Creates the project, uploads the images and boxes in batches, then opens it.
   const v2RunImport = async () => {
     const parsed = v2ImportParsed;
     if (!parsed || parsed.items.length === 0 || v2ImportBusyRef.current) return;
@@ -731,37 +535,26 @@ export function HomeView({
     setV2ImportProgress({ done: 0, total: parsed.items.length });
     try {
       const projectId = await v2EnsureProject(v2Name, parsed.classes);
-      if (!projectId) throw new Error("Couldn't create the project.");
+      if (!projectId) throw new Error("Couldn't create the dataset.");
       const result = await uploadDataset(
         parsed.items,
-        // Full resolution always - no client-side downscale on import.
-        { maxSide: null },
         (form) =>
           apiFetch(`/api/v2/projects/${projectId}/imports/raw_batch`, { method: "POST", body: form }),
         (p) => setV2ImportProgress({ done: p.done, total: p.total }),
       );
-      capture("dataset_import", {
-        images: result.done,
-        failed: result.failed,
-        classes: parsed.classes.length,
-        format: parsed.format,
-      });
       if (result.done === 0) {
         throw new Error(
           result.errors[0] ? `Import failed: ${result.errors[0]}` : "No images were imported.",
         );
       }
       if (result.failed > 0) {
-        // Partial success still opens the project, but say what was lost
-        // (undecodable HEICs, resource forks) rather than pretending.
+        // A partial import still opens the project.
         const first = result.errors.slice(0, 2).join("; ");
         window.alert(
           `${result.failed} of ${result.total} image(s) could not be imported${first ? `: ${first}` : "."}`,
         );
       }
-      // Open the new project. Labels = the dataset's classes.
-      if (onV2Begin) onV2Begin(v2Name.trim(), parsed.classes, [], projectId, null);
-      // Reset onboarding state (mirrors v2HandOff's tail).
+      onV2Begin(v2Name.trim(), parsed.classes, [], projectId, null);
       v2ImportBusyRef.current = false;
       setV2ImportBusy(false);
       setV2Stage("idle");
@@ -775,10 +568,7 @@ export function HomeView({
       setV2ImportProgress(null);
       } catch (e) {
       setError(e instanceof Error ? e.message : "Import failed.");
-      // Clean up the eagerly-created project so a failed import never leaves an
-      // orphan, and clear the project ref so a retry creates a FRESH project
-      // instead of re-uploading into the half-filled one. Mirrors v2Reset's
-      // orphan delete; the parsed dataset is kept so the user can just retry.
+      // Deletes the half-filled project so a retry starts fresh. The parsed dataset is kept.
       const orphan = v2ProjectIdRef.current;
       if (orphan) {
         apiFetch(`/api/projects/${orphan}`, { method: "DELETE" })
@@ -792,44 +582,42 @@ export function HomeView({
     }
   };
 
-  // Hand the gathered name + labels off to the parent. The backend
-  // project record is created here if it doesn't exist yet (the
-  // import path creates it earlier).
+  // Creates the project if needed and hands it to the parent.
   const v2HandOff = async (
     name: string,
     labels: string[],
     firstLoad: "onboarding" | null = null,
   ) => {
-    if (!onV2Begin) return;
-    let projectId = v2ProjectIdRef.current;
-    if (!projectId) projectId = await v2EnsureProject(name, labels);
-    // If this onboarding was launched from a Project page, add the new dataset
-    // to that Project (container) so it lands inside it, not standalone.
-    if (projectId && pendingContainerRef.current) {
-      try {
-        await addDataset(pendingContainerRef.current, projectId);
-        // Re-fetch the tree again: the dataset now lives under its
-        // Project node, not at the root where the create landed it.
-        requestExplorerRefresh();
-      } catch (e) {
-        console.error("[v2 handoff] add-to-container failed:", e);
+    // One at a time: a second Skip would create a second dataset.
+    if (v2HandOffBusyRef.current) return;
+    v2HandOffBusyRef.current = true;
+    try {
+      let projectId = v2ProjectIdRef.current;
+      if (!projectId) projectId = await v2EnsureProject(name, labels);
+      if (projectId && pendingContainerRef.current) {
+        try {
+          await addDataset(pendingContainerRef.current, projectId);
+          // The dataset moves under its Project node in the tree.
+          requestExplorerRefresh();
+        } catch (e) {
+          console.error("[v2 handoff] add-to-container failed:", e);
+        }
+        pendingContainerRef.current = null;
       }
-      pendingContainerRef.current = null;
+      onV2Begin(name.trim(), labels, [], projectId, firstLoad);
+      setV2Stage("idle");
+      setV2Name("");
+      setV2Labels([]);
+      setV2LabelColours({});
+      setV2Input("");
+      setV2ProjectId(null);
+      v2ProjectIdRef.current = null;
+    } finally {
+      v2HandOffBusyRef.current = false;
     }
-    onV2Begin(name.trim(), labels, [], projectId, firstLoad);
-    setV2Stage("idle");
-    setV2Name("");
-    setV2Labels([]);
-    setV2LabelColours({});
-    setV2Input("");
-    setV2ProjectId(null);
-    v2ProjectIdRef.current = null;
   };
 
-  // Labels confirmed → create the dataset and open it. The "creating"
-  // stage shows the in-place PixelKit loader while the create POST is
-  // in flight; reference images can be added later from the dataset
-  // view's References tab.
+  // Labels confirmed: create the dataset and open it.
   const v2DoneLabels = () => {
     if (v2Labels.length === 0) { v2HandOff(v2Name, []); return; }
     setV2Stage("creating");
@@ -838,10 +626,7 @@ export function HomeView({
 
   const v2SkipFromLabels = () => v2HandOff(v2Name, []);
 
-  // Optimistic patch from a `pixelkit-project-meta-changed` event the
-  // project view dispatches the moment a label save / rename PUT
-  // returns OK. Without this the workspace card waited for the next
-  // /api/projects poll (~4 s) before the rename showed up.
+  // Applies the project view's meta-changed and deleted events before the next poll.
   useEffect(() => {
     if (typeof window === "undefined") return;
     const handler = (e: Event) => {
@@ -851,7 +636,6 @@ export function HomeView({
         label_aliases?: Record<string, string>;
         labelColours?: Record<string, string>;
         name?: string;
-        private?: boolean;
         cover?: string | null;
       } | null | undefined;
       if (!detail?.projectId) return;
@@ -864,7 +648,6 @@ export function HomeView({
                 label_aliases: detail.label_aliases ?? p.label_aliases,
                 labelColours: detail.labelColours ?? p.labelColours,
                 name: detail.name ?? p.name,
-                private: typeof detail.private === "boolean" ? detail.private : p.private,
               }
             : p,
         ) ?? null,
@@ -883,11 +666,8 @@ export function HomeView({
     };
   }, []);
 
-  // Single source of truth for favourites: the backend manifest's
-  // `favouritedBy` list. Both Workspace and Projects pages use the same
-  // toggle endpoint so a project favourited in one is favourited in both.
+  // Favourites are stored in the manifest's `favouritedBy` list.
   const toggleFavourite = async (project_id: string) => {
-    if (!username) return;
     let optimistic = false;
     setProjects((prev) => {
       if (!prev) return prev;
@@ -897,27 +677,18 @@ export function HomeView({
         return { ...p, favouritedByMe: optimistic };
       });
     });
-    // Park the optimistic target so the next /api/projects poll
-    // doesn't undo it before our POST returns. Map key is the project
-    // id; value is the target favouritedByMe we just applied.
     pendingFavouriteIdsRef.current.set(project_id, optimistic);
     try {
-      const r = await fetch(`${API}/api/projects/${project_id}/favourite`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user: username }),
-      });
+      const r = await apiFetch(`/api/projects/${project_id}/favourite`, { method: "POST" });
       if (!r.ok) throw new Error(`http ${r.status}`);
-      const data: { favourites: number; favouritedByMe: boolean } = await r.json();
+      const data: { favouritedByMe: boolean } = await r.json();
       setProjects((prev) =>
         prev?.map((p) =>
-          p.id === project_id
-            ? { ...p, favouritedByMe: data.favouritedByMe, favourites: data.favourites }
-            : p,
+          p.id === project_id ? { ...p, favouritedByMe: data.favouritedByMe } : p,
         ) ?? null,
       );
     } catch {
-      // Revert by next refresh.
+      // The refresh reverts the optimistic toggle.
       refresh();
     } finally {
       pendingFavouriteIdsRef.current.delete(project_id);
@@ -926,26 +697,17 @@ export function HomeView({
 
   const refresh = async () => {
     try {
-      // Paginated to match the public projects page. Limit covers
-      // currently-loaded projects so the periodic poll keeps every
-      // loaded card in sync without re-pulling the user's whole
-      // workspace on every tick.
-      // projectsLenRef is the LIVE pagination cursor, reading
-      // projects?.length here directly would close over the value
-      // at this function's creation time, and the setInterval below
-      // keeps invoking that stale closure forever, so paginated
-      // pages got clobbered on every poll.
+      // Refetches every loaded project, and at least one page.
       const currentCount = projectsLenRef.current;
       const limit = Math.max(WORKSPACE_PAGE_SIZE, currentCount);
       const qParam = queryRef.current ? `&q=${encodeURIComponent(queryRef.current)}` : "";
-      const url = `${API}/api/projects?owner=${encodeURIComponent(username)}&viewer=${encodeURIComponent(username)}&offset=0&limit=${limit}${qParam}`;
+      const url = `${API_BASE}/api/projects?offset=0&limit=${limit}${qParam}`;
       const r = await fetch(url, { cache: "no-store" });
       if (!r.ok) throw new Error(`http ${r.status}`);
       const payload = await r.json() as
         | ProjectSummary[]
         | { total: number; items: ProjectSummary[]; offset?: number; limit?: number };
-      // Pagination form returns {total, items}; back-compat shape is
-      // a bare array. Either way, normalise to (data, totalCount).
+      // The response is {total, items} or a bare array.
       const data: ProjectSummary[] = Array.isArray(payload)
         ? payload
         : (payload.items ?? []);
@@ -953,9 +715,6 @@ export function HomeView({
         ? data.length
         : (payload.total ?? data.length);
       setTotal(totalCount);
-      // Strip any projects the user has just deleted but the backend
-      // still lists (in-flight delete). Once the backend stops listing
-      // them, drop them from the pending set.
       let visible = data;
       if (pendingDeleteIdsRef.current.size > 0) {
         const pending = pendingDeleteIdsRef.current;
@@ -967,12 +726,6 @@ export function HomeView({
           visible = data.filter((p) => !pending.has(p.id));
         }
       }
-      // Respect in-flight favourite toggles. If the user just
-      // optimistically favourited a project but the POST hasn't
-      // returned yet, the server's listing still reports the old
-      // state, patch it back to the user's target so the row
-      // doesn't flicker (favourite → top → un-favourite → bottom
-      // → favourite-again) while the toggle round-trips.
       if (pendingFavouriteIdsRef.current.size > 0) {
         const map = pendingFavouriteIdsRef.current;
         visible = visible.map((p) =>
@@ -981,23 +734,14 @@ export function HomeView({
             : p,
         );
       }
-      // Skip the state update when nothing the user can see has
-      // actually changed. Without this, every 4-second poll forces
-      // a re-render even when the response is byte-identical to the
-      // last one, which (a) flickers the progressive-reveal counter
-      // and (b) makes the search filter feel like it's "reloading"
-      // the project list on every tick.
       setProjects((prev) => (projectsEqual(prev, visible) ? prev : visible));
-      // localStorage + metaCache writes are gated on an empty query ,
-      // when search is active the response is a filtered subset, not
-      // the full workspace, so persisting it would corrupt the cold-
-      // load cache and evict meta for every non-matching project.
+      // Search results are a subset, so only an unfiltered list is cached.
       const searching = queryRef.current !== "";
       if (!searching) {
         try {
           window.localStorage.setItem("pixelkit_workspace_projects_v1", JSON.stringify(data));
         } catch {
-          /* quota, keeps working from in-memory state */
+          /* Quota exceeded. */
         }
         const metaCache: ProjectMetaCache = readProjectMetaCache();
         const seen = new Set<string>();
@@ -1008,12 +752,10 @@ export function HomeView({
             ...prevEntry,
             name: p.name,
             labels: p.tags ?? [],
-            v2: !!p.v2,
             nImages: p.n_images,
             nReferences: p.n_references ?? 0,
             labelAliases: p.label_aliases ?? prevEntry.labelAliases,
             labelColours: p.labelColours ?? prevEntry.labelColours,
-            private: typeof p.private === "boolean" ? p.private : prevEntry.private,
             cachedAt: Date.now(),
           };
         }
@@ -1030,10 +772,8 @@ export function HomeView({
   useEffect(() => {
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [username]);
+  }, []);
 
-  // Debounce the search input so we don't fire a /api/projects fetch
-  // on every keystroke. 200 ms feels instant but coalesces fast typing.
   useEffect(() => {
     const t = window.setTimeout(() => {
       setDebouncedQuery(searchQuery.trim());
@@ -1041,11 +781,7 @@ export function HomeView({
     return () => window.clearTimeout(t);
   }, [searchQuery]);
 
-  // Refetch with the new query when it lands. Resets the loaded slice
-  // so old results don't linger underneath the new ones. The poll
-  // (4 s) picks up the same `q` via queryRef on subsequent ticks.
-  // Skipped on first mount so the localStorage-warmed projects state
-  // isn't clobbered before the initial refresh fills it in.
+  // Refetches on a new query. Skipped on mount, which keeps the cached list.
   const queryEffectRanRef = useRef(false);
   useEffect(() => {
     queryRef.current = debouncedQuery;
@@ -1059,17 +795,7 @@ export function HomeView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debouncedQuery]);
 
-  // Sentinel-driven infinite scroll. Mirrors the public projects
-  // page pattern: when the bottom-of-list anchor scrolls into view
-  // (with a 300 px rootMargin), pull the next page of the user's
-  // workspace projects and append. Skips when there's nothing left
-  // to load or a fetch is already in flight, and pauses while the
-  // search input is non-empty so the filter applies to "loaded so
-  // far" rather than triggering more network round-trips per
-  // keystroke.
-  // Pull the next workspace page. Extracted so both the
-  // IntersectionObserver below AND the scroll-near-bottom fallback can
-  // call it without duplicating the fetch logic.
+  // Appends the next workspace page.
   const loadMoreWorkspacePage = useCallback(async (
     currentLen: number,
     currentTotal: number,
@@ -1079,7 +805,7 @@ export function HomeView({
     try {
       const offset = currentLen;
       const qParam = queryRef.current ? `&q=${encodeURIComponent(queryRef.current)}` : "";
-      const url = `${API}/api/projects?owner=${encodeURIComponent(username)}&viewer=${encodeURIComponent(username)}&offset=${offset}&limit=${WORKSPACE_PAGE_SIZE}${qParam}`;
+      const url = `${API_BASE}/api/projects?offset=${offset}&limit=${WORKSPACE_PAGE_SIZE}${qParam}`;
       const r = await fetch(url, { cache: "no-store" });
       if (!r.ok) throw new Error(`http ${r.status}`);
       const payload = await r.json() as
@@ -1103,7 +829,7 @@ export function HomeView({
       setLoadingMore(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadingMore, username]);
+  }, [loadingMore]);
 
   useEffect(() => {
     if (!projects || total === null) return;
@@ -1117,17 +843,10 @@ export function HomeView({
     }, { rootMargin: "600px" });
     obs.observe(node);
     return () => obs.disconnect();
-  }, [projects, total, loadingMore, username, loadMoreWorkspacePage]);
+  }, [projects, total, loadingMore, loadMoreWorkspacePage]);
 
-  // Scroll-event fallback. The IntersectionObserver gets occasionally
-  // stuck after a back-navigation from a project view, the sentinel
-  // ref repaints to a fresh DOM node but the effect's deps haven't
-  // changed, so the OLD observer is left observing a detached node
-  // and never fires. Listening to scroll lets the user keep
-  // paginating by reaching for the bottom of the list even when the
-  // observer hasn't re-armed. Cheap: a single math check per scroll
-  // tick. Same gates as the observer (search empty, more to load,
-  // not already loading).
+  // Scroll fallback: after a back-navigation the observer can be left on a
+  // detached sentinel node.
   useEffect(() => {
     if (!projects || total === null) return;
     if (projects.length >= total) return;
@@ -1143,33 +862,22 @@ export function HomeView({
     return () => window.removeEventListener("scroll", onScroll);
   }, [projects, total, loadingMore, loadMoreWorkspacePage]);
 
-  // Keep projectsLenRef in sync with the current projects state so
-  // the polling refresh closure below reads the live pagination
-  // cursor instead of the stale one captured at first render.
   useEffect(() => {
     projectsLenRef.current = projects?.length ?? 0;
   }, [projects]);
 
-  // Light poll so the workspace badges (In progress / Partial /
-  // Unlabelled / Labelled) reflect job state without forcing the user
-  // to reload. Kept on the slow side, the badges aren't latency-
-  // critical and the manifest list is the heaviest endpoint.
+  // Polls so the status badges follow job state.
   useEffect(() => {
     const id = window.setInterval(() => {
       refresh();
     }, 4000);
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [username]);
+  }, []);
 
   const sortedProjects = useMemo(() => {
     if (!projects) return null;
-    // Text filtering is server-side via the `q` param; the list we get
-    // back is already the matching set across every project in the
-    // user's workspace, not just the loaded slice. The Starred tab
-    // narrows that further client-side, then we sort by the chosen
-    // mode (favourites still float to the top on the default mode so
-    // the user's pinned projects stay where they expect them).
+    // Search is server-side. Favourites come first in the default sort.
     const base =
       tab === "starred" ? projects.filter((p) => p.favouritedByMe) : projects;
     const byUpdated = (a: ProjectSummary, b: ProjectSummary) =>
@@ -1193,39 +901,27 @@ export function HomeView({
     });
   }, [projects, tab, sortMode]);
 
-  // Starred count for the tab chip. Counts the loaded list (favourite
-  // state is always present on every loaded card) so the number tracks
-  // the user's toggles immediately.
+  // Counts loaded projects only.
   const starredCount = useMemo(
     () => (projects ?? []).filter((p) => p.favouritedByMe).length,
     [projects],
   );
 
-  // Progressive card reveal: instead of mounting every card at once
-  // (which makes every cover-image GET fire in the same tick and
-  // chokes on the browser's ~6 concurrent-connection limit), we mount
-  // them one at a time on a short timer. Each card's image starts
-  // fetching as it mounts, so the loads stagger naturally, the
-  // user sees cards filling in instead of a long blank wait.
-  //
-  // The stagger ONLY applies on the initial cold load. Once it's
-  // ramped up to the full project count we never reset it on a
-  // search-query change, search results should appear instantly,
-  // not re-stagger from zero on every keystroke (which is what was
-  // making search feel laggy). When search is active we also
-  // bypass the slice entirely so the full filtered set renders the
-  // moment the user types.
-  // Seed visibleCount from the cached project count on first
-  // render: when the user comes back to workspace from a project
-  // page, the localStorage hydration in the `projects` initialiser
-  // has already filled `sortedProjects` synchronously, so every
-  // card should mount in the same tick instead of one-per-70ms.
-  // Cold loads (no cache) start at 0 and ramp up via the stagger
-  // below, which still serves its original purpose of spreading
-  // cover-image GETs across the browser's connection limit.
-  const [visibleCount, setVisibleCount] = useState<number>(
-    () => projects?.length ?? 0,
-  );
+  // On a cold load cards mount one per 70 ms, spreading the cover image
+  // requests over the browser's connection limit. A cached list mounts at once.
+  const [visibleCount, setVisibleCount] = useState(0);
+  useEffect(() => {
+    let cached: unknown = null;
+    try {
+      cached = JSON.parse(window.localStorage.getItem("pixelkit_workspace_projects_v1") ?? "null");
+    } catch {
+      /* no usable copy */
+    }
+    if (!Array.isArray(cached)) return;
+    const list = cached as ProjectSummary[];
+    setProjects((cur) => cur ?? list);
+    setVisibleCount((v) => Math.max(v, list.length));
+  }, []);
   const projectCount = sortedProjects?.length ?? 0;
   useEffect(() => {
     if (visibleCount >= projectCount) return;
@@ -1234,101 +930,35 @@ export function HomeView({
     }, 70);
     return () => window.clearTimeout(t);
   }, [visibleCount, projectCount]);
-  // While the user is typing in the search box, ignore the staggered
-  // reveal entirely, render the full match set right now. Cleared
-  // search reverts to whatever the cold-load reveal had reached.
+  // Search results render at once.
   const isSearching = searchQuery.trim().length > 0;
   const renderCount = isSearching ? projectCount : visibleCount;
 
-  const create = async () => {
-    if (!newName.trim()) return;
-    setError(null);
-    const bad = containsProfanity(newName);
-    if (bad) {
-      // Block client-side too so the user gets instant feedback
-      // instead of a round-trip and a generic backend 400.
-      setError(`"${newName.trim()}" can't be used as a project name.`);
-      return;
-    }
-    // Plan-quota gate. If the user is already at their project limit,
-    // refuse before hitting the backend so they get an instant,
-    // specific error message instead of an opaque 200 + soft cap.
-    try {
-      const usageR = await fetch("/api/users/usage", { cache: "no-store" });
-      if (usageR.ok) {
-        const usage = (await usageR.json()) as {
-          plan: string;
-          planName: string;
-          limits: { projects: number };
-          usage: { projects: number };
-        };
-        if (usage.usage.projects >= usage.limits.projects) {
-          setError(
-            `You've hit the limit of ${usage.limits.projects} projects. Delete a project to create another.`,
-          );
-          return;
-        }
-      }
-    } catch {
-      // Usage endpoint down, fall through and let the backend create
-      // the project. Better to over-permit than wedge the user out.
-    }
-    try {
-      const r = await apiFetch(`/api/projects`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newName, owner: username }),
-      });
-      if (!r.ok) throw new Error(`http ${r.status}`);
-      const data = await r.json();
-      requestExplorerRefresh();
-      onOpen(data.id, username, newName);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-
   const confirmDelete = async (project_id: string) => {
-    // Guard against re-entry: if a delete is already in flight for
-    // this project (the dialog can sometimes be re-opened against
-    // a project that hasn't been pruned from a stale refresh yet),
-    // ignore the second click.
+    // A delete already in flight.
     if (pendingDeleteIdsRef.current.has(project_id)) {
       setDeleteTarget(null);
       return;
     }
-    // Optimistic strip so the card disappears immediately. Without
-    // this, a slow R2 delete or shutil.rmtree on Windows leaves the
-    // dialog "Deleting…" while the list still shows the project, and
-    // a subsequent refresh that lands before the backend finishes
-    // can re-list the very project we're trying to delete.
+    // Removed from the list at once, and restored if the delete fails.
     pendingDeleteIdsRef.current.add(project_id);
     const previous = projects;
     setProjects((prev) => (prev ? prev.filter((p) => p.id !== project_id) : prev));
     setDeleteTarget(null);
     try {
       const r = await apiFetch(`/api/projects/${project_id}`, { method: "DELETE" });
-      // 404 = already gone (e.g. another tab deleted it). Treat as
-      // success so a double-click doesn't surface a scary error.
+      // 404: already deleted.
       if (!r.ok && r.status !== 404) throw new Error(`http ${r.status}`);
       requestExplorerRefresh();
-      // Resync, server is the source of truth once the delete has
-      // landed, and the optimistic strip might have raced an unrelated
-      // upload or rename in another tab.
       await refresh();
     } catch (e) {
-      // Restore the card on failure so the user sees the project is
-      // still there and gets a clear error message.
       pendingDeleteIdsRef.current.delete(project_id);
       setProjects(previous);
       setError(e instanceof Error ? e.message : String(e));
     }
   };
 
-  // Duplicate a dataset into a new project owned by the user. The backend
-  // byte-copies the folder (images + labels) and returns the new id; we then
-  // resync from the server so the copy appears in the workspace.
+  // The server copies the dataset's images and labels into a new project.
   const duplicateProject = async (p: ProjectSummary) => {
     if (duplicatingId) return;
     setDuplicatingId(p.id);
@@ -1345,26 +975,20 @@ export function HomeView({
     }
   };
 
-  // One-page Project (container) view replaces the workspace when a Project card
-  // is opened. TopNav lives in page.tsx, so this still renders under the nav.
-  if (loggedIn && projectViewId) {
+  // An open Project shows in place of the workspace.
+  if (projectViewId) {
     return (
       <ProjectPage
         containerId={projectViewId}
-        username={username}
         onBack={() => setProjectViewId(null)}
         onOpenDataset={(dsId) => {
-          // Remember which Project this dataset was opened from so the dataset
-          // view's back button reads "Back to project" and returns here.
+          // The dataset view's back button returns to this Project.
           const fromProject = projectViewId ?? undefined;
           setProjectViewId(null);
-          onOpen(dsId, "", "", true, fromProject);
+          onOpen(dsId, "", fromProject);
         }}
         onNewDataset={(name) => {
-          // The name was entered INSIDE the Project; park the container, leave
-          // the project view, and jump straight into the onboarding LABELS
-          // stage (skipping the workspace name form) so the new dataset lands
-          // in this Project.
+          // Named in the Project: onboarding starts at labels and the dataset joins it.
           pendingContainerRef.current = projectViewId;
           setV2ReturnProjectId(projectViewId);
           setV2Labels([]);
@@ -1376,30 +1000,15 @@ export function HomeView({
     );
   }
 
-  // (Logged-out marketing view removed - the portable build has no accounts.)
-
   return (
     <main className="min-h-full bg-[var(--background)] overflow-x-hidden">
-      {/* Title + controls strip. Stays mounted across all stages ,
-          the H1 / subtitle / search-add buttons crossfade rather
-          than reflow so the page never visibly jumps. `relative
-          z-20` puts the title above the V2 wrapper, which uses a
-          negative top margin to overlap with this band so the
-          centred V2 body lands at exactly 50vh of the viewport. */}
+      {/* Title band. z-20 keeps it above the onboarding body, which
+          overlaps it with a negative top margin. */}
       <section className="relative z-20 mx-auto max-w-[1400px] px-6 pt-8 pb-6 flex items-end justify-between gap-6 flex-wrap">
         <div className="min-w-0 flex-1">
-          {/* Heading stack: "Workspace" → project name. The two H1s'
-              transitions are sequenced, the leaving one fades out
-              first, the arriving one fades in only after a matching
-              delay, so they never appear on screen at the same time
-              the way a simultaneous crossfade did. */}
-          {/* The wrapper's `pb-2` gives the H1s an extra 0.5rem of
-              box height below their line-box so descenders (g, y, p)
-              don't get clipped by the absolute project-name H1's
-              `truncate` (overflow: hidden). Both H1s also get
-              `leading-[1.3]`, slightly looser than `leading-tight`
-              (1.25), so the line-box itself accommodates the tail
-              even on fonts with deeper descenders. */}
+          {/* "Workspace", or the new project's name. The arriving heading
+              fades in after the leaving one has gone. */}
+          {/* pb-2 and leading-[1.3] keep descenders clear of the truncate clip. */}
           <div className="relative pb-2">
             <h1
               className={[
@@ -1423,10 +1032,7 @@ export function HomeView({
               {v2Name || " "}
             </h1>
           </div>
-          {/* Subtitle stack, same sequencing rule. While V2 is active
-              the workspace tagline is replaced by the project's
-              creation date so the user can read off the metadata for
-              the project they just named. */}
+          {/* Tagline, or the creation date during onboarding. */}
           <div className="relative mt-2 max-w-2xl">
             <p
               className={[
@@ -1447,18 +1053,13 @@ export function HomeView({
                   : "opacity-0 translate-y-3 pointer-events-none select-none",
               ].join(" ")}
             >
-              {/* No identity in this build - just the creation-date
-                  stamp. */}
               <span className="tabular-nums">Created {v2DateLabel}</span>
             </div>
           </div>
         </div>
       </section>
 
-      {/* Workspace "+ Add Dataset" name popup - the exact same modal the
-          Project page uses. On continue we jump straight to the labels stage
-          (no Project to attach to, so the parked container + return id are
-          cleared). */}
+      {/* Name popup for "+ Add Dataset", then the labels stage. */}
       <CreateDatasetModal
         open={showWorkspaceCreate}
         onClose={() => setShowWorkspaceCreate(false)}
@@ -1472,45 +1073,26 @@ export function HomeView({
         }}
       />
 
-      {/* V2 stage body. Labels stage uses the centred-prompt layout
-          (negative top margin + flex items-center) so the question
-          sits a touch above the viewport's mid-line. The import
-          stage drops the centring, its content grows as the user
-          picks a dataset, so normal flow + a small top padding
-          keeps the heading anchored and lets the page grow. */}
+      {/* Onboarding body. Labels and creating are centred; import flows from the top. */}
       {v2Active && (
         <div
           className={[
             "relative px-6",
-            // The creating stage shares the same vertically-centred
-            // layout as the labels stage so the swap is in-place, no
-            // wrapper-level layout shift, no flicker between forms.
-            // Pull-up tuned against the denser title band (was -13rem
-            // when the workspace heading was text-6xl marketing scale).
             v2Stage === "labels" || v2Stage === "creating"
               ? "-mt-[6rem] min-h-[calc(100vh-10rem)] flex items-center justify-center pointer-events-none"
               : "pt-4 pb-16 pointer-events-none",
           ].join(" ")}
         >
-          {/* Ambient word backdrop, only on the labels stage. The
-              parent gate keeps it mounted briefly after the user
-              leaves so the fade-out animation plays in full. */}
-          {v2Stage === "labels" && v2WordCloudMounted && <WordCloud show={v2WordCloudShouldShow} />}
+          {v2WordCloudMounted && <WordCloud show={v2WordCloudShouldShow} />}
           {(v2Stage === "labels" || v2Stage === "creating") && (
             <div
               key="v2-labels"
               className={[
-                // Both the form and the creating loader live in
-                // this relative wrapper so the loader can absolute-
-                // overlay the form and the two crossfade in place
-                // when the user clicks Done.
+                // The creating loader overlays the form inside this wrapper.
                 "relative w-full max-w-2xl pointer-events-auto",
                 v2Stage === "labels" ? "animate-[fadeIn_280ms_ease-out]" : "",
               ].join(" ")}
             >
-            {/* Labels form crossfades out as the loader fades in.
-                Done is disabled while the create call is in flight
-                so the user can't double-fire. */}
             <div
               key="v2-labels-form"
               className="transition-all duration-300 ease-out"
@@ -1520,9 +1102,7 @@ export function HomeView({
                 pointerEvents: v2Stage === "labels" ? "auto" : "none",
               }}
             >
-              {/* Back/cancel, only when this onboarding was launched from a
-                  Project page. Abandons the in-progress dataset and returns to
-                  the project the user came from. */}
+              {/* Back to the Project page that started onboarding. */}
               {v2ReturnProjectId && (
                 <button
                   type="button"
@@ -1543,7 +1123,7 @@ export function HomeView({
                 What do you want to detect?
               </h2>
               <p className="mt-3 text-sm text-foreground/50 leading-relaxed">
-                Enter the objects you want to detect, you can add more later.
+                Enter the objects you want to detect. You can add more later.
               </p>
               <button
                 type="button"
@@ -1560,8 +1140,6 @@ export function HomeView({
                   return (
                     <span
                       key={`${lab}-${i}`}
-                      // Neutral chip: hairline border, transparent surface,
-                      // the label's colour carried by the dot only.
                       className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] bg-transparent pl-2.5 pr-1 h-7 font-mono text-[12px] text-[var(--foreground)] animate-[fadeIn_180ms_ease-out]"
                     >
                       <span aria-hidden className="h-2 w-2 rounded-full shrink-0" style={{ backgroundColor: bg }} />
@@ -1600,17 +1178,10 @@ export function HomeView({
                 />
               </div>
 
-              {/* Inline validation (e.g. the profanity guard) - the V1
-                  error strip below is hidden while this stage is up. */}
+              {/* The workspace error line is hidden during onboarding. */}
               {error && <p className="mt-3 text-sm text-[var(--bad)]">{error}</p>}
 
               <div className="mt-6 flex items-center gap-3">
-                {/* Buttons sit on the right via an auto-margin so
-                    Skip + Done hold the right edge. */}
-                {/* Cancel discards the in-progress dataset and returns to the
-                    workspace, matching the Cancel on the Project page's create
-                    flow. (The toolbar's morphed Cancel sits behind this overlay,
-                    so the labels stage needs its own.) */}
                 <button
                   type="button"
                   onClick={v2Reset}
@@ -1623,7 +1194,7 @@ export function HomeView({
                   type="button"
                   onClick={v2SkipFromLabels}
                   className="inline-flex items-center justify-center px-4 py-2.5 text-sm leading-none text-foreground/55 hover:text-foreground/90 transition-colors"
-                  title="Skip, open the project without setting labels."
+                  title="Skip: open the dataset without setting labels."
                 >
                   Skip
                 </button>
@@ -1636,9 +1207,7 @@ export function HomeView({
                   >
                     Done
                   </button>
-                  {/* Ctrl ↵ hint sits OUTSIDE the flex flow so it
-                      doesn't shift the Done button's centreline away
-                      from Skip's. */}
+                  {/* Absolute, so the hint does not shift the Done button. */}
                   <span className="pointer-events-none absolute right-0 top-full mt-1 text-[10px] text-foreground/30 font-mono select-none">
                     Ctrl ↵
                   </span>
@@ -1646,16 +1215,12 @@ export function HomeView({
               </div>
             </div>
 
-            {/* Creating loader, absolute over the form's space.
-                Crossfades with the form (form opacity 0 / loader
-                fades in) so the swap reads as a single in-place
-                transition while the dataset is created and opened. */}
             {v2Stage === "creating" && (
               <div
                 key="v2-creating"
                 className="absolute inset-0 grid place-items-center pointer-events-auto animate-[fadeIn_320ms_ease-out]"
               >
-                <PixelKitLoader size={128} message="Opening project…" />
+                <PixelKitLoader size={128} message="Opening dataset…" />
               </div>
             )}
             </div>
@@ -1689,7 +1254,7 @@ export function HomeView({
 
               {error && <p className="mt-4 text-sm text-[var(--bad)]">{error}</p>}
 
-              {/* Picker - folder or zip. Hidden once a dataset is parsed. */}
+              {/* Folder or zip picker, until a dataset is parsed. */}
               {!v2ImportParsed && (
                 <div className="mt-8 flex flex-wrap items-center gap-3">
                   <label className="pk-btn cursor-pointer">
@@ -1721,14 +1286,14 @@ export function HomeView({
                       <span className="inline-block h-3 w-3 rounded-full border-2 border-foreground/50 border-t-transparent animate-spin" />
                       Reading dataset
                       {v2ImportParseProgress
-                        ? ` - ${v2ImportParseProgress.done}/${v2ImportParseProgress.total}`
+                        ? `… ${v2ImportParseProgress.done}/${v2ImportParseProgress.total}`
                         : "…"}
                     </span>
                   )}
                 </div>
               )}
 
-              {/* Preview + options once parsed. */}
+              {/* Preview once parsed. */}
               {v2ImportParsed && (
                 <div className="mt-8 animate-[fadeIn_220ms_ease-out]">
                   <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] p-5">
@@ -1779,7 +1344,7 @@ export function HomeView({
                       disabled={v2ImportBusy}
                       className="inline-flex items-center justify-center px-4 py-2.5 text-sm leading-none text-foreground/55 hover:text-foreground/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                     >
-                      Choose different
+                      Choose another
                     </button>
                     <button
                       type="button"
@@ -1811,51 +1376,19 @@ export function HomeView({
         </div>
       )}
 
-      {/* V1 inline create form + projects grid. Hidden when V2 is
-          fully active, the V2 stages take over the centre while the
-          projects collapse out. */}
+      {/* Projects grid, hidden during onboarding. */}
       {!v2Active && (
         <section className="mx-auto max-w-[1400px] px-6 pb-24 grid gap-8">
-          {creating && (
-            <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] p-5 grid gap-4 animate-[fadeIn_180ms_ease-out]">
-              <div className="flex flex-wrap items-center gap-3">
-                <input
-                  autoFocus
-                  value={newName}
-                  onChange={(e) => setNewName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") create();
-                    if (e.key === "Escape") setCreating(false);
-                  }}
-                  placeholder="Project name (e.g. potholes)"
-                  className="flex-1 min-w-[12rem] rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-base transition-colors"
-                />
-                <button
-                  onClick={create}
-                  disabled={!newName.trim()}
-                  className="pk-btn pk-btn-primary"
-                >
-                  Create
-                </button>
-              </div>
-            </div>
-          )}
-
           {error && <div className="text-sm text-[var(--bad)]">{error}</div>}
 
-          {/* Projects (team containers of datasets). Sits above the Datasets
-              grid. Only for signed-in users (lists the user's own Projects). */}
-          {loggedIn && (
-            <ProjectsSection onOpenProject={(id) => setProjectViewId(id)} />
-          )}
+          {/* Projects: containers of datasets. */}
+          <ProjectsSection onOpenProject={(id) => setProjectViewId(id)} />
 
-          {/* Datasets toolbar: tab filters (All / Starred) on the left; search,
-              sort + the create button on the right, all on one line. The create
-              button always renders so a brand-new account can make its first
-              dataset; tabs / search / sort only appear once there's data. */}
+          {/* Datasets toolbar. Tabs, search and sort appear once there are
+              datasets; the create button always shows. */}
           {sortedProjects !== null && (
             <div className="flex flex-wrap items-center justify-between gap-3">
-              {/* Left group: tab filters + sort */}
+              {/* Tabs and sort */}
               <div className="flex items-center gap-2 flex-wrap">
                 <div className="flex items-center gap-1">
                   {(projects?.length ?? 0) > 0 && ([
@@ -1890,7 +1423,7 @@ export function HomeView({
                 </div>
                 {(projects?.length ?? 0) > 0 && <SortMenu value={sortMode} onChange={setSortMode} />}
               </div>
-              {/* Right group: search + create */}
+              {/* Search and create */}
               <div className="flex items-center gap-2 flex-wrap">
                 {(projects?.length ?? 0) > 0 && (
                   <label className="relative">
@@ -1918,29 +1451,17 @@ export function HomeView({
                   onClick={() => {
                     // Workspace create is never scoped to a Project.
                     pendingContainerRef.current = null;
-                    if (creating) setCreating(false);
-                    if (v2Stage === "idle") {
-                      if (onV2Begin) {
-                        // Same name popup as the Project page, instead of the
-                        // old inline name bar at the top of the workspace.
-                        setShowWorkspaceCreate(true);
-                      } else {
-                        setCreating((v) => !v);
-                      }
-                    } else {
-                      v2Reset();
-                    }
+                    if (v2Stage === "idle") setShowWorkspaceCreate(true);
+                    else v2Reset();
                   }}
                   className={[
                     "h-9 rounded-md px-4 text-[13px] font-medium transition",
-                    // Accent is reserved for the single primary action; the
-                    // morphed Cancel state drops to the flat neutral recipe.
-                    v2Stage !== "idle" || creating
+                    v2Stage !== "idle"
                       ? "border border-[var(--line)] text-foreground/75 hover:bg-[var(--surface-hover)] hover:border-[var(--line-strong)]"
                       : "bg-[var(--accent)] text-[var(--accent-contrast)] hover:brightness-105",
                   ].join(" ")}
                 >
-                  {v2Stage !== "idle" || creating ? "Cancel" : "+ Add Dataset"}
+                  {v2Stage !== "idle" ? "Cancel" : "+ Add Dataset"}
                 </button>
               </div>
             </div>
@@ -1951,9 +1472,9 @@ export function HomeView({
           ) : sortedProjects.length === 0 ? (
             <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] py-10 text-center text-foreground/50">
               {isSearching ? (
-                <>No projects match <span className="text-foreground/90">&ldquo;{searchQuery.trim()}&rdquo;</span>.</>
+                <>No datasets match <span className="text-foreground/90">&ldquo;{searchQuery.trim()}&rdquo;</span>.</>
               ) : tab === "starred" ? (
-                <>No starred projects yet. Tap the bookmark on a card to pin it here.</>
+                <>No starred datasets yet. Click the star on a card to pin it here.</>
               ) : (
                 <>No datasets yet. Click <span className="text-foreground/90">+ Add Dataset</span> to start one.</>
               )}
@@ -1967,24 +1488,15 @@ export function HomeView({
                     project={p}
                     favourited={p.favouritedByMe}
                     onToggleFavourite={() => toggleFavourite(p.id)}
-                    onOpen={() => onOpen(p.id, p.createdBy, p.name, p.v2)}
+                    onOpen={() => onOpen(p.id, p.name)}
                     onOpenProject={(id) => setProjectViewId(id)}
                     onDelete={() => setDeleteTarget(p)}
                     onDuplicate={() => duplicateProject(p)}
                     duplicating={duplicatingId === p.id}
-                    /* First WORKSPACE_PAGE_SIZE cards load real bytes
-                       immediately; the rest blurhash-only until the
-                       cover scrolls into the near-viewport. */
                     eagerCover={i < WORKSPACE_PAGE_SIZE}
                   />
                 ))}
-                {/* Skeleton placeholders for slots that haven't been
-                    paginated in yet. Renders the full final grid
-                    shape on first paint so the user gets a sense of
-                    the workspace size before everything streams in.
-                    Hidden while the user has an active search query
-                    (the filter applies to "loaded so far", adding
-                    placeholders below the matches would be noise). */}
+                {/* Placeholders for up to one page not yet loaded. */}
                 {tab === "all"
                   && !isSearching
                   && total !== null
@@ -2003,11 +1515,7 @@ export function HomeView({
                     </div>
                   ))}
               </div>
-              {/* Sentinel for the IntersectionObserver, sits 300 px
-                  above the actual bottom so the next page kicks off
-                  before the user reaches the end of what's loaded.
-                  Only armed on the unfiltered All tab, the Starred
-                  view + active search both work over the loaded set. */}
+              {/* Infinite scroll sentinel, on the All tab without a search. */}
               {tab === "all" && !isSearching && total !== null && projects !== null && projects.length < total && (
                 <div ref={sentinelRef} aria-hidden className="h-1 w-full mt-2" />
               )}
@@ -2027,69 +1535,34 @@ export function HomeView({
   );
 }
 
-// Cover image that prefers the server-rendered annotated preview
-// (boxes + masks baked in) and falls back to the raw original when
-// the annotated version doesn't exist for that filename. The
-// `updatedAt` query string busts the browser cache whenever the
-// manifest is rewritten, manual edits in the editor trigger a
-// re-bake on the backend, so the cover refreshes the next time the
-// list is polled without us having to invalidate anything by hand.
+// Card cover: the server's /cover_thumb, which finds the cover among the images
+// and the references. The blurhash stays when it does not load. `updatedAt`
+// busts the browser cache.
 function ProjectCover({
   projectId,
-  thumbnail,
   updatedAt,
-  v2 = false,
   blurhash = null,
   eager = false,
 }: {
   projectId: string;
-  thumbnail: string;
   updatedAt: string | null;
-  v2?: boolean;
-  /** BlurHash placeholder rendered until the card scrolls into the
-      near-viewport. Without it, off-screen cards drop to a flat dark
-      square, fine, just less informative. */
+  /** Placeholder behind the cover image. */
   blurhash?: string | null;
-  /** When true, skip the IntersectionObserver gate and load the cover
-      image immediately. Used for the first row of cards above the
-      fold so they paint with real images on initial load instead of
-      waiting for the observer to tick. */
+  /** Loads the image at once instead of near the viewport. */
   eager?: boolean;
 }) {
-  // Workspace card uses the server-rendered ~480 px /cover_thumb so
-  // the grid paints at a fraction of the bytes the full-resolution
-  // cover would cost. Falls back to the original when the thumb
-  // endpoint isn't available (older deployments) so the card never
-  // shows a broken image. Cache-buster keeps a renamed-cover swap
-  // responsive, backend resolves source from references/ then
-  // imports/ regardless of v2 flag.
   const cacheBuster = updatedAt ? `?v=${encodeURIComponent(updatedAt)}` : "";
-  const thumbUrl = `${API}/api/projects/${projectId}/cover_thumb${cacheBuster}`;
-  const fallbackUrl = v2
-    ? `${API}/api/v2/projects/${projectId}/references/${encodeURIComponent(thumbnail)}${cacheBuster}`
-    : `${API}/api/projects/${projectId}/originals/${encodeURIComponent(thumbnail)}${cacheBuster}`;
-  // `src` is what's actually painted; `pending` is the next URL we're
-  // preloading off-screen. Without this dance the browser blanks the
-  // <img> for one frame whenever the cache-buster (?v=updatedAt)
-  // changes, which happens every time the user opens a project,
-  // because the blurhash-backfill async job writes the manifest and
-  // bumps updatedAt by the time they navigate back to the workspace.
-  // That single-frame blank flashed the white card background.
+  const thumbUrl = `${API_BASE}/api/projects/${projectId}/cover_thumb${cacheBuster}`;
+  // A new URL preloads hidden as `pending`, so the painted `src` never blanks.
   const [src, setSrc] = useState(thumbUrl);
   const [pending, setPending] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
   useEffect(() => {
     if (thumbUrl === src) return;
     setPending(thumbUrl);
   }, [thumbUrl, src]);
 
-  // IntersectionObserver gate. The first WORKSPACE_PAGE_SIZE (= 12)
-  // cards opt-in to `eager` so they paint with real bytes on the
-  // initial render. Everything below the fold renders the blurhash
-  // placeholder until it scrolls within 600 px of the viewport, then
-  // upgrades to the actual <img>. Without this, every card the user
-  // had scrolled past was sitting on the GPU as a decoded JPEG,
-  // making theme toggles + card-open animations stutter on a wide
-  // workspace.
+  // A non-eager cover loads once it is within 600 px of the viewport.
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [showImage, setShowImage] = useState<boolean>(eager);
   useEffect(() => {
@@ -2126,26 +1599,25 @@ function ProjectCover({
       )}
       {showImage && (
         <>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={src}
-            alt=""
-            loading="lazy"
-            decoding="async"
-            onError={() => { if (src !== fallbackUrl) setSrc(fallbackUrl); }}
-            className="absolute inset-0 w-full h-full object-cover"
-          />
+          {!failed && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={src}
+              alt=""
+              loading="lazy"
+              decoding="async"
+              onError={() => setFailed(true)}
+              className="absolute inset-0 w-full h-full object-cover"
+            />
+          )}
           {pending && pending !== src && (
             // eslint-disable-next-line @next/next/no-img-element
             <img
               src={pending}
               alt=""
               decoding="async"
-              onLoad={() => { setSrc(pending); setPending(null); }}
-              onError={() => {
-                if (pending !== fallbackUrl) setPending(fallbackUrl);
-                else setPending(null);
-              }}
+              onLoad={() => { setSrc(pending); setPending(null); setFailed(false); }}
+              onError={() => setPending(null)}
               style={{ display: "none" }}
             />
           )}
@@ -2175,20 +1647,12 @@ function ProjectCard({
   onDelete: () => void;
   onDuplicate?: () => void;
   duplicating?: boolean;
-  /** First-row hint, when true, the cover skips its
-      IntersectionObserver gate and loads bytes immediately on
-      mount. */
+  /** The cover image loads at once. */
   eagerCover?: boolean;
 }) {
-  // Tag-chip colours come from colourForLabelStable so the same label
-  // keeps its colour across the workspace card, public-feed card, and
-  // the project page (see ProjectTagsRow). Status pills are shared with
-  // the public feed via projectStatusBadges so both surfaces match.
   const statusBadges = projectStatusBadges(project);
   const [tagsOverflowOpen, setTagsOverflowOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  // Shared chrome for the two floating cover buttons: a frosted white
-  // pill that stays legible on any thumbnail in both themes.
   const coverBtn =
     "h-8 w-8 rounded-md grid place-items-center backdrop-blur-md bg-white/85 hover:bg-white text-zinc-700 transition-colors";
   const coverBtnShadow = { boxShadow: "var(--shadow-soft)" };
@@ -2196,9 +1660,7 @@ function ProjectCard({
     <div
       className="pk-card pk-card-hover group overflow-hidden rounded-md"
       style={{
-        // Lift the card above the dim overlay (z-1000) while either
-        // popup (tag overflow / overflow menu) is open so the card
-        // chrome stays bright.
+        // Above the dim overlay, z-1000, while a popup is open.
         position: tagsOverflowOpen || menuOpen ? "relative" : undefined,
         zIndex: tagsOverflowOpen || menuOpen ? 1001 : undefined,
       }}
@@ -2209,9 +1671,7 @@ function ProjectCard({
             {project.thumbnail ? (
               <ProjectCover
                 projectId={project.id}
-                thumbnail={project.thumbnail}
                 updatedAt={project.updatedAt}
-                v2={project.v2}
                 blurhash={project.cover_blurhash ?? null}
                 eager={eagerCover}
               />
@@ -2220,23 +1680,13 @@ function ProjectCard({
             )}
           </div>
         </button>
-        {project.certified && (
-          <div
-            className="absolute top-3 left-3 inline-flex items-center gap-1.5 rounded-md bg-white/85 backdrop-blur-md px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-zinc-700 pointer-events-none"
-            style={{ boxShadow: "var(--shadow-soft)" }}
-          >
-            <span aria-hidden className="h-2 w-2 rounded-full bg-[var(--warn)]" />
-            Certified
-          </div>
-        )}
-        {/* Favourite (star), top-right, mirrors the Starred tab. */}
         <button
           onClick={(e) => {
             e.stopPropagation();
             onToggleFavourite();
           }}
           aria-pressed={favourited}
-          aria-label={favourited ? "unfavourite" : "favourite"}
+          aria-label={favourited ? "Unstar" : "Star"}
           className={[coverBtn, "absolute top-3 right-3", favourited ? "text-[var(--accent)]" : ""].join(" ")}
           style={coverBtnShadow}
         >
@@ -2251,9 +1701,6 @@ function ProjectCard({
             <path d="M12 17.3l-6.18 3.7 1.64-7.03L2 9.24l7.19-.61L12 2l2.81 6.63L22 9.24l-5.46 4.73L18.18 21z" />
           </svg>
         </button>
-        {/* Overflow menu, bottom-right, holds the destructive Delete
-            action so it's out of the primary click path but still one
-            tap away. */}
         <div className="absolute bottom-3 right-3">
           <button
             onClick={(e) => {
@@ -2262,7 +1709,7 @@ function ProjectCard({
             }}
             aria-haspopup="menu"
             aria-expanded={menuOpen}
-            aria-label="Project actions"
+            aria-label="Dataset actions"
             className={coverBtn}
             style={coverBtnShadow}
           >
@@ -2351,9 +1798,6 @@ function ProjectCard({
             )}
           </div>
 
-          {/* Compact inline stats: small uppercase label + value, so
-              the card reads at a glance without the old oversized
-              numbers dominating the body. */}
           <div className="flex flex-wrap items-baseline gap-x-6 gap-y-1">
             <div className="flex items-baseline gap-1.5">
               <span className="pk-micro">Images</span>
@@ -2378,9 +1822,7 @@ function ProjectCard({
           )}
         </div>
       </button>
-      {/* Likes were the SaaS public feed's gesture; a single local user
-          has nobody to like at. The slot keeps the Open-project chip
-          right-aligned via an empty spacer. */}
+      {/* The empty span keeps the Project chip right-aligned. */}
       <div className="px-4 pb-3.5 flex items-center justify-between text-xs">
         <span />
         {project.container && onOpenProject && (
@@ -2455,7 +1897,7 @@ function DeleteProjectDialog({
       <div className="pk-glass pk-pop max-w-md w-full rounded-md overflow-hidden">
         <header className="px-6 pt-6 pb-3">
           <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--bad)]">Permanent action</div>
-          <h2 className="mt-2 text-xl font-semibold tracking-tight">Delete project?</h2>
+          <h2 className="mt-2 text-xl font-semibold tracking-tight">Delete dataset?</h2>
         </header>
 
         <div className="px-6 pb-5 grid gap-4">
@@ -2468,7 +1910,7 @@ function DeleteProjectDialog({
           </p>
 
           <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 py-2.5 text-xs text-[var(--bad)]">
-            Type the project name{" "}
+            Type the dataset name{" "}
             <span className="font-mono text-[var(--foreground)]">{project.name}</span> below to confirm.
           </div>
 

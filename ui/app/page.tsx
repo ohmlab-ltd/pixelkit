@@ -3,9 +3,7 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 
-// Portable build has no marketing landing page - the root goes straight
-// to the workspace. Client-side replace because `output: "export"` can't
-// do server redirects.
+// Client-side redirect to /app: `output: "export"` has no server redirects.
 export default function Home() {
   const router = useRouter();
   useEffect(() => {

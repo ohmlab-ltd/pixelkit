@@ -55,18 +55,30 @@ def test_copies_keep_edited_boxes_and_follow_label_changes(client, app_module):
         copies = json.loads(anno_path.read_text("utf-8"))["copies"]
         return sorted(d["label"] for dets in copies.values() for d in dets)
 
-    # Hand-drawn boxes are x0/y0/x1/y1: they used to come out as "box": [].
+    # Hand-drawn boxes are x0/y0/x1/y1.
     copies = json.loads(anno_path.read_text("utf-8"))["copies"]
     assert all(len(d["box"]) == 4 for dets in copies.values() for d in dets)
     assert labels() == ["apple", "pear"]
 
+    def bundled():
+        return len(app_module._aug_files_to_bundle(pid, app_module.load_manifest(pid)))
+
+    assert bundled() == 1
     r = client.post(f"/api/projects/{pid}/labels/rename", json={"old_label": "apple", "new_label": "plum"})
     assert r.status_code == 200
     assert labels() == ["pear", "plum"]
+    assert bundled() == 1, "a rename keeps the copies current"
 
     r = client.post("/api/jobs", json={"project": pid, "kind": "purge_label", "params": {"label": "pear"}})
     assert _wait(client, r.json()["jobId"])["status"] == "done"
     assert labels() == ["plum"]
+    assert bundled() == 1
+
+    # A moved box leaves the copies out of date: exports leave them out.
+    moved = [{"id": "b1", "label": "plum", "x0": 8, "y0": 8, "x1": 30, "y1": 30}]
+    assert client.put(f"/api/v2/projects/{pid}/imports/{iid}",
+                      json={"editedBoxes": moved}).status_code == 200
+    assert bundled() == 0
 
 
 def test_one_generation_at_a_time(client, app_module):
@@ -75,11 +87,42 @@ def test_one_generation_at_a_time(client, app_module):
     client.post(f"/api/v2/projects/{pid}/imports/raw", files={"image": ("a.jpg", _jpeg(), "image/jpeg")})
     from jobs import Job
 
-    # A generation in progress (registered, not queued, so nothing runs).
-    busy = Job(id="busyaug", kind="augment_generate", project=pid, params={}, user="t", status="running")
+    # A running generation, registered but not queued, so nothing runs.
+    busy = Job(id="busyaug", kind="augment_generate", project=pid, params={}, status="running")
     app_module.state["jobs"].jobs[busy.id] = busy
     try:
         r = client.post(f"/api/v2/projects/{pid}/augment/generate", json={"perImageMode": "off", "config": {}})
         assert r.status_code == 409
     finally:
         app_module.state["jobs"].jobs.pop(busy.id, None)
+
+
+def test_augmentations_and_training_do_not_overlap(client, app_module):
+    from jobs import Job
+
+    r = client.post("/api/v2/projects", data={"name": "Aug train", "labels": json.dumps(["apple"])})
+    pid = r.json()["project_id"]
+    for name in ("a.jpg", "b.jpg"):
+        iid = client.post(f"/api/v2/projects/{pid}/imports/raw",
+                          files={"image": (name, _jpeg(), "image/jpeg")}).json()["import_id"]
+        boxes = [{"id": "b1", "label": "apple", "x0": 4, "y0": 4, "x1": 30, "y1": 30}]
+        assert client.put(f"/api/v2/projects/{pid}/imports/{iid}",
+                          json={"editedBoxes": boxes}).status_code == 200
+    jobs = app_module.state["jobs"].jobs
+
+    # A training run reads the copies every epoch.
+    jobs["busytrain"] = Job(id="busytrain", kind="train_yolox", project=pid, params={}, status="running")
+    try:
+        r = client.post(f"/api/v2/projects/{pid}/augment/generate", json={"perImageMode": "off", "config": {}})
+        assert r.status_code == 409
+        r = client.delete(f"/api/v2/projects/{pid}/augmentations/{iid}/00.jpg")
+        assert r.status_code == 409
+    finally:
+        jobs.pop("busytrain", None)
+
+    jobs["busyaug"] = Job(id="busyaug", kind="augment_generate", project=pid, params={}, status="running")
+    try:
+        r = client.post("/api/jobs", json={"kind": "train_yolox", "project": pid, "params": {}})
+        assert r.status_code == 409, r.text
+    finally:
+        jobs.pop("busyaug", None)

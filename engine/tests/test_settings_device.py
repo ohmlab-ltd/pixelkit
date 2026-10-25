@@ -1,8 +1,4 @@
-"""Device-preference settings — the Settings "Compute" picker's API.
-
-The choice persists in the app config (never the workspace) and takes
-effect on the next boot; PK_DEVICE env always beats the config.
-"""
+"""Device-preference settings API; PK_DEVICE overrides the stored choice."""
 import pytest
 
 
@@ -68,3 +64,23 @@ def test_env_var_beats_config(client, app_module, monkeypatch):
     assert client.get("/api/settings").json()["deviceEnvOverride"] == "mps"
     monkeypatch.delenv("PK_DEVICE")
     assert app_module._configured_device() == "cpu"
+
+
+def test_concurrent_config_updates_keep_every_change(tmp_path, monkeypatch):
+    import threading
+
+    import workspace
+
+    monkeypatch.setenv("PIXELKIT_CONFIG_DIR", str(tmp_path))
+    workspace.save_config({"hf_token": "keep-me"})
+    threads = [threading.Thread(target=workspace.update_config,
+                                args=(lambda c, i=i: c.__setitem__(f"k{i}", i),))
+               for i in range(24)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    cfg = workspace.load_config()
+    assert cfg["hf_token"] == "keep-me"
+    assert all(cfg[f"k{i}"] == i for i in range(24))
+    assert not list(tmp_path.glob("*.tmp"))

@@ -67,14 +67,14 @@ describe("trainRuns helpers", () => {
     expect(confusionShade([10, 5, 0], 0)).toBe(0);
   });
 
-  it("describes the threshold, including reports written before the fallback flag", () => {
+  it("describes calibrated, fallback and configured thresholds, with or without the fallback flag", () => {
     expect(thresholdNote({ conf: 0.35, f1: 0.8, precision: 0.9, recall: 0.7, calibrated: true })).toBe(
       "chosen on the val split for the best F1 (0.80): precision 90.0%, recall 70.0%. Written into the labels header.",
     );
     expect(thresholdNote({ conf: 0.25, f1: 0, precision: 0, recall: 0, calibrated: false, fallback: true })).toMatch(
       /found nothing/,
     );
-    // Old report: calibrated false, no flag, all zeros -> still the fallback.
+    // No flag, calibrated false, all zeros: the fallback.
     expect(isThresholdFallback({ conf: 0.25, f1: 0, precision: 0, recall: 0, calibrated: false, fallback: null })).toBe(true);
     // A user-pinned threshold that found things.
     expect(thresholdNote({ conf: 0.4, f1: 0.5, precision: 0.6, recall: 0.4, calibrated: false })).toBe(

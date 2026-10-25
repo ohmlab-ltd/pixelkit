@@ -1,49 +1,42 @@
-# Getting your Hugging Face token for SAM 3
+# Hugging Face token
 
-PixelKit's auto-labelling runs on Meta's **SAM 3**, whose weights are
-distributed on Hugging Face behind a license gate. That means a one-time,
-free setup: accept Meta's license, create a read token, paste it into
-PixelKit. Roughly two minutes.
+SAM 3, the model behind auto-labelling, is distributed by Meta on Hugging
+Face behind a licence agreement. Downloading it needs a free Hugging Face
+account that has accepted the licence, and a read token from that account.
 
 ## Steps
 
-1. **Create a Hugging Face account** (free): <https://huggingface.co/join>.
-2. **Accept the SAM 3 license**: open
-   <https://huggingface.co/facebook/sam3>, sign in, and click the button
-   in the "gated model" banner to request/accept access. Approval is
-   instant for this repo.
-3. **Create a token**: <https://huggingface.co/settings/tokens> →
-   *Create new token* → type **Read** (a fine-grained token with
-   "Read access to contents of all public gated repos you can access"
-   also works). Copy the `hf_…` value.
-4. **Paste it into PixelKit**: the first-run setup asks for it (or
-   Settings → Hugging Face access later). PixelKit validates it live and
-   then downloads the weights (~1.7 GB) into your workspace's `weights/`
-   folder.
+1. Create an account at <https://huggingface.co/join>.
+2. Sign in, open <https://huggingface.co/facebook/sam3> and accept the
+   licence in the gated-model banner.
+3. Create a token at <https://huggingface.co/settings/tokens> of type Read.
+   A fine-grained token with "Read access to contents of all public gated
+   repos you can access" also works. Tokens start with `hf_`.
+4. Enter the token in PixelKit, in the first-run setup or under Settings,
+   Hugging Face access. PixelKit checks it, then downloads the SAM 3 weights,
+   about 3.6 GB, into the workspace's `weights/` folder. Without a GPU, the
+   download starts after Compute is set to CPU in Settings and PixelKit
+   restarts.
 
-The token is stored in the app config directory on your machine -
-never inside the workspace, so backups and synced workspaces don't
-contain it. PixelKit uses it only to download weights from Hugging Face.
+The token is stored in the application's config folder, not in the
+workspace, and is used only to download weights from Hugging Face.
 
-## If validation fails
+## Errors
 
-- **"Token invalid"** - the value didn't authenticate: re-copy it
-  (tokens start with `hf_`), or it may have been revoked.
-- **"Token OK but no SAM 3 access"** - the token works but step 2 was
-  skipped or done with a different account: open the
-  [facebook/sam3](https://huggingface.co/facebook/sam3) page with the
-  same account the token belongs to and accept the license.
-- **Corporate networks** - downloads come from `huggingface.co` /
-  `cdn-lfs.huggingface.co`; proxies that block them will fail the
-  download step, not the token check.
+- A token that does not authenticate is rejected. It may be mistyped or
+  revoked.
+- A token that authenticates without SAM 3 access belongs to an account that
+  has not accepted the licence on the facebook/sam3 page.
+- A proxy that blocks `huggingface.co` fails the token check. One that lets
+  the check through but blocks the file downloads fails the download.
 
-## Community mirrors
+## Other sources
 
-`SAM3_MODEL_ID` (env var) overrides the repo id if you want to use a
-compatible repackage of the weights. The default and only tested source
+The `SAM3_MODEL_ID` environment variable replaces the repository id, for a
+compatible repackage of the weights. The default, and the only tested source,
 is `facebook/sam3`.
 
 ## DINOv2
 
-The second model PixelKit uses, `facebook/dinov2-large` (~0.6 GB), is
-not gated - it downloads automatically without any token.
+`facebook/dinov2-large`, about 1.3 GB, is not gated and downloads without a
+token.

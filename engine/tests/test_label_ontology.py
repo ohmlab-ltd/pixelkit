@@ -1,4 +1,4 @@
-"""Project-level label usage + cross-dataset rename/merge."""
+"""Project label usage, and rename and merge across datasets."""
 import io
 import json
 
@@ -30,7 +30,7 @@ def _dataset(client, name: str, label: str) -> str:
 
 
 def test_container_label_usage_and_merge(client):
-    r = client.post("/api/containers", json={"name": "Ontology", "private": True})
+    r = client.post("/api/containers", json={"name": "Ontology"})
     cid = r.json()["id"]
     pid_a = _dataset(client, "Bolts A", "bolt")
     pid_b = _dataset(client, "Bolts B", "bolts")
@@ -60,19 +60,18 @@ def test_container_label_usage_and_merge(client):
 
 
 def test_dataset_rename_covers_v2_records(client):
-    # The per-dataset rename must rewrite labels stored inside V2
-    # imports[] records (detections/editedBoxes), not just V1 fields.
+    # The rename reaches labels inside imports[] records.
     pid = _dataset(client, "Rename V2", "cat")
     r = client.post(
         f"/api/projects/{pid}/labels/rename",
         json={"old_label": "cat", "new_label": "kitten"},
     )
     assert r.status_code == 200, r.text
-    assert r.json()["renamed"] >= 2  # tag + the edited box
+    assert r.json()["renamed"] >= 2  # tag and the edited box
 
     r = client.get(f"/api/v2/projects/{pid}/initial")
     imports = r.json().get("imports") or r.json().get("items") or []
-    # Read the annotation back directly — the box label must be renamed.
+    # The stored box label is renamed.
     r = client.get(f"/api/v2/projects/{pid}/annotations")
     # fall back to per-import fetch if the bulk route doesn't exist
     if r.status_code == 404:
@@ -85,8 +84,7 @@ def test_dataset_rename_covers_v2_records(client):
 
 
 def test_case_only_rename_and_case_insensitive_merge(client):
-    # cat -> Cat must be a real rename (used to be rejected as "same
-    # name"), and renaming onto a different-cased twin must merge.
+    # cat -> Cat is a rename, and renaming onto a different-cased twin merges.
     pid = _dataset(client, "Case Fix", "cat")
     r = client.post(
         f"/api/projects/{pid}/labels/rename",
@@ -96,7 +94,7 @@ def test_case_only_rename_and_case_insensitive_merge(client):
     tags = r.json()["tags"]
     assert tags.count("Cat") == 1 and "cat" not in tags
 
-    # Now a Feline/feline-style merge: no case-duplicate twins allowed.
+    # Different-cased twins merge into one.
     r = client.post(
         f"/api/projects/{pid}/labels/rename",
         json={"old_label": "Cat", "new_label": "CAT"},
@@ -107,7 +105,7 @@ def test_case_only_rename_and_case_insensitive_merge(client):
 
 def test_rename_migrates_snake_case_alias(client):
     pid = _dataset(client, "Alias Move", "bolt")
-    # Plant a display alias under the manifest's real (snake_case) key.
+    # A display alias under the manifest's snake_case key.
     r = client.put(
         f"/api/projects/{pid}",
         json={"label_aliases": {"bolt": "Bolt (M6)"}},
@@ -118,7 +116,7 @@ def test_rename_migrates_snake_case_alias(client):
         json={"old_label": "bolt", "new_label": "fastener"},
     )
     assert r.status_code == 200, r.text
-    m = client.get(f"/api/projects/{pid}").json()
+    m = client.get(f"/api/v2/projects/{pid}/overview").json()
     aliases = m.get("label_aliases") or {}
     assert "bolt" not in aliases
     assert aliases.get("fastener") == "Bolt (M6)"

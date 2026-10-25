@@ -3,20 +3,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { buildProjectLabelColourMap, colourForLabelStable, readableTextForBg } from "../v2/OnboardLabelsV2";
+import { buildProjectLabelColourMap, colourForLabelStable, readableTextForBg } from "../v2/labelColours";
 
-// Project-card label row that NEVER wraps onto a second line.
-// Renders the prefix of `tags` that fits the available width, falling
-// back to a "+N" overflow chip once the next tag won't fit. Hovering
-// the overflow chip pops a label list out to the right of the cursor
-// and dims the rest of the page; the host card lifts above the dim
-// via an inline z-index that the parent applies based on
-// onOverflowOpenChange.
-//
-// Used by both the workspace card (HomeView) and the public-projects
-// card (ProjectsView) so the visual treatment stays consistent.
-// Colour assignment is via colourForLabelStable so the same label
-// string keeps the same colour across every view + project.
+// Single-line label row; a "+N" chip lists the overflow on hover.
 export function ProjectTagsRow({
   tags,
   labelAliases = {},
@@ -25,29 +14,19 @@ export function ProjectTagsRow({
 }: {
   tags: string[];
   labelAliases?: Record<string, string>;
-  /** Per-label colour overrides keyed by canonical-lower label. When
-      set, the user-picked colour wins over the project's stable
-      hash palette so the workspace + public chips match the in-app
-      viewer chips. */
+  /** Colours keyed by lower-case label; they win over the palette. */
   colourOverrides?: Record<string, string> | null;
-  /** Fires when the hover popup opens / closes so the host card
-      can bump its own z-index above the dim overlay. */
+  /** Lets the host card raise its z-index above the dim overlay. */
   onOverflowOpenChange?: (open: boolean) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const measureRef = useRef<HTMLCanvasElement | null>(null);
 
-  // disp() returns the display name for a canonical label by
-  // applying the alias map (case-insensitive lookup).
   const disp = useMemo(
     () => (t: string) => labelAliases[t.trim().toLowerCase()] || t,
     [labelAliases],
   );
 
-  // Project-scoped palette assignment, guarantees no two chips on
-  // this card share a visually-similar colour. Same project +
-  // same labels yields the same map across the workspace, public,
-  // and project surfaces.
   const colourMap = useMemo(
     () => buildProjectLabelColourMap(tags, colourOverrides),
     [tags, colourOverrides],
@@ -67,8 +46,6 @@ export function ProjectTagsRow({
     onOverflowOpenChange?.(hoverOpen);
   }, [hoverOpen, onOverflowOpenChange]);
 
-  // Width-aware fit pass. Uses canvas measureText against the
-  // chip's font so we never have to mount + measure off-DOM nodes.
   useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -78,16 +55,16 @@ export function ProjectTagsRow({
       setVisibleCount(tags.length);
       return;
     }
-    // Match the chip's actual rendered font. uppercase + tracking-
-    // wider don't change measureText (CSS letter-spacing isn't
-    // applied to canvas), so we approximate by inflating the
-    // measured width.
-    const CHIP_FONT = '600 10px ui-monospace, "Geist Mono", monospace';
-    const LETTER_SPACING_FACTOR = 1.18; // ~0.05em + uppercase
-    const CHIP_PAD_X = 16; // px-2 (= 0.5rem each side) at 10px
+    // Chips inherit the row's font family and weight, at 10px, upper case,
+    // with tracking-wider (0.05em). Canvas applies neither the case nor the
+    // tracking, so both are added here.
+    const style = window.getComputedStyle(el);
+    const CHIP_FONT = `${style.fontStyle} ${style.fontWeight} 10px ${style.fontFamily}`;
+    const CHIP_TRACKING = 0.5; // px per character
+    const CHIP_PAD_X = 16; // px-2, both sides
     const CHIP_GAP = 6;    // gap-1.5
     const OVERFLOW_CHIP_W = 38; // "+99" worst case
-    const MAX_CHIP_W = 160; // matches `max-w-[10rem]`
+    const MAX_CHIP_W = 160; // max-w-[10rem], padding included
     ctx.font = CHIP_FONT;
 
     const update = () => {
@@ -96,14 +73,12 @@ export function ProjectTagsRow({
       let used = 0;
       let count = 0;
       for (let i = 0; i < tags.length; i++) {
-        const tw = Math.min(
+        const text = disp(tags[i]).toUpperCase();
+        const chipW = Math.min(
           MAX_CHIP_W,
-          ctx.measureText(disp(tags[i])).width * LETTER_SPACING_FACTOR,
+          ctx.measureText(text).width + CHIP_TRACKING * text.length + CHIP_PAD_X,
         );
-        const chipW = tw + CHIP_PAD_X;
         const g = i > 0 ? CHIP_GAP : 0;
-        // After placing chip i, are there more chips? If yes,
-        // reserve room for the "+N" overflow chip.
         const remaining = tags.length - count - 1;
         const reserve = remaining > 0 ? CHIP_GAP + OVERFLOW_CHIP_W : 0;
         if (used + g + chipW + reserve > w) break;
@@ -115,11 +90,16 @@ export function ProjectTagsRow({
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
-    return () => ro.disconnect();
+    // The first pass can run before the web font has loaded.
+    let live = true;
+    document.fonts?.ready.then(() => { if (live) update(); });
+    return () => {
+      live = false;
+      ro.disconnect();
+    };
   }, [tags, disp]);
 
-  // Close on scroll, popup is position-fixed against the cursor
-  // so a scroll would orphan it.
+  // Closed on scroll: the popup is placed at the cursor's viewport position.
   useEffect(() => {
     if (!hoverOpen) return;
     const close = () => setHoverOpen(false);

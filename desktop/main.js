@@ -1,9 +1,4 @@
-// PixelKit desktop shell.
-//
-// Wraps the local PixelKit engine (FastAPI on 127.0.0.1:8001) in a native
-// window. If an engine is already running (e.g. started from a terminal, or
-// mid-download of model weights) it is REUSED and never killed; otherwise the
-// shell spawns its own engine and shuts it down on quit.
+// PixelKit desktop shell: the local engine on 127.0.0.1:8001 in a native window.
 
 'use strict';
 
@@ -22,16 +17,14 @@ const HEALTH_URL = `${ENGINE_ORIGIN}/api/health`;
 const APP_URL = `${ENGINE_ORIGIN}/app`;
 const ALLOWED_ORIGINS = new Set(['http://127.0.0.1:8001', 'http://localhost:8001']);
 
-const HEALTH_TIMEOUT_MS = 1000; // per-request timeout
-const STARTUP_TIMEOUT_MS = 60000; // total time to wait for a spawned engine
+const HEALTH_TIMEOUT_MS = 1000; // per request
+const STARTUP_TIMEOUT_MS = 60000; // total wait for a spawned engine
 const POLL_INTERVAL_MS = 500;
-const SHUTDOWN_GRACE_MS = 4000; // how long to wait for SIGTERM'd engine
+const SHUTDOWN_GRACE_MS = 4000; // after SIGTERM, before SIGKILL
 
 app.setName('PixelKit');
 
-// ---------------------------------------------------------------------------
 // Single instance
-// ---------------------------------------------------------------------------
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -50,17 +43,13 @@ if (!gotLock) {
 let splashWindow = null;
 let mainWindow = null;
 
-// engine.external === true  -> we found a running engine and must never kill it
-// engine.proc !== null      -> we spawned it and own its lifecycle
+// external: an engine found running, never killed. proc: the engine this shell spawned.
 const engine = { external: false, proc: null, exited: false };
 
-// ---------------------------------------------------------------------------
 // Engine management
-// ---------------------------------------------------------------------------
 
-// { state, version }: 'up' when a PixelKit engine answered, 'busy' when
-// something accepted the connection but did not answer in time (a long
-// export or delete can hold the engine's event loop), 'down' otherwise.
+// { state, version }: 'up' when a PixelKit engine answered, 'busy' when a
+// connection was accepted but no answer came in time, 'down' otherwise.
 function probeEngine() {
   return new Promise((resolve) => {
     const req = http.get(HEALTH_URL, { timeout: HEALTH_TIMEOUT_MS }, (res) => {
@@ -68,8 +57,6 @@ function probeEngine() {
         res.resume();
         return resolve({ state: 'down' });
       }
-      // Identity check: something else listening on 8001 must not be
-      // adopted as "the engine" just because it answers 200.
       let body = '';
       res.on('data', (c) => (body += c));
       res.on('end', () => {
@@ -94,8 +81,8 @@ async function checkHealth() {
   return (await probeEngine()).state === 'up';
 }
 
-// POST JSON to the engine with no timeout (legacy imports can run for
-// minutes); resolves {status, body}.
+// POST JSON to the engine; resolves { status, body }. No timeout: an import
+// can run for minutes.
 function postJson(pathname, payload) {
   return new Promise((resolve, reject) => {
     const data = Buffer.from(JSON.stringify(payload));
@@ -129,10 +116,8 @@ function engineLogPath() {
   return path.join(app.getPath('logs'), 'engine.log');
 }
 
-// Packaged app: a fat bundle (macOS dmg) carries runtime/py inside
-// resources/; the slim Windows install has no bundled runtime and instead
-// bootstraps one into %LOCALAPPDATA%\PixelKit\runtime on first run
-// (bootstrap.js). Dev runs use the repo venv.
+// The macOS dmg carries runtime/py in resources/; the Windows install has none
+// and bootstraps one on first run.
 function bundledPaths() {
   const res = process.resourcesPath || '';
   const python =
@@ -150,8 +135,8 @@ function resolvePython() {
   if (process.env.PIXELKIT_PYTHON) return process.env.PIXELKIT_PYTHON;
   const b = bundledPaths();
   if (app.isPackaged) {
-    if (fs.existsSync(b.python)) return b.python; // fat bundle (macOS dmg)
-    return bootstrap.runtimePython(); // slim install - ensureEngine bootstraps it first
+    if (fs.existsSync(b.python)) return b.python;
+    return bootstrap.runtimePython(); // ensureEngine bootstraps it first
   }
   const venvPython =
     process.platform === 'win32'
@@ -179,10 +164,7 @@ function spawnEngine() {
     cwd,
     env: {
       ...process.env,
-      // Piped stdio on Windows defaults Python to the legacy codepage;
-      // a log line with ≥/²/→ then raises inside the printing code.
-      // The engine also reconfigures its own streams - this covers
-      // interpreter startup and any subprocesses it spawns.
+      // Python's piped stdio on Windows is not UTF-8 by default; non-ASCII output raises.
       PYTHONIOENCODING: 'utf-8',
       ...(app.isPackaged && fs.existsSync(bundledPaths().uiDir)
         ? { PIXELKIT_UI_DIR: bundledPaths().uiDir }
@@ -195,15 +177,11 @@ function spawnEngine() {
   });
   proc.stdout.pipe(log);
   proc.stderr.pipe(log);
-  // Tag the handlers to THIS proc: a stale exit event from a replaced
-  // process must never mark the current engine dead (that stale flag
-  // used to wedge the crash watch into a restart loop over a healthy
-  // engine and let will-quit skip shutdown of a live one).
+  // An event from a replaced process must not mark the current engine dead.
   proc.on('exit', () => {
     if (engine.proc === proc) engine.exited = true;
   });
   proc.on('error', () => {
-    // e.g. python binary not found; poll loop will time out and report.
     if (engine.proc === proc) engine.exited = true;
   });
 
@@ -212,14 +190,13 @@ function spawnEngine() {
   engine.external = false;
 }
 
-// Slim Windows installs set up their Python runtime on first launch.
-// Loops on failure (Retry / Quit); returns false only when the user quits.
 function bootstrapRequirementsPath() {
   return app.isPackaged
     ? path.join(process.resourcesPath, 'engine', 'requirements-win.txt')
     : path.join(__dirname, '..', 'engine', 'requirements-win.txt');
 }
 
+// Retries until setup succeeds or Quit is chosen; returns false on Quit.
 async function runFirstRunBootstrap() {
   const requirementsPath = bootstrapRequirementsPath();
   const logFile = path.join(path.dirname(engineLogPath()), 'bootstrap.log');
@@ -234,7 +211,7 @@ async function runFirstRunBootstrap() {
       log.end();
       return true;
     } catch (err) {
-      log.write(`\nBOOTSTRAP FAILED: ${err && err.stack ? err.stack : err}\n`);
+      log.write(`\nBootstrap failed: ${err && err.stack ? err.stack : err}\n`);
       log.end();
       const opts = {
         type: 'error',
@@ -242,7 +219,7 @@ async function runFirstRunBootstrap() {
         message: 'PixelKit could not finish setting up its runtime.',
         detail:
           `${(err && err.message) || err}\n\nLog: ${logFile}\n\n` +
-          'First run needs an internet connection - the AI runtime is downloaded once.',
+          'First run needs an internet connection. The AI runtime is downloaded once.',
         buttons: ['Retry', 'Quit'],
         defaultId: 0,
         cancelId: 1,
@@ -258,21 +235,30 @@ async function runFirstRunBootstrap() {
 
 let bootstrapQuit = false;
 let versionMismatch = null;
+let portUnresponsive = false;
 
 async function ensureEngine() {
-  const running = await probeEngine();
+  let running = await probeEngine();
+  // A busy engine is waited for: a second one could not bind the port.
+  const busyDeadline = Date.now() + STARTUP_TIMEOUT_MS;
+  while (running.state === 'busy' && Date.now() < busyDeadline) {
+    setSplashStatus('Waiting for the running engine…');
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    running = await probeEngine();
+  }
+  if (running.state === 'busy') {
+    portUnresponsive = true;
+    return false;
+  }
   if (running.state === 'up') {
-    // An engine left running by another version would serve this UI
-    // an API it does not match.
     if (running.version && running.version !== app.getVersion()) {
       versionMismatch = running.version;
       return false;
     }
-    engine.external = true; // someone else owns it -> never kill it
+    engine.external = true;
     return true;
   }
 
-  // Slim Windows install: make sure a runtime exists before spawning.
   if (process.platform === 'win32' && app.isPackaged && !process.env.PIXELKIT_PYTHON) {
     const b = bundledPaths();
     if (!fs.existsSync(b.python) && !bootstrap.runtimeReady(bootstrapRequirementsPath())) {
@@ -290,18 +276,14 @@ async function ensureEngine() {
 
   const deadline = Date.now() + STARTUP_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    if (engine.exited) return false; // crashed / python missing
+    if (engine.exited) return false;
     if (await checkHealth()) return true;
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
   return false;
 }
 
-// ---------------------------------------------------------------------------
-// Crash watch - if the engine dies mid-session, restart it (bounded) and
-// reload the window; if it won't come back, tell the user instead of
-// leaving a dead page.
-// ---------------------------------------------------------------------------
+// Crash watch
 
 let crashWatchTimer = null;
 let restartInFlight = false;
@@ -309,9 +291,8 @@ const restartTimes = []; // timestamps of recent automatic restarts
 
 async function restartEngine() {
   if (shuttingDown) return false;
-  // Something healthy may already own the port - adopt it instead of
-  // spawning into a guaranteed bind failure. If it is our own process
-  // that recovered, it stays ours, so Quit still stops it.
+  // A healthy engine on the port is adopted. One this shell spawned stays
+  // owned, so Quit still stops it.
   if (await checkHealth()) {
     if (engine.proc && !engine.external && !engine.exited) return true;
     engine.proc = null;
@@ -319,8 +300,7 @@ async function restartEngine() {
     engine.external = true;
     return true;
   }
-  // A hung-but-alive owned process still holds the port; kill and wait
-  // before respawning, or the replacement dies on the bind.
+  // A hung owned engine still holds the port, so it is stopped before respawning.
   if (engine.proc && !engine.external && !engine.exited) {
     await stopOwnedEngine();
   }
@@ -350,9 +330,7 @@ function startCrashWatch() {
       busySince = 0;
       return;
     }
-    // Connected but slow: a long export or delete holds the engine's
-    // event loop. Killing it then lost the work in progress, so a busy
-    // engine gets two minutes before it counts as hung.
+    // A busy engine, as in a long export or delete, counts as hung after two minutes.
     if (state === 'busy') {
       if (!busySince) busySince = Date.now();
       if (Date.now() - busySince < 120000) return;
@@ -360,7 +338,7 @@ function startCrashWatch() {
       busySince = 0;
     }
     misses += 1;
-    if (!ownedDead && misses < 3) return; // ride out transient blips
+    if (!ownedDead && misses < 3) return;
 
     restartInFlight = true;
     misses = 0;
@@ -400,9 +378,7 @@ function startCrashWatch() {
   }, 5000);
 }
 
-// Kill the engine and everything it started (the ST Edge AI compiler,
-// training workers): on Windows the process tree, elsewhere its process
-// group. Killing python.exe alone left its children running.
+// Kills the engine and its children: the process tree on Windows, the process group elsewhere.
 function killEngineTree(proc, signal) {
   try {
     if (process.platform === 'win32') {
@@ -426,8 +402,6 @@ function stopOwnedEngine() {
       clearTimeout(timer);
       resolve();
     };
-    // Past the grace period a hung engine is killed outright: left
-    // alone it kept the port, and the next launch could not start.
     const timer = setTimeout(() => {
       killEngineTree(proc, 'SIGKILL');
       setTimeout(finish, 1000);
@@ -437,9 +411,7 @@ function stopOwnedEngine() {
   });
 }
 
-// ---------------------------------------------------------------------------
 // Splash window
-// ---------------------------------------------------------------------------
 
 function splashHtml(body) {
   const html = `<!doctype html><html><head><meta charset="utf-8"><style>
@@ -460,7 +432,6 @@ function splashHtml(body) {
   return 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
 }
 
-// Update the one-line status on the splash (no-op once it's closed).
 function setSplashStatus(text) {
   if (!splashWindow || splashWindow.isDestroyed()) return;
   splashWindow.webContents
@@ -489,8 +460,7 @@ function createSplash() {
   );
 }
 
-// Any HTTP response on the engine port (even an error) means something
-// else owns it - checkHealth() already said it isn't a PixelKit engine.
+// True on any HTTP response from the engine port, an error status included.
 function portOccupied() {
   return new Promise((resolve) => {
     const req = http.get(`${ENGINE_ORIGIN}/`, { timeout: HEALTH_TIMEOUT_MS }, (res) => {
@@ -517,6 +487,10 @@ function showSplashError(kind) {
       ? '<h1>PixelKit</h1>' +
         '<p class="err">Port 8001 is in use by another application.</p>' +
         '<p>Close whatever is listening on 127.0.0.1:8001 and start PixelKit again.</p>'
+      : kind === 'unresponsive'
+      ? '<h1>PixelKit</h1>' +
+        '<p class="err">A process on 127.0.0.1:8001 accepts connections but does not answer.</p>' +
+        '<p>If it is an earlier PixelKit engine, end it, then start PixelKit again.</p>'
       : '<h1>PixelKit</h1>' +
         '<p class="err">The engine failed to start.</p>' +
         `<p>See engine.log:<br><small>${logFile}</small></p>`;
@@ -526,9 +500,7 @@ function showSplashError(kind) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Window state persistence
-// ---------------------------------------------------------------------------
+// Window state
 
 const stateFile = () => path.join(app.getPath('userData'), 'window-state.json');
 
@@ -540,7 +512,6 @@ function loadWindowState() {
   } catch {
     return defaults;
   }
-  // Only honour saved x/y if they land on a currently attached display.
   if (typeof state.x === 'number' && typeof state.y === 'number') {
     const visible = screen.getAllDisplays().some((d) => {
       const a = d.workArea;
@@ -572,9 +543,7 @@ function saveWindowState(win) {
   }
 }
 
-// ---------------------------------------------------------------------------
 // Main window
-// ---------------------------------------------------------------------------
 
 function isInternalUrl(url) {
   try {
@@ -582,6 +551,16 @@ function isInternalUrl(url) {
   } catch {
     return false;
   }
+}
+
+// The licences of the components PixelKit ships, beside the app's own.
+function openNotices() {
+  const file = app.isPackaged
+    ? path.join(process.resourcesPath, 'THIRD-PARTY-NOTICES.md')
+    : path.join(__dirname, '..', 'THIRD-PARTY-NOTICES.md');
+  shell.openPath(file).then((err) => {
+    if (err) dialog.showErrorBox('PixelKit', `Could not open ${file}: ${err}`);
+  });
 }
 
 function openExternally(url) {
@@ -610,13 +589,11 @@ function createMainWindow() {
 
   const wc = mainWindow.webContents;
 
-  // target=_blank and window.open -> system browser, never a new Electron window.
   wc.setWindowOpenHandler(({ url }) => {
     openExternally(url);
     return { action: 'deny' };
   });
 
-  // Any navigation away from the local engine -> system browser.
   wc.on('will-navigate', (event, url) => {
     if (!isInternalUrl(url)) {
       event.preventDefault();
@@ -629,9 +606,7 @@ function createMainWindow() {
     if (splashWindow && !splashWindow.isDestroyed()) splashWindow.close();
   });
 
-  // A transient failure loading the app page (engine mid-listen, socket
-  // reset) would otherwise leave an eternal splash: ready-to-show never
-  // fires and nothing retries. Retry the load a few times.
+  // Without a retry, a failed load leaves the splash up: ready-to-show never fires.
   let loadRetries = 0;
   wc.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
     if (!isMainFrame || loadRetries >= 5) return;
@@ -641,26 +616,48 @@ function createMainWindow() {
     }, 1000 * loadRetries);
   });
 
-  mainWindow.on('close', () => saveWindowState(mainWindow));
+  // 'close' comes before the page's beforeunload, so the prompt below knows
+  // whether a close or a reload is being held up.
+  let closeRequested = false;
+  mainWindow.on('close', () => {
+    closeRequested = true;
+    saveWindowState(mainWindow);
+  });
   mainWindow.on('closed', () => {
     mainWindow = null;
+  });
+
+  // ExportModal holds the page with beforeunload while an export builds.
+  // Electron would block the unload silently; preventDefault lets it go ahead.
+  wc.on('will-prevent-unload', (event) => {
+    const closing = closeRequested;
+    closeRequested = false;
+    const choice = dialog.showMessageBoxSync(mainWindow, {
+      type: 'warning',
+      title: 'PixelKit',
+      message: closing
+        ? 'An export is still being built. Close PixelKit anyway?'
+        : 'An export is still being built. Reload anyway?',
+      buttons: [closing ? 'Close' : 'Reload', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+    });
+    if (choice === 0) event.preventDefault();
   });
 
   mainWindow.loadURL(APP_URL);
 }
 
-// ---------------------------------------------------------------------------
 // Menu
-// ---------------------------------------------------------------------------
 
 let importBusy = false;
 
 async function importLegacyBackup() {
-  if (importBusy) return; // one minutes-long import at a time
+  if (importBusy) return;
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const picked = await dialog.showOpenDialog(mainWindow, {
     title: 'Import legacy PixelKit data',
-    message: 'Choose a nightly backup zip or an old backend data folder',
+    message: 'Choose a nightly backup zip',
     properties: ['openFile'],
     filters: [{ name: 'PixelKit backup', extensions: ['zip'] }],
   });
@@ -670,13 +667,13 @@ async function importLegacyBackup() {
   const alive = () => mainWindow && !mainWindow.isDestroyed();
   try {
     const r = await postJson('/api/import-legacy', { path: src });
-    if (!alive()) return; // window closed during a long import
+    if (!alive()) return;
     if (r.status === 200) {
       await dialog.showMessageBox(mainWindow, {
         type: 'info',
         title: 'PixelKit',
         message: 'Legacy data imported.',
-        detail: 'Your projects are in the workspace now; the window will reload.',
+        detail: 'Your Projects and datasets are in the workspace now. The window will reload.',
       });
       if (alive()) mainWindow.webContents.reload();
     } else {
@@ -772,6 +769,7 @@ function buildMenu() {
       submenu: [
         { label: 'Open Engine Log Folder', click: () => openEngineLogFolder() },
         { label: 'Report an Issue…', click: () => shell.openExternal(ISSUES_URL) },
+        { label: 'Third-Party Notices', click: () => openNotices() },
         ...(isMac ? [] : [{ type: 'separator' }, { role: 'about' }]),
       ],
     },
@@ -779,12 +777,10 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-// ---------------------------------------------------------------------------
 // Lifecycle
-// ---------------------------------------------------------------------------
 
 app.whenReady().then(async () => {
-  // Dev-mode dock icon (packaged builds get it from electron-builder).
+  // For dev runs; packaged builds get the dock icon from electron-builder.
   if (process.platform === 'darwin' && app.dock) {
     try { app.dock.setIcon(APP_ICON); } catch {}
   }
@@ -803,17 +799,17 @@ app.whenReady().then(async () => {
     }
   } else if (versionMismatch) {
     showSplashError('version');
+  } else if (portUnresponsive) {
+    showSplashError('unresponsive');
   } else if (!bootstrapQuit) {
-    // Startup timed out: reap our own spawn first, both to avoid a
-    // zombie engine behind the error splash and so the port probe
-    // can't blame "another application" for a process we started.
+    // Stopped first, so the port probe does not report it as another application.
     await stopOwnedEngine();
     showSplashError((await portOccupied()) ? 'port' : undefined);
   }
 });
 
 app.on('activate', () => {
-  // macOS dock click with no windows: recreate if the engine is up.
+  // macOS dock click with no windows open.
   if (mainWindow === null && splashWindow === null) {
     checkHealth().then((ok) => {
       if (ok && mainWindow === null) createMainWindow();
@@ -822,19 +818,15 @@ app.on('activate', () => {
 });
 
 app.on('window-all-closed', () => {
-  // Single-window shell: closing the window quits the app on every platform,
-  // which is what tears down a spawned engine (a reused one is left alone).
+  // Quits on macOS too: quitting is what stops a spawned engine.
   app.quit();
 });
 
 let shuttingDown = false;
 app.on('will-quit', (event) => {
   if (shuttingDown) return;
-  // From here nothing spawns: a restart in flight (stopping the old
-  // engine) must not start a new one that outlives the app.
+  // Set first: a restart in flight must not spawn an engine that outlives the app.
   shuttingDown = true;
-  // Quitting mid-bootstrap: kill the tar/pip child so a multi-GB
-  // install doesn't keep running headless and race the next launch.
   bootstrap.abort();
   if (engine.proc && !engine.external && !engine.exited) {
     event.preventDefault();

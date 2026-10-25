@@ -1,8 +1,4 @@
-"""Training pipeline pieces that need a dataset on disk: the stratified
-split, augmentations in the training set, pre-flight checks, batch
-sizing and out-of-memory recovery, checkpoint + resume, the calibrated
-threshold in the bundle, and labelling with the exported model. CPU
-only, 64 px inputs, no COCO download."""
+"""Training pipeline pieces that need a dataset on disk."""
 import io
 import json
 import threading
@@ -47,7 +43,22 @@ def _dataset(client, name: str, n: int = 10, labels=("dog", "cat")) -> tuple[str
     return pid, iids
 
 
-# ── split ────────────────────────────────────────────────────────────
+def _store_dataset(name: str, tags, imports: list[dict]) -> str:
+    """A dataset written through the store, one small JPEG per import."""
+    import store
+
+    pid = store.new_id()
+    d = store.create_dataset_dir(pid, name)
+    for imp in imports:
+        (d / "images" / imp["filename"]).write_bytes(_jpeg())
+        imp.setdefault("id", Path(imp["filename"]).stem)
+        imp.setdefault("width", 96)
+        imp.setdefault("height", 64)
+    store.save(pid, {"id": pid, "name": name, "tags": list(tags), "imports": imports})
+    return pid
+
+
+# Split
 
 def _mk(name, classes, split="train"):
     from train_yolox import Sample
@@ -100,7 +111,7 @@ def test_split_edges():
     stratified_split([], 0.8)
 
 
-# ── dataset loading: augmentations follow their parent ───────────────
+# Dataset loading: augmentations follow their parent
 
 def _write_augmentations(ds_dir: Path, iid: str, parent_w=96, parent_h=64, n=2, label="dog"):
     d = ds_dir / "augmentations" / iid
@@ -120,7 +131,6 @@ def test_augmentations_join_the_train_split_only(client):
     pid, iids = _dataset(client, "Aug Split", n=8)
     m = store.load(pid)
     ds_dir = store.dataset_dir(pid)
-    # Mark every import as augmented on disk.
     for imp in m["imports"]:
         imp["n_augmentations"] = 2
         _write_augmentations(ds_dir, imp["id"], label="dog" if "img0" in imp["filename"] else "cat")
@@ -154,7 +164,85 @@ def test_augmentations_join_the_train_split_only(client):
         load_samples(pid, 0.75, eval_project=pid)
 
 
-# ── pre-flight ───────────────────────────────────────────────────────
+def test_copies_made_from_boxes_an_image_no_longer_has_are_left_out(client):
+    import aug_source
+    import store
+    from train_yolox import TrainConfig, load_samples, preflight
+
+    pid, iids = _dataset(client, "Aug Stale", n=6)
+    m = store.load(pid)
+    ds_dir = store.dataset_dir(pid)
+    for imp in m["imports"]:
+        imp["n_augmentations"] = 2
+        _write_augmentations(ds_dir, imp["id"])
+        anno = ds_dir / "augmentations" / imp["id"] / "annotations.json"
+        data = json.loads(anno.read_text())
+        data["source"] = aug_source.source_boxes(imp)
+        anno.write_text(json.dumps(data))
+    store.save(pid, m)
+    _s, _c, info = load_samples(pid, 1.0, use_augmentations=True)
+    assert info["augmented"] == 12 and info["augmentedStale"] == 0
+
+    moved = [{"id": "b0", "label": "dog", "x0": 12, "y0": 10, "x1": 40, "y1": 40}]
+    r = client.put(f"/api/v2/projects/{pid}/imports/{iids[0]}", json={"editedBoxes": moved})
+    assert r.status_code == 200
+    _s, _c, info = load_samples(pid, 1.0, use_augmentations=True)
+    assert info["augmented"] == 10 and info["augmentedStale"] == 1
+    out = preflight(pid, TrainConfig(imgsz=64, train_split=1.0))
+    assert out["images"]["augmentedStale"] == 1
+    assert any("changed after their augmentations" in w for w in out["warnings"])
+
+
+# Which boxes train
+
+def test_training_takes_the_boxes_the_exports_take(app_module):
+    """Detections the labeller rejected are not boxes; edited boxes win as in the exports."""
+    import store
+    from train_yolox import load_samples
+
+    def det(x0, rejected=False):
+        return {"box": [x0, 10, x0 + 30, 40], "gd_label": "cat", "gd_score": 0.3,
+                "pred_label": None if rejected else "cat", "rejected": rejected,
+                "reject_reason": "gd" if rejected else None}
+
+    edit = {"label": "cat", "x0": 5, "y0": 5, "x1": 45, "y1": 45}
+    pid = _store_dataset("Rejected", ["cat"], [
+        {"filename": "a.jpg", "detections": [det(10), det(50, rejected=True)]},
+        {"filename": "b.jpg", "detections": [det(10, rejected=True)]},             # only rejected
+        {"filename": "c.jpg", "detections": [det(10, rejected=True)], "background": True},
+        {"filename": "d.jpg", "detections": [det(10)], "editedBoxesSet": True, "editedBoxes": []},
+        {"filename": "e.jpg", "detections": [det(10)], "editedBoxes": [edit]},
+        {"filename": "f.jpg", "detections": [det(20), det(60, rejected=True)], "editedBoxesSet": True},
+    ])
+    samples, _c, info = load_samples(pid, 1.0, use_augmentations=False)
+    trained = {s.name: sorted(s.boxes.tolist()) for s in samples}
+    exported = {name: sorted(list(app_module._box_xyxy(b)) for b in slot["boxes"])
+                for name, slot in app_module._image_index(store.load(pid)).items()}
+    assert {n: trained.get(n, []) for n in exported} == exported
+    assert trained["a.jpg"] == [[10, 10, 40, 40]] and trained["f.jpg"] == [[20, 10, 50, 40]]
+    # An image whose detections were all rejected is unlabelled, unless it is a background image.
+    assert "b.jpg" not in trained and trained["c.jpg"] == []
+    assert info["unlabelled"] == 2 and info["background"] == 1
+
+
+def test_boxes_with_labels_outside_the_dataset_are_counted_and_reported():
+    from train_yolox import TrainConfig, load_samples, preflight
+
+    def box(label, x0=10):
+        return {"label": label, "x0": x0, "y0": 10, "x1": x0 + 30, "y1": 40}
+
+    imports = [{"filename": f"i{k}.jpg", "editedBoxes": [box("bolt"), box("nutt", 50)]} for k in range(3)]
+    imports += [{"filename": "j.jpg", "editedBoxes": [box("Bolts")]},
+                {"filename": "k.jpg", "detections": [{**box("washer"), "rejected": True}]}]
+    pid = _store_dataset("Other labels", ["bolt", "nut"], imports)
+    _s, _c, info = load_samples(pid, 0.8, use_augmentations=False)
+    assert info["ignoredLabels"] == {"nutt": 3, "bolts": 1}
+    out = preflight(pid, TrainConfig(imgsz=64, train_split=0.8))
+    assert "4 box(es) with labels not in this dataset are left out: nutt, bolts" in out["warnings"]
+    assert out["images"]["unlabelled"] == 2  # j.jpg's only box and k.jpg's rejected one
+
+
+# Pre-flight
 
 def test_preflight_reports_blockers_and_warnings(client):
     from train_yolox import TrainConfig, preflight
@@ -171,8 +259,7 @@ def test_preflight_reports_blockers_and_warnings(client):
     # 30x30 boxes on a 96-wide image at 64 px input are 20 px: not small.
     assert "under 8 px" not in joined
 
-    # Objects that vanish at the input size: a 10 px box on a 96 px wide
-    # image is under 7 px at a 64 px input.
+    # A 10 px box on a 96 px wide image is under 7 px at a 64 px input.
     from train_yolox import Sample, preflight_samples
 
     tiny = []
@@ -202,7 +289,7 @@ def test_preflight_reports_blockers_and_warnings(client):
     assert client.get("/api/v2/projects/nope/train/preflight").status_code == 404
 
 
-# ── batch sizing and OOM recovery ────────────────────────────────────
+# Batch sizing and OOM recovery
 
 def test_auto_batch_on_cpu_and_oom_halving():
     from train_yolox import _auto_batch, _epoch, _is_oom
@@ -273,7 +360,7 @@ def test_infer_image_maps_boxes_back_to_the_original_pixels():
     assert (y0, y1) == pytest.approx(((28 - 8 - 16) / 0.5, (28 + 8 - 16) / 0.5), abs=0.6)
 
 
-# ── the whole run on CPU: interrupt, resume, bundle, label with it ────
+# A whole run: interrupt, resume, bundle, label with it
 
 def test_interrupt_resume_and_label_with_the_model(client):
     import store
@@ -306,8 +393,7 @@ def test_interrupt_resume_and_label_with_the_model(client):
     assert entry["status"] == "interrupted" and entry["resumable"] is True
     assert entry["epochsDone"] == 1 and entry["totalEpochs"] == 2 and entry["hasExport"] is False
 
-    # Resume: the request carries only the run id; settings come back
-    # from the checkpoint (epochs=2, imgsz=64, no QAT).
+    # Resume takes only the run id; the settings come from the checkpoint.
     report = train(pid, TrainConfig(resume_run=run_id, device="cpu", verify_neuron6=False))
     assert report["resumed"] is True and report["run"] == run_id
     assert report["epochs"] == 2 and report["imgsz"] == 64 and report["qat_epochs"] == 0
@@ -342,8 +428,7 @@ def test_interrupt_resume_and_label_with_the_model(client):
         assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
     assert client.get(f"/api/v2/projects/{pid}/models/{run_id}/failures/..%2Freport.json").status_code in (400, 404)
     assert client.get(f"/api/v2/projects/{pid}/models/{run_id}/failures/99_nope.jpg").status_code == 404
-    # Every val image beside its truth, in the image's own pixels: the
-    # truth there is the dataset's boxes back from the letterbox.
+    # Val predictions and truth, in each image's own pixels.
     assert entry["hasPredictions"] is True
     r = client.get(f"/api/v2/projects/{pid}/models/{run_id}/predictions")
     assert r.status_code == 200
@@ -390,13 +475,102 @@ def test_interrupt_resume_and_label_with_the_model(client):
     r = client.post("/api/jobs", json={"kind": "label_model", "project": pid, "params": {"run": run_id}})
     assert r.status_code == 400 and "overwrite" in r.json()["detail"]
 
-    # Start a new run from this one's weights: accepted by the scheduler.
+    # A new run from an unknown run's weights is refused.
     r = client.post("/api/jobs", json={"kind": "train_yolox", "project": pid,
                                        "params": {"initRun": "20000101T000000Z"}})
     assert r.status_code == 400
     r = client.delete(f"/api/v2/projects/{pid}/models/{run_id}")
     assert r.status_code == 200 and not run_dir.exists()
     assert client.get(f"/api/v2/projects/{pid}/models").json()["models"] == []
+
+
+def test_a_resumed_run_keeps_its_split_while_the_dataset_changes():
+    """Val stays val and train stays train; images added since train, deleted ones drop out."""
+    import store
+    from train_yolox import Cancelled, TrainConfig, find_run_dir, load_samples, train
+
+    names = [f"img_{i:03d}.jpg" for i in range(10)]
+    box = {"label": "dog", "x0": 10, "y0": 10, "x1": 40, "y1": 40}
+    pid = _store_dataset("Resume split", ["dog"], [{"filename": n, "editedBoxes": [box]} for n in names])
+    run_id = "20990110T000000Z"
+    cancel = threading.Event()
+
+    def prog(p):
+        if p["index"] == 1:
+            cancel.set()
+
+    cfg = TrainConfig(epochs=2, qat_epochs=0, imgsz=64, batch=2, device="cpu", pretrained=False,
+                      verify_neuron6=False, run_id=run_id, checkpoint_every=1, failure_limit=2)
+    with pytest.raises(Cancelled):
+        train(pid, cfg, prog, cancel)
+    run_dir = find_run_dir(pid, run_id)
+    ck = torch.load(run_dir / "ckpt_last.pt", map_location="cpu", weights_only=False)
+    saved = ck["split"]
+    assert sorted(saved["train"] + saved["val"]) == names and len(saved["val"]) == 2
+    # A checkpoint from before the split was saved, as a second run.
+    old_id = "20990110T000001Z"
+    run_dir.with_name(old_id).mkdir()
+    ck.pop("split")
+    torch.save({**ck, "run_id": old_id}, run_dir.with_name(old_id) / "ckpt_last.pt")
+
+    # Delete a val and a train image, then add images until a new split would
+    # move one of those that stay.
+    m = store.load(pid)
+    gone = {saved["val"][0], saved["train"][0]}
+    m["imports"] = [e for e in m["imports"] if e["filename"] not in gone]
+    stay = [n for n in names if n not in gone]
+    added = []
+    for k in range(20):
+        added.append(f"new_{k:03d}.jpg")
+        (store.dataset_dir(pid) / "images" / added[-1]).write_bytes(_jpeg())
+        m["imports"].append({"id": f"new{k}", "filename": added[-1], "width": 96, "height": 64,
+                             "editedBoxes": [box]})
+        store.save(pid, m)
+        fresh = {s.name: s.split for s in load_samples(pid, 0.8, use_augmentations=False)[0]}
+        if any(fresh[n] != ("val" if n in saved["val"] else "train") for n in stay):
+            break
+    else:
+        pytest.fail("no added image changes the split")
+
+    report = train(pid, TrainConfig(resume_run=run_id, device="cpu", verify_neuron6=False))
+    kept_val = sorted(set(saved["val"]) & set(stay))
+    preds = json.loads((run_dir / "predictions.json").read_text("utf-8"))
+    assert sorted(img["image"] for img in preds["images"]) == kept_val
+    assert report["images"]["val"] == len(kept_val)
+    assert report["images"]["train"] == len(set(saved["train"]) & set(stay)) + len(added)
+    assert f"{len(added)} image(s) added since the run started went to train" in report["notes"]
+    assert "2 image(s) deleted or left without boxes since the run started were dropped" in report["notes"]
+
+    # Without a saved split, the dataset is split as it is now.
+    report = train(pid, TrainConfig(resume_run=old_id, device="cpu", verify_neuron6=False))
+    preds = json.loads((run_dir.with_name(old_id) / "predictions.json").read_text("utf-8"))
+    assert sorted(img["image"] for img in preds["images"]) == sorted(n for n, s in fresh.items() if s == "val")
+    assert not any("since the run started" in n for n in report["notes"])
+
+
+def test_a_compiler_that_cannot_start_keeps_the_run_and_a_refusal_keeps_its_scores(
+        client, fake_stedgeai):
+    """A compiler that cannot start leaves the bundle unverified; one that refuses rejects it, keeping the scores."""
+    from train_yolox import TrainConfig, find_run_dir, train
+
+    pid, _ = _dataset(client, "Verify Run", n=8)
+    cfg = dict(epochs=1, qat_epochs=0, imgsz=64, batch=2, device="cpu", pretrained=False,
+               verify_neuron6=True, failure_limit=4)
+
+    fake_stedgeai("@exit /b -1073741502\r\n", "exit 1\n")
+    report = train(pid, TrainConfig(**cfg, run_id="20990105T000000Z"))
+    assert report["neuron6"]["verified"] is False and "did not run" in report["neuron6"]["reason"]
+    assert (find_run_dir(pid, "20990105T000000Z") / "export.zip").is_file()
+
+    fake_stedgeai("@echo ERROR: unsupported layer Foo\r\n@exit /b 1\r\n",
+                  'echo "ERROR: unsupported layer Foo"\nexit 1\n')
+    with pytest.raises(ValueError, match="export rejected"):
+        train(pid, TrainConfig(**cfg, run_id="20990106T000000Z"))
+    run_dir = find_run_dir(pid, "20990106T000000Z")
+    rejected = json.loads((run_dir / "report.json").read_text())
+    assert rejected["exportRejected"] is True and "unsupported layer Foo" in rejected["neuron6"]["error"]
+    assert {"ap50_fp32", "ap50_int8", "threshold"} <= rejected.keys()
+    assert not (run_dir / "export.zip").exists()
 
 
 def test_val_predictions_are_in_image_pixels_with_how_each_box_fared():
@@ -447,7 +621,7 @@ def test_train_params_are_clamped(app_module):
     assert app_module._fmt_eta(2 * 3600 + 5 * 60) == "2 h 05 min"
 
 
-# ── sweep: one bad file, one bad box, one bad step must not end a run ──
+# One bad file, box or step does not end a run
 
 def test_unreadable_images_and_outside_boxes_are_skipped(tmp_path):
     import torch
@@ -474,7 +648,7 @@ def test_unreadable_images_and_outside_boxes_are_skipped(tmp_path):
     assert targets[1].sum() == 0 and imgs[1].sum() == 0  # unreadable: blank sample, no boxes
     gt = _gt_letterbox(s, 64)
     assert len(gt) == 2 and gt[:, :4].max() <= 64.0
-    # The head accepts the batch (this used to raise "selected index k out of range").
+    # The head accepts the batch.
     model = _build_model(n_classes=2)
     model.train()
     out = model(imgs, targets)
@@ -511,8 +685,7 @@ def test_non_finite_steps_are_skipped_and_a_diverged_epoch_raises(tmp_path):
 
 
 def test_atomic_replace_retries_while_the_file_is_open(tmp_path):
-    """Windows refuses to rename over a file another handle has open;
-    the writer waits it out instead of ending the run."""
+    """Windows refuses to rename over an open file; the writer retries until it closes."""
     import threading
     import time as _time
 
@@ -562,7 +735,7 @@ def test_label_model_targets_never_touch_hand_edited_images(app_module):
     assert [e["id"] for e in app_module._label_model_targets(manifest, True)] == ["a", "b"]
 
 
-# ── sharing the labelling GPU ────────────────────────────────────────
+# Sharing the labelling GPU
 
 def test_every_step_offers_the_gpu_and_a_cancel_there_ends_the_epoch(tmp_path):
     from train_yolox import Cancelled, Sample, _epoch

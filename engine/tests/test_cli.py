@@ -1,5 +1,4 @@
-"""The launcher CLI's arguments. No engine is started: serve() is
-replaced by a recorder."""
+"""The launcher CLI's arguments; serve() is replaced by a recorder."""
 import sys
 from pathlib import Path
 

@@ -1,9 +1,9 @@
-// Client for the engine's model manager + settings (portable build).
+// Client for the engine's model manager and settings.
 import { apiFetch } from "@/lib/apiFetch";
 
 export type ModelName = "sam3" | "dinov2";
 
-export type DownloadRec = {
+type DownloadRec = {
   status: "downloading" | "done" | "error";
   downloaded_bytes: number;
   total_bytes: number;
@@ -28,7 +28,7 @@ export type ModelsStatus = {
   hfTokenConfigured: boolean;
 };
 
-export type TokenStatus = {
+type TokenStatus = {
   configured: boolean;
   valid: boolean | null;
   username: string | null;
@@ -38,7 +38,7 @@ export type TokenStatus = {
 
 export type DevicePreference = "auto" | "cuda" | "mps" | "cpu" | `cuda:${number}`;
 
-export type GpuInfo = { index: number; name: string; vramGb: number };
+type GpuInfo = { index: number; name: string; vramGb: number };
 
 export type EngineSettings = {
   workspace: string;
@@ -68,9 +68,6 @@ export const fetchModelsStatus = () =>
 export const fetchEngineSettings = () =>
   apiFetch("/api/settings").then((r) => json<EngineSettings>(r));
 
-export const fetchTokenStatus = () =>
-  apiFetch("/api/settings/hf-token").then((r) => json<TokenStatus>(r));
-
 export const setHfToken = (token: string) =>
   apiFetch("/api/settings/hf-token", {
     method: "POST",
@@ -80,10 +77,6 @@ export const setHfToken = (token: string) =>
 
 export const clearHfToken = () =>
   apiFetch("/api/settings/hf-token", { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r));
-
-// NOTE: the per-model download/load/unload client calls are gone -
-// models are engine-managed plumbing (auto-download + auto-load once
-// the HF token exists); the UI only ever READS /api/models/status.
 
 export const setWorkspacePath = (path: string) =>
   apiFetch("/api/settings/workspace", {

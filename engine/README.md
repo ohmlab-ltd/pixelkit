@@ -1,35 +1,39 @@
 # PixelKit engine
 
-Python FastAPI engine for the portable build: SAM 3 auto-labelling
-("Pipeline Charlie"), job queue + SSE progress, GPU augmentations,
-YOLO/COCO/VOC export - all storing into a local workspace folder
-(default `~/PixelKit`, override with `PIXELKIT_WORKSPACE`).
+FastAPI server for PixelKit: SAM 3 labelling, a job queue whose progress is
+read from `GET /api/jobs/{id}`, GPU augmentations, dataset import and export,
+and YOLOX training.
+Data is stored in the workspace folder, `~/PixelKit` by default or
+`PIXELKIT_WORKSPACE` ([docs/WORKSPACE.md](../docs/WORKSPACE.md)).
 
-    <workspace>/projects/<project>/<dataset>/
-        dataset.json      # metadata + labels + per-image index
-        images/           # original images only
-        annotations/      # one JSON per image (boxes, masks, labels)
+Install PyTorch first, from download.pytorch.org with the CUDA index on an
+NVIDIA machine; from PyPI, Windows gets a CPU-only build.
 
-Run:
+```bash
+pip install -r requirements.txt
+python gd/server.py            # http://127.0.0.1:8001
+```
 
-    pip install -r requirements.txt
-    python gd/server.py            # http://127.0.0.1:8001
+The server binds to localhost and has no authentication. The device is
+CUDA, then MPS, then the CPU; `PK_DEVICE` or the Settings device picker
+overrides it. Without a supported GPU, every dataset, annotation and export
+API works, and the labelling endpoints return 503 unless the CPU is chosen
+in Settings.
 
-No auth, no cloud, binds localhost only. Device auto-detects
-cuda → mps → cpu (`PK_DEVICE` or the Settings picker override it). On a
-machine with no supported GPU the engine still runs every dataset/
-annotation/export API; the labelling endpoints return 503 unless CPU
-mode is explicitly chosen (very slow).
+Command line, after `pip install -e .`:
 
-Migrate SaaS-era data: `python import_legacy.py <old-dir-or-backup.zip>`.
+```bash
+pixelkit serve
+pixelkit doctor
+pixelkit label ./photos --prompts "bolt,washer" --export yolo
+pixelkit train <dataset> --epochs 50 --size nano
+```
 
-Training a YOLOX-Nano for the Neuro N6 (dataset overview -> Train card;
-export contract, NPU verification and the validated recipe are in
-[docs/TRAINING.md](../docs/TRAINING.md)).
+`pixelkit label` also takes `--name`, `--out DIR`, `--device cpu|cuda:N` and
+`--model-timeout S`. Training is described in
+[docs/TRAINING.md](../docs/TRAINING.md).
 
-Headless batch labelling (no UI, results land in the normal workspace):
+`python import_legacy.py <folder or zip>` imports a backup of an earlier
+PixelKit server into the workspace.
 
-    pixelkit label ./photos --prompts "bolt,washer" --export yolo
-    # options: --name, --out DIR, --device cpu|cuda:N, --model-timeout S
-
-Tests: `python -m pytest tests/`.
+Tests: `pip install pytest httpx`, then `python -m pytest tests/`.

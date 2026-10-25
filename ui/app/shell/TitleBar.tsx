@@ -1,21 +1,15 @@
 "use client";
 
-// Desktop-shell title bar (36px). Draggable so the packaged Electron
-// window can be moved by grabbing it; interactive children must opt
-// out with `no-drag` (none exist yet). On macOS under Electron the
-// native traffic-light buttons overlay the top-left corner, so the
-// app name shifts right by 76px only in that environment.
+// Shell title bar and Electron drag region. Interactive children need
+// `no-drag`. On macOS the name clears the window buttons by 76 px.
 
 import { useEffect, useState, type CSSProperties } from "react";
 
-// `-webkit-app-region` isn't in React's CSSProperties; a cast keeps
-// the style typed without widening everything to `any`.
+// `-webkit-app-region` is not in React's CSSProperties.
 const DRAG: CSSProperties = { WebkitAppRegion: "drag" } as CSSProperties;
 
 export function TitleBar({ title }: { title?: string }) {
-  // Electron-on-macOS detection is a client-only concern; start false
-  // so SSR/static export renders the no-inset variant and correct
-  // padding applies after hydration.
+  // Detected after hydration; static rendering has no inset.
   const [macElectron, setMacElectron] = useState(false);
   useEffect(() => {
     if (typeof navigator === "undefined") return;
@@ -37,15 +31,11 @@ export function TitleBar({ title }: { title?: string }) {
       >
         PixelKit
       </span>
-      {/* Centre slot: the open dataset/project name. Absolutely centred
-          so it doesn't drift when the left padding changes. Mono
-          micro-label voice - the operational chrome idiom. */}
       {title ? (
         <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 max-w-[40%] truncate font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--fg-dim)] leading-none">
           {title}
         </span>
       ) : null}
-      {/* Right slot: intentionally empty for now. */}
     </header>
   );
 }

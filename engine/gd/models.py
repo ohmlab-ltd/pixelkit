@@ -1,19 +1,4 @@
-"""Model manager - download state, HF token, progress.
-
-Owns everything about getting weights onto disk:
-  - the registry of models the portable build uses (SAM3 required+gated,
-    DINOv2 required),
-  - the user's Hugging Face token (needed for the gated facebook/sam3):
-    validated against the hub, stored in the app-config dir (never in the
-    workspace, which may be shared/synced), exported as HF_TOKEN so
-    transformers/hub pick it up,
-  - background downloads into <workspace>/weights (HF_HOME) with byte-level
-    progress and a disk-space preflight.
-
-Loading models onto the GPU stays in server.py (it owns `state` and the
-load lock); this module only answers "is it on disk / how far along is the
-download / may we access the repo".
-"""
+"""Model weights on disk: registry, Hugging Face token and downloads."""
 from __future__ import annotations
 
 import json
@@ -25,13 +10,11 @@ from typing import Any
 
 import workspace
 
-# Read repo ids from the same env vars the loaders use, without importing
-# the (torch-heavy) loader modules.
+# The same env vars the loaders read.
 SAM3_REPO = os.environ.get("SAM3_MODEL_ID", "facebook/sam3")
 DINO_REPO = os.environ.get("V2_DINO_MODEL", "facebook/dinov2-large")
 
-# Skip alternative-format mirrors some repos carry (GGUF/ONNX etc.) -
-# transformers only needs configs + safetensors + tokenizer/processor files.
+# Files transformers needs; GGUF and ONNX mirrors are skipped.
 _ALLOW_PATTERNS = [
     "*.json", "*.txt", "*.model", "*.safetensors",
     "tokenizer*", "preprocessor*", "processor*", "chat_template*", "*.py",
@@ -54,52 +37,41 @@ REGISTRY: dict[str, dict[str, Any]] = {
     },
 }
 
-# name -> {status: idle|downloading|done|error, downloaded_bytes, total_bytes, error}
+# name -> {status: downloading|done|error, downloaded_bytes, total_bytes, error}
 _DOWNLOADS: dict[str, dict[str, Any]] = {}
 _DL_LOCK = threading.Lock()
 
 
-# ---------------------------------------------------------------- token
+# Token
 
 def _config_token() -> str:
     return str(workspace.load_config().get("hf_token") or "").strip()
 
 
 def hf_token() -> str | None:
-    """Config wins; a manually-exported HF_TOKEN env works too."""
+    """The configured token, else the HF_TOKEN environment variable, else None."""
     return _config_token() or (os.environ.get("HF_TOKEN") or "").strip() or None
 
 
 def apply_token_env() -> None:
-    """Export the stored token so transformers/hub calls inherit it.
-    Call before any model load. No-op when nothing is configured."""
+    """Export the stored token as HF_TOKEN; call before any model load."""
     tok = _config_token()
     if tok:
         os.environ["HF_TOKEN"] = tok
 
 
 def set_hf_token(token: str) -> None:
-    cfg = workspace.load_config()
-    cfg["hf_token"] = token.strip()
-    workspace.save_config(cfg)
-    try:  # token at rest: owner-only file perms (POSIX; no-op on Windows)
-        os.chmod(workspace.config_dir() / "config.json", 0o600)
-    except OSError:
-        pass
+    workspace.update_config(lambda c: c.__setitem__("hf_token", token.strip()))
     apply_token_env()
 
 
 def clear_hf_token() -> None:
-    cfg = workspace.load_config()
-    cfg.pop("hf_token", None)
-    workspace.save_config(cfg)
+    workspace.update_config(lambda c: c.pop("hf_token", None))
     os.environ.pop("HF_TOKEN", None)
 
 
 def validate_token(token: str | None = None) -> dict[str, Any]:
-    """Network check: who is this token, and does it unlock SAM3?
-    Distinguishes the failure modes the setup screen must explain:
-    invalid token / valid but license not accepted / all good."""
+    """Ask Hugging Face whether the token is valid and can access SAM3_REPO."""
     import huggingface_hub as hh
     from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
 
@@ -141,10 +113,10 @@ def validate_token(token: str | None = None) -> dict[str, Any]:
     return out
 
 
-# ---------------------------------------------------------------- status
+# Status
 
 def is_downloaded(name: str) -> bool:
-    """True when a complete snapshot sits in the local cache (no network)."""
+    """True when the local cache holds a complete snapshot; uses no network."""
     from huggingface_hub import snapshot_download
 
     spec = REGISTRY[name]
@@ -154,9 +126,8 @@ def is_downloaded(name: str) -> bool:
         ))
     except Exception:
         return False
-    # The snapshot folder exists once the first small file lands, so an
-    # interrupted download looked complete. Complete means the weights:
-    # every shard the index lists, or the single weights file.
+    # The folder exists before the weights land. Complete means every
+    # shard the index lists, or a single weights file.
     index = snap / "model.safetensors.index.json"
     if index.is_file():
         try:
@@ -168,8 +139,7 @@ def is_downloaded(name: str) -> bool:
 
 
 def _loaded(name: str) -> bool:
-    """Loaded-on-device state, without importing torch-heavy modules that
-    aren't already in the process."""
+    """Whether the model is loaded, without importing its module."""
     import sys
 
     mod_name = {"sam3": "pipeline_charlie", "dinov2": "v2_dinov2"}[name]
@@ -209,16 +179,25 @@ def status() -> dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------- download
+# Download
+
+# huggingface_hub's bar for bytes received from the network. The bytes written
+# to disk, which match the files' sizes, are counted from its other bar.
+_TRANSFER_BAR_DESC = "Downloading bytes"
+
 
 def _make_tqdm(progress: dict[str, Any]):
-    """A tqdm stand-in the hub drives per file; we aggregate bytes across
-    files into one progress dict the status endpoint reports."""
+    """A tqdm class that adds the bytes written for every file to `progress`."""
     from tqdm.std import tqdm as _tqdm
 
     class _Progress(_tqdm):
+        def __init__(self, *args, **kwargs):
+            # Read here: a disabled bar sets no attributes.
+            self._counts_bytes = kwargs.get("unit") == "B" and kwargs.get("desc") != _TRANSFER_BAR_DESC
+            super().__init__(*args, **kwargs)
+
         def update(self, n=1):
-            if self.unit == "B" and n:
+            if self._counts_bytes and n:
                 with _DL_LOCK:
                     progress["downloaded_bytes"] += int(n)
             return super().update(n)
@@ -227,9 +206,8 @@ def _make_tqdm(progress: dict[str, Any]):
 
 
 def start_download(name: str) -> dict[str, Any]:
-    """Kick a background download; returns the progress record. Safe to
-    call repeatedly - an in-flight download is returned, a finished one
-    restarts only if the snapshot is incomplete."""
+    """Start a background download and return its progress record; an
+    in-flight download is returned as it is."""
     if name not in REGISTRY:
         raise KeyError(name)
     spec = REGISTRY[name]

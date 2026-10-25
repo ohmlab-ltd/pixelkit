@@ -4,20 +4,38 @@ Copyright 2026 Ohm Lab Ltd
 This product includes software developed at Ohm Lab Ltd
 (https://ohmlab.co.uk), licensed under the Apache License, Version 2.0.
 
-PixelKit downloads machine-learning model weights from Hugging Face at
-runtime. Those weights are NOT covered by this repository's license and
-are licensed by their respective owners - in particular:
+This product includes code from YOLOX
+(https://github.com/Megvii-BaseDetection/YOLOX), licensed under the Apache
+License, Version 2.0:
 
-  - facebook/sam3 (SAM 3): Meta's SAM License, accepted by each user on
-    Hugging Face before download.
-  - facebook/dinov2-large: Apache License 2.0.
+  Copyright (c) 2021-2022 Megvii Inc. All rights reserved.
 
-The engine vendors model-definition and loss code from YOLOX
-(https://github.com/Megvii-BaseDetection/YOLOX), Copyright (c) Megvii
-Inc., Apache License 2.0, at engine/gd/vendor/yolox/ (from the
-yolox==0.3.0 sdist, modified for quantisation-aware training and the
-raw-head export; each modified file says so). Training downloads
-Megvii's COCO-pretrained yolox_nano or yolox_tiny checkpoint at the
-user's request; it carries the same Apache-2.0 license. A model
-PixelKit trains from it is derived from it: distribute an exported model
-with Megvii's Apache-2.0 license and copyright notice.
+It is in engine/gd/vendor/yolox/, taken from the yolox==0.3.0 sdist. Ohm
+Lab Ltd modified network_blocks.py, yolo_pafpn.py, yolo_head.py and
+yolox.py for quantisation-aware training and the raw-head export; each
+modified file says so. yolo_head.py also uses package-relative imports,
+the standard logging module in place of loguru and torch.amp.autocast in
+place of the deprecated torch.cuda.amp.autocast.
+
+This product includes third-party code, data, fonts and artwork under other
+licences, and its installers redistribute third-party software: the user
+interface libraries, Electron, the NSIS installer with its plug-ins and
+elevate.exe in the Windows installer and, in the macOS dmg, a Python
+runtime. They are listed with their copyright notices and licences in
+THIRD-PARTY-NOTICES.md.
+
+PixelKit downloads model weights at runtime from Hugging Face and GitHub.
+They are not covered by this repository's licence and are licensed by their
+owners:
+
+  facebook/sam3 (SAM 3): Meta's SAM License, accepted by each user on
+  Hugging Face before download.
+  facebook/dinov2-large: Apache License, Version 2.0.
+  YOLOX COCO checkpoints yolox_nano and yolox_tiny, Megvii Inc.: Apache
+  License, Version 2.0.
+
+A model PixelKit trains is a modified version of the YOLOX network and,
+when its weights descend from Megvii's COCO checkpoint, directly or through
+an earlier run, of Megvii's weights. Each exported model ships with a
+NOTICE.txt and a copy of the Apache License, Version 2.0; keep both with
+the model when you share it.

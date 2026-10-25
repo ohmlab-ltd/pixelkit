@@ -1,7 +1,4 @@
-"""Background images: checked, with nothing in them to label. Marked in the
-viewer or declared by an imported dataset, they count as labelled, the
-labelling passes leave them alone, and training learns from them as
-negatives. CPU only, 64 px inputs."""
+"""Background images count as labelled, are skipped by labelling and train as negatives."""
 import io
 import json
 from pathlib import Path

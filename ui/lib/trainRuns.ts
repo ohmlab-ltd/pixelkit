@@ -1,7 +1,4 @@
-// Types and pure helpers for the Train card: the engine's trained-run
-// records (GET /api/v2/projects/:id/models and .../models/:run), the
-// pre-flight report, and the small formatting + charting functions the
-// card renders with. Kept free of React so they can be unit-tested.
+// Types and pure helpers for the Train card: run records, the pre-flight report, curves.
 
 export type Neuron6Summary = {
   verified?: boolean | null;
@@ -27,7 +24,7 @@ export type HistoryRow = {
   batch?: number;
 };
 
-export type ThresholdSummary = {
+type ThresholdSummary = {
   conf: number;
   f1?: number | null;
   precision?: number | null;
@@ -36,8 +33,7 @@ export type ThresholdSummary = {
   fallback?: boolean | null; // the model found nothing on val: the default was written
 };
 
-// Reports written before the flag existed carry calibrated=false with an
-// all-zero sweep when the model found nothing: read that as the fallback.
+// Without the fallback flag, calibrated=false with all-zero scores is the fallback too.
 export function isThresholdFallback(thr: ThresholdSummary): boolean {
   if (thr.fallback) return true;
   return !thr.calibrated && (thr.f1 ?? 0) === 0 && (thr.precision ?? 0) === 0 && (thr.recall ?? 0) === 0;
@@ -83,11 +79,10 @@ export type TrainedRun = {
   history?: HistoryRow[] | null;
 };
 
-// predictions.json: each val image's truth beside what the exported model
-// reports on it at the shipped threshold, in the image's own pixels. A
-// prediction's kind is how it fared; a truth box nothing found is missed.
-export type TruthBox = { box: number[]; class: number; missed: boolean };
-export type PredictedBox = { box: number[]; class: number; score: number; kind: "tp" | "wrong" | "fp" };
+// predictions.json: each val image's truth and the exported model's boxes at
+// the shipped threshold, in image pixels.
+type TruthBox = { box: number[]; class: number; missed: boolean };
+type PredictedBox = { box: number[]; class: number; score: number; kind: "tp" | "wrong" | "fp" };
 export type ValPrediction = {
   project: string;
   image: string;
@@ -106,8 +101,7 @@ export function errorCounts(p: ValPrediction): { missed: number; wrong: number; 
   };
 }
 
-// Worst first, weighed as the report's gallery is (a miss or a wrong
-// class counts double a spurious box), then in val order.
+// Same order as the report's gallery: worst first, then val order.
 export function worstFirst(images: ValPrediction[]): ValPrediction[] {
   const weight = (p: ValPrediction) => {
     const e = errorCounts(p);
@@ -130,7 +124,7 @@ export type ClassReportRow = {
   f1: number | null;
 };
 
-export type FailureItem = {
+type FailureItem = {
   kind: "fp" | "fn" | "wrong";
   class: string;
   predicted?: string;
@@ -138,7 +132,7 @@ export type FailureItem = {
   box: number[];
 };
 
-export type FailureEntry = {
+type FailureEntry = {
   file: string;
   image: string;
   index: number;
@@ -150,7 +144,7 @@ export type FailureEntry = {
   height: number;
 };
 
-export type RunReport = {
+type RunReport = {
   classes?: string[];
   history?: HistoryRow[];
   threshold?: ThresholdSummary & { sweep?: { conf: number; precision: number; recall: number; f1: number }[] };
@@ -171,7 +165,7 @@ export type RunDetail = TrainedRun & {
   live: { history?: HistoryRow[]; notes?: string[]; error?: string | null; status?: string } | null;
 };
 
-export type PreflightClass = {
+type PreflightClass = {
   name: string;
   trainImages: number;
   valImages: number;
@@ -186,7 +180,7 @@ export type Preflight = {
   blockers: string[];
   warnings: string[];
   classes: PreflightClass[];
-  // background: how many of train + val are background images (no boxes).
+  // background: train + val images without boxes.
   images: { train: number; val: number; augmented: number; unlabelled: number; background?: number } | null;
 };
 
@@ -232,10 +226,8 @@ export function statusLabel(r: Pick<TrainedRun, "status" | "epochsDone" | "total
   }
 }
 
-// A polyline in a fixed viewBox for the training curves: loss on the
-// left axis (normalised to its own max), AP@0.5 as points on a 0..1
-// axis. Returns null when there is nothing to draw.
-export type CurveGeometry = {
+// Training curves in a fixed viewBox: loss scaled to its own max, AP@0.5 on 0..1.
+type CurveGeometry = {
   width: number;
   height: number;
   lossPath: string;
@@ -281,9 +273,7 @@ export function curveGeometry(
   };
 }
 
-// Confusion-matrix cell shade: 0 for an empty cell, up to 1 for the
-// largest cell in its row (the truth), so a row reads as "where did
-// this class go".
+// Cell shade: 0 when empty, up to 1 for the largest cell in its truth row.
 export function confusionShade(row: number[], value: number): number {
   const max = Math.max(...row, 0);
   if (max <= 0 || value <= 0) return 0;
@@ -291,7 +281,7 @@ export function confusionShade(row: number[], value: number): number {
 }
 
 export function etaFromProgressText(text: string | null | undefined): string | null {
-  // The engine appends "· 12 min left" to the phase text.
+  // The engine appends "12 min left" to the phase text.
   if (!text) return null;
   const m = /([0-9]+(?: h [0-9]{2} min| min| s)) left/.exec(text);
   return m ? m[1] : null;
