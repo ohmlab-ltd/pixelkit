@@ -27,10 +27,6 @@ page.
 | macOS 14 or later, Apple Silicon | `PixelKit-arm64.dmg`, 410 MB | Included |
 | Linux | none | Run from source |
 
-The installers are unsigned. On Windows, SmartScreen asks for confirmation
-(More info, Run anyway). On macOS, after the first attempt to open it, choose
-Open Anyway under System Settings, Privacy & Security.
-
 The packaged app checks GitHub for a newer release at launch and offers the
 release page; `PIXELKIT_NO_UPDATE_CHECK=1` turns the check off.
 
@@ -39,6 +35,35 @@ SAM 3, about 3.6 GB, which needs a Hugging Face token
 ([docs/HF-TOKEN.md](docs/HF-TOKEN.md)), and DINOv2, about 1.3 GB; each
 download needs 2 GB free beyond its size. The first training run downloads
 Megvii's COCO-pretrained YOLOX checkpoint, 8 MB for Nano and 41 MB for Tiny.
+
+### First launch
+
+The installers are not signed with paid certificates yet, so Windows and
+macOS ask you to confirm PixelKit once. After that it opens like any other
+app.
+
+On macOS:
+
+1. Open `PixelKit-arm64.dmg` and drag PixelKit to Applications.
+2. Open PixelKit from Applications. macOS says it cannot verify the app.
+   Close the message with Done, OK or Cancel, whichever it shows, not Move
+   to Trash.
+3. Open System Settings, then Privacy & Security. Near the bottom it says
+   PixelKit was blocked. Click Open Anyway. If the button is not there, open
+   PixelKit once more and come back: it shows for about an hour after a
+   blocked launch.
+4. Confirm with Open Anyway or Open, and with your password or Touch ID if
+   asked. PixelKit opens.
+
+If macOS instead says PixelKit "is damaged and can't be opened", run this in
+Terminal, then open it again:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/PixelKit.app"
+```
+
+On Windows, if "Windows protected your PC" appears when you run
+`PixelKit-Setup.exe`, click More info, then Run anyway.
 
 ## Requirements
 
@@ -110,8 +135,9 @@ runs the engine without models.
 
 ## Status
 
-Pre-release. The installers are unsigned, there is no Linux package, and
-training covers object detection only.
+Pre-release. The installers are not signed with paid certificates
+([First launch](#first-launch)), there is no Linux package, and training
+covers object detection only.
 
 ## Documentation
 

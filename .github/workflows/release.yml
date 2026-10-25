@@ -60,7 +60,7 @@ jobs:
         run: cd ui && npm ci && npm run build
       - name: Bundle Python runtime
         run: bash desktop/scripts/prepare-runtime.sh
-      - name: Build dmg (unsigned)
+      - name: Build dmg (signed ad hoc)
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: cd desktop && npm ci && npx electron-builder --mac

@@ -38,9 +38,10 @@ runtime, Electron 43, and fixes throughout the app.
   it started from. A model trained from scratch had no notice.
 - The installers carry PixelKit's LICENSE and NOTICE, the new
   THIRD-PARTY-NOTICES.md, YOLOX's licence and the font licence; the macOS app
-  also keeps
-  Electron's and Chromium's notices and the licences of its Python
-  runtime, now a pinned python-build-standalone release.
+  also keeps Electron's and Chromium's notices and the licences of its
+  Python runtime, now a pinned python-build-standalone release.
+- The macOS app is signed ad hoc instead of not at all, as Apple Silicon
+  requires.
 - HEIC photos are decoded with pi-heif, the decode-only build of
   pillow-heif, whose wheels carry no GPL code. Pillow decodes AVIF itself.
 - The NPU check builds the Neuro N6 memory map from the ST Edge AI Core
@@ -235,6 +236,12 @@ runtime, Electron 43, and fixes throughout the app.
   PyTorch 2.13.0 and the engine's packages from lock files instead of the
   newest releases, and the macOS build installs from its own lock, with the
   same versions.
+
+### Notes
+
+- The installers are not signed with paid certificates yet, so Windows and
+  macOS ask you to confirm PixelKit once. The README's First launch section
+  has the steps.
 
 ## 0.3.0
 

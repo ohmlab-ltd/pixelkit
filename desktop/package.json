@@ -37,7 +37,8 @@
       "artifactName": "PixelKit-arm64.dmg",
       "category": "public.app-category.graphics-design",
       "icon": "build/icon.png",
-      "identity": null,
+      "identity": "-",
+      "hardenedRuntime": false,
       "extraResources": [
         {
           "from": "runtime",
