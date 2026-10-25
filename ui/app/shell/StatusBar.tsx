@@ -9,7 +9,7 @@ import { type EngineSettings, fetchEngineSettings } from "@/lib/models";
 import { readProjectMeta } from "@/lib/projectMetaCache";
 
 // Shown until the engine's /api/health reports its real version.
-const VERSION_FALLBACK = "v0.4.0";
+const VERSION_FALLBACK = "v0.4.1";
 
 // Entries of GET /api/jobs/active.
 type ActiveJob = {

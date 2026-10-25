@@ -1,6 +1,6 @@
 name: release
-# A vX.Y.Z tag builds the Windows installer and the macOS dmg and attaches
-# them to the tag's release.
+# A vX.Y.Z tag builds the Windows installer and the macOS dmg, then publishes
+# both on the tag's release, so a release never lacks one of them.
 on:
   push:
     tags: ["v*"]
@@ -34,20 +34,24 @@ jobs:
       - name: Build UI
         run: cd ui && npm ci && npm run build
       - name: Build installer (unsigned)
-        run: cd desktop && npm ci && npx electron-builder --win
-      - name: Release notes from CHANGELOG.md
-        # The tag's "## X.Y.Z" section, with CR stripped; empty when there is none.
         shell: bash
         run: |
-          awk -v v="${GITHUB_REF_NAME#v}" '{ sub(/\r$/, "") }
-            $0 == "## " v { on = 1; next } on && /^## / { exit } on { print }' CHANGELOG.md > notes.md
-      - name: Attach to release
-        uses: softprops/action-gh-release@v2
+          exec > >(tee build.log) 2>&1
+          cd desktop && npm ci
+          npx electron-builder --win --publish never
+      - name: Surface build failure
+        # Annotations, unlike the log, can be read without signing in.
+        if: failure()
+        shell: bash
+        run: |
+          tail -n 40 build.log | tr -d '\r' | sed 's/%/%25/g' \
+            | awk '{ printf "%s%%0A", $0 } END { print "" }' | sed 's/^/::error title=Last 40 lines of the build::/'
+      - uses: actions/upload-artifact@v4
         with:
-          # A version-less name keeps releases/latest/download/PixelKit-Setup.exe stable.
-          files: desktop/dist/PixelKit-Setup*.exe
-          body_path: notes.md
-          generate_release_notes: true
+          name: windows
+          path: desktop/dist/PixelKit-Setup.exe
+          if-no-files-found: error
+          retention-days: 1
 
   macos:
     needs: versions
@@ -61,16 +65,51 @@ jobs:
       - name: Bundle Python runtime
         run: bash desktop/scripts/prepare-runtime.sh
       - name: Build dmg (signed ad hoc)
+        shell: bash
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: cd desktop && npm ci && npx electron-builder --mac
+        run: |
+          exec > >(tee build.log) 2>&1
+          # Signing opens every file in the app at once, tens of thousands
+          # with the Python runtime; macOS allows a process 256 by default.
+          sudo sysctl -w kern.maxfiles=524288 kern.maxfilesperproc=524288
+          ulimit -n 524288 || ulimit -n 65536
+          cd desktop && npm ci
+          # Electron 43 unpacks only on demand, and the app ships its licence files.
+          node node_modules/electron/install.js
+          npx electron-builder --mac --publish never
+      - name: Surface build failure
+        if: failure()
+        shell: bash
+        run: |
+          tail -n 40 build.log | tr -d '\r' | sed 's/%/%25/g' \
+            | awk '{ printf "%s%%0A", $0 } END { print "" }' | sed 's/^/::error title=Last 40 lines of the build::/'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: desktop/dist/PixelKit-arm64.dmg
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
       - name: Release notes from CHANGELOG.md
+        # The tag's "## X.Y.Z" section, with CR stripped; empty when there is none.
         run: |
           awk -v v="${GITHUB_REF_NAME#v}" '{ sub(/\r$/, "") }
             $0 == "## " v { on = 1; next } on && /^## / { exit } on { print }' CHANGELOG.md > notes.md
-      - name: Attach to release
+      - name: Publish the release
         uses: softprops/action-gh-release@v2
         with:
-          files: desktop/dist/*.dmg
+          # Version-less names keep releases/latest/download/<name> stable.
+          files: |
+            dist/PixelKit-Setup.exe
+            dist/PixelKit-arm64.dmg
+          fail_on_unmatched_files: true
           body_path: notes.md
           generate_release_notes: true

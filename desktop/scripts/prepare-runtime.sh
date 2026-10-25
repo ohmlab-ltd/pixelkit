@@ -14,4 +14,6 @@ tar -xzf /tmp/pbs-python.tar.gz -C runtime && mv runtime/python runtime/py
 # of the libraries the build links, from the same release's full archive.
 mkdir -p runtime/py/licenses && cp licenses/python/*.txt runtime/py/licenses/
 runtime/py/bin/python3 -m pip install --require-hashes --no-warn-script-location -r ../engine/requirements-mac.txt
+# PyTorch's C++ headers serve only to build extensions: 9,000 files to sign.
+rm -rf runtime/py/lib/python3.*/site-packages/torch/include
 runtime/py/bin/python3 -c "import torch, transformers, fastapi, cv2, onnx, onnxruntime, pi_heif; print('runtime OK')"

@@ -2,6 +2,22 @@
 
 This changelog starts at 0.3.0.
 
+## 0.4.1
+
+The macOS dmg, which 0.4.0 does not have. 0.4.0's notes list the changes
+since 0.3.0.
+
+### Fixed
+
+- The macOS build stopped while signing the app, which opens every file in
+  the app at once, and the bundled Python runtime holds tens of thousands.
+  The runtime also leaves out PyTorch's C++ headers, about 9,000 files that
+  only building extensions needs.
+- The macOS app ships Electron's and Chromium's licence files again; the
+  build stopped copying them when Electron 43 stopped unpacking itself on
+  install.
+- A release is published only once both installers have built.
+
 ## 0.4.0
 
 Exports for Neuro N6 core 0.1.3 that letterbox the camera picture as

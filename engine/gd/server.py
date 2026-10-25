@@ -45,7 +45,7 @@ import secrets
 
 
 # Must match engine/pyproject.toml, desktop/package.json and the release tag.
-PK_VERSION = "0.4.0"
+PK_VERSION = "0.4.1"
 
 
 def _configured_device() -> str:
