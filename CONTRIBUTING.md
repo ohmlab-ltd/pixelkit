@@ -57,3 +57,12 @@ Set the version in `desktop/package.json`, `engine/pyproject.toml`,
 `CHANGELOG.md` to `## X.Y.Z`, then push a `vX.Y.Z` tag. The release workflow
 builds both installers and publishes them with that section, followed by
 GitHub's generated notes, as the release notes.
+
+The Windows installer is signed with Azure Artifact Signing when the
+repository has the Actions variables `AZURE_SIGN_ENDPOINT`,
+`AZURE_SIGN_ACCOUNT`, `AZURE_SIGN_PROFILE` and `AZURE_SIGN_PUBLISHER` (the
+account's endpoint and name, its certificate profile, and the certificate's
+subject name) and the secrets `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and
+`AZURE_CLIENT_SECRET` of an Entra ID app with the Artifact Signing
+Certificate Profile Signer role on the profile. Without them it is unsigned.
+The macOS app is signed ad hoc.

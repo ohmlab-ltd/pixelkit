@@ -33,12 +33,30 @@ jobs:
         with: { node-version: 22, cache: npm, cache-dependency-path: ui/package-lock.json }
       - name: Build UI
         run: cd ui && npm ci && npm run build
-      - name: Build installer (unsigned)
+      - name: Build installer
         shell: bash
+        env:
+          # Azure Artifact Signing signs the installer once these are set
+          # (CONTRIBUTING.md, Releases); without them it is unsigned.
+          AZURE_SIGN_ENDPOINT: ${{ vars.AZURE_SIGN_ENDPOINT }}
+          AZURE_SIGN_ACCOUNT: ${{ vars.AZURE_SIGN_ACCOUNT }}
+          AZURE_SIGN_PROFILE: ${{ vars.AZURE_SIGN_PROFILE }}
+          AZURE_SIGN_PUBLISHER: ${{ vars.AZURE_SIGN_PUBLISHER }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
         run: |
           exec > >(tee build.log) 2>&1
           cd desktop && npm ci
-          npx electron-builder --win --publish never
+          SIGN=()
+          if [ -n "$AZURE_SIGN_ENDPOINT" ] && [ -n "$AZURE_SIGN_ACCOUNT" ] \
+            && [ -n "$AZURE_SIGN_PROFILE" ] && [ -n "$AZURE_SIGN_PUBLISHER" ]; then
+            SIGN=("-c.win.azureSignOptions.endpoint=$AZURE_SIGN_ENDPOINT"
+              "-c.win.azureSignOptions.codeSigningAccountName=$AZURE_SIGN_ACCOUNT"
+              "-c.win.azureSignOptions.certificateProfileName=$AZURE_SIGN_PROFILE"
+              "-c.win.azureSignOptions.publisherName=$AZURE_SIGN_PUBLISHER")
+          fi
+          npx electron-builder --win --publish never "${SIGN[@]}"
       - name: Surface build failure
         # Annotations, unlike the log, can be read without signing in.
         if: failure()
