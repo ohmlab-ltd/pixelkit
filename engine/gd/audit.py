@@ -47,12 +47,12 @@ def list_events(kind: str | None = None, limit: int = 200) -> list[dict]:
     cur = _get_conn().cursor()
     if kind:
         cur.execute(
-            "SELECT ts, kind, data FROM events WHERE kind = ? ORDER BY ts DESC LIMIT ?",
+            "SELECT ts, kind, data FROM events WHERE kind = ? ORDER BY ts DESC, id DESC LIMIT ?",
             (kind, limit),
         )
     else:
         cur.execute(
-            "SELECT ts, kind, data FROM events ORDER BY ts DESC LIMIT ?",
+            "SELECT ts, kind, data FROM events ORDER BY ts DESC, id DESC LIMIT ?",
             (limit,),
         )
     out: list[dict] = []
@@ -74,7 +74,8 @@ def list_activity(container_id: str, dataset_ids: list[str], limit: int = 100) -
     """Recent events of a container or of its `dataset_ids`, newest first."""
     ids = {d for d in (dataset_ids or []) if d}
     cur = _get_conn().cursor()
-    cur.execute("SELECT ts, kind, data FROM events ORDER BY ts DESC LIMIT 3000")
+    # ts has one-second resolution; id orders events within the same second.
+    cur.execute("SELECT ts, kind, data FROM events ORDER BY ts DESC, id DESC LIMIT 3000")
     out: list[dict] = []
     for ts, kind, blob in cur.fetchall():
         if kind not in ACTIVITY_KINDS:

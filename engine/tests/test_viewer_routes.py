@@ -176,8 +176,8 @@ def test_an_upload_request_is_one_activity_row(client):
                     files=[("images", (f"{i}.jpg", _jpeg(), "image/jpeg")) for i in range(3)])
     assert r.status_code == 200, r.text
     rows = client.get(f"/api/containers/{cid}/activity").json()["activity"]
-    # The dataset's first image, then the batch of three.
-    assert [a["n_images"] for a in rows if a["job_kind"] == "upload" and a["dataset"] == pid] == [1, 3]
+    # Newest first: the batch of three, then the dataset's first image.
+    assert [a["n_images"] for a in rows if a["job_kind"] == "upload" and a["dataset"] == pid] == [3, 1]
 
 
 def test_a_project_cover_is_stored_and_served(client, workspace_dir):

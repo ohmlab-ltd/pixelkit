@@ -176,7 +176,12 @@ def test_a_read_that_keeps_failing_raises_rather_than_reading_as_empty(client, a
 
 def test_a_manifest_without_its_id_is_never_saved_over_a_dataset(client, app_module):
     pid, _ = _dataset(client, "Guarded", n=1)
-    before = (store.dataset_dir(pid) / "dataset.json").read_bytes()
+    path = store.dataset_dir(pid) / "dataset.json"
+    for _ in range(100):  # the upload writes its blurhash to the file after responding
+        if all(i.get("blurhash") for i in json.loads(path.read_bytes())["imports"]):
+            break
+        time.sleep(0.05)
+    before = path.read_bytes()
     annotations = sorted(p.name for p in (store.dataset_dir(pid) / "annotations").iterdir())
     with pytest.raises(RuntimeError):
         app_module.save_manifest(pid, {})
