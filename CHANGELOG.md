@@ -2,6 +2,18 @@
 
 This changelog starts at 0.3.0.
 
+## 0.4.2
+
+A signed Windows installer.
+
+### Changed
+
+- The Windows installer is signed, with Azure Artifact Signing.
+
+### Fixed
+
+- The activity list showed events from the same second oldest first.
+
 ## 0.4.1
 
 The macOS dmg, which 0.4.0 does not have. 0.4.0's notes list the changes
