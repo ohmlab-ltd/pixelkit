@@ -24,7 +24,7 @@ page.
 | Platform | File | Python runtime |
 |---|---|---|
 | Windows 10 or later, x64 | `PixelKit-Setup.exe`, 114 MB | Downloaded on first launch into `%LOCALAPPDATA%\PixelKit\runtime`: about 3.5 GB with CUDA on NVIDIA machines, which needs 9 GB free, and 3 GB free otherwise |
-| macOS 14 or later, Apple Silicon | `PixelKit-arm64.dmg`, 465 MB | Included |
+| macOS 14 or later, Apple Silicon | `PixelKit-arm64.dmg`, 464 MB | Included |
 | Linux | none | Run from source |
 
 The packaged app checks GitHub for a newer release at launch and offers the
@@ -38,9 +38,9 @@ Megvii's COCO-pretrained YOLOX checkpoint, 8 MB for Nano and 41 MB for Tiny.
 
 ### First launch
 
-The installers are not signed with paid certificates yet, so Windows and
-macOS ask you to confirm PixelKit once. After that it opens like any other
-app.
+The Windows installer is signed by Ohm Lab Ltd. The macOS app is signed ad
+hoc, so macOS asks you to confirm PixelKit once. After that it opens like any
+other app.
 
 On macOS:
 
@@ -62,8 +62,9 @@ Terminal, then open it again:
 xattr -dr com.apple.quarantine "/Applications/PixelKit.app"
 ```
 
-On Windows, if "Windows protected your PC" appears when you run
-`PixelKit-Setup.exe`, click More info, then Run anyway.
+On Windows, while the certificate is new, "Windows protected your PC" can
+still appear when you run `PixelKit-Setup.exe`: click More info, then Run
+anyway.
 
 ## Requirements
 
@@ -135,7 +136,7 @@ runs the engine without models.
 
 ## Status
 
-Pre-release. The installers are not signed with paid certificates
+Pre-release. The macOS app is not signed with a Developer ID certificate
 ([First launch](#first-launch)), there is no Linux package, and training
 covers object detection only.
 
